@@ -1,0 +1,6 @@
+keel (0.1.0) unstable; urgency=medium
+
+  * Initial release: the instance spec (load, validate, render, apply) and
+    the keel command line interface. inspect, diff and verify are stubs.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Wed, 24 Sep 2026 00:00:00 +0000

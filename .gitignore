@@ -1,1 +1,11 @@
-placeholder
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+debian/.debhelper/
+debian/files
+debian/keel/
+debian/*.debhelper.log
+debian/*.substvars

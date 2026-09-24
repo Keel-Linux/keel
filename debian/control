@@ -1,0 +1,32 @@
+Source: keel
+Section: admin
+Priority: optional
+Maintainer: KeelLinux maintainers <admin@keellinux.org>
+Build-Depends:
+ debhelper-compat (= 13),
+ dh-python,
+ pybuild-plugin-pyproject,
+ python3 (>= 3.12),
+ python3-setuptools,
+ python3-yaml,
+Standards-Version: 4.7.2
+X-Python-Version: >= 3.12
+Vcs-Git: https://github.com/marcos-mendez/keel.git
+Vcs-Browser: https://github.com/marcos-mendez/keel
+
+Package: keel
+Architecture: all
+Depends:
+ python3 (>= 3.12),
+ python3-yaml,
+ ${python3:Depends},
+ ${misc:Depends},
+Description: Declarative management of one appliance instance
+ Keel describes one appliance instance in a single file and applies it
+ idempotently. It is compatible with TurnKey Linux appliances: the spec is
+ rendered into the inithooks conf variables the existing firstboot hooks
+ already read, so no hook has to know that the spec exists.
+ .
+ The library is the only implementation. The keel command and confconsole
+ are both clients of it, so every operation runs headless from the same
+ code path.

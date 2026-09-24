@@ -1,0 +1,48 @@
+version: 1
+
+instance:
+  hostname: blog
+  fqdn: blog.example.org
+
+network:
+  managed_by: host
+  interfaces:
+    eth0:
+      ipv6:
+        method: static
+        address: 2001:db8:1::10/64
+        gateway: fe80::1
+  nameservers:
+    - 2001:db8:1::53
+    - 2001:db8:1::54
+
+tls:
+  acme:
+    enabled: true
+    challenge: http-01
+    domains:
+      - blog.example.org
+
+secrets:
+  root_password:
+    file: /etc/keel/secrets/root_password
+  db_password:
+    generate: true
+
+app:
+  email: admin@example.org
+  domain: blog.example.org
+  options:
+    ip_bind: "[2001:db8:1::10]"
+
+security:
+  alerts: admin@example.org
+  updates: force
+
+hub:
+  api_key: skip
+
+first_login_wizard: false
+
+preseed:
+  AUTOGROW: ONCE
