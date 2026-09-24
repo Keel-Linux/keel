@@ -92,7 +92,9 @@ class TestSpecCommands(CLITestCase):
 
     def test_validate_reports_every_error_with_the_spec_path(self):
         path = self.write_spec("version: 2\nnonsense: true\n")
-        code, _, err = self.run_cli_captured("spec", "validate", "--spec", path)
+        code, _, err = self.run_cli_captured(
+            "spec", "validate", "--spec", path
+        )
         self.assertEqual(code, exits.SPEC_INVALID)
         self.assertIn(f"Error: {path}: version: must be 1", err)
         self.assertIn(f"Error: {path}: nonsense: unknown top level key", err)
