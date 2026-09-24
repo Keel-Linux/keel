@@ -9,3 +9,4 @@ debian/files
 debian/keel/
 debian/*.debhelper.log
 debian/*.substvars
+.coverage

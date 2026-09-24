@@ -163,4 +163,5 @@ python3 -m unittest discover tests
 ```
 
 Both runners run the same suite. It needs no network, no root and no installed
-package.
+package. The coverage standard (95 percent, lines and branches) and the
+commands that check it are in `tests/README.md`.
