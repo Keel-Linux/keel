@@ -19,6 +19,18 @@ def mapping_error(key: str, value: Any) -> str | None:
     return None
 
 
+def list_error(key: str, value: Any) -> str | None:
+    """A field that holds several values is a list or absent
+
+    A scalar is not read as a list of one: YAML makes it too easy to write
+    `nameservers: 2001:db8::53`, and iterating a string would check it one
+    character at a time.
+    """
+    if value is not None and not isinstance(value, list):
+        return f"{key}: must be a list"
+    return None
+
+
 def domain_error(key: str, value: Any) -> str | None:
     """Reject anything that is not a bare domain name"""
     if not isinstance(value, str) or not value.strip():

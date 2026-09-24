@@ -9,7 +9,7 @@ import ipaddress
 from typing import Any
 
 from keel.spec.constants import IPV4_METHODS, IPV6_METHODS, MANAGED_BY
-from keel.spec.fields import is_unicast, mapping_error
+from keel.spec.fields import is_unicast, list_error, mapping_error
 
 
 def validate_network(network: Any) -> list[str]:
@@ -26,7 +26,12 @@ def validate_network(network: Any) -> list[str]:
     if managed_by is not None and str(managed_by) not in MANAGED_BY:
         errors.append(f"network.managed_by: must be one of {MANAGED_BY}")
 
-    for server in network.get("nameservers") or []:
+    nameservers = network.get("nameservers")
+    error = list_error("network.nameservers", nameservers)
+    if error:
+        errors.append(error)
+        nameservers = []
+    for server in nameservers or []:
         try:
             ipaddress.ip_address(str(server))
         except ValueError:

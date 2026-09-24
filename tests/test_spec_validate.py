@@ -272,6 +272,10 @@ class TestTLS(unittest.TestCase):
             "tls.acme.domains: domain",
         )
 
+    def test_rejects_domains_that_are_not_a_list(self):
+        found = errors(self.acme("    domains: blog.example.org\n"))
+        self.assertEqual(found, ["tls.acme.domains: must be a list"])
+
     def test_accepts_a_full_acme_section(self):
         text = self.acme(
             "    enabled: true\n"

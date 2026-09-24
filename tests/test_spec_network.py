@@ -130,6 +130,14 @@ class TestNetworkErrors(unittest.TestCase):
             "version: 1\nnetwork:\n  dns: []\n", "network.dns: unknown key"
         )
 
+    def test_rejects_nameservers_that_are_not_a_list(self):
+        for value in ("2001:db8:1::53", "{a: 1}"):
+            with self.subTest(value=value):
+                found = errors(
+                    f"version: 1\nnetwork:\n  nameservers: {value}\n"
+                )
+                self.assertEqual(found, ["network.nameservers: must be a list"])
+
     def test_rejects_interfaces_that_are_not_a_mapping(self):
         self.assert_one_error(
             "version: 1\nnetwork:\n  interfaces: [eth0]\n",

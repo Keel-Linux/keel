@@ -18,6 +18,7 @@ from keel.spec.fields import (
     NAME_RE,
     domain_error,
     email_error,
+    list_error,
     mapping_error,
 )
 from keel.spec.secretstore import secret_file_error
@@ -205,7 +206,11 @@ def _validate_tls(tls: Any) -> list[str]:
             errors.append(f"tls.acme.{key}: unknown key")
     if acme.get("challenge") not in (None, "http-01", "dns-01"):
         errors.append("tls.acme.challenge: must be http-01 or dns-01")
-    for domain in acme.get("domains") or []:
+    domains = acme.get("domains")
+    error = list_error("tls.acme.domains", domains)
+    if error:
+        return errors + [error]
+    for domain in domains or []:
         error = domain_error("tls.acme.domains", domain)
         if error:
             errors.append(error)
