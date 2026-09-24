@@ -1,9 +1,14 @@
 # Copyright (c) 2026 KeelLinux maintainers
 """Mapping of spec fields onto the conf variables the hooks read"""
 
+import os
+import tempfile
 import unittest
+from os.path import join
 
-from helpers import env, errors
+from helpers import doc, env, errors, spec
+
+from keel.spec.fields import is_ipv4  # noqa: E402
 
 
 class TestMapping(unittest.TestCase):
@@ -64,6 +69,64 @@ class TestMapping(unittest.TestCase):
     def test_first_login_wizard_false_does_not_export_auto_run(self):
         exported = env("version: 1\nfirst_login_wizard: false\n")
         self.assertNotIn("AUTO_RUN", exported)
+
+    def test_boolean_values_are_exported_as_the_hooks_keywords(self):
+        exported = env(
+            "version: 1\n"
+            "app:\n  options:\n    debug: true\n"
+            "preseed:\n  AUTOGROW: false\n"
+        )
+        self.assertEqual(exported["APP_DEBUG"], "TRUE")
+        self.assertEqual(exported["AUTOGROW"], "FALSE")
+
+    def test_hub_api_key_from_a_file_is_exported_and_masked_for_display(self):
+        tmpdir = tempfile.mkdtemp()
+        path = join(tmpdir, "apikey")
+        with open(path, "w") as fob:
+            fob.write("ABCDEF123456\n")
+        os.chmod(path, 0o600)
+        text = f"version: 1\nhub:\n  api_key:\n    file: {path}\n"
+
+        self.assertEqual(env(text)["HUB_APIKEY"], "ABCDEF123456")
+
+        document = doc(text)
+        placeholders = spec.masked_secrets(document)
+        self.assertEqual(placeholders, {"HUB_APIKEY": spec.MASK})
+        rendered = spec.mask(spec.render_env(document, placeholders))
+        self.assertIn(f"export HUB_APIKEY={spec.MASK}\n", rendered)
+        self.assertNotIn("ABCDEF123456", rendered)
+
+    def test_mask_leaves_the_skip_keyword_readable(self):
+        rendered = spec.mask("export HUB_APIKEY=SKIP\nexport ROOT_PASS=x\n")
+        self.assertEqual(
+            rendered, f"export HUB_APIKEY=SKIP\nexport ROOT_PASS={spec.MASK}\n"
+        )
+
+
+class TestNetworkMapping(unittest.TestCase):
+    def file_managed(self, ipv4: str) -> dict:
+        return env(
+            "version: 1\n"
+            "network:\n"
+            "  managed_by: file\n"
+            "  interfaces:\n"
+            "    eth0:\n"
+            "      ipv4:\n"
+            f"        method: {ipv4}\n"
+            "      ipv6:\n"
+            "        method: auto\n"
+        )
+
+    def test_ipv4_none_exports_nothing(self):
+        self.assertEqual(self.file_managed("none"), {})
+
+    def test_ipv4_dhcp_exports_only_the_method(self):
+        self.assertEqual(self.file_managed("dhcp"), {"IP_CONFIG": "dhcp"})
+
+    def test_is_ipv4_tells_the_families_apart(self):
+        self.assertTrue(is_ipv4("192.0.2.53"))
+        self.assertFalse(is_ipv4("2001:db8:1::53"))
+        self.assertFalse(is_ipv4("ns.example.org"))
 
 
 class TestDomains(unittest.TestCase):
