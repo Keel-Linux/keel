@@ -5,7 +5,11 @@ The CLI is exercised in process through keel.cli.main, and once as a
 subprocess so that `python3 -m keel` is covered too.
 """
 
+import contextlib
+import importlib
+import io
 import os
+import runpy
 import subprocess
 import sys
 import tempfile
@@ -15,6 +19,7 @@ from unittest import mock
 
 from helpers import spec  # noqa: F401
 
+import keel  # noqa: E402
 from keel import commands, exits  # noqa: E402
 from keel.cli import main  # noqa: E402
 
@@ -50,6 +55,13 @@ class CLITestCase(unittest.TestCase):
     def run_cli(self, *argv: str) -> int:
         return main(list(argv))
 
+    def run_cli_captured(self, *argv: str) -> tuple[int, str, str]:
+        """Run the CLI in process and return (code, stdout, stderr)"""
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = main(list(argv))
+        return code, out.getvalue(), err.getvalue()
+
 
 class TestSpecCommands(CLITestCase):
     def test_validate_of_a_good_spec_exits_ok(self):
@@ -70,6 +82,37 @@ class TestSpecCommands(CLITestCase):
         path = self.write_spec("version: 1\ninstance: [unclosed\n")
         code = self.run_cli("spec", "validate", "--spec", path)
         self.assertEqual(code, exits.SPEC_UNREADABLE)
+
+    def test_spec_that_cannot_be_opened_exits_spec_unreadable(self):
+        code, _, err = self.run_cli_captured(
+            "spec", "validate", "--spec", self.tmpdir
+        )
+        self.assertEqual(code, exits.SPEC_UNREADABLE)
+        self.assertIn(self.tmpdir, err)
+
+    def test_validate_reports_every_error_with_the_spec_path(self):
+        path = self.write_spec("version: 2\nnonsense: true\n")
+        code, _, err = self.run_cli_captured("spec", "validate", "--spec", path)
+        self.assertEqual(code, exits.SPEC_INVALID)
+        self.assertIn(f"Error: {path}: version: must be 1", err)
+        self.assertIn(f"Error: {path}: nonsense: unknown top level key", err)
+
+    def test_render_prints_the_conf_with_secrets_masked(self):
+        secret = join(self.tmpdir, "secret")
+        with open(secret, "w") as fob:
+            fob.write("s3cret\n")
+        os.chmod(secret, 0o600)
+        path = self.write_spec(
+            VALID + f"secrets:\n  root_password:\n    file: {secret}\n"
+        )
+
+        code, out, _ = self.run_cli_captured("spec", "render", "--spec", path)
+
+        self.assertEqual(code, exits.OK)
+        self.assertIn("export HOSTNAME=blog\n", out)
+        self.assertIn(f"export ROOT_PASS={spec.MASK}\n", out)
+        self.assertNotIn("s3cret", out)
+        self.assertFalse(os.path.exists(self.conf))
 
     def test_invalid_spec_exits_spec_invalid(self):
         path = self.write_spec("version: 1\nnonsense: true\n")
@@ -157,8 +200,36 @@ class TestUsage(CLITestCase):
             self.run_cli("nonsense")
         self.assertEqual(raised.exception.code, exits.USAGE)
 
+    def test_unknown_option_prints_usage_and_exits_usage(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            with self.assertRaises(SystemExit) as raised:
+                self.run_cli("spec", "validate", "--nonsense")
+        self.assertEqual(raised.exception.code, exits.USAGE)
+        self.assertIn("usage:", err.getvalue())
+        self.assertIn("Error:", err.getvalue())
+
     def test_no_command_exits_usage(self):
         self.assertEqual(self.run_cli(), exits.USAGE)
+
+    def test_spec_without_action_exits_usage(self):
+        self.assertEqual(self.run_cli("spec"), exits.USAGE)
+
+    def test_version_prints_the_package_version_and_exits_ok(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            with self.assertRaises(SystemExit) as raised:
+                self.run_cli("--version")
+        self.assertEqual(raised.exception.code, exits.OK)
+        self.assertEqual(out.getvalue().strip(), keel.__version__)
+
+    def test_spec_and_conf_paths_default_to_the_environment(self):
+        path = self.write_spec(VALID)
+        environment = {spec.SPEC_ENV: path, spec.CONF_ENV: self.conf}
+        with mock.patch.dict(os.environ, environment):
+            code = self.run_cli("spec", "apply")
+        self.assertEqual(code, exits.OK)
+        self.assertTrue(os.path.exists(self.conf))
 
     def test_every_exit_code_is_documented(self):
         codes = {
@@ -167,6 +238,36 @@ class TestUsage(CLITestCase):
             if name.isupper() and isinstance(value, int)
         }
         self.assertEqual(codes, set(exits.DESCRIPTIONS))
+
+
+class TestEntryPoints(CLITestCase):
+    """The module and the script entry points hand the exit code to sys"""
+
+    def run_as_main(self, run, *argv: str) -> int:
+        err = io.StringIO()
+        with mock.patch.object(sys, "argv", ["keel", *argv]):
+            with contextlib.redirect_stderr(err):
+                with self.assertRaises(SystemExit) as raised:
+                    run()
+        return raised.exception.code
+
+    def test_importing_the_module_entry_point_does_not_run_the_cli(self):
+        with mock.patch.object(sys, "argv", ["keel", "diff"]):
+            importlib.import_module("keel.__main__")
+        sys.modules.pop("keel.__main__", None)
+
+    def test_python_dash_m_keel_exits_with_the_command_code(self):
+        code = self.run_as_main(
+            lambda: runpy.run_module("keel", run_name="__main__"), "diff"
+        )
+        self.assertEqual(code, exits.NOT_IMPLEMENTED)
+
+    def test_cli_module_run_as_a_script_exits_with_the_command_code(self):
+        script = join(ROOT, "keel", "cli.py")
+        code = self.run_as_main(
+            lambda: runpy.run_path(script, run_name="__main__"), "inspect"
+        )
+        self.assertEqual(code, exits.NOT_IMPLEMENTED)
 
 
 if __name__ == "__main__":
