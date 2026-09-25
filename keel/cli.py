@@ -14,6 +14,7 @@ import signal
 import sys
 
 from keel import __version__, commands, exits
+from keel.layers import LAYERS_DEFAULT, LAYERS_ENV
 from keel.spec import CONF_DEFAULT, CONF_ENV, SPEC_DEFAULT, SPEC_ENV
 
 
@@ -32,6 +33,10 @@ def spec_default() -> str:
 
 def conf_default() -> str:
     return os.environ.get(CONF_ENV, CONF_DEFAULT)
+
+
+def layers_default() -> str:
+    return os.environ.get(LAYERS_ENV, LAYERS_DEFAULT)
 
 
 def add_common_options(parser: argparse.ArgumentParser) -> None:
@@ -94,13 +99,31 @@ def build_parser() -> argparse.ArgumentParser:
         "report drift between declared and running (not implemented yet)",
         commands.diff,
     )
-    _add_command(
+    verify_parser = _add_command(
         subparsers, "verify",
-        "check layers and packages against the manifest (not implemented"
-        " yet)",
+        "check the installed layers against their manifests (packages not"
+        " implemented yet)",
         commands.verify,
     )
+    add_layer_options(verify_parser)
     return parser
+
+
+def add_layer_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--layers-dir",
+        default=layers_default(),
+        metavar="DIR",
+        help=f"directory of layer manifests (default: ${LAYERS_ENV} or"
+        f" {LAYERS_DEFAULT})",
+    )
+    parser.add_argument(
+        "--tarballs-dir",
+        default=None,
+        metavar="DIR",
+        help="directory of layer tarballs and hash files (default: the"
+        " layers directory)",
+    )
 
 
 def _add_spec_action(subparsers, name: str, help_text: str, handler) -> None:
@@ -109,10 +132,13 @@ def _add_spec_action(subparsers, name: str, help_text: str, handler) -> None:
     parser.set_defaults(handler=handler)
 
 
-def _add_command(subparsers, name: str, help_text: str, handler) -> None:
+def _add_command(
+    subparsers, name: str, help_text: str, handler
+) -> argparse.ArgumentParser:
     parser = subparsers.add_parser(name, help=help_text)
     add_common_options(parser)
     parser.set_defaults(handler=handler)
+    return parser
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -8,14 +8,18 @@ confconsole both call it.
 from keel.layers.constants import LAYERS_DEFAULT, LAYERS_ENV, REQUIRED_KEYS
 from keel.layers.errors import ManifestError
 from keel.layers.manifest import Manifest, load, parse, validate
+from keel.layers.verify import LayerResult, Report, verify_layers
 
 __all__ = [
     "LAYERS_DEFAULT",
     "LAYERS_ENV",
     "REQUIRED_KEYS",
+    "LayerResult",
     "Manifest",
     "ManifestError",
+    "Report",
     "load",
     "parse",
     "validate",
+    "verify_layers",
 ]

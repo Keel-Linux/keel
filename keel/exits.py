@@ -11,6 +11,9 @@ SPEC_UNREADABLE = 2
 SPEC_INVALID = 3
 SECRET_ERROR = 4
 CONF_ERROR = 5
+MANIFEST_INVALID = 6
+LAYER_MISMATCH = 7
+SIGNATURE_UNVERIFIED = 8
 NOT_IMPLEMENTED = 9
 
 DESCRIPTIONS = {
@@ -20,5 +23,8 @@ DESCRIPTIONS = {
     SPEC_INVALID: "spec file is valid YAML but fails validation",
     SECRET_ERROR: "a referenced secret is missing or badly protected",
     CONF_ERROR: "the conf file cannot be written",
+    MANIFEST_INVALID: "a layer manifest cannot be read or fails validation",
+    LAYER_MISMATCH: "a layer does not match its manifest",
+    SIGNATURE_UNVERIFIED: "a layer hash file could not be verified",
     NOT_IMPLEMENTED: "command is a documented stub, not implemented yet",
 }

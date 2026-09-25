@@ -8,7 +8,7 @@ Nothing here prompts, so confconsole can call the same functions.
 import os
 import sys
 
-from keel import exits, spec
+from keel import exits, layers, spec
 
 
 def warn(message: str) -> None:
@@ -117,8 +117,32 @@ def diff(args) -> int:
 
 
 def verify(args) -> int:
+    """Check the installed layers, then say that packages are not checked
+
+    One line per layer on stdout, then a summary line. A layer problem
+    decides the exit code; when every layer passes, the code is still
+    NOT_IMPLEMENTED because the packages half of the check (brief
+    section 5.4) does not exist yet, and verify never claims more than
+    it checked.
+    """
+    code = verify_layers(args)
+    if code != exits.OK:
+        return code
     return not_implemented(
-        "verify",
+        "verify packages",
         "5.4",
-        "check installed layers and packages against the signed manifest",
+        "check installed packages against the manifest; the layers above"
+        " were checked",
     )
+
+
+def verify_layers(args) -> int:
+    report = layers.verify_layers(args.layers_dir, args.tarballs_dir)
+    if not report.results:
+        print(
+            f"{args.layers_dir}: no layer manifests found", file=sys.stderr
+        )
+    for result in report.results:
+        print(result.line())
+    print(report.summary())
+    return report.code
