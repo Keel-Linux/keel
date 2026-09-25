@@ -19,7 +19,7 @@ keel = "keel.cli:main"
 Homepage = "https://github.com/marcos-mendez/keel"
 
 [tool.setuptools]
-packages = ["keel", "keel.spec"]
+packages = ["keel", "keel.spec", "keel.layers"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
