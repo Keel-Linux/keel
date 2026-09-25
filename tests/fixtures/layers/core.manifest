@@ -1,0 +1,17 @@
+layer core
+type rootfs
+parent none
+parent_sha256 none
+release debian/trixie
+arch amd64
+product_commit 24c82ee3540ce545422742b0e28ba6b687c53ec2
+common_commit b60dd2306b52591423aaeca2321cdd5322096ea1
+fab_version 1.1.1
+source_date_epoch 1700000000
+common_overlays turnkey.d
+common_conf turnkey.d
+build_overlays default
+build_conf default
+tarball core.tar.zst
+sha256 e08e8224aeea1abb605b0e359d345f459d2e04d413e6a08c5e57f5b7858c9e19
+size 326418793

@@ -1,0 +1,17 @@
+layer lamp
+type delta
+parent core
+parent_sha256 e08e8224aeea1abb605b0e359d345f459d2e04d413e6a08c5e57f5b7858c9e19
+release debian/trixie
+arch amd64
+product_commit a295e3485ed560feac951fa7379671801d3a2894
+common_commit b60dd2306b52591423aaeca2321cdd5322096ea1
+fab_version 1.1.1
+source_date_epoch 1700000000
+common_overlays turnkey.d tkl-webcp confconsole-lamp apache php mysql adminer composer
+common_conf turnkey.d tkl-webcp apache-cgi adminer-apache adminer-mysql apache-vhost apache-headers apache-security apache-ssl php mysql adminer
+build_overlays turnkey.d/tkl-bashlib turnkey.d/systemd-chroot tkl-webcp confconsole-lamp apache php mysql adminer composer
+build_conf turnkey.d/hostname turnkey.d/zz-ssl-ciphers tkl-webcp apache-cgi adminer-apache adminer-mysql apache-vhost apache-headers apache-security apache-ssl php mysql adminer
+tarball lamp.tar.zst
+sha256 237188ea3339caa72a6b7bcf36fc03bb4a40f654c643bb1ad0734d1b954102ae
+size 79807121
