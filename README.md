@@ -10,10 +10,12 @@ which means every operation runs headless from the same code path.
 
 ## Status
 
-Working today: `spec validate`, `spec render`, `spec apply`.
+Working today: `spec validate`, `spec render`, `spec apply`, and the layers
+half of `verify` (see [docs/layers.md](docs/layers.md)).
 
 Stubs that print what they will do, name the brief section covering them and
-exit 9: `inspect`, `diff`, `verify`. They never pretend to work.
+exit 9: `inspect`, `diff`, and the packages half of `verify`. They never
+pretend to work.
 
 ## Commands
 
@@ -24,7 +26,7 @@ exit 9: `inspect`, `diff`, `verify`. They never pretend to work.
 | `keel spec apply` | Write the conf, leaving an existing non empty conf untouched |
 | `keel inspect` | Write a spec from the running machine (brief section 5.2, not implemented yet) |
 | `keel diff` | Report drift between the declared and the running state (brief section 5.2, not implemented yet) |
-| `keel verify` | Check installed layers and packages against the manifest (brief section 5.4, not implemented yet) |
+| `keel verify` | Check the installed layers against their manifests, one line per layer (brief section 5.4; packages not implemented yet) |
 
 Every command accepts the same three options, so a caller never has to branch:
 
@@ -33,6 +35,13 @@ Every command accepts the same three options, so a caller never has to branch:
 | `--spec FILE` | Instance spec to read. Default: `$KEEL_SPEC`, else `/etc/keel/instance.yaml` |
 | `--conf FILE` | Conf file to write. Default: `$KEEL_CONF`, else `/etc/inithooks.conf` |
 | `--non-interactive` | Never prompt. This is already the only behaviour; the flag is accepted so that callers can pass it unconditionally |
+
+`keel verify` also accepts:
+
+| Option | Meaning |
+| --- | --- |
+| `--layers-dir DIR` | Directory of layer manifests. Default: `$KEEL_LAYERS_DIR`, else `/var/lib/keel/layers` |
+| `--tarballs-dir DIR` | Directory of the tarballs and `.hash` files. Default: the layers directory |
 
 `keel` and `python3 -m keel` are the same program.
 
@@ -48,7 +57,10 @@ Defined in one place, `keel/exits.py`, and reproduced here.
 | 3 | `SPEC_INVALID` | The spec file is valid YAML but fails validation; every error is printed |
 | 4 | `SECRET_ERROR` | A referenced secret is missing, or is readable by somebody other than its owner |
 | 5 | `CONF_ERROR` | The conf file cannot be written |
-| 9 | `NOT_IMPLEMENTED` | The command is a documented stub |
+| 6 | `MANIFEST_INVALID` | A layer manifest cannot be read or fails validation; every problem is printed |
+| 7 | `LAYER_MISMATCH` | A layer tarball, parent chain or `.hash` digest does not match its manifest |
+| 8 | `SIGNATURE_UNVERIFIED` | Every layer matches, but a `.hash` file is present whose signature was not verified (no trusted key is configured yet) |
+| 9 | `NOT_IMPLEMENTED` | The command is a documented stub, or the part of it that is (`verify` exits 9 after the layers pass, because packages are not checked yet) |
 
 Two rules that callers depend on:
 
@@ -56,7 +68,9 @@ Two rules that callers depend on:
   behaves exactly as it does today;
 - a conf file that already holds something other than whitespace wins and is
   never clobbered, so a hand written or platform supplied preseed keeps
-  priority over the spec.
+  priority over the spec;
+- `verify` never claims more than it checked: a signature is reported as
+  present, never as verified, until a trusted key exists.
 
 ## An instance file
 
@@ -153,7 +167,9 @@ if code != exits.OK:
 ```
 
 Every menu action has a headless equivalent with the same exit code, and the
-tests exercise the CLI, so the TUI cannot drift away from it.
+tests exercise the CLI, so the TUI cannot drift away from it. The layer
+check is `keel.layers.verify_layers()`, described in
+[docs/layers.md](docs/layers.md).
 
 ## Tests
 
