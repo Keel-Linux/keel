@@ -18,6 +18,9 @@ from os.path import dirname, abspath, join
 from unittest import mock
 
 from helpers import spec  # noqa: F401
+from layers_helpers import build_tree, hash_text, write, write_manifest
+
+from keel.layers import LAYERS_ENV  # noqa: E402
 
 import keel  # noqa: E402
 from keel import commands, exits  # noqa: E402
@@ -175,13 +178,82 @@ class TestSpecCommands(CLITestCase):
         self.assertEqual(code, exits.SECRET_ERROR)
 
 
+class TestVerify(CLITestCase):
+    def setUp(self):
+        super().setUp()
+        self.layers = join(self.tmpdir, "layers")
+        self.fields = build_tree(self.layers)
+
+    def verify(self, *argv: str) -> tuple[int, str, str]:
+        return self.run_cli_captured(
+            "verify", "--layers-dir", self.layers, "--non-interactive", *argv
+        )
+
+    def test_layers_that_pass_still_exit_not_implemented_for_packages(self):
+        code, out, err = self.verify()
+        self.assertEqual(code, exits.NOT_IMPLEMENTED)
+        self.assertEqual(out.splitlines(), [
+            "core: ok",
+            "lamp: ok",
+            "layers: 2 checked, 2 ok, 0 unverified, 0 mismatch, 0 invalid",
+        ])
+        self.assertIn("verify packages: not implemented yet", err)
+        self.assertIn("BRIEF.md section 5.4", err)
+
+    def test_invalid_manifest_exits_manifest_invalid(self):
+        write_manifest(self.layers, {**self.fields["core"], "size": "big"})
+        code, out, _ = self.verify()
+        self.assertEqual(code, exits.MANIFEST_INVALID)
+        self.assertIn("core: invalid: size: must be a non negative integer",
+                      out)
+
+    def test_missing_tarball_exits_layer_mismatch(self):
+        os.remove(join(self.layers, "lamp.tar.zst"))
+        code, out, _ = self.verify()
+        self.assertEqual(code, exits.LAYER_MISMATCH)
+        self.assertIn("lamp: mismatch: tarball lamp.tar.zst:", out)
+        self.assertIn("1 mismatch", out)
+
+    def test_signed_hash_file_exits_signature_unverified(self):
+        write(join(self.layers, "lamp.tar.zst.hash"),
+              hash_text("lamp", self.fields["lamp"]["sha256"], signed=True))
+        code, out, _ = self.verify()
+        self.assertEqual(code, exits.SIGNATURE_UNVERIFIED)
+        self.assertIn("lamp: unverified: signature present, not verified"
+                      " (no trusted key configured)", out)
+
+    def test_tarballs_dir_points_at_the_tarballs(self):
+        tarballs = join(self.tmpdir, "tarballs")
+        os.mkdir(tarballs)
+        for name in ("core", "lamp"):
+            os.rename(join(self.layers, f"{name}.tar.zst"),
+                      join(tarballs, f"{name}.tar.zst"))
+        code, _, _ = self.verify("--tarballs-dir", tarballs)
+        self.assertEqual(code, exits.NOT_IMPLEMENTED)
+
+    def test_absent_layers_dir_says_so_and_checks_nothing(self):
+        absent = join(self.tmpdir, "absent")
+        code, out, err = self.run_cli_captured(
+            "verify", "--layers-dir", absent
+        )
+        self.assertEqual(code, exits.NOT_IMPLEMENTED)
+        self.assertIn(f"{absent}: no layer manifests found", err)
+        self.assertIn("layers: 0 checked", out)
+
+    def test_layers_dir_defaults_to_the_environment(self):
+        os.remove(join(self.layers, "core.tar.zst"))
+        with mock.patch.dict(os.environ, {LAYERS_ENV: self.layers}):
+            code, _, _ = self.run_cli_captured("verify")
+        self.assertEqual(code, exits.LAYER_MISMATCH)
+
+
 class TestStubs(CLITestCase):
     def test_stubs_exit_not_implemented(self):
-        for command in ("inspect", "diff", "verify"):
+        for command in ("inspect", "diff"):
             self.assertEqual(self.run_cli(command), exits.NOT_IMPLEMENTED)
 
     def test_stub_names_the_brief_section(self):
-        out = self.module_run("verify")
+        out = self.module_run("inspect")
         self.assertEqual(out.returncode, exits.NOT_IMPLEMENTED)
         self.assertIn("not implemented yet", out.stderr.decode())
         self.assertIn("BRIEF.md section", out.stderr.decode())

@@ -1,0 +1,36 @@
+To ensure the image has not been corrupted in transmit or tampered with,
+perform the following two steps to cryptographically verify image integrity:
+
+1. Verify the authenticity of this file by checking that it is signed with our
+   GPG release key:
+
+    $ curl https://raw.githubusercontent.com/turnkeylinux/common/19.x/keys/tkl-trixie-images.asc | gpg --import
+    $ gpg --list-keys --with-fingerprint release-trixie-images@turnkeylinux.org
+      pub   rsa4096 2025-10-07 [SC] [expires: 2045-10-02]
+            DEE9 0D99 70AE 35D5 5B7C  6C2D C6D2 54B7 6A9D 9430
+      uid           [ unknown] TurnKey GNU/Linux Trixie Images (GPG signing key for TurnKey Linux Trixie Images) <release-trixie-images@turnkeylinux.org>
+      sub   rsa4096 2025-10-07 [S] [expires: 2045-10-02]
+      
+    $ gpg --verify core.tar.zst.hash
+      gpg: Signature made using RSA key ID DEE90D9970AE35D55B7C6C2DC6D254B76A9D9430
+      gpg: Good signature from "0"
+
+2. Recalculate the image hash and make sure it matches your choice of hash below.
+
+    $ sha256sum core.tar.zst
+      e08e8224aeea1abb605b0e359d345f459d2e04d413e6a08c5e57f5b7858c9e19  core.tar.zst
+
+    $ sha512sum core.tar.zst
+      8e7b197d9324dc48ba48607d879cfc12e67d51c352f0a910b9526a15ee320218af1b34916413b0dc2e8fa418da9e152c0a6a34bf48fba415b8754cac6c5183aa  core.tar.zst
+
+   Note, you can compare hashes automatically::
+
+    $ sha256sum -c core.tar.zst.hash
+      core.tar.zst: OK
+
+    $ sha512sum -c core.tar.zst.hash
+      core.tar.zst: OK
+
+    Final note, when checking SHAs automatically, please ignore warning noting
+    that some lines are improperly formatted.
+

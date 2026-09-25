@@ -1,0 +1,36 @@
+To ensure the image has not been corrupted in transmit or tampered with,
+perform the following two steps to cryptographically verify image integrity:
+
+1. Verify the authenticity of this file by checking that it is signed with our
+   GPG release key:
+
+    $ curl https://raw.githubusercontent.com/turnkeylinux/common/19.x/keys/tkl-trixie-images.asc | gpg --import
+    $ gpg --list-keys --with-fingerprint release-trixie-images@turnkeylinux.org
+      pub   rsa4096 2025-10-07 [SC] [expires: 2045-10-02]
+            DEE9 0D99 70AE 35D5 5B7C  6C2D C6D2 54B7 6A9D 9430
+      uid           [ unknown] TurnKey GNU/Linux Trixie Images (GPG signing key for TurnKey Linux Trixie Images) <release-trixie-images@turnkeylinux.org>
+      sub   rsa4096 2025-10-07 [S] [expires: 2045-10-02]
+      
+    $ gpg --verify lamp.tar.zst.hash
+      gpg: Signature made using RSA key ID DEE90D9970AE35D55B7C6C2DC6D254B76A9D9430
+      gpg: Good signature from "0"
+
+2. Recalculate the image hash and make sure it matches your choice of hash below.
+
+    $ sha256sum lamp.tar.zst
+      237188ea3339caa72a6b7bcf36fc03bb4a40f654c643bb1ad0734d1b954102ae  lamp.tar.zst
+
+    $ sha512sum lamp.tar.zst
+      3bc9ea593f09d4531376fb90bc248e79768389fe780e5a5d47f75441da1500bab1cf890f058e8c4496e884b6ac84730a86caa58aee65c32680267dcf7b0ed70c  lamp.tar.zst
+
+   Note, you can compare hashes automatically::
+
+    $ sha256sum -c lamp.tar.zst.hash
+      lamp.tar.zst: OK
+
+    $ sha512sum -c lamp.tar.zst.hash
+      lamp.tar.zst: OK
+
+    Final note, when checking SHAs automatically, please ignore warning noting
+    that some lines are improperly formatted.
+
