@@ -164,3 +164,26 @@ def pull(args) -> int:
         print(result.line())
     print(report.summary())
     return exits.OK
+
+
+def assemble(args) -> int:
+    """Extract the chain of `args.layer` into a rootfs; pack it when asked
+
+    Runs as root only. An OSError that the library did not turn into a
+    LayerError (tar or zstd missing, a disk full) is reported the same
+    way and returns ASSEMBLE_FAILED.
+    """
+    try:
+        report = layers.assemble(
+            args.layer, args.cache_dir, args.rootfs, args.template,
+            args.sha256,
+        )
+    except layers.LayerError as e:
+        error(str(e))
+        return e.code
+    except OSError as e:
+        error(f"assemble: {e}")
+        return exits.ASSEMBLE_FAILED
+    for line in report.lines():
+        print(line)
+    return exits.OK

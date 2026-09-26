@@ -122,6 +122,13 @@ def build_parser() -> argparse.ArgumentParser:
         commands.pull,
     )
     add_pull_options(pull_parser)
+    assemble_parser = _add_command(
+        subparsers, "assemble",
+        "extract cached layers into a rootfs and pack a Proxmox template"
+        " (root only)",
+        commands.assemble,
+    )
+    add_assemble_options(assemble_parser)
     return parser
 
 
@@ -164,6 +171,32 @@ def add_pull_options(parser: argparse.ArgumentParser) -> None:
         metavar="URL-or-DIR",
         help="where manifests and tarballs are served: an http(s) URL such"
         " as http://[2001:db8::1]/layers, or a directory",
+    )
+    add_cache_option(parser)
+
+
+def add_assemble_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "layer", metavar="LAYER", help="layer name, as pulled into the cache"
+    )
+    parser.add_argument(
+        "--rootfs",
+        required=True,
+        metavar="DIR",
+        help="directory to extract into; created, must be empty",
+    )
+    parser.add_argument(
+        "--template",
+        default=None,
+        metavar="FILE",
+        help="also pack the rootfs into this .tar.zst, with FILE.sha512"
+        " next to it",
+    )
+    parser.add_argument(
+        "--sha256",
+        default=None,
+        metavar="HEX",
+        help="which cached version of LAYER, when more than one is cached",
     )
     add_cache_option(parser)
 

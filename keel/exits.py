@@ -16,6 +16,8 @@ LAYER_MISMATCH = 7
 SIGNATURE_UNVERIFIED = 8
 NOT_IMPLEMENTED = 9
 LAYER_UNAVAILABLE = 10
+ASSEMBLE_NEEDS_ROOT = 11
+ASSEMBLE_FAILED = 12
 
 DESCRIPTIONS = {
     OK: "success, including the no-op cases",
@@ -30,4 +32,6 @@ DESCRIPTIONS = {
     NOT_IMPLEMENTED: "command is a documented stub, not implemented yet",
     LAYER_UNAVAILABLE: "a layer could not be fetched into the cache, or is"
     " not in it",
+    ASSEMBLE_NEEDS_ROOT: "assemble must run as root",
+    ASSEMBLE_FAILED: "the rootfs or the template could not be written",
 }

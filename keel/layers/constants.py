@@ -16,6 +16,7 @@ CACHE_ENV = "KEEL_CACHE_DIR"
 MANIFEST_SUFFIX = ".manifest"
 HASH_SUFFIX = ".hash"
 TARBALL_SUFFIX = ".tar.zst"
+SHA512_SUFFIX = ".sha512"
 PART_SUFFIX = ".part"
 NONE = "none"
 
@@ -56,3 +57,16 @@ READ_CHUNK = 1 << 20
 
 URL_SCHEMES = ("http", "https")
 FETCH_TIMEOUT = 60
+
+# What overlayfs leaves in an upper directory: a character device 0:0
+# where a lower path was removed, and this xattr on a directory whose
+# lower contents must not show through. Both are stored in the tarball by
+# tar --xattrs as pax headers with this prefix.
+PAX_XATTR_PREFIX = "SCHILY.xattr."
+OVERLAY_XATTR_GLOB = "trusted.overlay.*"
+OPAQUE_XATTR = PAX_XATTR_PREFIX + "trusted.overlay.opaque"
+OPAQUE_VALUE = "y"
+TAR_BLOCK = 512
+TAR_END_OF_ARCHIVE = b"\0" * (2 * TAR_BLOCK)
+
+ZSTD_LEVEL = 19
