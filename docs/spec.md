@@ -136,7 +136,7 @@ secrets:
 
 | Backend | State | Notes |
 | --- | --- | --- |
-| `file: PATH` | read | The file must exist, be owned by root (or by the caller), and be mode 0600 or stricter. A single trailing newline is stripped. All of that is checked at validation time, not only at apply time |
+| `file: PATH` | read | `PATH` must be a non empty string. The file must exist, be owned by root (or by the caller), and be mode 0600 or stricter; a single trailing newline is stripped. The file is checked at validation time by `spec validate`, `spec render` and `spec apply`, and not by `keel diff` or `spec validate --no-secret-files`, see below |
 | `generate: true` | read | A value is generated at apply time with `secrets.token_urlsafe` |
 
 `generate` is refused for `root_password` and `app_password` unless
@@ -148,6 +148,35 @@ survives being sourced.
 
 `spec render` never resolves a secret: it substitutes `[masked]` before
 rendering, so a preview cannot read a file or generate a value.
+
+### Checking the structure without the files
+
+A secret is a reference, so a spec can be valid on a machine that does
+not hold the value: the operator's workstation, or a fresh container that
+`keel inspect` described but where the secrets have not been materialised
+yet. `spec.validate()` takes a keyword for that case:
+
+```python
+errors = spec.validate(document, check_secret_files=False)
+```
+
+With `check_secret_files=False` every secret reference is still checked
+for structure (exactly one known backend, a `file:` value that is a non
+empty string, `generate` only where `first_login_wizard` allows it), but
+the existence, owner and mode of the file are not. The default is `True`,
+so `spec apply` and `spec render` behave as before.
+
+`keel diff` always loads the spec this way, because it never compares
+secrets ([docs/diff.md](diff.md)). `keel spec validate` checks the files
+by default and takes `--no-secret-files` to skip them; its output says
+which was done:
+
+```
+$ keel spec validate --spec instance.yaml
+Error: instance.yaml: secrets.root_password: /etc/keel/secrets/root_password: secret file not found
+$ keel spec validate --spec instance.yaml --no-secret-files
+instance.yaml: ok (secret files not checked)
+```
 
 ## app
 

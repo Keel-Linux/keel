@@ -87,9 +87,16 @@ def build_parser() -> argparse.ArgumentParser:
     spec_actions = spec_parser.add_subparsers(
         dest="action", metavar="ACTION"
     )
-    _add_spec_action(
+    validate_parser = _add_spec_action(
         spec_actions, "validate", "check the spec and report every error",
         commands.spec_validate,
+    )
+    validate_parser.add_argument(
+        "--no-secret-files",
+        action="store_true",
+        help="check the structure of each secret reference but not that"
+        " the file exists with the right owner and mode; for a machine"
+        " that does not hold the secrets (default: check the files)",
     )
     _add_spec_action(
         spec_actions, "render",
@@ -253,10 +260,13 @@ def add_inspect_options(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _add_spec_action(subparsers, name: str, help_text: str, handler) -> None:
+def _add_spec_action(
+    subparsers, name: str, help_text: str, handler
+) -> argparse.ArgumentParser:
     parser = subparsers.add_parser(name, help=help_text)
     add_common_options(parser)
     parser.set_defaults(handler=handler)
+    return parser
 
 
 def _add_command(

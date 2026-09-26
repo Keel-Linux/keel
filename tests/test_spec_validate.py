@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from os.path import join
 
-from helpers import errors
+from helpers import doc, errors, spec
 
 from keel.spec.fields import MAX_DOMAIN_LENGTH  # noqa: E402
 
@@ -142,6 +142,79 @@ class TestSecrets(unittest.TestCase):
             f"    file: {path}\n    generate: false\n",
             "secrets.root_password: exactly one of",
         )
+
+    def test_file_backend_must_be_a_non_empty_string(self):
+        for value in ("123", "''", "[a]"):
+            with self.subTest(value=value):
+                messages(
+                    "version: 1\nsecrets:\n  db_password:\n"
+                    f"    file: {value}\n",
+                    "secrets.db_password.file: must be a path",
+                )
+
+    def test_missing_secret_file_is_an_error_by_default(self):
+        absent = join(self.tmpdir, "absent")
+        text = f"version: 1\nsecrets:\n  db_password:\n    file: {absent}\n"
+        messages(text, f"secrets.db_password: {absent}: secret file not found")
+        self.assertEqual(
+            spec.validate(doc(text), check_secret_files=True),
+            [f"secrets.db_password: {absent}: secret file not found"],
+        )
+
+
+class TestSecretsWithoutFiles(unittest.TestCase):
+    """validate(check_secret_files=False): structure yes, the file no
+
+    This is what diff and `spec validate --no-secret-files` use, on a
+    machine that may not hold the secrets.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+
+    def structural(self, text: str) -> list[str]:
+        return spec.validate(doc(text), check_secret_files=False)
+
+    def test_missing_secret_file_is_not_an_error(self):
+        absent = join(self.tmpdir, "absent")
+        text = f"version: 1\nsecrets:\n  db_password:\n    file: {absent}\n"
+        self.assertEqual(self.structural(text), [])
+
+    def test_loose_mode_and_owner_are_not_checked(self):
+        path = secret_file(self.tmpdir, "s3cret\n")
+        os.chmod(path, 0o644)
+        text = f"version: 1\nsecrets:\n  db_password:\n    file: {path}\n"
+        self.assertEqual(self.structural(text), [])
+        self.assertEqual(len(spec.validate(doc(text))), 1)
+
+    def test_missing_hub_api_key_file_is_not_an_error(self):
+        absent = join(self.tmpdir, "absent")
+        text = f"version: 1\nhub:\n  api_key:\n    file: {absent}\n"
+        self.assertEqual(self.structural(text), [])
+
+    def test_structure_is_still_checked(self):
+        found = self.structural(
+            "version: 1\n"
+            "secrets:\n"
+            "  db_password:\n    vault: kv/db\n"
+            "  app_password: generate\n"
+            "  root_password:\n    generate: true\n"
+            "  wifi_password:\n    generate: true\n"
+            "hub:\n  api_key:\n    file: 123\n"
+        )
+        self.assertEqual(sorted(found), sorted([
+            "secrets.db_password.vault: unknown secret backend",
+            "secrets.db_password: exactly one of file, generate is required",
+            "secrets.app_password: must be a mapping",
+            "secrets.root_password: generate needs first_login_wizard,"
+            " otherwise nobody can log in with the generated value",
+            "secrets.wifi_password: unknown secret",
+            "hub.api_key.file: must be a path",
+        ]))
+
+    def test_the_other_sections_are_validated_as_usual(self):
+        found = self.structural("version: 2\ninstance:\n  nonsense: 1\n")
+        self.assertEqual(len(found), 2)
 
 
 class TestApp(unittest.TestCase):

@@ -21,12 +21,17 @@ def error(message: str) -> None:
     print(f"Error: {message}", file=sys.stderr)
 
 
-def read_spec(path: str) -> tuple[dict | None, int]:
+def read_spec(
+    path: str, check_secret_files: bool = True
+) -> tuple[dict | None, int]:
     """Load and validate a spec file
 
     Returns (document, exit code). The document is None when the caller
     has nothing to do, which includes the successful no-op of an absent
-    file, so the caller checks the code first.
+    file, so the caller checks the code first. `check_secret_files` is
+    passed to spec.validate(): a command that never reads a secret value
+    passes False, so the spec is usable on a machine that does not hold
+    the secret files.
     """
     if not os.path.exists(path):
         print(f"{path}: not found, nothing to do", file=sys.stderr)
@@ -38,7 +43,7 @@ def read_spec(path: str) -> tuple[dict | None, int]:
         error(str(e))
         return None, exits.SPEC_UNREADABLE
 
-    errors = spec.validate(doc)
+    errors = spec.validate(doc, check_secret_files=check_secret_files)
     if errors:
         for message in errors:
             error(f"{path}: {message}")
@@ -47,10 +52,17 @@ def read_spec(path: str) -> tuple[dict | None, int]:
 
 
 def spec_validate(args) -> int:
-    doc, code = read_spec(args.spec)
+    """Check the spec and say whether the secret files were checked too
+
+    --no-secret-files checks the structure only, for an operator who
+    validates a spec on a machine that does not hold the secrets.
+    """
+    check_secret_files = not getattr(args, "no_secret_files", False)
+    doc, code = read_spec(args.spec, check_secret_files)
     if doc is None:
         return code
-    print(f"{args.spec}: ok")
+    checked = "checked" if check_secret_files else "not checked"
+    print(f"{args.spec}: ok (secret files {checked})")
     return exits.OK
 
 
@@ -140,12 +152,15 @@ def diff(args) -> int:
     """Report drift between the spec and the machine under --root
 
     The declared side is the spec, loaded and validated like every other
-    command reads it; the observed side is what the inspect collector
-    finds. One line per field on stdout, or one JSON document with
-    --format json, and nothing is written anywhere. Drift decides the
-    exit code before unknown fields do (docs/diff.md).
+    command reads it, except that the secret files are not required to
+    exist: diff never compares secrets, and the machine being compared
+    may not hold them (a spec fresh from inspect names files nobody has
+    created yet). The observed side is what the inspect collector finds.
+    One line per field on stdout, or one JSON document with --format
+    json, and nothing is written anywhere. Drift decides the exit code
+    before unknown fields do (docs/diff.md).
     """
-    doc, code = read_spec(args.spec)
+    doc, code = read_spec(args.spec, check_secret_files=False)
     if doc is None:
         return code
     comparison = drift.diff_root(doc, args.root)

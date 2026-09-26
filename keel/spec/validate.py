@@ -3,6 +3,14 @@
 
 validate() returns every error it finds instead of raising on the first
 one, so that an operator fixes the whole file in one pass.
+
+Secret references are checked in two layers: their structure (exactly one
+known backend, a path that is a string) always, and the file behind a
+`file:` reference (present, root owned, mode 0600 or stricter) only when
+`check_secret_files` is true. apply and render keep the default and need
+the files; diff and a structure only `spec validate` do not, because a
+secret is a reference and the machine being checked may not hold the
+value.
 """
 
 from typing import Any
@@ -26,8 +34,12 @@ from keel.spec.validate_extras import validate_locale, validate_users
 from keel.spec.validate_network import validate_network
 
 
-def validate(doc: dict) -> list[str]:
-    """Return a list of error messages, empty when the document is valid"""
+def validate(doc: dict, *, check_secret_files: bool = True) -> list[str]:
+    """Return a list of error messages, empty when the document is valid
+
+    With `check_secret_files` false, a `file:` secret reference is still
+    checked for structure, but the file itself is not looked at.
+    """
     errors: list[str] = []
 
     if doc.get("version") != SCHEMA_VERSION:
@@ -37,9 +49,9 @@ def validate(doc: dict) -> list[str]:
             errors.append(f"{key}: unknown top level key")
 
     errors.extend(_validate_instance(doc.get("instance")))
-    errors.extend(_validate_secrets(doc))
+    errors.extend(_validate_secrets(doc, check_secret_files))
     errors.extend(_validate_app(doc.get("app")))
-    errors.extend(_validate_hub(doc.get("hub")))
+    errors.extend(_validate_hub(doc.get("hub"), check_secret_files))
     errors.extend(_validate_security(doc.get("security")))
     errors.extend(_validate_wizard(doc.get("first_login_wizard")))
     errors.extend(validate_network(doc.get("network")))
@@ -67,7 +79,7 @@ def _validate_instance(instance: Any) -> list[str]:
     return errors
 
 
-def _validate_secrets(doc: dict) -> list[str]:
+def _validate_secrets(doc: dict, check_secret_files: bool) -> list[str]:
     declared = doc.get("secrets")
     error = mapping_error("secrets", declared)
     if error or not declared:
@@ -80,7 +92,7 @@ def _validate_secrets(doc: dict) -> list[str]:
         if name not in SECRET_VARS:
             errors.append(f"{key}: unknown secret")
             continue
-        errors.extend(validate_secret(key, spec))
+        errors.extend(validate_secret(key, spec, check_secret_files))
         if not isinstance(spec, dict):
             continue
         if (
@@ -95,8 +107,15 @@ def _validate_secrets(doc: dict) -> list[str]:
     return errors
 
 
-def validate_secret(key: str, spec: Any) -> list[str]:
-    """Check one secret reference: exactly one backend, and it works"""
+def validate_secret(
+    key: str, spec: Any, check_secret_files: bool = True
+) -> list[str]:
+    """Check one secret reference: exactly one backend, and it works
+
+    "Works" means the file exists with the right owner and mode, which is
+    skipped when `check_secret_files` is false; the structure is checked
+    either way.
+    """
     if not isinstance(spec, dict):
         return [f"{key}: must be a mapping"]
 
@@ -109,10 +128,20 @@ def validate_secret(key: str, spec: Any) -> list[str]:
         )
         return errors
     if "file" in spec:
-        error = secret_file_error(str(spec["file"]))
-        if error:
-            errors.append(f"{key}: {error}")
+        errors.extend(_validate_file_backend(key, spec["file"],
+                                             check_secret_files))
     return errors
+
+
+def _validate_file_backend(
+    key: str, path: Any, check_secret_files: bool
+) -> list[str]:
+    if not isinstance(path, str) or not path:
+        return [f"{key}.file: must be a path"]
+    if not check_secret_files:
+        return []
+    error = secret_file_error(path)
+    return [f"{key}: {error}"] if error else []
 
 
 def _validate_app(app: Any) -> list[str]:
@@ -143,7 +172,7 @@ def _validate_app(app: Any) -> list[str]:
     return errors
 
 
-def _validate_hub(hub: Any) -> list[str]:
+def _validate_hub(hub: Any, check_secret_files: bool) -> list[str]:
     error = mapping_error("hub", hub)
     if error or not hub:
         return [error] if error else []
@@ -154,7 +183,9 @@ def _validate_hub(hub: Any) -> list[str]:
             errors.append(f"hub.{key}: unknown key")
     api_key = hub.get("api_key")
     if isinstance(api_key, dict):
-        errors.extend(validate_secret("hub.api_key", api_key))
+        errors.extend(
+            validate_secret("hub.api_key", api_key, check_secret_files)
+        )
     elif api_key is not None and str(api_key).lower() != "skip":
         errors.append("hub.api_key: must be 'skip' or a secret mapping")
     return errors

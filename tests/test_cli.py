@@ -76,8 +76,63 @@ class CLITestCase(unittest.TestCase):
 class TestSpecCommands(CLITestCase):
     def test_validate_of_a_good_spec_exits_ok(self):
         path = self.write_spec(VALID)
-        code = self.run_cli("spec", "validate", "--spec", path)
-        self.assertEqual(code, exits.OK)
+        code, out, err = self.run_cli_captured("spec", "validate", "--spec",
+                                               path)
+        self.assertEqual((code, err), (exits.OK, ""))
+        self.assertEqual(out, f"{path}: ok (secret files checked)\n")
+
+    def test_validate_checks_the_secret_files_by_default(self):
+        path = self.write_spec(
+            VALID + "secrets:\n  root_password:\n"
+            f"    file: {join(self.tmpdir, 'absent')}\n"
+        )
+        code, out, err = self.run_cli_captured("spec", "validate", "--spec",
+                                               path)
+        self.assertEqual((code, out), (exits.SPEC_INVALID, ""))
+        self.assertIn("secrets.root_password: ", err)
+        self.assertIn("secret file not found", err)
+
+    def test_validate_no_secret_files_accepts_a_missing_file_and_says_so(self):
+        path = self.write_spec(
+            VALID + "secrets:\n  root_password:\n"
+            f"    file: {join(self.tmpdir, 'absent')}\n"
+        )
+        code, out, err = self.run_cli_captured(
+            "spec", "validate", "--spec", path, "--no-secret-files"
+        )
+        self.assertEqual((code, err), (exits.OK, ""))
+        self.assertEqual(out, f"{path}: ok (secret files not checked)\n")
+
+    def test_validate_no_secret_files_still_checks_the_structure(self):
+        path = self.write_spec(
+            VALID + "secrets:\n  root_password:\n    vault: kv/root\n"
+        )
+        code, out, err = self.run_cli_captured(
+            "spec", "validate", "--spec", path, "--no-secret-files"
+        )
+        self.assertEqual((code, out), (exits.SPEC_INVALID, ""))
+        self.assertIn("secrets.root_password.vault: unknown secret backend",
+                      err)
+
+    def test_no_secret_files_belongs_to_validate_only(self):
+        path = self.write_spec(VALID)
+        for action in ("render", "apply"):
+            with self.subTest(action=action):
+                with self.assertRaises(SystemExit) as raised:
+                    self.run_cli_captured("spec", action, "--spec", path,
+                                          "--no-secret-files")
+                self.assertEqual(raised.exception.code, exits.USAGE)
+
+    def test_spec_validate_called_without_the_flag_checks_the_files(self):
+        """confconsole builds a Namespace by hand, as the README shows"""
+        from argparse import Namespace
+        path = self.write_spec(
+            VALID + "secrets:\n  root_password:\n"
+            f"    file: {join(self.tmpdir, 'absent')}\n"
+        )
+        args = Namespace(spec=path, conf=self.conf, non_interactive=True)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(commands.spec_validate(args), exits.SPEC_INVALID)
 
     def test_absent_spec_is_a_no_op_for_every_spec_command(self):
         path = join(self.tmpdir, "absent.yaml")

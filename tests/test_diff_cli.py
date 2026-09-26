@@ -3,7 +3,9 @@
 
 The round trip is the property that ties inspect and diff together: a
 spec written by `keel inspect` from a fixture tree, diffed against the
-same tree, reports no drift and exits 0, for every fixture.
+same tree, reports no drift and exits 0, for every fixture, and it holds
+on a machine where the secret files the spec names do not exist, because
+diff never compares secrets and so never requires them.
 """
 
 import contextlib
@@ -132,6 +134,27 @@ class TestDiffCommand(DiffTestCase):
                       " either side)\n", out)
         self.assertIn("first_login_wizard: not compared (", out)
 
+    def test_a_missing_secret_file_is_not_an_error(self):
+        absent = join(self.tmpdir, "secrets", "root_password")
+        path = self.write_spec(
+            MATCHING + f"secrets:\n  root_password:\n    file: {absent}\n"
+            f"hub:\n  api_key:\n    file: {absent}\n"
+        )
+        code, out, err = run_cli("diff", "--spec", path, "--root", TURNKEY)
+        self.assertEqual((code, err), (exits.OK, ""))
+        self.assertIn("secrets: not compared (", out)
+        self.assertIn("hub.api_key: not compared (a secret reference; values"
+                      " are never read)\n", out)
+
+    def test_a_malformed_secret_reference_still_exits_spec_invalid(self):
+        path = self.write_spec(
+            MATCHING + "secrets:\n  root_password:\n    vault: kv/root\n"
+        )
+        code, out, err = run_cli("diff", "--spec", path, "--root", TURNKEY)
+        self.assertEqual((code, out), (exits.SPEC_INVALID, ""))
+        self.assertIn("secrets.root_password.vault: unknown secret backend",
+                      err)
+
     def test_absent_spec_is_a_no_op(self):
         path = join(self.tmpdir, "absent.yaml")
         code, out, err = run_cli("diff", "--spec", path, "--root", TURNKEY)
@@ -170,24 +193,27 @@ class TestDiffCommand(DiffTestCase):
 
 
 class TestRoundTrip(DiffTestCase):
-    """inspect a tree into a spec, then diff that spec against the tree"""
+    """inspect a tree into a spec, then diff that spec against the tree
+
+    No secret file exists during these tests: the placeholders point into
+    a directory that is never created, as on a machine where the operator
+    has not materialised the secrets yet.
+    """
 
     def setUp(self):
         super().setUp()
         self.secrets = join(self.tmpdir, "secrets")
-        os.mkdir(self.secrets)
-        for name in spec.SECRET_VARS:
-            path = join(self.secrets, name)
-            with open(path, "w") as fob:
-                fob.write("provided-by-the-operator\n")
-            os.chmod(path, 0o600)
+
+    def inspect(self, root: str, output: str) -> None:
+        run_cli("inspect", "--root", root, "--output", output,
+                "--secrets-dir", self.secrets)
+        self.assertFalse(os.path.exists(self.secrets))
 
     def test_every_fixture_diffs_clean_against_itself(self):
         for root in (TURNKEY, DHCP, MISSING):
             with self.subTest(root=os.path.basename(root)):
                 output = join(self.tmpdir, f"{os.path.basename(root)}.yaml")
-                run_cli("inspect", "--root", root, "--output", output,
-                        "--secrets-dir", self.secrets)
+                self.inspect(root, output)
                 code, out, err = run_cli("diff", "--spec", output, "--root",
                                          root, "--format", "json")
                 self.assertEqual(err, "")
@@ -195,12 +221,30 @@ class TestRoundTrip(DiffTestCase):
                 self.assertEqual(document["counts"]["drift"], 0)
                 self.assertEqual(document["counts"]["unknown"], 0)
                 self.assertEqual(document["counts"]["not_declared"], 0)
+                self.assertNotEqual(code, exits.SPEC_INVALID)
                 self.assertEqual(code, exits.OK)
+
+    def test_every_fixture_names_secret_files_that_do_not_exist(self):
+        """The precondition of the round trip: the spec has placeholders"""
+        for root in (TURNKEY, DHCP, MISSING):
+            with self.subTest(root=os.path.basename(root)):
+                output = join(self.tmpdir, f"{os.path.basename(root)}.yaml")
+                self.inspect(root, output)
+                document = spec.load(output)
+                names = list(document["secrets"])
+                self.assertIn("root_password", names)
+                for name in names:
+                    path = document["secrets"][name]["file"]
+                    self.assertEqual(path, join(self.secrets, name))
+                    self.assertFalse(os.path.exists(path))
+                self.assertEqual(len(spec.validate(document)), len(names))
+                self.assertEqual(
+                    spec.validate(document, check_secret_files=False), []
+                )
 
     def test_one_edited_field_is_the_only_drift(self):
         output = join(self.tmpdir, "instance.yaml")
-        run_cli("inspect", "--root", TURNKEY, "--output", output,
-                "--secrets-dir", self.secrets)
+        self.inspect(TURNKEY, output)
         with open(output) as fob:
             text = fob.read()
         with open(output, "w") as fob:
