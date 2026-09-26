@@ -195,7 +195,7 @@ tls:
 
 | Field | State | Notes |
 | --- | --- | --- |
-| `tls.acme.enabled` | accepted | When true, `apply` warns that this version does not request a certificate and points at confconsole |
+| `tls.acme.enabled` | accepted | `true` or `false`; absent counts as false. When true, `apply` warns that this version does not request a certificate and points at confconsole. When false, the fields below it are kept in the file and `keel diff` does not compare them ([docs/diff.md](diff.md)), so an operator prepares a certificate configuration before turning it on |
 | `tls.acme.challenge` | accepted | `http-01` or `dns-01` |
 | `tls.acme.domains` | accepted | A list of domain names, each validated |
 

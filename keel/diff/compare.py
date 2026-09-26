@@ -41,6 +41,10 @@ NOT_COMPARED_REASONS = {
     " machine",
 }
 SECRET_REASON = "a secret reference; values are never read"
+# A feature the spec turns off with one field. Its other fields stay in
+# the file, ready for the day the switch is turned on, and are not
+# compared meanwhile: nothing on the machine is supposed to match them.
+DISABLED_FEATURES = {"tls.acme": "enabled"}
 KEYWORD_FIELDS = ("security.alerts", "security.updates", "hub.api_key")
 DOMAIN_LEAVES = ("hostname", "fqdn", "domains")
 ADDRESS_LEAVES = ("address",)
@@ -87,8 +91,11 @@ def compare_section(
         return [FieldDiff("hub.api_key", NOT_COMPARED, reason=SECRET_REASON)]
     wanted = dict(flatten(section, declared or {}))
     found = dict(flatten(section, observed or {}))
+    skipped = disabled(section, wanted)
     fields = [
-        compare_field(path, value, found.get(path), unknowns)
+        FieldDiff(path, NOT_COMPARED, value, found.get(path), skipped[path])
+        if path in skipped
+        else compare_field(path, value, found.get(path), unknowns)
         for path, value in wanted.items()
     ]
     fields += [
@@ -97,6 +104,34 @@ def compare_section(
         if path not in wanted
     ]
     return fields
+
+
+def disabled(section: str, wanted: dict[str, object]) -> dict[str, str]:
+    """The declared paths of a feature the spec turned off, and why
+
+    The switch itself is always compared: turning a feature on behind the
+    spec's back is drift. What the switch governs is not, because the
+    machine is not supposed to carry it, and refusing the settings in the
+    schema instead would leave an operator nowhere to prepare them.
+    """
+    off: dict[str, str] = {}
+    for feature, switch in DISABLED_FEATURES.items():
+        if not feature.startswith(f"{section}."):
+            continue
+        key = f"{feature}.{switch}"
+        if wanted.get(key):
+            continue
+        state = "false" if key in wanted else "not declared"
+        reason = (
+            f"{feature} is off in the spec ({switch} is {state}), so what it"
+            f" governs is not compared; it takes effect when {switch}"
+            " becomes true"
+        )
+        off.update({
+            path: reason for path in wanted
+            if path.startswith(f"{feature}.") and path != key
+        })
+    return off
 
 
 def compare_field(

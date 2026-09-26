@@ -210,6 +210,51 @@ class TestCompare(unittest.TestCase):
                          " observed nothing)")
         self.assertEqual(fields["tls.acme.domains"].status, DRIFT)
 
+    def test_a_feature_the_spec_turns_off_is_compared_at_the_switch_only(self):
+        declared = {"tls": {"acme": {
+            "enabled": False, "challenge": "http-01",
+            "domains": ["forum2.keellinux.org"],
+        }}}
+        observed = {"tls": {"acme": {"enabled": False}}}
+        result = compare(declared, inspection(
+            observed,
+            inferred("tls.acme.enabled", "false",
+                     "/etc/dehydrated is not present"),
+        ))
+        fields = by_field(result)
+        self.assertEqual(fields["tls.acme.enabled"].status, SAME)
+        self.assertEqual(fields["tls.acme.challenge"].status, NOT_COMPARED)
+        self.assertEqual(
+            fields["tls.acme.domains"].line(),
+            "tls.acme.domains: not compared (tls.acme is off in the spec"
+            " (enabled is false), so what it governs is not compared; it"
+            " takes effect when enabled becomes true)",
+        )
+        self.assertEqual(result.code, exits.OK)
+
+    def test_the_switch_itself_drifts_when_the_machine_turned_it_on(self):
+        declared = {"tls": {"acme": {"enabled": False,
+                                     "domains": ["blog.example.org"]}}}
+        observed = {"tls": {"acme": {"enabled": True, "challenge": "dns-01",
+                                     "domains": ["blog.example.org"]}}}
+        result = compare(declared, inspection(observed))
+        fields = by_field(result)
+        self.assertEqual(fields["tls.acme.enabled"].status, DRIFT)
+        self.assertEqual(fields["tls.acme.domains"].status, NOT_COMPARED)
+        self.assertEqual(fields["tls.acme.challenge"].status, NOT_DECLARED)
+        self.assertEqual(result.code, exits.DRIFT_FOUND)
+
+    def test_settings_declared_without_the_switch_are_not_compared(self):
+        declared = {"tls": {"acme": {"domains": ["blog.example.org"]}}}
+        result = compare(declared, inspection({"tls": {"acme": {
+            "enabled": False}}}))
+        fields = by_field(result)
+        self.assertEqual(fields["tls.acme.domains"].status, NOT_COMPARED)
+        self.assertIn("enabled is not declared",
+                      fields["tls.acme.domains"].reason)
+        self.assertEqual(fields["tls.acme.enabled"].status, NOT_DECLARED)
+        self.assertEqual(result.code, exits.OK)
+
     def test_a_value_inspect_wrote_is_compared_despite_a_side_note(self):
         """The dhcp fixture: a v4tunnel stanza next to the dhcp one"""
         declared = {"network": {"managed_by": "host", "interfaces": {

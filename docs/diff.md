@@ -57,8 +57,9 @@ Every field of the declared spec that inspect can observe gets one line:
 | `unknown` | inspect could not infer the field; the line carries inspect's reason, for example `/etc/hostname file is empty` or `permission denied (root only)` | 13 |
 | `not declared` | The machine has a value the spec is silent about; listed so the operator sees it, never counted as drift | unchanged |
 
-Two more lines describe what is deliberately not compared, one per
-declared section: `not compared`, with the reason.
+A fifth line describes what is deliberately not compared: `not compared`,
+with the reason. It covers a whole section whose values leave no trace,
+and the settings of a feature the spec turns off.
 
 ```
 instance.hostname: same (blog)
@@ -116,6 +117,35 @@ it:
 
 `version` is a property of the file, not of the machine, and is not
 listed.
+
+### A feature the spec turns off
+
+`tls.acme.enabled: false` with `challenge` and `domains` below it is a
+valid and useful spec: the operator has prepared the certificate
+configuration and has not turned it on yet, because the name has no DNS
+record, or the machine is not reachable, or the proxy in front still
+terminates TLS. Those settings describe nothing the machine is supposed
+to carry, so comparing them reported drift on a spec that was correct:
+
+```
+tls.acme.challenge: drift (declared http-01, observed nothing)
+tls.acme.domains: drift (declared forum2.keellinux.org, observed nothing)
+```
+
+Diff now compares the switch and nothing else it governs:
+
+```
+tls.acme.enabled: same (false)
+tls.acme.challenge: not compared (tls.acme is off in the spec (enabled is false), so what it governs is not compared; it takes effect when enabled becomes true)
+tls.acme.domains: not compared (tls.acme is off in the spec (enabled is false), so what it governs is not compared; it takes effect when enabled becomes true)
+```
+
+The switch itself is always compared, so a machine that has ACME running
+behind the spec's back is still drift. `enabled` absent counts as off,
+the same way `apply` reads it. The alternative, a schema that refuses
+`domains` while ACME is disabled, was rejected: it would force the
+operator to write the domains and turn the feature on in the same edit,
+which is exactly the change that should be reviewable on its own.
 
 ## JSON
 
