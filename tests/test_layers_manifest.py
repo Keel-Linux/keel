@@ -135,6 +135,55 @@ class TestValidate(unittest.TestCase):
         )
 
 
+class TestLayouts(unittest.TestCase):
+    """The two file name layouts, docs/layers.md"""
+
+    DIGEST = "a" * 64
+
+    def test_split_stem_tells_the_layouts_apart(self):
+        self.assertEqual(manifest.split_stem("lamp"), ("lamp", None))
+        self.assertEqual(manifest.split_stem("my-app"), ("my-app", None))
+        self.assertEqual(manifest.split_stem(f"lamp-{self.DIGEST}"),
+                         ("lamp", self.DIGEST))
+        self.assertEqual(manifest.split_stem(f"my-app-{self.DIGEST}"),
+                         ("my-app", self.DIGEST))
+        self.assertEqual(manifest.split_stem("lamp-abc"), ("lamp-abc", None))
+        self.assertEqual(manifest.cache_stem("lamp", self.DIGEST),
+                         f"lamp-{self.DIGEST}")
+
+    def test_the_tarball_follows_the_layout_of_the_manifest(self):
+        fields = fixture_fields("lamp")
+        loaded = manifest.from_text("x", render(fields))
+        self.assertEqual(
+            manifest.tarball_filename(loaded, "/layers/lamp.manifest"),
+            "lamp.tar.zst",
+        )
+        self.assertEqual(
+            manifest.tarball_filename(
+                loaded, f"/cache/lamp-{fields['sha256']}.manifest"
+            ),
+            f"lamp-{fields['sha256']}.tar.zst",
+        )
+
+    def test_the_file_name_must_agree_with_the_manifest(self):
+        fields = fixture_fields("lamp")
+        loaded = manifest.from_text("x", render(fields))
+        self.assertIsNone(manifest.name_problem(loaded, "lamp.manifest"))
+        self.assertIsNone(manifest.digest_problem(loaded, "lamp.manifest"))
+        cached = f"lamp-{fields['sha256']}.manifest"
+        self.assertIsNone(manifest.name_problem(loaded, cached))
+        self.assertIsNone(manifest.digest_problem(loaded, cached))
+        self.assertEqual(
+            manifest.name_problem(loaded, "core.manifest"),
+            "layer: manifest names 'lamp', file is 'core'",
+        )
+        self.assertEqual(
+            manifest.digest_problem(loaded, f"lamp-{self.DIGEST}.manifest"),
+            f"file name sha256 {self.DIGEST}, manifest says"
+            f" {fields['sha256']}",
+        )
+
+
 class TestLoad(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()

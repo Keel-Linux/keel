@@ -44,6 +44,7 @@ from keel.layers import (
     extract,
     pack,
     pull,
+    verify_layers,
 )
 from keel.layers.cache import Cache
 
@@ -130,6 +131,14 @@ class TestAssemble(AssembleTestCase):
         self.assertIn(self.fields["core"]["sha256"], str(error))
         self.assemble("core", sha256=self.fields["core"]["sha256"])
         self.assertTrue(exists(join(self.rootfs, "etc/turnkey_version")))
+
+    def test_the_cache_layout_assembles_and_verifies(self):
+        verified = verify_layers(self.cache)
+        self.assertEqual([r.line() for r in verified.results],
+                         ["core: ok", "lamp: ok"])
+        self.assemble()
+        self.assertEqual(read(join(self.rootfs, "etc/turnkey_version")),
+                         LAMP_VERSION)
 
     def test_rootfs_may_exist_when_empty(self):
         os.makedirs(self.rootfs)
@@ -222,6 +231,28 @@ class TestRefusals(AssembleTestCase):
         error = self.failing()
         self.assertEqual(error.code, exits.MANIFEST_INVALID)
         self.assertIn("missing keys", str(error))
+
+    def test_a_cached_manifest_naming_another_layer_is_invalid(self):
+        path = self.cached("core", ".manifest")
+        write(path, open(path).read().replace("layer core", "layer base"))
+        error = self.failing()
+        self.assertEqual(error.code, exits.MANIFEST_INVALID)
+        self.assertIn(f"{path}: layer: manifest names 'base', file is",
+                      str(error))
+
+    def test_a_cached_manifest_filed_under_another_sha256_is_a_mismatch(self):
+        digest = self.fields["core"]["sha256"]
+        other = "f" * 64
+        os.rename(self.cached("core", ".manifest"),
+                  join(self.cache, f"core-{other}.manifest"))
+        error = self.failing(layer="core")
+        self.assertEqual(error.code, exits.LAYER_MISMATCH)
+        self.assertEqual(
+            str(error),
+            f"{join(self.cache, f'core-{other}.manifest')}: file name sha256"
+            f" {other}, manifest says {digest}",
+        )
+        self.assertFalse(exists(self.rootfs))
 
     def test_a_corrupted_cached_tarball_is_a_mismatch_before_extraction(self):
         write(self.cached("lamp"), b"corrupted")

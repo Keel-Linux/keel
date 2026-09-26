@@ -13,6 +13,7 @@ from layers_helpers import (
     hash_text,
     sha256,
     stand_in_fields,
+    to_cache_layout,
     write,
     write_manifest,
 )
@@ -220,6 +221,97 @@ class TestManifests(VerifyTestCase):
     def test_files_that_are_not_manifests_are_ignored(self):
         write(join(self.root, "core.log"), "INFO building\n")
         self.assertEqual(len(verify_layers(self.root).results), 2)
+
+
+class TestCacheLayout(VerifyTestCase):
+    """A directory keel pull wrote: `<name>-<sha256>.*` (docs/layers.md)"""
+
+    def cached(self, name: str, suffix: str) -> str:
+        return join(self.root, f"{name}-{self.fields[name]['sha256']}{suffix}")
+
+    def write_hash_files(self) -> None:
+        for name in ("core", "lamp"):
+            write(join(self.root, f"{name}.tar.zst.hash"),
+                  hash_text(name, self.fields[name]["sha256"]))
+
+    def test_the_cache_layout_verifies_like_the_build_output(self):
+        before = verify_layers(self.root)
+        to_cache_layout(self.root, self.fields)
+        after = verify_layers(self.root)
+        self.assertEqual([r.line() for r in after.results],
+                         [r.line() for r in before.results])
+        self.assertEqual([r.line() for r in after.results],
+                         ["core: ok", "lamp: ok"])
+        self.assertEqual(after.code, exits.OK)
+
+    def test_unsigned_hash_files_are_unverified_in_both_layouts(self):
+        self.write_hash_files()
+        before = verify_layers(self.root)
+        to_cache_layout(self.root, self.fields)
+        after = verify_layers(self.root)
+        self.assertEqual([r.line() for r in before.results], [
+            f"core: unverified: {verify.SIGNATURE_ABSENT}",
+            f"lamp: unverified: {verify.SIGNATURE_ABSENT}",
+        ])
+        self.assertEqual([r.line() for r in after.results],
+                         [r.line() for r in before.results])
+        self.assertEqual(after.code, exits.SIGNATURE_UNVERIFIED)
+        self.assertEqual(before.code, exits.SIGNATURE_UNVERIFIED)
+
+    def test_the_sha256_in_the_file_name_must_be_the_recorded_one(self):
+        to_cache_layout(self.root, self.fields)
+        os.rename(self.cached("lamp", ".manifest"),
+                  join(self.root, f"lamp-{OTHER}.manifest"))
+        found = self.result("lamp")
+        self.assertEqual(found.status, verify.STATUS_MISMATCH)
+        self.assertEqual(found.code, exits.LAYER_MISMATCH)
+        self.assertEqual(found.details[0], (
+            f"file name sha256 {OTHER}, manifest says "
+            f"{self.fields['lamp']['sha256']}"
+        ))
+        self.assertEqual(self.result("core").status, verify.STATUS_OK)
+
+    def test_the_tarball_is_looked_up_by_the_cache_name(self):
+        to_cache_layout(self.root, self.fields)
+        os.rename(self.cached("lamp", ".tar.zst"),
+                  join(self.root, "lamp.tar.zst"))
+        found = self.result("lamp")
+        self.assertEqual(found.status, verify.STATUS_MISMATCH)
+        self.assertEqual(found.details, (
+            (f"tarball lamp-{self.fields['lamp']['sha256']}.tar.zst:"
+             " No such file or directory"),
+        ))
+
+    def test_a_manifest_naming_another_layer_is_invalid(self):
+        to_cache_layout(self.root, self.fields)
+        stem = f"base-{self.fields['core']['sha256']}"
+        os.rename(self.cached("core", ".manifest"),
+                  join(self.root, f"{stem}.manifest"))
+        found = self.result(stem)
+        self.assertEqual(found.status, verify.STATUS_INVALID)
+        self.assertEqual(found.details, (
+            f"layer: manifest names 'core', file is {stem!r}",
+        ))
+
+    def test_two_versions_of_the_parent_are_both_checked(self):
+        to_cache_layout(self.root, self.fields)
+        other = stand_in_fields("core", b"other core\n")
+        write(join(self.root, f"core-{other['sha256']}.tar.zst"),
+              b"other core\n")
+        write_manifest(self.root, other, name=f"core-{other['sha256']}")
+        report = verify_layers(self.root)
+        self.assertEqual([r.line() for r in report.results],
+                         ["core: ok", "core: ok", "lamp: ok"])
+
+    def test_a_layer_name_with_a_dash_is_not_a_digest(self):
+        app = stand_in_fields(
+            "lamp", b"app\n", layer="my-app", parent="lamp",
+            parent_sha256=self.fields["lamp"]["sha256"],
+            tarball="my-app.tar.zst",
+        )
+        write(join(self.root, "my-app.tar.zst"), b"app\n")
+        write_manifest(self.root, app)
+        self.assertEqual(self.result("my-app").line(), "my-app: ok")
 
 
 class TestDirectory(unittest.TestCase):
