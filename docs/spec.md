@@ -37,8 +37,8 @@ version: 1
 | `version` | read | Must be `1`. Absent or different is an error |
 
 The other top level keys are `instance`, `network`, `tls`, `secrets`, `app`,
-`hub`, `security`, `first_login_wizard` and `preseed`, each a mapping and each
-optional. A file with `version: 1` and nothing else is valid and renders to an
+`hub`, `security`, `first_login_wizard`, `preseed`, `users` and `locale`, each
+optional and each a mapping except `first_login_wizard`. A file with `version: 1` and nothing else is valid and renders to an
 empty conf.
 
 ## instance
@@ -216,12 +216,45 @@ preseed:
 | --- | --- | --- |
 | `preseed.<KEY>` | read | An escape hatch: each key is exported verbatim, after being checked as a valid shell variable name. Use it for a hook variable the spec does not model yet |
 
+## users
+
+```yaml
+users:
+  root:
+    authorized_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyMaterialOnly admin@blog
+```
+
+| Field | State | Notes |
+| --- | --- | --- |
+| `users.<name>` | accepted | A user name (lower case, as `useradd` accepts). The value is a mapping with the one key below, or empty |
+| `users.<name>.authorized_keys` | accepted | A list of public key lines: a key type (`ssh-`, `ecdsa-`, `sk-`) followed by the key material. Nothing else about a user is modelled |
+
+`keel inspect` writes this section from the `authorized_keys` files it finds.
+Nothing creates the accounts or installs the keys yet, so `apply` warns.
+
+## locale
+
+```yaml
+locale:
+  timezone: Europe/Lisbon
+  lang: en_US.UTF-8
+```
+
+| Field | State | Notes |
+| --- | --- | --- |
+| `locale.timezone` | accepted | A zoneinfo name such as `Europe/Lisbon` or `Etc/UTC` |
+| `locale.lang` | accepted | A locale name such as `en_US.UTF-8` or `C.UTF-8` |
+
+Written by `keel inspect` from `/etc/timezone` (or the `/etc/localtime`
+symlink) and `/etc/default/locale`. Nothing applies it yet, so `apply` warns.
+
 ## Not in the spec yet
 
 Named in brief section 5.2 but not part of the format today, so declaring them
-is an unknown key error rather than a silent no-op: users and SSH keys,
-timezone and locale, enabled services, and the backup target. Each needs a
-hook or a converge step behind it before it earns a field.
+is an unknown key error rather than a silent no-op: enabled services and the
+backup target. Each needs a hook or a converge step behind it before it earns
+a field.
 
 ## Error reporting
 
