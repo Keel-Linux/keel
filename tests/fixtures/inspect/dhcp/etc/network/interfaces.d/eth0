@@ -1,0 +1,7 @@
+auto eth0
+iface eth0 inet6 dhcp
+    hostname core
+iface eth0 inet dhcp
+    hostname core
+iface eth0 inet6 v4tunnel
+    address 2001:db8:2::1

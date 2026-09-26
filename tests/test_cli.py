@@ -353,11 +353,10 @@ class TestPullAndAssemble(CLITestCase):
 
 class TestStubs(CLITestCase):
     def test_stubs_exit_not_implemented(self):
-        for command in ("inspect", "diff"):
-            self.assertEqual(self.run_cli(command), exits.NOT_IMPLEMENTED)
+        self.assertEqual(self.run_cli("diff"), exits.NOT_IMPLEMENTED)
 
     def test_stub_names_the_brief_section(self):
-        out = self.module_run("inspect")
+        out = self.module_run("diff")
         self.assertEqual(out.returncode, exits.NOT_IMPLEMENTED)
         self.assertIn("not implemented yet", out.stderr.decode())
         self.assertIn("BRIEF.md section", out.stderr.decode())
@@ -443,7 +442,7 @@ class TestEntryPoints(CLITestCase):
     def test_cli_module_run_as_a_script_exits_with_the_command_code(self):
         script = join(ROOT, "keel", "cli.py")
         code = self.run_as_main(
-            lambda: runpy.run_path(script, run_name="__main__"), "inspect"
+            lambda: runpy.run_path(script, run_name="__main__"), "diff"
         )
         self.assertEqual(code, exits.NOT_IMPLEMENTED)
 
