@@ -23,6 +23,7 @@ from keel.inspect.accounts import (
 from keel.inspect.tree import NOT_PRESENT, PERMISSION_DENIED, File
 from keel.system import needs_root, observe, plan
 from keel.system.actions import MakeDir, Note, Run, Symlink, WriteFile
+from keel.system.hosts import entry_address, plan_hosts
 from keel.system.locale import (
     charset_of,
     is_generated,
@@ -49,9 +50,10 @@ GROUP = File("/x/etc/group", "root:x:0:\nadm:x:4:admin\nsudo:x:27:\n")
 def state(**overrides) -> SystemState:
     """A scratch tree state with nothing in it, unless overridden"""
     values = dict(
-        root="/x", live=False, passwd=ABSENT, group=ABSENT, key_files={},
-        timezone=ABSENT, localtime_target=None, default_locale=ABSENT,
-        locale_gen=ABSENT, generated=None, available=frozenset(),
+        root="/x", live=False, passwd=ABSENT, group=ABSENT, hosts=ABSENT,
+        key_files={}, timezone=ABSENT, localtime_target=None,
+        default_locale=ABSENT, locale_gen=ABSENT, generated=None,
+        available=frozenset(),
     )
     values.update(overrides)
     return SystemState(**values)
@@ -69,6 +71,109 @@ def only(step):
     """The single action of a step"""
     assert len(step.actions) == 1, step
     return step.actions[0]
+
+
+class TestPlanHosts(unittest.TestCase):
+    """instance.fqdn: the /etc/hosts entry 09hostname never writes"""
+
+    INSTANCE = {"hostname": "blog", "fqdn": "blog.example.org"}
+    HOSTS = File(
+        "/x/etc/hosts",
+        "127.0.0.1 localhost\n127.0.1.1 blog\n\n# a comment\n"
+        "::1 ip6-localhost ip6-loopback\n",
+    )
+    STATIC = {"interfaces": {"eth0": {
+        "ipv4": {"method": "static", "address": "192.0.2.10/24"},
+        "ipv6": {"method": "static", "address": "2001:db8:1::10/64"},
+    }}}
+
+    def plan(self, instance=None, network=None, **overrides):
+        return plan_hosts(
+            self.INSTANCE if instance is None else instance,
+            network or {}, state(**overrides),
+        )
+
+    def test_a_spec_without_a_fqdn_plans_nothing(self):
+        self.assertEqual(self.plan({}), [])
+        self.assertEqual(self.plan({"hostname": "blog"}), [])
+
+    def test_the_short_name_line_is_replaced_where_it_stood(self):
+        step = self.plan(hosts=self.HOSTS)[0]
+        action = only(step)
+        self.assertEqual(step.field, "instance.fqdn")
+        self.assertEqual((action.path, action.mode, action.owner),
+                         ("etc/hosts", 0o644, None))
+        self.assertEqual(action.describe(),
+                         "write /etc/hosts with '127.0.1.1 blog.example.org"
+                         " blog' (mode 0644)")
+        self.assertEqual(action.content,
+                         "127.0.0.1 localhost\n"
+                         "127.0.1.1 blog.example.org blog\n"
+                         "\n# a comment\n::1 ip6-localhost ip6-loopback\n")
+
+    def test_a_declared_static_ipv6_address_carries_the_name(self):
+        action = only(self.plan(network=self.STATIC, hosts=self.HOSTS)[0])
+        self.assertEqual(action.content,
+                         "127.0.0.1 localhost\n127.0.1.1 blog\n"
+                         "\n# a comment\n::1 ip6-localhost ip6-loopback\n"
+                         "2001:db8:1::10 blog.example.org blog\n")
+
+    def test_a_dynamic_address_is_never_written_into_the_file(self):
+        network = {"interfaces": {
+            "eth0": {"ipv4": {"method": "static", "address": "192.0.2.10/24"},
+                     "ipv6": {"method": "auto"}},
+            "eth1": None,
+        }}
+        self.assertEqual(entry_address(network), "127.0.1.1")
+        self.assertEqual(entry_address({}), "127.0.1.1")
+        self.assertEqual(entry_address(self.STATIC), "2001:db8:1::10")
+        action = only(self.plan(network=network, hosts=ABSENT)[0])
+        self.assertEqual(action.content, "127.0.1.1 blog.example.org blog\n")
+
+    def test_a_file_that_already_names_the_host_is_unchanged(self):
+        for text in ("127.0.1.1 blog.example.org blog\n",
+                     "2001:db8:1::10 BLOG.EXAMPLE.ORG blog\n",
+                     "127.0.1.1 blog.example.org\n"):
+            with self.subTest(text=text):
+                step = self.plan(hosts=File("/x/etc/hosts", text))[0]
+                self.assertIn("unchanged (/etc/hosts maps blog to",
+                              only(step).describe())
+
+    def test_another_fully_qualified_name_is_replaced(self):
+        hosts = File("/x/etc/hosts", "127.0.1.1 shop.example.org blog\n")
+        action = only(self.plan(hosts=hosts)[0])
+        self.assertEqual(action.content, "127.0.1.1 blog.example.org blog\n")
+
+    def test_several_lines_for_the_same_host_collapse_into_one(self):
+        hosts = File(
+            "/x/etc/hosts",
+            "127.0.1.1 blog\n127.0.1.1 blog.old.example.org blog\n"
+            "127.0.0.1 localhost\n",
+        )
+        action = only(self.plan(hosts=hosts)[0])
+        self.assertEqual(action.content,
+                         "127.0.1.1 blog.example.org blog\n"
+                         "127.0.0.1 localhost\n")
+
+    def test_a_name_with_no_dot_is_written_once_and_left_alone(self):
+        first = only(self.plan({"fqdn": "blog"}, hosts=ABSENT)[0])
+        self.assertEqual(first.content, "127.0.1.1 blog\n")
+        step = self.plan({"fqdn": "blog"},
+                         hosts=File("/x/etc/hosts", first.content))[0]
+        self.assertEqual(only(step).describe(),
+                         "unchanged (/etc/hosts already has 127.0.1.1 blog)")
+
+    def test_a_fqdn_without_a_hostname_uses_its_first_label(self):
+        action = only(self.plan({"fqdn": "blog.example.org"},
+                                hosts=ABSENT)[0])
+        self.assertEqual(action.content, "127.0.1.1 blog.example.org blog\n")
+
+    def test_an_unreadable_hosts_file_cannot_be_planned(self):
+        denied = File("/x/etc/hosts", problem=PERMISSION_DENIED)
+        self.assertEqual(
+            only(self.plan(hosts=denied)[0]).describe(),
+            f"cannot plan: /x/etc/hosts {PERMISSION_DENIED}",
+        )
 
 
 class TestAccounts(unittest.TestCase):
