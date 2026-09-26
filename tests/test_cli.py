@@ -18,9 +18,15 @@ from os.path import dirname, abspath, join
 from unittest import mock
 
 from helpers import spec  # noqa: F401
-from layers_helpers import build_tree, hash_text, write, write_manifest
+from layers_helpers import (
+    build_source,
+    build_tree,
+    hash_text,
+    write,
+    write_manifest,
+)
 
-from keel.layers import LAYERS_ENV  # noqa: E402
+from keel.layers import CACHE_ENV, LAYERS_ENV  # noqa: E402
 
 import keel  # noqa: E402
 from keel import commands, exits  # noqa: E402
@@ -246,6 +252,56 @@ class TestVerify(CLITestCase):
             code, _, _ = self.run_cli_captured("verify")
         self.assertEqual(code, exits.LAYER_MISMATCH)
 
+
+class TestPullAndAssemble(CLITestCase):
+    def setUp(self):
+        super().setUp()
+        self.source = join(self.tmpdir, "source")
+        self.cache = join(self.tmpdir, "cache")
+        self.rootfs = join(self.tmpdir, "rootfs")
+        self.fields = build_source(self.source)
+
+    def pull(self, *argv: str) -> tuple[int, str, str]:
+        return self.run_cli_captured(
+            "pull", "lamp", "--source", self.source, "--cache-dir",
+            self.cache, "--non-interactive", *argv,
+        )
+
+    def test_pull_reports_every_layer_and_the_bytes_transferred(self):
+        code, out, _ = self.pull()
+        self.assertEqual(code, exits.OK)
+        self.assertEqual(out.splitlines(), [
+            f"core: fetched ({self.fields['core']['size']} bytes)",
+            f"lamp: fetched ({self.fields['lamp']['size']} bytes)",
+            "layers: 2 resolved, 2 fetched, 0 cached,"
+            f" {int(self.fields['core']['size'])
+                + int(self.fields['lamp']['size'])} bytes transferred",
+        ])
+
+    def test_pull_without_a_source_exits_usage(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            with self.assertRaises(SystemExit) as raised:
+                self.run_cli("pull", "lamp")
+        self.assertEqual(raised.exception.code, exits.USAGE)
+        self.assertIn("--source", err.getvalue())
+
+    def test_pull_failure_prints_the_reason_and_exits_with_its_code(self):
+        os.remove(join(self.source, "core.tar.zst"))
+        code, _, err = self.pull()
+        self.assertEqual(code, exits.LAYER_UNAVAILABLE)
+        self.assertIn("Error: ", err)
+        self.assertIn("core.tar.zst", err)
+
+    def test_cache_dir_defaults_to_the_environment(self):
+        with mock.patch.dict(os.environ, {CACHE_ENV: self.cache}):
+            code, _, _ = self.run_cli_captured(
+                "pull", "core", "--source", self.source
+            )
+        self.assertEqual(code, exits.OK)
+        self.assertTrue(os.path.exists(
+            join(self.cache, f"core-{self.fields['core']['sha256']}.tar.zst")
+        ))
 
 class TestStubs(CLITestCase):
     def test_stubs_exit_not_implemented(self):
