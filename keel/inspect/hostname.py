@@ -46,16 +46,25 @@ def fqdn_in_hosts(name: str, hosts: File) -> str | None:
     """The fully qualified name /etc/hosts gives `name`, or None
 
     The dotted name on the first line that names the host, either
-    outright or as the first label of one of its names. `apply --system`
-    asks this same function before writing the entry
-    (keel.system.hosts), so what apply writes is what inspect reads.
+    outright or as the first label of one of its names, and nothing from
+    any line after it: a resolver answers from the first entry that
+    carries the name, so a later line does not give the host a name it is
+    not resolved by. A file where `127.0.1.1 blog` stands before
+    `2001:db8:1::10 blog.example.org blog` gives blog no fully qualified
+    name, and `hostname -f` on such a machine answers `blog`.
+
+    `apply --system` asks this same function before writing the entry
+    (keel.system.hosts), so what apply writes is what inspect reads, and
+    a file in that state is converged rather than called settled.
     """
     for line in hosts.lines():
         names = line.split()[1:]
-        if any(n == name or n.split(".")[0] == name for n in names):
-            for candidate in names:
-                if "." in candidate:
-                    return candidate
+        if not any(n == name or n.split(".")[0] == name for n in names):
+            continue
+        for candidate in names:
+            if "." in candidate:
+                return candidate
+        return None
     return None
 
 
