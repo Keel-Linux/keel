@@ -1,14 +1,15 @@
 # Copyright (c) 2026 KeelLinux maintainers
 """The layer cache: tarballs and manifests by name and content hash
 
-Layout of the cache directory:
+Layout of the cache directory (the cache layout of keel.layers.manifest):
 
-    <name>-<sha256>.tar.zst     the layer tarball, as built
-    <name>-<sha256>.manifest    its manifest, as pulled
+    <name>-<sha256>.tar.zst       the layer tarball, as built
+    <name>-<sha256>.tar.zst.hash  its .hash file, when the source had one
+    <name>-<sha256>.manifest      its manifest, as pulled
 
-Both are keyed by the sha256 the manifest records, so two versions of
-the same layer never collide and a file that is present with the right
-digest never has to be fetched again.
+Everything is keyed by the sha256 the manifest records, so two versions
+of the same layer never collide and a file that is present with the
+right digest never has to be fetched again.
 """
 
 import glob
@@ -17,6 +18,7 @@ import os
 from keel import exits
 from keel.layers import manifest as manifests
 from keel.layers.constants import (
+    HASH_SUFFIX,
     KIND_ROOTFS,
     MANIFEST_SUFFIX,
     TARBALL_SUFFIX,
@@ -30,11 +32,17 @@ class Cache:
     def __init__(self, path: str):
         self.path = path
 
+    def stem(self, name: str, sha256: str) -> str:
+        return os.path.join(self.path, manifests.cache_stem(name, sha256))
+
     def tarball(self, name: str, sha256: str) -> str:
-        return os.path.join(self.path, f"{name}-{sha256}{TARBALL_SUFFIX}")
+        return self.stem(name, sha256) + TARBALL_SUFFIX
+
+    def hash_file(self, name: str, sha256: str) -> str:
+        return self.tarball(name, sha256) + HASH_SUFFIX
 
     def manifest(self, name: str, sha256: str) -> str:
-        return os.path.join(self.path, f"{name}-{sha256}{MANIFEST_SUFFIX}")
+        return self.stem(name, sha256) + MANIFEST_SUFFIX
 
     def has(self, layer: Manifest) -> bool:
         """The tarball is present with the recorded size and sha256
@@ -65,10 +73,15 @@ class Cache:
         return path
 
     def load(self, name: str, sha256: str) -> Manifest:
-        """The cached manifest of one layer version, or LayerError"""
+        """The cached manifest of one layer version, or LayerError
+
+        The file must name the layer and record the sha256 it is filed
+        under: the tarball is looked up by that name, so a manifest
+        that says otherwise would send assemble to the wrong file.
+        """
         path = self.manifest(name, sha256)
         try:
-            return manifests.load(path)
+            found = manifests.load(path)
         except ManifestError as e:
             code = exits.MANIFEST_INVALID
             if not os.path.exists(path):
@@ -76,6 +89,13 @@ class Cache:
             raise LayerError(
                 code, f"{name}: {e}; run keel pull first"
             ) from e
+        problem = manifests.name_problem(found, path)
+        if problem is not None:
+            raise LayerError(exits.MANIFEST_INVALID, f"{path}: {problem}")
+        problem = manifests.digest_problem(found, path)
+        if problem is not None:
+            raise LayerError(exits.LAYER_MISMATCH, f"{path}: {problem}")
+        return found
 
     def resolve(self, name: str, sha256: str | None) -> Manifest:
         """The cached manifest for a name, by sha256 when several exist"""
@@ -85,23 +105,22 @@ class Cache:
             self.path, glob.escape(f"{name}-") + "*" + MANIFEST_SUFFIX
         )
         found = sorted(glob.glob(pattern))
-        if not found:
+        digests = [
+            manifests.split_stem(manifests.manifest_stem(path))[1]
+            for path in found
+        ]
+        if not digests:
             raise LayerError(
                 exits.LAYER_UNAVAILABLE,
                 f"{name}: not in cache {self.path}; run keel pull first",
             )
-        if len(found) > 1:
-            digests = ", ".join(
-                os.path.basename(path)[len(name) + 1: -len(MANIFEST_SUFFIX)]
-                for path in found
-            )
+        if len(digests) > 1:
             raise LayerError(
                 exits.LAYER_UNAVAILABLE,
                 f"{name}: several versions in cache, pass --sha256 with one"
-                f" of {digests}",
+                f" of {', '.join(digests)}",
             )
-        stem = os.path.basename(found[0])[: -len(MANIFEST_SUFFIX)]
-        return self.load(name, stem[len(name) + 1:])
+        return self.load(name, digests[0])
 
     def chain(self, top: Manifest) -> list[Manifest]:
         """The layers of `top`, rootfs first, every one from the cache

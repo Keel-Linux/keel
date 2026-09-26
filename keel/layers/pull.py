@@ -6,7 +6,10 @@ top layer (a name looked up at the source, or a manifest file), the
 parent chain is resolved through the manifests, every layer whose
 tarball is already in the cache with the right digest is left alone,
 and the others are downloaded, checked against the manifest and stored
-under `<name>-<sha256>.tar.zst`.
+under `<name>-<sha256>.tar.zst`, the cache layout of
+keel.layers.manifest. The tarball's `.hash` file is copied next to it
+when the source has one, so `keel verify` on the cache can report the
+signature state.
 """
 
 import hashlib
@@ -17,6 +20,7 @@ from keel import exits
 from keel.layers import manifest as manifests
 from keel.layers.cache import Cache
 from keel.layers.constants import (
+    HASH_SUFFIX,
     KIND_ROOTFS,
     MANIFEST_SUFFIX,
     PART_SUFFIX,
@@ -136,7 +140,10 @@ def resolve_chain(top: Manifest, source: Source) -> list[Manifest]:
 
 def tarball_names(layer: Manifest) -> tuple[str, str]:
     """Where a source may keep the tarball: by hash, or as bt-layer wrote it"""
-    return (f"{layer.name}-{layer.sha256}{TARBALL_SUFFIX}", layer.tarball)
+    return (
+        manifests.cache_stem(layer.name, layer.sha256) + TARBALL_SUFFIX,
+        layer.tarball,
+    )
 
 
 def open_tarball(source: Source, layer: Manifest):
@@ -185,6 +192,25 @@ def download(source: Source, layer: Manifest, target: str) -> None:
     os.replace(part, target)
 
 
+def fetch_hash_file(source: Source, layer: Manifest, target: str) -> bool:
+    """Copy the tarball's `.hash` file to `target` when the source has one
+
+    Looked for under the same two names as the tarball. A source without
+    one is not an error: bt-layer writes the file only when a signing
+    key is set. Returns whether a file was copied.
+    """
+    for name in tarball_names(layer):
+        try:
+            with source.open(name + HASH_SUFFIX) as fob:
+                text = fob.read()
+        except OSError:
+            continue
+        with open(target, "wb") as out:
+            out.write(text)
+        return True
+    return False
+
+
 def remove_quietly(path: str) -> None:
     try:
         os.remove(path)
@@ -219,4 +245,5 @@ def pull_layer(source: Source, cache: Cache, layer: Manifest) -> PullResult:
         download(source, layer, cache.tarball(layer.name, layer.sha256))
         status = STATUS_FETCHED
     cache.store_manifest(layer)
+    fetch_hash_file(source, layer, cache.hash_file(layer.name, layer.sha256))
     return PullResult(layer.name, layer.sha256, layer.size, status)

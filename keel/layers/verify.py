@@ -1,10 +1,13 @@
 # Copyright (c) 2026 KeelLinux maintainers
 """Check a directory of layers against their manifests
 
-For every `<name>.manifest` in the layers directory: the manifest must
-parse and validate, the tarball it names must exist with the recorded
-sha256 and size, the parent chain must resolve to a rootfs layer with
-every parent_sha256 equal to the parent's recorded sha256, and a
+For every `*.manifest` in the layers directory, in the build output
+layout (`<name>.manifest`) or the cache layout
+(`<name>-<sha256>.manifest`, see keel.layers.manifest): the manifest
+must parse and validate, the file name must agree with it, the tarball
+named by the same layout rule must exist with the recorded sha256 and
+size, the parent chain must resolve to a rootfs layer with every
+parent_sha256 equal to the parent's recorded sha256, and a
 `<tarball>.hash` file, when present, must name the same sha256.
 
 A signature inside the hash file is detected and reported, never
@@ -100,23 +103,25 @@ def find_manifests(layers_dir: str) -> list[str]:
 def load_manifests(
     paths: list[str],
 ) -> tuple[dict[str, Manifest], list[LayerResult]]:
-    """Load every manifest; the ones that fail become invalid results"""
+    """Load every manifest; the ones that fail become invalid results
+
+    The loaded manifests are keyed by file stem, so two versions of one
+    layer in a cache are both checked.
+    """
     loaded: dict[str, Manifest] = {}
     failed: list[LayerResult] = []
     for path in paths:
-        stem = os.path.basename(path)[: -len(MANIFEST_SUFFIX)]
+        stem = manifests.manifest_stem(path)
         try:
             found = manifests.load(path)
         except ManifestError as e:
             failed.append(LayerResult(stem, STATUS_INVALID, tuple(e.errors)))
             continue
-        if found.name != stem:
-            failed.append(LayerResult(
-                stem, STATUS_INVALID,
-                (f"layer: manifest names {found.name!r}, file is {stem!r}",),
-            ))
+        problem = manifests.name_problem(found, path)
+        if problem is not None:
+            failed.append(LayerResult(stem, STATUS_INVALID, (problem,)))
             continue
-        loaded[found.name] = found
+        loaded[stem] = found
     return loaded, failed
 
 
@@ -131,19 +136,38 @@ def digest_and_size(path: str) -> tuple[str, int]:
     return digest.hexdigest(), size
 
 
-def check_tarball(layer: Manifest, tarballs_dir: str) -> list[str]:
-    """The tarball the manifest names exists with its sha256 and size"""
-    path = os.path.join(tarballs_dir, layer.tarball)
+def check_filename(layer: Manifest) -> list[str]:
+    """In the cache layout, the sha256 in the file name is the recorded one"""
+    problem = manifests.digest_problem(layer, layer.path)
+    return [] if problem is None else [problem]
+
+
+def check_tarball(
+    layer: Manifest, tarballs_dir: str, tarball: str
+) -> list[str]:
+    """The tarball of the layer exists with its sha256 and size"""
+    path = os.path.join(tarballs_dir, tarball)
     try:
         sha256, size = digest_and_size(path)
     except OSError as e:
-        return [f"tarball {layer.tarball}: {e.strerror or e}"]
+        return [f"tarball {tarball}: {e.strerror or e}"]
     problems = []
     if size != layer.size:
         problems.append(f"size {size}, manifest says {layer.size}")
     if sha256 != layer.sha256:
         problems.append(f"sha256 {sha256}, manifest says {layer.sha256}")
     return problems
+
+
+def find_parent(
+    known: dict[str, Manifest], name: str, sha256: str | None
+) -> Manifest | None:
+    """The known manifest called `name`, by `sha256` when several"""
+    candidates = [found for found in known.values() if found.name == name]
+    for candidate in candidates:
+        if candidate.sha256 == sha256:
+            return candidate
+    return candidates[0] if candidates else None
 
 
 def check_parent_chain(
@@ -154,7 +178,7 @@ def check_parent_chain(
     current = layer
     while current.kind != KIND_ROOTFS:
         parent_name = current.parent
-        parent = known.get(parent_name)
+        parent = find_parent(known, parent_name, current.parent_sha256)
         if parent is None:
             return [f"parent {parent_name}: no valid manifest"]
         if current.parent_sha256 != parent.sha256:
@@ -170,15 +194,17 @@ def check_parent_chain(
 
 
 def check_hash_file(
-    layer: Manifest, tarballs_dir: str
+    layer: Manifest, tarballs_dir: str, tarball: str
 ) -> tuple[list[str], str | None]:
     """Problems with the hash file and, when it exists, its signature note
 
     The note is None when there is no hash file, so the layer can be
     fully ok; otherwise it says what was found about the signature, and
-    the caller reports the layer as unverified.
+    the caller reports the layer as unverified. The hash file sits next
+    to the tarball under the tarball's name, in either layout; the name
+    on its digest line is the `tarball` field, as bt-layer wrote it.
     """
-    path = os.path.join(tarballs_dir, layer.tarball + HASH_SUFFIX)
+    path = os.path.join(tarballs_dir, tarball + HASH_SUFFIX)
     if not os.path.exists(path):
         return [], None
     try:
@@ -203,9 +229,11 @@ def check_hash_file(
 def verify_layer(
     layer: Manifest, known: dict[str, Manifest], tarballs_dir: str
 ) -> LayerResult:
-    problems = check_tarball(layer, tarballs_dir)
+    tarball = manifests.tarball_filename(layer, layer.path)
+    problems = check_filename(layer)
+    problems += check_tarball(layer, tarballs_dir, tarball)
     problems += check_parent_chain(layer, known)
-    hash_problems, note = check_hash_file(layer, tarballs_dir)
+    hash_problems, note = check_hash_file(layer, tarballs_dir, tarball)
     problems += hash_problems
     if problems:
         return LayerResult(layer.name, STATUS_MISMATCH, tuple(problems))
