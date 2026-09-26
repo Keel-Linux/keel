@@ -4,8 +4,12 @@ The standard for code authored by the project is at least 95 percent line
 and branch coverage, with every subcommand, exit code and error path
 exercised (docs/decisions/0003-test-coverage-standard.md).
 
-Run the suite from the repository root. It needs pytest, PyYAML and
-coverage, no network, no root and no installed package. Both runners run
+Run the suite from the repository root. It needs pytest, PyYAML,
+coverage, the `tar` and `zstd` commands and the IPv6 loopback (the pull
+tests serve a directory on `[::1]` from a thread), no other network, no
+root and no installed package: the assemble tests stand root in by
+patching `os.geteuid`, and their synthetic layers never need a device
+node created or a `trusted.*` attribute restored. Both runners run
 the same tests:
 
 ```
