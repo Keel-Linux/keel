@@ -235,7 +235,7 @@ class TestRoundTrip(unittest.TestCase):
 
         code, out, err = run_cli("spec", "validate", "--spec", self.output)
         self.assertEqual((code, err), (exits.OK, ""))
-        self.assertEqual(out, f"{self.output}: ok\n")
+        self.assertEqual(out, f"{self.output}: ok (secret files checked)\n")
 
         code, out, _ = run_cli("spec", "render", "--spec", self.output)
         self.assertEqual(code, exits.OK)
