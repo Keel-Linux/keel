@@ -471,6 +471,36 @@ class TestBootThenDiff(ApplySystemTestCase):
         self.assertEqual(report["counts"]["unknown"], 0)
         self.assertEqual(report["counts"]["drift"], 0)
 
+    def test_an_entry_a_short_name_line_shadows_is_unknown_and_converged(self):
+        """The file a resolver does not answer from is not a converged file
+
+        127.0.1.1 blog before the entry makes hostname -f answer blog, so
+        diff must not call the field same: the file gives the host no
+        fully qualified name, and the phase drops the line.
+        """
+        self.declare()
+        with open(join(self.machine, "etc", "hosts"), "w") as fob:
+            fob.write("127.0.0.1 localhost\n127.0.1.1 blog\n"
+                      "2001:db8:1::10 blog.example.org blog\n")
+
+        code, report = self.diff()
+        self.assertEqual(code, exits.INSPECT_INCOMPLETE)
+        self.assertEqual(self.field(report, "instance.fqdn")["status"],
+                         "unknown")
+
+        code, out, _ = run_cli("spec", "apply", "--spec", self.spec, "--conf",
+                               self.conf, "--system-only", "--root",
+                               self.machine)
+        self.assertEqual(code, exits.OK)
+        self.assertIn("apply --system-only: 1 change(s), 0 failed", out)
+        with open(join(self.machine, "etc", "hosts")) as fob:
+            self.assertEqual(fob.read(), "127.0.0.1 localhost\n"
+                             "2001:db8:1::10 blog.example.org blog\n")
+
+        code, report = self.diff()
+        self.assertEqual(code, exits.OK)
+        self.assertEqual(self.field(report, "instance.fqdn")["status"], "same")
+
     def test_the_field_is_compared_and_not_in_the_not_compared_table(self):
         """Editing the file behind the spec is drift, not an excused field"""
         self.declare()

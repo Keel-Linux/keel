@@ -118,6 +118,37 @@ class TestHostname(unittest.TestCase):
                          {"hostname": "blog", "fqdn": "blog.example.org"})
         self.assertEqual(reason(findings, "instance.fqdn"), "/x/etc/hosts")
 
+    def test_a_short_name_line_before_the_entry_gives_no_fqdn(self):
+        """A resolver answers from the first line that carries the name
+
+        With 127.0.1.1 blog standing before the fully qualified entry,
+        hostname -f on such a machine answers blog, so the file gives blog
+        no fully qualified name and the field is not inferred from it.
+        """
+        section, findings = self.probe(
+            "blog\n",
+            "127.0.0.1 localhost\n127.0.1.1 blog\n"
+            "2001:db8:1::10 blog.example.org blog\n",
+        )
+        self.assertEqual(section, {"hostname": "blog"})
+        self.assertEqual(statuses(findings, "instance.fqdn"), [NOT_INFERRED])
+        self.assertIn("has no fully qualified name for blog",
+                      reason(findings, "instance.fqdn"))
+
+    def test_the_first_line_that_names_the_host_is_the_one_read(self):
+        for hosts, expected in (
+            ("127.0.1.1 blog.example.org blog\n"
+             "2001:db8:1::10 blog.elsewhere.example blog\n",
+             "blog.example.org"),
+            ("2001:db8:1::10 blog.elsewhere.example blog\n"
+             "127.0.1.1 blog.example.org blog\n",
+             "blog.elsewhere.example"),
+        ):
+            with self.subTest(hosts=hosts):
+                self.assertEqual(
+                    hostname.fqdn_in_hosts("blog", File("/x", hosts)),
+                    expected)
+
     def test_fqdn_falls_back_to_hostname_f_when_it_ran(self):
         section, findings = self.probe("blog\n", "127.0.1.1 blog\n",
                                        HOSTNAME_F)

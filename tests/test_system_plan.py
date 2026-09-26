@@ -125,6 +125,26 @@ class TestPlanHosts(unittest.TestCase):
                          "2001:db8:1::10 blog.example.org blog\n"
                          "\n# a comment\n::1 ip6-localhost ip6-loopback\n")
 
+    def test_a_short_name_line_before_the_entry_is_converged_not_settled(self):
+        """The state the previous version of this planner could produce
+
+        The entry is in the file and the short name line stands before it,
+        so hostname -f answers the short name. The reader now reads the
+        file as a resolver does, the field is not settled, and the line
+        goes.
+        """
+        hosts = File("/x/etc/hosts",
+                     "127.0.0.1 localhost\n127.0.1.1 blog\n"
+                     "2001:db8:1::10 blog.example.org blog\n")
+        action = only(self.plan(network=self.STATIC, hosts=hosts)[0])
+        self.assertEqual(action.content,
+                         "127.0.0.1 localhost\n"
+                         "2001:db8:1::10 blog.example.org blog\n")
+        settled = File("/x/etc/hosts", action.content)
+        self.assertIn("unchanged",
+                      only(self.plan(network=self.STATIC,
+                                     hosts=settled)[0]).describe())
+
     def test_a_line_naming_the_host_beside_another_name_is_kept_and_named(self):
         """Rewriting somebody else's line is not this phase's business"""
         hosts = File("/x/etc/hosts", "127.0.0.1 localhost blog\n")
@@ -158,6 +178,17 @@ class TestPlanHosts(unittest.TestCase):
         self.assertEqual(entry_address(self.STATIC), "2001:db8:1::10")
         action = only(self.plan(network=network, hosts=ABSENT)[0])
         self.assertEqual(action.content, "127.0.1.1 blog.example.org blog\n")
+
+    def test_the_kept_line_is_named_on_a_run_that_changes_nothing(self):
+        """The machine still answers the short name, so the run still says so"""
+        hosts = File("/x/etc/hosts", "127.0.0.1 localhost blog\n"
+                     "2001:db8:1::10 blog.example.org blog\n")
+        step = self.plan(network=self.STATIC, hosts=hosts)[0]
+        unchanged_note, kept = step.actions
+        self.assertIn("unchanged (/etc/hosts already has 2001:db8:1::10"
+                      " blog.example.org)", unchanged_note.describe())
+        self.assertIn("names blog beside another name", kept.describe())
+        self.assertEqual(step.changes, 0)
 
     def test_a_file_that_already_names_the_host_is_unchanged(self):
         for text in ("127.0.1.1 blog.example.org blog\n",
