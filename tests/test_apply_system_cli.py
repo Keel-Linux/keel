@@ -12,12 +12,15 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
 from argparse import Namespace
 from os.path import abspath, dirname, join
 from unittest import mock
+
+import yaml
 
 from helpers import spec
 
@@ -395,6 +398,92 @@ class TestSystemOnly(ApplySystemTestCase):
         code, out, err = self.only()
         self.assertEqual((code, out), (exits.OK, ""))
         self.assertIn("not found, nothing to do", err)
+
+
+class TestBootThenDiff(ApplySystemTestCase):
+    """The loop a first boot closes, on a tree in the state 09hostname leaves
+
+    The hook at 10keel-system runs the system phase, so the operator who
+    runs keel diff after a boot must find exit 0 without running anything
+    by hand. The field is compared, not excused: before the phase it is
+    unknown and the reason names what writes it, after it is same
+    (docs/diff.md).
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.machine = join(self.tmpdir, "machine")
+        shutil.copytree(TURNKEY, self.machine)
+        with open(join(self.machine, "etc", "hosts"), "w") as fob:
+            fob.write("::1 localhost ip6-localhost\n127.0.1.1 blog\n")
+
+    def declare(self) -> None:
+        """The spec inspect writes, less the sections this test is not about
+
+        users and locale have their own tests (TestRoundTrip). Writing
+        another account's authorized_keys into the fixture's home
+        directories would need root, and this test is about the one field
+        the boot settles.
+        """
+        code, _, _ = run_cli("inspect", "--root", TURNKEY, "--output",
+                             self.spec)
+        self.assertEqual(code, exits.OK)
+        document = spec.load(self.spec)
+        for section in ("users", "locale"):
+            document.pop(section)
+        with open(self.spec, "w") as fob:
+            yaml.safe_dump(document, fob, sort_keys=False)
+
+    def diff(self) -> tuple[int, dict]:
+        code, out, _ = run_cli("diff", "--spec", self.spec, "--root",
+                               self.machine, "--format", "json")
+        return code, json.loads(out)
+
+    def field(self, report: dict, name: str) -> dict:
+        return next(f for f in report["fields"] if f["field"] == name)
+
+    def test_unknown_with_the_remedy_before_the_phase_and_same_after(self):
+        self.declare()
+
+        code, report = self.diff()
+        self.assertEqual(code, exits.INSPECT_INCOMPLETE)
+        fqdn = self.field(report, "instance.fqdn")
+        self.assertEqual(fqdn["status"], "unknown")
+        self.assertIn("has no fully qualified name for blog", fqdn["reason"])
+        self.assertIn("the system phase of apply writes it"
+                      " (spec apply --system-only)", fqdn["reason"])
+
+        code, out, err = run_cli("spec", "apply", "--spec", self.spec,
+                                 "--conf", self.conf, "--system-only",
+                                 "--root", self.machine)
+        self.assertEqual((code, err), (exits.OK, ""))
+        self.assertIn("apply --system-only: 1 change(s), 0 failed", out)
+        with open(join(self.machine, "etc", "hosts")) as fob:
+            self.assertEqual(fob.read(), "::1 localhost ip6-localhost\n"
+                             "2001:db8:1::10 blog.example.org blog\n")
+        self.assertEqual(run_cli("spec", "apply", "--spec", self.spec,
+                                 "--conf", self.conf, "--system-only",
+                                 "--root", self.machine)[0], exits.OK)
+
+        code, report = self.diff()
+        self.assertEqual(code, exits.OK, report["fields"])
+        self.assertEqual(self.field(report, "instance.fqdn")["status"], "same")
+        self.assertEqual(report["counts"]["unknown"], 0)
+        self.assertEqual(report["counts"]["drift"], 0)
+
+    def test_the_field_is_compared_and_not_in_the_not_compared_table(self):
+        """Editing the file behind the spec is drift, not an excused field"""
+        self.declare()
+        with open(join(self.machine, "etc", "hosts"), "w") as fob:
+            fob.write("127.0.1.1 blog.elsewhere.example blog\n")
+
+        code, report = self.diff()
+
+        self.assertEqual(code, exits.DRIFT_FOUND)
+        fqdn = self.field(report, "instance.fqdn")
+        self.assertEqual(fqdn["status"], "drift")
+        self.assertEqual(fqdn["declared"], "blog.example.org")
+        self.assertEqual(fqdn["observed"], "blog.elsewhere.example")
 
 
 class TestRoundTrip(ApplySystemTestCase):
