@@ -24,7 +24,7 @@ import ipaddress
 
 from keel.inspect.hostname import fqdn_in_hosts
 from keel.inspect.tree import File
-from keel.system.actions import Note, Step, WriteFile, unchanged
+from keel.system.actions import Note, Step, WriteFile
 from keel.system.state import SystemState
 from keel.system.users import readable_or_absent
 
@@ -51,20 +51,20 @@ def plan_hosts(
 
     names = [fqdn] if name == fqdn else [fqdn, name]
     address = entry_address(network)
-    settled = _settled(hosts, fqdn, name, address, set(names))
-    if settled is not None:
-        return [unchanged(FIELD, settled)]
-    entry = " ".join([address, *names])
-    actions = [WriteFile(
-        HOSTS, with_entry(hosts, address, entry, set(names)), HOSTS_MODE,
-        None, f"write /{HOSTS} with {entry!r}",
-    )]
-    actions += [Note(
+    kept = [Note(
         f"kept: {shadow!r} names {name} beside another name and answers"
         f" before the entry, so hostname -f keeps answering {name};"
         f" edit that line by hand"
     ) for shadow in _shadowing(hosts, address, set(names))]
-    return [Step(FIELD, tuple(actions))]
+    entry = " ".join([address, *names])
+    wanted = with_entry(hosts, address, entry, set(names))
+    settled = _settled(hosts, fqdn, name, address, wanted)
+    if settled is not None:
+        return [Step(FIELD, (Note(f"unchanged ({settled})"), *kept))]
+    return [Step(FIELD, (WriteFile(
+        HOSTS, wanted, HOSTS_MODE, None,
+        f"write /{HOSTS} with {entry!r}",
+    ), *kept))]
 
 
 def entry_address(network: dict) -> str:
@@ -82,22 +82,25 @@ def entry_address(network: dict) -> str:
 
 
 def _settled(
-    hosts: File, fqdn: str, name: str, address: str, names: set[str]
+    hosts: File, fqdn: str, name: str, address: str, wanted: str
 ) -> str | None:
     """Why there is nothing to write, or None when there is
 
     Either the reader inspect uses already finds the declared name, at
-    whatever address the operator chose for it, or the entry this planner
-    would write is there already, which is the only way a name with no
-    dot in it can be settled.
+    whatever address the operator chose for it, or the file the write
+    would produce is the file that is there, which is the only way a name
+    with no dot in it can be settled.
+
+    The second test is the produced text and not the presence of the
+    entry, because the entry can be in the file and still not be what a
+    resolver answers: with `127.0.1.1 blog` standing before it, the write
+    has that line to drop, so the field is converged and not settled.
     """
     found = fqdn_in_hosts(name, hosts)
     if found is not None and found.lower() == fqdn.lower():
         return f"/{HOSTS} maps {name} to {found}"
-    for line in hosts.lines():
-        fields = line.split()
-        if fields[0] == address and names <= set(fields[1:]):
-            return f"/{HOSTS} already has {address} {fqdn}"
+    if wanted == (hosts.text or ""):
+        return f"/{HOSTS} already has {address} {fqdn}"
     return None
 
 

@@ -177,10 +177,15 @@ about spelling or placement: `same` is reachable and stays.
 | --- | --- | --- |
 | The boot ran the hook, or an operator ran `apply --system` | `same` | 0 |
 | The value was changed afterwards, in the file or in the spec | `drift` | 14 |
-| No trace at all: an image with no hook, and `apply` never run | `unknown`, and the reason names what writes the field | 13 |
+| No trace at all: an image with no hook, and `apply` never run, or an entry another `/etc/hosts` line answers before | `unknown`, and the reason names what writes the field | 13 |
 
 The third row is what an operator meets on an image that predates the hook,
-so the reason says so rather than only listing what was checked:
+so the reason says so rather than only listing what was checked. It is also
+what a shadowed entry reports: the observed side reads `/etc/hosts` the way
+a resolver does, from the first line that carries the name, so a file whose
+fully qualified entry stands behind a `127.0.1.1 blog` line is not reported
+as `same` while `hostname -f` answers `blog`
+([docs/inspect.md](inspect.md)).
 
 ```
 instance.fqdn: unknown (declared blog.example.org; not inferred: /etc/hosts has no fully qualified name for blog; hostname -f not run: the root is not the live system; the system phase of apply writes it (spec apply --system-only))
