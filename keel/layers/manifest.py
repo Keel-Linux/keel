@@ -1,12 +1,23 @@
 # Copyright (c) 2026 KeelLinux maintainers
-"""Parse and validate one layer manifest
+"""Parse and validate one layer manifest, and name the files around it
 
 A manifest is the plain text file bt-layer writes next to a layer
 tarball: one `key value` per line, keys as in REQUIRED_KEYS. Parsing
 never raises anything but ManifestError, and validation returns every
 problem it finds rather than the first.
+
+A manifest file is named in one of two layouts, and the tarball next to
+it follows the same rule (docs/layers.md, Layouts):
+
+    <layer>.manifest            <tarball field>       build output (bt-layer)
+    <layer>-<sha256>.manifest   <layer>-<sha256>.tar.zst   cache (keel pull)
+
+In the cache layout the sha256 in the file name must be the one the
+manifest records. The functions after `from_text` are the one place
+that rule is written; verify, pull and assemble all call them.
 """
 
+import os
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Mapping
@@ -17,10 +28,12 @@ from keel.layers.constants import (
     KIND_DELTA,
     KIND_ROOTFS,
     KINDS,
+    MANIFEST_SUFFIX,
     NAME_RE,
     NONE,
     REQUIRED_KEYS,
     SHA256_RE,
+    TARBALL_SUFFIX,
 )
 from keel.layers.errors import ManifestError
 
@@ -182,3 +195,51 @@ def from_text(path: str, text: str) -> Manifest:
     if errors:
         raise ManifestError(path, errors)
     return Manifest(path=path, fields=MappingProxyType(dict(fields)))
+
+
+def cache_stem(name: str, sha256: str) -> str:
+    """The file name stem of a layer in the cache layout"""
+    return f"{name}-{sha256}"
+
+
+def manifest_stem(path: str) -> str:
+    """The file name of a manifest without its directory and suffix"""
+    return os.path.basename(path)[: -len(MANIFEST_SUFFIX)]
+
+
+def split_stem(stem: str) -> tuple[str, str | None]:
+    """The layer name a file stem carries and, in the cache layout, its sha256
+
+    `lamp` is the build output layout and gives ("lamp", None);
+    `lamp-<64 hex digits>` is the cache layout. A layer name may contain
+    `-`, so only a trailing full sha256 counts as a digest.
+    """
+    name, dash, digest = stem.rpartition("-")
+    if dash and SHA256_RE.match(digest):
+        return name, digest
+    return stem, None
+
+
+def name_problem(layer: Manifest, path: str) -> str | None:
+    """The manifest file is named after another layer, or None"""
+    stem = manifest_stem(path)
+    name, _ = split_stem(stem)
+    if layer.name == name:
+        return None
+    return f"layer: manifest names {layer.name!r}, file is {stem!r}"
+
+
+def digest_problem(layer: Manifest, path: str) -> str | None:
+    """The cache layout file name carries another sha256, or None"""
+    _, digest = split_stem(manifest_stem(path))
+    if digest is None or digest == layer.sha256:
+        return None
+    return f"file name sha256 {digest}, manifest says {layer.sha256}"
+
+
+def tarball_filename(layer: Manifest, path: str) -> str:
+    """The tarball next to the manifest at `path`, by the manifest's layout"""
+    _, digest = split_stem(manifest_stem(path))
+    if digest is None:
+        return layer.tarball
+    return cache_stem(layer.name, layer.sha256) + TARBALL_SUFFIX

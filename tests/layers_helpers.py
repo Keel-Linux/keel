@@ -104,6 +104,21 @@ def build_tree(root: str) -> dict[str, dict[str, str]]:
     return {"core": core, "lamp": lamp}
 
 
+def to_cache_layout(root: str, fields: dict[str, dict[str, str]]) -> None:
+    """Rename a build output tree in place into the layout keel pull writes
+
+    `<name>.manifest`, `<name>.tar.zst` and `<name>.tar.zst.hash` become
+    `<name>-<sha256>.manifest`, `<name>-<sha256>.tar.zst` and
+    `<name>-<sha256>.tar.zst.hash`; anything absent is skipped.
+    """
+    for name, layer in fields.items():
+        stem = f"{name}-{layer['sha256']}"
+        for suffix in (".manifest", ".tar.zst", ".tar.zst.hash"):
+            source = join(root, f"{name}{suffix}")
+            if os.path.exists(source):
+                os.rename(source, join(root, f"{stem}{suffix}"))
+
+
 # Synthetic layers for pull and assemble: a small core rootfs and a lamp
 # delta with the marks overlayfs leaves in an upper directory, written
 # with the tarfile module, so the suite needs neither root nor overlayfs.

@@ -45,7 +45,7 @@ Every key below is required; a manifest missing any of them is invalid.
 
 | Key | Checked as | Meaning |
 | --- | --- | --- |
-| `layer` | `[a-z0-9][a-z0-9._-]*`, equal to the file name stem | Layer name |
+| `layer` | `[a-z0-9][a-z0-9._-]*`, the name in the file name (Layouts, below) | Layer name |
 | `type` | `rootfs` or `delta` | A full root file system, or the upper directories of a deck build on top of `parent` |
 | `parent` | `none` for a rootfs; a layer name for a delta | The layer this one was built on |
 | `parent_sha256` | `none` for a rootfs; 64 hex digits for a delta | The parent's `sha256` at build time |
@@ -74,6 +74,31 @@ once signed, a clear signature around it. `keel verify` reads the
 `.hash` file when it is there and ignores the `.sha256` file, which
 repeats what the manifest already says.
 
+## Layouts
+
+A directory of layers is named in one of two ways, and every command
+reads both. The rule is written once, in `keel.layers.manifest`.
+
+| Layout | Manifest | Tarball | Hash file | Written by |
+| --- | --- | --- | --- | --- |
+| build output | `lamp.manifest` | `lamp.tar.zst` (the `tarball` field) | `lamp.tar.zst.hash` | `bt-layer`, into the build directory a source serves |
+| cache | `lamp-<sha256>.manifest` | `lamp-<sha256>.tar.zst` | `lamp-<sha256>.tar.zst.hash` | `keel pull`, into `--cache-dir` |
+
+In both, `<layer>` is the `layer` field: a manifest file named after
+another layer is `invalid`. In the cache layout `<sha256>` must be the
+digest the manifest records; a file such as `lamp-ffff...manifest` whose
+manifest says another sha256 is a `mismatch` (`file name sha256 ffff...,
+manifest says ...`). The tarball and its `.hash` file are looked up next
+to the manifest by the same rule, so `keel verify --layers-dir` on a
+cache reports exactly what it reports on the build directory the cache
+was pulled from. A layer name may contain `-`; only a trailing 64 hex
+digit suffix counts as a digest, so `my-app.manifest` is the build
+output layout of the layer `my-app`.
+
+`keel verify` reads either layout, `keel pull` reads the build output
+layout (or `<name>-<sha256>.tar.zst` at the source) and writes the cache
+layout, and `keel assemble` reads the cache layout.
+
 ## What `keel verify` checks
 
 ```
@@ -81,16 +106,21 @@ keel verify [--layers-dir DIR] [--tarballs-dir DIR] [--non-interactive]
 ```
 
 The manifests are read from `--layers-dir`, by default `$KEEL_LAYERS_DIR`
-or `/var/lib/keel/layers`. Tarballs and `.hash` files are looked up in
-`--tarballs-dir`, by default the same directory. Every `*.manifest` in
-the directory is checked, in name order:
+or `/var/lib/keel/layers`, in either layout. Tarballs and `.hash` files
+are looked up in `--tarballs-dir`, by default the same directory, under
+the name the layout gives them. Every `*.manifest` in the directory is
+checked, in name order:
 
 1. The manifest parses and validates as above, including the parent
    rule: a delta names a parent and its digest, a rootfs names neither.
+   Its file name agrees with it: the layer name, and in the cache layout
+   the sha256.
 2. The tarball exists and its size and sha256 equal the manifest.
 3. The parent chain resolves: following `parent` reaches a rootfs
    through manifests that exist and are valid, without a loop, and at
    every step `parent_sha256` equals the parent's recorded `sha256`.
+   When a cache holds several versions of the parent, the one recording
+   that `sha256` is the parent; every version is checked and reported.
 4. When `<tarball>.hash` exists: it carries a sha256 line, that digest
    equals the manifest, and the file name on the line is the tarball.
    The sha512 line is not recomputed. If the file is clear signed, the
@@ -188,6 +218,10 @@ The command:
    the transfer stops as soon as the manifest size is exceeded, so a
    wrong file is not downloaded whole. The manifest is stored next to
    the tarball as `<name>-<sha256>.manifest`.
+4. When the source has the tarball's `.hash` file, under either tarball
+   name, it is copied to `<name>-<sha256>.tar.zst.hash`, for a `cached`
+   layer too, so `keel verify --layers-dir CACHE` reports the signature
+   state the source publishes. A source without one is not an error.
 
 A source may keep a tarball under either name: `<name>-<sha256>.tar.zst`
 (what a layer host serves, decision 0005) or the `tarball` name in the
@@ -215,9 +249,22 @@ holds:
 ```
 /var/cache/keel/layers/
   core-e08e8224aeea1abb605b0e359d345f459d2e04d413e6a08c5e57f5b7858c9e19.tar.zst
+  core-e08e8224aeea1abb605b0e359d345f459d2e04d413e6a08c5e57f5b7858c9e19.tar.zst.hash
   core-e08e8224aeea1abb605b0e359d345f459d2e04d413e6a08c5e57f5b7858c9e19.manifest
   lamp-237188ea3339caa72a6b7bcf36fc03bb4a40f654c643bb1ad0734d1b954102ae.tar.zst
+  lamp-237188ea3339caa72a6b7bcf36fc03bb4a40f654c643bb1ad0734d1b954102ae.tar.zst.hash
   lamp-237188ea3339caa72a6b7bcf36fc03bb4a40f654c643bb1ad0734d1b954102ae.manifest
+```
+
+This is the cache layout of the Layouts section; `keel verify
+--layers-dir /var/cache/keel/layers` checks it as it checks a build
+directory:
+
+```
+# keel verify --layers-dir /var/cache/keel/layers
+core: unverified: hash file present, not signed
+lamp: unverified: hash file present, not signed
+layers: 2 checked, 0 ok, 2 unverified, 0 mismatch, 0 invalid
 ```
 
 Everything is keyed by the sha256 the manifest records, so two versions
@@ -296,8 +343,8 @@ privileges beyond writing the cache.
 | --- | --- | --- |
 | 0 | `OK` | Every layer resolved and is in the cache; the rootfs (and template) was written |
 | 1 | `USAGE` | `--source` or `--rootfs` missing, unknown option |
-| 6 | `MANIFEST_INVALID` | A manifest at the source, on disk or in the cache does not validate, or names another layer than the one asked for |
-| 7 | `LAYER_MISMATCH` | A parent's sha256 differs from the child's `parent_sha256`, the chain loops, a download's size or sha256 differs from the manifest, or a cached tarball no longer matches at assembly time |
+| 6 | `MANIFEST_INVALID` | A manifest at the source, on disk or in the cache does not validate, or names another layer than the one asked for or filed under |
+| 7 | `LAYER_MISMATCH` | A parent's sha256 differs from the child's `parent_sha256`, the chain loops, a download's size or sha256 differs from the manifest, a cached manifest is filed under another sha256 than it records, or a cached tarball no longer matches at assembly time |
 | 10 | `LAYER_UNAVAILABLE` | A manifest or tarball is not at the source or the transfer failed, the cache cannot be written, or `assemble` finds a layer of the chain missing from the cache |
 | 11 | `ASSEMBLE_NEEDS_ROOT` | `assemble` was run by a user other than root |
 | 12 | `ASSEMBLE_FAILED` | The rootfs is not empty or cannot be created, a member name would escape it, or tar or zstd exited non zero (a template path that cannot be written is reported here, after the rootfs is complete) |

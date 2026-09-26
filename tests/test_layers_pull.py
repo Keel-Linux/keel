@@ -13,13 +13,14 @@ from unittest import mock
 from layers_helpers import (
     Server,
     build_source,
+    hash_text,
     sha256,
     write,
     write_manifest,
 )
 
 from keel import exits
-from keel.layers import LayerError, PullReport, PullResult, pull
+from keel.layers import LayerError, PullReport, PullResult, pull, verify_layers
 from keel.layers.cache import Cache
 from keel.layers.pull import STATUS_CACHED, STATUS_FETCHED
 from keel.layers.source import Source
@@ -55,6 +56,11 @@ class PullTestCase(unittest.TestCase):
     def cached(self, name: str, suffix=".tar.zst") -> str:
         digest = self.fields[name]["sha256"]
         return join(self.cache, f"{name}-{digest}{suffix}")
+
+    def write_hash_files(self, signed=False) -> None:
+        for name in ("core", "lamp"):
+            write(join(self.source, f"{name}.tar.zst.hash"),
+                  hash_text(name, self.fields[name]["sha256"], signed))
 
 
 class TestDirectorySource(PullTestCase):
@@ -126,6 +132,47 @@ class TestDirectorySource(PullTestCase):
         error = self.failing(manifest)
         self.assertEqual(error.code, exits.MANIFEST_INVALID)
         self.assertIn("missing keys", str(error))
+
+    def test_the_hash_file_is_copied_when_the_source_has_one(self):
+        self.write_hash_files()
+        self.pull()
+        for name in ("core", "lamp"):
+            with open(self.cached(name, ".tar.zst.hash")) as cached, \
+                    open(join(self.source, f"{name}.tar.zst.hash")) as source:
+                self.assertEqual(cached.read(), source.read())
+
+    def test_no_hash_file_at_the_source_leaves_none_in_the_cache(self):
+        self.pull()
+        self.assertFalse(any(
+            entry.endswith(".hash") for entry in os.listdir(self.cache)
+        ))
+
+    def test_the_hash_file_is_copied_for_a_cached_layer_too(self):
+        self.pull()
+        self.write_hash_files(signed=True)
+        report = self.pull()
+        self.assertEqual(report.count(STATUS_CACHED), 2)
+        self.assertTrue(exists(self.cached("lamp", ".tar.zst.hash")))
+
+    def test_the_source_may_serve_the_hash_file_by_hash(self):
+        self.write_hash_files()
+        for name in ("core", "lamp"):
+            os.rename(join(self.source, f"{name}.tar.zst.hash"),
+                      join(self.source,
+                           f"{name}-{self.fields[name]['sha256']}"
+                           ".tar.zst.hash"))
+        self.pull()
+        self.assertTrue(exists(self.cached("core", ".tar.zst.hash")))
+
+    def test_the_cache_verifies_as_the_source_does(self):
+        self.write_hash_files()
+        self.pull()
+        source = verify_layers(self.source)
+        cache = verify_layers(self.cache)
+        self.assertEqual([r.line() for r in cache.results],
+                         [r.line() for r in source.results])
+        self.assertEqual(cache.code, exits.SIGNATURE_UNVERIFIED)
+        self.assertEqual(cache.count("invalid"), 0)
 
     def test_result_is_read_only(self):
         result = PullResult("core", OTHER, 1, STATUS_CACHED)
@@ -249,6 +296,19 @@ class TestHttpSource(PullTestCase):
         error = self.failing(source=self.server.url)
         self.assertEqual(error.code, exits.LAYER_UNAVAILABLE)
         self.assertIn("lamp.manifest", str(error))
+
+    def test_pull_then_verify_round_trip_over_ipv6(self):
+        self.write_hash_files(signed=True)
+        report = self.pull(source=self.server.url)
+        self.assertEqual(report.count(STATUS_FETCHED), 2)
+        verified = verify_layers(self.cache)
+        self.assertEqual([r.line() for r in verified.results], [
+            ("core: unverified: signature present, not verified (no trusted"
+             " key configured)"),
+            ("lamp: unverified: signature present, not verified (no trusted"
+             " key configured)"),
+        ])
+        self.assertEqual(verified.code, exits.SIGNATURE_UNVERIFIED)
 
     def test_a_trailing_slash_is_optional(self):
         report = self.pull(source=self.server.url.rstrip("/"))
