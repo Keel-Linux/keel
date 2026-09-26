@@ -18,17 +18,19 @@ from keel.system.plan import plan
 from keel.system.state import SystemState, observe
 
 
-def needs_root(root: str) -> str | None:
-    """Why --system cannot run on the live system now, or None when it can
+def needs_root(root: str, label: str = "apply --system") -> str | None:
+    """Why the system phase cannot run on the live system now, or None
 
     A scratch tree under --root needs no privilege check: useradd --root
     and the file writes fail on their own terms if the user lacks them.
+    `label` is how the run was asked for, so the message names the flag
+    the operator typed.
     """
     euid = os.geteuid()
     if os.path.abspath(root) != ROOT_DEFAULT or euid == 0:
         return None
     return (
-        f"apply --system on the live system must run as root: creating"
+        f"{label} on the live system must run as root: creating"
         f" accounts and writing under /etc is not possible as uid {euid};"
         f" use --dry-run to see the plan, or --root DIR for a scratch tree"
     )

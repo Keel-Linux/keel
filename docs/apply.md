@@ -1,9 +1,10 @@
 # keel spec apply
 
 `apply` is the converge operation of brief section 5.2, under principle 1
-of section 4: it converges and is safe to re-run. It has two phases. The
-first has been there from the start and is unchanged; the second is new
-and runs only when asked for with `--system`. Every example uses IPv6.
+of section 4: it converges and is safe to re-run. It has two phases, and
+the flags select which of them a run carries out: neither flag is the conf
+alone, `--system` is both, `--system-only` is the system phase by itself.
+Every example uses IPv6.
 
 ## Phase 1: the conf
 
@@ -19,21 +20,27 @@ into `ROOT_PASS`, `DB_PASS` and `APP_PASS`, and the existing hooks set
 them. The second phase never reads or writes a password, a shadow entry or
 a hash.
 
-## Phase 2: the system (`--system`)
+## Phase 2: the system (`--system`, `--system-only`)
 
 ```
 keel spec apply --system
+keel spec apply --system-only
 keel spec apply --system --dry-run
 keel spec apply --system --root /mnt/rootfs
 ```
 
 With `--system`, after the conf, `apply` converges the parts of the spec
 that describe system state rather than hook input: `instance.fqdn`, `users`
-and `locale`. The flag is off by default in this version. It becomes the
-default when the first-boot hook (`00declarative` in inithooks) calls it,
-at which point this document is updated. That hook must call it after
+and `locale`. With `--system-only` it converges them and does nothing
+else, for a machine whose conf phase has already run. Neither flag is on
+by default.
+
+The two phases run at different moments of a first boot, which is why
+there is a flag for each. The conf phase must run before every hook,
+because the hooks read what it writes; the system phase must run after
 `09hostname`, which sets the hostname and rewrites `/etc/hosts` with a
-`sed` over the old name.
+`sed` over the old name, so anything written to `/etc/hosts` before it
+would be edited or lost.
 
 The phase is built as brief section 6 and decision 0003 ask: the state is
 read once (`keel.system.state`), the plan is a pure function of the spec
@@ -48,11 +55,67 @@ exactly as `inspect` is.
 | Option | Meaning |
 | --- | --- |
 | `--system` | Run phase 2 after phase 1. Root on the live system (exit 15 otherwise) |
-| `--dry-run` | With `--system`: print the plan and change nothing, not even the conf. Reads no secret, so the secret files need not exist. Needs no root |
+| `--system-only` | Run phase 2 and not phase 1: the conf is neither read nor written and no secret is resolved. Root on the live system |
+| `--dry-run` | With either flag: print the plan and change nothing, not even the conf. Reads no secret, so the secret files need not exist. Needs no root |
 | `--root DIR` | The filesystem phase 2 converges: `/` (the default, the live system) or a scratch tree. Phase 1 is not affected; the conf path is `--conf` |
 
-`--dry-run` without `--system` is a usage error (exit 1): phase 1 has
-`spec render` for that.
+`--dry-run` with neither flag is a usage error (exit 1): phase 1 has
+`spec render` for that. `--system` and `--system-only` together is a
+usage error as well, because the two answers to "which phases" cannot
+both be right, and a precedence rule between them would be a rule to
+remember rather than a refusal to guess.
+
+### Why a flag and not a subcommand
+
+`--system-only` selects which phases a run of `apply` carries out. It is
+the same operation on the same spec, with the same `--spec`, `--root` and
+`--dry-run`, so a subcommand (`keel spec converge`) would give one code
+path two names, repeat every option, and leave confconsole with two call
+sites for one converge. Phase selection is an attribute of the run, so it
+is a flag on the run.
+
+### Running it where the conf phase never ran
+
+Nothing in phase 2 depends on phase 1: its inputs are the spec and the
+machine, so on a machine whose conf phase never ran it plans and converges
+`instance.fqdn`, `users` and `locale` exactly as it would otherwise, and
+exits 0, or 16 for an action that failed. What is missing on such a
+machine is phase 1's output, the hook variables and the passwords, and
+this run will never write them. So every `--system-only` run says so on
+its first line, naming the conf:
+
+```
+$ keel spec apply --system-only
+apply --system-only: /etc/inithooks.conf not read or written
+instance.fqdn: write /etc/hosts with '127.0.1.1 blog.example.org blog' (mode 0644): done
+apply --system-only: 1 change(s), 0 failed
+```
+
+The line is printed whatever the conf holds, because the run cannot tell
+a conf that was never written from one that `98finalize` blanked after a
+successful first boot, and guessing between the two would be a claim
+about a file this phase does not read. An operator who meant to configure
+the whole appliance runs `apply --system`, which writes the conf when it
+is empty and leaves a populated one alone.
+
+Not resolving the secrets is the point of the flag, not a side effect.
+Phase 1 resolves `secrets` into `ROOT_PASS` and friends, and a secret
+declared `generate: true` gets a fresh value each time it is resolved. A
+first boot that ran phase 1 at hook 00 and phase 1 again at hook 10 would
+hand the appliance a password generated after `30rootpass` had already
+set and shown the first one: nobody would know it. `--system-only`
+resolves nothing, so the value the hooks applied stands. For the same
+reason the spec is validated with `check_secret_files=False`, as `diff`
+is: the run reads no secret, so a file it will not open is not required
+to exist.
+
+A spec that declares none of the fields phase 2 converges is a no-op that
+says which it is, so a log shows the difference between an empty plan and
+a run that did nothing because it failed:
+
+```
+apply --system-only: nothing declared that this phase converges
+```
 
 ### What is converged
 
@@ -208,6 +271,7 @@ args = Namespace(
     conf="/etc/inithooks.conf",
     non_interactive=True,
     system=True,
+    system_only=False,
     dry_run=False,
     root="/",
 )
@@ -224,7 +288,8 @@ replaced), the root check and every branch of the three planners with hand
 built states and the fixture trees. `tests/test_system_execute.py` covers
 the effects against a temporary root with `subprocess.run` replaced, and
 the executor with a fake effects object. `tests/test_apply_system_cli.py`
-runs the command end to end: `useradd` and `usermod` are replaced at the
+runs the command end to end, including every `--system-only` path (the
+conf left alone, no secret resolved, the empty plan, the refusals): `useradd` and `usermod` are replaced at the
 subprocess boundary by a fake that edits the scratch tree's passwd and
 group files as the real commands would under `--root`; everything else is
 written for real under a temporary root and read back by `keel inspect`

@@ -90,29 +90,40 @@ def spec_render(args) -> int:
 
 
 def spec_apply(args) -> int:
-    """Write the conf; with --system, converge users and locale as well
+    """Write the conf; with --system, converge the system state as well
 
     The conf phase is unchanged: a populated conf is never clobbered.
-    The system phase (docs/apply.md) runs only with --system, refuses the
-    live system without root before anything is written, and with
-    --dry-run prints its plan and changes nothing at all, and reads no
-    secret, so the secret files need not exist for it. A caller that
-    builds the Namespace by hand, as confconsole does, gets the conf only.
+    The system phase (docs/apply.md) runs with --system or --system-only,
+    refuses the live system without root before anything is written, and
+    with --dry-run prints its plan and changes nothing at all.
+
+    --system-only runs the system phase and nothing else, for a boot that
+    has already run the conf phase: the conf is neither read nor written
+    and no secret is resolved, so a `generate: true` password the earlier
+    hooks already applied is never regenerated behind their back. The
+    secret files therefore need not exist, as with --dry-run.
+
+    A caller that builds the Namespace by hand, as confconsole does, gets
+    the conf only.
     """
-    with_system = getattr(args, "system", False)
+    system_only = getattr(args, "system_only", False)
+    with_system = system_only or getattr(args, "system", False)
     dry_run = getattr(args, "dry_run", False)
     root = getattr(args, "root", inspection.ROOT_DEFAULT)
-    doc, code = read_spec(args.spec, check_secret_files=not dry_run)
+    no_secrets = dry_run or system_only
+    doc, code = read_spec(args.spec, check_secret_files=not no_secrets)
     if doc is None:
         return code
 
     if with_system and not dry_run:
-        refusal = system.needs_root(root)
+        refusal = system.needs_root(root, phase_label(system_only))
         if refusal:
             error(refusal)
             return exits.APPLY_NEEDS_ROOT
 
-    if dry_run:
+    if system_only:
+        print(f"{phase_label(True)}: {args.conf} not read or written")
+    elif dry_run:
         print(f"dry run: {args.conf} not written")
     else:
         code = apply_conf(args, doc, with_system)
@@ -120,7 +131,12 @@ def spec_apply(args) -> int:
             return code
     if not with_system:
         return exits.OK
-    return apply_system(doc, root, dry_run)
+    return apply_system(doc, root, dry_run, phase_label(system_only))
+
+
+def phase_label(system_only: bool) -> str:
+    """How the run names itself in its own output: the flag that asked"""
+    return "apply --system-only" if system_only else "apply --system"
 
 
 def apply_conf(args, doc: dict, with_system: bool) -> int:
@@ -146,12 +162,21 @@ def apply_conf(args, doc: dict, with_system: bool) -> int:
     return exits.OK
 
 
-def apply_system(doc: dict, root: str, dry_run: bool) -> int:
-    """Observe, plan, then carry out or only print; one line per action"""
+def apply_system(
+    doc: dict, root: str, dry_run: bool, label: str = "apply --system"
+) -> int:
+    """Observe, plan, then carry out or only print; one line per action
+
+    A spec that declares none of the fields this phase converges is a
+    no-op that says so, so a first boot hook reading the log can tell an
+    empty plan from a run that did nothing because it failed.
+    """
     state = system.observe(root, doc)
-    outcome = system.execute(
-        system.plan(doc, state), system.Effects(root), dry_run
-    )
+    plan = system.plan(doc, state)
+    if not plan.steps:
+        print(f"{label}: nothing declared that this phase converges")
+        return exits.OK
+    outcome = system.execute(plan, system.Effects(root), dry_run, label)
     for line in outcome.lines:
         print(line)
     print(outcome.summary())

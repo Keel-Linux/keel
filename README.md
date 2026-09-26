@@ -25,7 +25,7 @@ exits 9: the packages half of `verify`. It never pretends to work.
 | --- | --- |
 | `keel spec validate` | Check the spec and report every error it finds, not just the first; the secret files are checked too, unless `--no-secret-files` |
 | `keel spec render` | Print the conf that `apply` would write, with every secret masked |
-| `keel spec apply` | Write the conf, leaving an existing non empty conf untouched; with `--system`, also converge users (accounts, authorized keys), timezone and locale, only where they differ, never touching a password (brief section 4, principle 1) |
+| `keel spec apply` | Write the conf, leaving an existing non empty conf untouched; with `--system`, also converge the fully qualified name, users (accounts, authorized keys), timezone and locale, only where they differ, never touching a password (brief section 4, principle 1); with `--system-only`, that state alone |
 | `keel inspect` | Write a spec from the running machine, or from an offline root, and report every field with its source or why it was not inferred; secrets are never read (brief sections 5.2 and 7) |
 | `keel diff` | Report drift between the spec and the running machine, or an offline root, field by field, through the same collector `inspect` uses; secrets are never compared and their files need not exist, nothing is written (brief section 5.2) |
 | `keel verify` | Check the installed layers against their manifests, one line per layer (brief section 5.4; packages not implemented yet) |
@@ -50,8 +50,9 @@ Every command accepts the same three options, so a caller never has to branch:
 
 | Option | Meaning |
 | --- | --- |
-| `--system` | After the conf, converge the system state the spec declares: users with their authorized keys, timezone, locale. Root on the live system. Off by default in this version |
-| `--dry-run` | With `--system`: print the plan and change nothing, not even the conf; reads no secret and needs no root |
+| `--system` | After the conf, converge the system state the spec declares: the fully qualified name in `/etc/hosts`, users with their authorized keys, timezone, locale. Root on the live system. Off by default |
+| `--system-only` | That system state and nothing else: the conf is neither read nor written and no secret is resolved, so a generated password the hooks already applied is never regenerated ([docs/apply.md](docs/apply.md)) |
+| `--dry-run` | With `--system` or `--system-only`: print the plan and change nothing, not even the conf; reads no secret and needs no root |
 | `--root DIR` | The filesystem `--system` converges: `/` (the default, the live system) or a scratch tree. The conf path stays `--conf` |
 
 `keel verify` also accepts:
@@ -111,8 +112,8 @@ Defined in one place, `keel/exits.py`, and reproduced here.
 | 12 | `ASSEMBLE_FAILED` | The rootfs is not empty or cannot be created, or `tar` or `zstd` failed while extracting or packing |
 | 13 | `INSPECT_INCOMPLETE` | `inspect` wrote the spec, but a required field (hostname, fqdn, interfaces, alerts, updates) could not be inferred; or `diff` found no drift, but a declared field could not be observed. The report says which and why |
 | 14 | `DRIFT_FOUND` | `diff` found at least one declared field whose observed value differs. Drift wins over unobserved fields, so a report with both exits 14 |
-| 15 | `APPLY_NEEDS_ROOT` | `apply --system` on the live system was run by a user other than root; nothing was written, not even the conf |
-| 16 | `APPLY_FAILED` | `apply --system` could not make at least one change; the output names it. The conf was written and every other change was made, so the run can be repeated |
+| 15 | `APPLY_NEEDS_ROOT` | The system phase (`--system`, `--system-only`) on the live system was run by a user other than root; nothing was written, not even the conf |
+| 16 | `APPLY_FAILED` | The system phase could not make at least one change; the output names it. The conf was written, where the run writes one, and every other change was made, so the run can be repeated |
 
 Two rules that callers depend on:
 
