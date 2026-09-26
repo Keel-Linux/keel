@@ -106,7 +106,8 @@ def build_parser() -> argparse.ArgumentParser:
     apply_parser = _add_spec_action(
         spec_actions, "apply",
         "write the conf, leaving an existing non empty conf alone; with"
-        " --system also converge users and locale",
+        " --system also converge the system state, with --system-only that"
+        " state alone",
         commands.spec_apply,
     )
     add_apply_options(apply_parser)
@@ -229,18 +230,28 @@ def add_root_option(parser: argparse.ArgumentParser, verb: str) -> None:
 
 
 def add_apply_options(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
+    phase = parser.add_mutually_exclusive_group()
+    phase.add_argument(
         "--system",
         action="store_true",
         help="after the conf, converge the system state the spec declares"
-        " (users with their authorized keys, locale, timezone); root on the"
-        " live system (default: the conf only)",
+        " (the fully qualified name in /etc/hosts, users with their"
+        " authorized keys, locale, timezone); root on the live system"
+        " (default: the conf only)",
+    )
+    phase.add_argument(
+        "--system-only",
+        action="store_true",
+        help="the system state and nothing else: the conf is neither read"
+        " nor written and no secret is resolved, so a generated password"
+        " the hooks already applied is never regenerated; for a machine"
+        " whose conf phase has already run (docs/apply.md)",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="with --system: print the plan and change nothing, not even"
-        " the conf",
+        help="with --system or --system-only: print the plan and change"
+        " nothing, not even the conf",
     )
     add_root_option(parser, "converge with --system")
 
@@ -306,8 +317,10 @@ def main(argv: list[str] | None = None) -> int:
     if handler is None:
         parser.print_help(sys.stderr)
         return exits.USAGE
-    if getattr(args, "dry_run", False) and not args.system:
-        parser.error("--dry-run requires --system")
+    if getattr(args, "dry_run", False) and not (
+        getattr(args, "system", False) or getattr(args, "system_only", False)
+    ):
+        parser.error("--dry-run requires --system or --system-only")
     return handler(args)
 
 
