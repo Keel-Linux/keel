@@ -1,0 +1,13 @@
+# Coverage gate for the keel library and CLI: 95 percent (decision 0003,
+# project-authored code). The check is "tests / coverage". Raise only.
+name: tests
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  tests:
+    uses: keel-linux/.github/.github/workflows/test-python.yml@main
+    with:
+      threshold: 95
+      package: keel
