@@ -74,30 +74,82 @@ network:
 | --- | --- | --- |
 | `network.managed_by` | read | `host` or `file`. Default: `host` on a container, `file` otherwise, decided at apply time |
 | `network.interfaces.<name>.ipv6.method` | read | One of `static`, `dhcp`, `auto`, `manual`, `none` |
-| `network.interfaces.<name>.ipv6.address` | accepted | Required when the method is `static`. Must carry a prefix length and must be a unicast address, so link local, loopback and multicast are rejected |
-| `network.interfaces.<name>.ipv6.gateway` | accepted | An IPv6 address. A link local gateway such as `fe80::1` is normal and is accepted |
+| `network.interfaces.<name>.ipv6.address` | read | Required when the method is `static`. Must carry a prefix length and must be a unicast address, so link local, loopback and multicast are rejected |
+| `network.interfaces.<name>.ipv6.gateway` | read | An IPv6 address. A link local gateway such as `fe80::1` is normal and is accepted |
 | `network.interfaces.<name>.ipv4.method` | read | One of `static`, `dhcp`, `manual`, `none`. Optional everywhere |
 | `network.interfaces.<name>.ipv4.address` | read | Required when the method is `static`. Must carry a prefix length |
 | `network.interfaces.<name>.ipv4.gateway` | read | An IPv4 address |
 | `network.nameservers` | read | A list of addresses of either family |
 
-What "read" means per case, because this section is the one with real gaps:
+What "read" means per case:
 
 - `managed_by: host` is the container case, where the host owns the interface
-  configuration. Nothing is written: no `IP_*` variable is exported. `apply`
-  compares each declared IPv6 address with the live addresses on that interface
-  and warns when they differ, so a mismatch is visible without stopping a boot.
-- `managed_by: file` exports the `IP_*` variables the `01ipconfig` hook reads:
-  `IP_CONFIG`, and for a static address `IP_ADDRESS`, `IP_NETMASK` and `IP_GW`.
-  Only IPv4 maps onto those variables, because that is all the hook understands
-  today. Declaring a static IPv6 address together with `managed_by: file` is
-  therefore an error with an explicit message, rather than a value silently
-  dropped. Set the address on the host and use `managed_by: host`.
-- `nameservers` exports at most two entries, as `IP_DNS1` and `IP_DNS2`, and
-  only under `managed_by: file`. IPv6 nameservers are validated and kept in the
-  file but are not exported, because those two variables are IPv4 only in the
-  hook. An IPv6 resolver belongs in the host configuration or in the router
-  advertisement until that hook is replaced.
+  configuration. Nothing is written: no `IP_*` or `IP6_*` variable is
+  exported. `apply` compares each declared IPv6 address with the live
+  addresses on that interface and warns when they differ, so a mismatch is
+  visible without stopping a boot.
+- `managed_by: file` exports the variables the `01ipconfig` hook reads, and
+  the hook writes `/etc/network/interfaces` from them, one `inet` and one
+  `inet6` stanza for the interface it configures (`eth0`, or `br0` in an LXC
+  build). The hook configures that one interface, so when the spec declares
+  several, the last `ipv4` block and the last `ipv6` block win, each as a
+  whole.
+- `nameservers` are split by family: the first two IPv4 addresses become
+  `IP_DNS1` and `IP_DNS2`, the first two IPv6 addresses `IP6_DNS1` and
+  `IP6_DNS2`. An IPv4 address never lands in an `IP6_*` variable, nor the
+  other way round. `IP6_DNS*` are exported only when an interface declares an
+  `ipv6` block, so a spec without one renders exactly what it rendered before
+  IPv6 was written.
+
+| Spec value | Conf variables |
+| --- | --- |
+| `ipv4.method: dhcp` or `manual` | `IP_CONFIG=dhcp` or `IP_CONFIG=manual` |
+| `ipv4.method: static` | `IP_CONFIG=static`, `IP_ADDRESS` (the address alone), `IP_NETMASK` (dotted, from the prefix length), `IP_GW` when set |
+| `ipv4.method: none`, or no `ipv4` block | nothing |
+| `ipv6.method: static` | `IP6_CONFIG=static`, `IP6_ADDRESS` (address with its prefix length, as an `inet6` stanza has no netmask), `IP6_GW` when set |
+| `ipv6.method: dhcp` or `auto` | `IP6_CONFIG=dhcp`. ifupdown has no SLAAC method of its own: `inet6 dhcp` is what the hook writes for both today, and it keeps SLAAC on as confconsole does. `keel inspect` therefore reads such a stanza back as `dhcp` |
+| `ipv6.method: manual` | `IP6_CONFIG=manual` |
+| `ipv6.method: none`, or no `ipv6` block | nothing, and no `IP6_DNS*` |
+| `nameservers` | `IP_DNS1`, `IP_DNS2` from the IPv4 entries; `IP6_DNS1`, `IP6_DNS2` from the IPv6 entries |
+
+A static address on both families:
+
+```yaml
+network:
+  managed_by: file
+  interfaces:
+    eth0:
+      ipv6:
+        method: static
+        address: 2001:db8:1::10/64
+        gateway: fe80::1
+      ipv4:
+        method: static
+        address: 192.0.2.10/24
+        gateway: 192.0.2.1
+  nameservers:
+    - 2001:db8:1::53
+    - 2001:db8:2::53
+    - 192.0.2.53
+```
+
+```
+export IP_CONFIG=static
+export IP_ADDRESS=192.0.2.10
+export IP_NETMASK=255.255.255.0
+export IP_GW=192.0.2.1
+export IP_DNS1=192.0.2.53
+export IP6_CONFIG=static
+export IP6_ADDRESS=2001:db8:1::10/64
+export IP6_GW=fe80::1
+export IP6_DNS1=2001:db8:1::53
+export IP6_DNS2=2001:db8:2::53
+```
+
+The hook validates every `IP6_*` value again before writing anything, with
+the same rules as the spec (an IPv6 address, a prefix length on `IP6_ADDRESS`,
+no multicast, loopback or link local address as the address itself), so a
+value the spec accepted is never rejected at first boot.
 
 ## tls
 
