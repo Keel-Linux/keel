@@ -14,7 +14,7 @@ def probe_locale(
     locale: dict = {}
     findings: list[Finding] = []
 
-    zone, source = _timezone(timezone, localtime_target)
+    zone, source = current_timezone(timezone, localtime_target)
     if zone is None:
         findings.append(missing("locale.timezone", source))
     else:
@@ -33,9 +33,10 @@ def probe_locale(
     return (locale or None), findings
 
 
-def _timezone(
+def current_timezone(
     timezone: File, localtime_target: str | None
 ) -> tuple[str | None, str]:
+    """The zone and where it was read from, or None and why not"""
     lines = timezone.lines()
     if lines:
         return lines[0], timezone.path

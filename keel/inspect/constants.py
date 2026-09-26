@@ -25,6 +25,8 @@ HOME_KEYS = "home/*/.ssh/authorized_keys"
 TIMEZONE = "etc/timezone"
 LOCALTIME = "etc/localtime"
 DEFAULT_LOCALE = "etc/default/locale"
+PASSWD = "etc/passwd"
+GROUP = "etc/group"
 DATABASE_DIRS = ("etc/mysql", "etc/postgresql")
 
 HOSTNAME_COMMAND = ("hostname", "-f")

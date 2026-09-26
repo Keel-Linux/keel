@@ -20,6 +20,8 @@ ASSEMBLE_NEEDS_ROOT = 11
 ASSEMBLE_FAILED = 12
 INSPECT_INCOMPLETE = 13
 DRIFT_FOUND = 14
+APPLY_NEEDS_ROOT = 15
+APPLY_FAILED = 16
 
 DESCRIPTIONS = {
     OK: "success, including the no-op cases",
@@ -42,4 +44,7 @@ DESCRIPTIONS = {
     " not be observed",
     DRIFT_FOUND: "diff found at least one declared field whose observed"
     " value differs",
+    APPLY_NEEDS_ROOT: "apply --system on the live system must run as root",
+    APPLY_FAILED: "apply --system could not make a change; the conf was"
+    " written and every other change was made",
 }

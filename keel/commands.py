@@ -11,6 +11,7 @@ import sys
 from keel import exits, layers, spec
 from keel import diff as drift
 from keel import inspect as inspection
+from keel import system
 
 
 def warn(message: str) -> None:
@@ -80,12 +81,42 @@ def spec_render(args) -> int:
 
 
 def spec_apply(args) -> int:
-    doc, code = read_spec(args.spec)
+    """Write the conf; with --system, converge users and locale as well
+
+    The conf phase is unchanged: a populated conf is never clobbered.
+    The system phase (docs/apply.md) runs only with --system, refuses the
+    live system without root before anything is written, and with
+    --dry-run prints its plan and changes nothing at all, and reads no
+    secret, so the secret files need not exist for it. A caller that
+    builds the Namespace by hand, as confconsole does, gets the conf only.
+    """
+    with_system = getattr(args, "system", False)
+    dry_run = getattr(args, "dry_run", False)
+    root = getattr(args, "root", inspection.ROOT_DEFAULT)
+    doc, code = read_spec(args.spec, check_secret_files=not dry_run)
     if doc is None:
         return code
 
+    if with_system and not dry_run:
+        refusal = system.needs_root(root)
+        if refusal:
+            error(refusal)
+            return exits.APPLY_NEEDS_ROOT
+
+    if dry_run:
+        print(f"dry run: {args.conf} not written")
+    else:
+        code = apply_conf(args, doc, with_system)
+        if code != exits.OK:
+            return code
+    if not with_system:
+        return exits.OK
+    return apply_system(doc, root, dry_run)
+
+
+def apply_conf(args, doc: dict, with_system: bool) -> int:
     if spec.conf_is_populated(args.conf):
-        warn(f"{args.conf} is not empty, ignoring {args.spec}")
+        warn(f"{args.conf} is not empty, ignoring {args.spec} for the conf")
         return exits.OK
 
     try:
@@ -101,9 +132,21 @@ def spec_apply(args) -> int:
         return exits.CONF_ERROR
 
     print(f"{args.spec} applied to {args.conf}")
-    for message in spec.check_network(doc) + spec.unsupported(doc):
+    for message in spec.check_network(doc) + spec.unsupported(doc, with_system):
         warn(message)
     return exits.OK
+
+
+def apply_system(doc: dict, root: str, dry_run: bool) -> int:
+    """Observe, plan, then carry out or only print; one line per action"""
+    state = system.observe(root, doc)
+    outcome = system.execute(
+        system.plan(doc, state), system.Effects(root), dry_run
+    )
+    for line in outcome.lines:
+        print(line)
+    print(outcome.summary())
+    return exits.APPLY_FAILED if outcome.failed else exits.OK
 
 
 def not_implemented(command: str, section: str, summary: str) -> int:

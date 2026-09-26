@@ -84,7 +84,9 @@ def inspect_root(
     findings += found
     _add(spec, "hub", hub)
 
-    users, found = probe_users(key_files(tree))
+    users, found = probe_users(
+        key_files(tree), tree.read(paths.PASSWD), tree.read(paths.GROUP)
+    )
     findings += found
     _add(spec, "users", users)
 
