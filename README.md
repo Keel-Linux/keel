@@ -10,8 +10,9 @@ which means every operation runs headless from the same code path.
 
 ## Status
 
-Working today: `spec validate`, `spec render`, `spec apply`, and the layers
-half of `verify` (see [docs/layers.md](docs/layers.md)).
+Working today: `spec validate`, `spec render`, `spec apply`, `pull`,
+`assemble`, and the layers half of `verify` (see
+[docs/layers.md](docs/layers.md)).
 
 Stubs that print what they will do, name the brief section covering them and
 exit 9: `inspect`, `diff`, and the packages half of `verify`. They never
@@ -27,6 +28,8 @@ pretend to work.
 | `keel inspect` | Write a spec from the running machine (brief section 5.2, not implemented yet) |
 | `keel diff` | Report drift between the declared and the running state (brief section 5.2, not implemented yet) |
 | `keel verify` | Check the installed layers against their manifests, one line per layer (brief section 5.4; packages not implemented yet) |
+| `keel pull` | Fetch the layers of an appliance that the cache does not have yet, from a directory or an http(s) URL, checking every digest (brief section 5.1) |
+| `keel assemble` | Extract a cached chain into a rootfs, honouring whiteouts and opaque directories, and pack it as a Proxmox template with its sha512 (brief section 5.1; root only) |
 
 Every command accepts the same three options, so a caller never has to branch:
 
@@ -42,6 +45,17 @@ Every command accepts the same three options, so a caller never has to branch:
 | --- | --- |
 | `--layers-dir DIR` | Directory of layer manifests. Default: `$KEEL_LAYERS_DIR`, else `/var/lib/keel/layers` |
 | `--tarballs-dir DIR` | Directory of the tarballs and `.hash` files. Default: the layers directory |
+
+`keel pull` and `keel assemble` accept:
+
+| Option | Meaning |
+| --- | --- |
+| `LAYER` | The layer to pull (a name at the source, or the path of its manifest file) or to assemble (a name in the cache) |
+| `--cache-dir DIR` | The layer cache. Default: `$KEEL_CACHE_DIR`, else `/var/cache/keel/layers` |
+| `--source URL-or-DIR` | `pull` only, required: where manifests and tarballs are served, for example `http://[2001:db8:19::1]/layers` or `/mnt/builds/layers` |
+| `--rootfs DIR` | `assemble` only, required: the directory to extract into; created, must be empty |
+| `--template FILE` | `assemble` only: also pack the rootfs into this `.tar.zst`, with `FILE.sha512` next to it |
+| `--sha256 HEX` | `assemble` only: which cached version of `LAYER`, when more than one is cached |
 
 `keel` and `python3 -m keel` are the same program.
 
@@ -61,6 +75,9 @@ Defined in one place, `keel/exits.py`, and reproduced here.
 | 7 | `LAYER_MISMATCH` | A layer tarball, parent chain or `.hash` digest does not match its manifest |
 | 8 | `SIGNATURE_UNVERIFIED` | Every layer matches, but a `.hash` file is present whose signature was not verified (no trusted key is configured yet) |
 | 9 | `NOT_IMPLEMENTED` | The command is a documented stub, or the part of it that is (`verify` exits 9 after the layers pass, because packages are not checked yet) |
+| 10 | `LAYER_UNAVAILABLE` | `pull` could not fetch a manifest or tarball from the source or write the cache; `assemble` found a layer of the chain missing from the cache |
+| 11 | `ASSEMBLE_NEEDS_ROOT` | `assemble` was run by a user other than root; nothing was written |
+| 12 | `ASSEMBLE_FAILED` | The rootfs is not empty or cannot be created, or `tar` or `zstd` failed while extracting or packing |
 
 Two rules that callers depend on:
 
@@ -70,7 +87,9 @@ Two rules that callers depend on:
   never clobbered, so a hand written or platform supplied preseed keeps
   priority over the spec;
 - `verify` never claims more than it checked: a signature is reported as
-  present, never as verified, until a trusted key exists.
+  present, never as verified, until a trusted key exists;
+- `pull` never puts a tarball in the cache under a digest it does not
+  have, and `assemble` never extracts a tarball it did not check.
 
 ## An instance file
 
@@ -178,6 +197,6 @@ pytest
 python3 -m unittest discover tests
 ```
 
-Both runners run the same suite. It needs no network, no root and no installed
-package. The coverage standard (95 percent, lines and branches) and the
+Both runners run the same suite. It needs `tar`, `zstd` and the IPv6
+loopback, no other network, no root and no installed package. The coverage standard (95 percent, lines and branches) and the
 commands that check it are in `tests/README.md`.

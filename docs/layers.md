@@ -1,14 +1,17 @@
-# Layers and `keel verify`
+# Layers: `keel verify`, `keel pull` and `keel assemble`
 
 An appliance is assembled from layers (brief section 5.1): a `core`
 rootfs, a stack layer such as `lamp` built on top of it, and the
 application delta. Each layer is a deterministic tarball with a content
 hash and a plain text manifest, both written by `bt-layer` in buildtasks.
 `keel verify` reads those manifests on a running appliance and checks the
-layers against them (brief section 5.4).
+layers against them (brief section 5.4). `keel pull` fetches the layers
+an appliance needs and that the local cache does not have yet, and
+`keel assemble` turns the cached chain into a rootfs directory and,
+when asked, into the single tarball Proxmox expects (brief section 5.1).
 
-This page describes the manifest as `keel` consumes it, the checks, the
-output and the exit codes. The library behind the command is
+This page describes the manifest as `keel` consumes it, the three
+commands, their output and the exit codes. The library behind them is
 `keel.layers`; confconsole calls it directly.
 
 ## The manifest
@@ -137,7 +140,7 @@ every layer is `ok`, it is 9 (`NOT_IMPLEMENTED`) for the packages half,
 as explained above. A layers directory that exists but cannot be listed
 is reported as one `invalid` line named after the directory.
 
-## From confconsole
+## Verify from confconsole
 
 ```python
 from keel import exits, layers
@@ -153,9 +156,180 @@ if report.code != exits.OK:
 `verify_layers()` never raises: an unreadable manifest or directory
 becomes a result with `status == "invalid"`.
 
+## What `keel pull` fetches
+
+```
+keel pull LAYER --source URL-or-DIR [--cache-dir DIR] [--non-interactive]
+```
+
+`LAYER` is the top of the chain: the name of a layer as the source knows
+it (`lamp`, `wordpress`), or the path of its manifest file when the
+caller already has one. `--source` is where the manifests and tarballs
+are served: a directory (`/mnt/builds/layers`, which is what `bt-layer`
+writes today) or an http(s) URL such as
+`http://[2001:db8:19::1]/layers`. IPv6 addresses go in brackets, as in
+any URL. Only the standard library is used for the transfer; there is
+no dependency on a download tool.
+
+The command:
+
+1. Reads `<LAYER>.manifest` from the source (or the given file) and
+   validates it as described above.
+2. Follows `parent` at the source, manifest by manifest, up to a rootfs
+   layer. At every step the parent's recorded `sha256` must equal the
+   child's `parent_sha256`: a source whose `core` has moved on since
+   `lamp` was built is reported as a mismatch, never substituted.
+3. For each layer, rootfs first: if `<name>-<sha256>.tar.zst` is in the
+   cache with the recorded size and sha256, it is left alone and
+   reported `cached`. Otherwise the tarball is streamed from the source
+   into `<name>-<sha256>.tar.zst.part`, hashed on the way, and renamed
+   into place only when its size and sha256 equal the manifest. A
+   mismatch removes the partial file and fails with `LAYER_MISMATCH`;
+   the transfer stops as soon as the manifest size is exceeded, so a
+   wrong file is not downloaded whole. The manifest is stored next to
+   the tarball as `<name>-<sha256>.manifest`.
+
+A source may keep a tarball under either name: `<name>-<sha256>.tar.zst`
+(what a layer host serves, decision 0005) or the `tarball` name in the
+manifest (`lamp.tar.zst`, what `bt-layer` writes). Both are tried, in
+that order.
+
+Output, one line per layer on stdout, then a summary:
+
+```
+# keel pull lamp --source http://[2001:db8:19::1]/layers
+core: cached (326418793 bytes)
+lamp: fetched (79807121 bytes)
+layers: 2 resolved, 1 fetched, 1 cached, 79807121 bytes transferred
+```
+
+A corrupted or truncated file in the cache is treated as absent and
+fetched again. Layers are fetched rootfs first, so a failure part way
+leaves the cache with a usable prefix of the chain.
+
+## The cache
+
+`--cache-dir`, by default `$KEEL_CACHE_DIR` or `/var/cache/keel/layers`,
+holds:
+
+```
+/var/cache/keel/layers/
+  core-e08e8224aeea1abb605b0e359d345f459d2e04d413e6a08c5e57f5b7858c9e19.tar.zst
+  core-e08e8224aeea1abb605b0e359d345f459d2e04d413e6a08c5e57f5b7858c9e19.manifest
+  lamp-237188ea3339caa72a6b7bcf36fc03bb4a40f654c643bb1ad0734d1b954102ae.tar.zst
+  lamp-237188ea3339caa72a6b7bcf36fc03bb4a40f654c643bb1ad0734d1b954102ae.manifest
+```
+
+Everything is keyed by the sha256 the manifest records, so two versions
+of a layer never collide, a `core` update is one new pair of files, and
+`assemble` can resolve a chain exactly: the parent of a cached delta is
+`<parent>-<parent_sha256>.manifest`, nothing else. A `.part` file is a
+transfer in progress or one that failed; `pull` removes its own.
+
+## What `keel assemble` produces
+
+```
+keel assemble LAYER --rootfs DIR [--template FILE] [--sha256 HEX]
+              [--cache-dir DIR] [--non-interactive]
+```
+
+`LAYER` is a name in the cache. When more than one version of it is
+cached, `--sha256` picks one; otherwise the command says which digests
+it found and stops. The chain is resolved from the cached manifests
+only; nothing is fetched. Before anything is extracted, every cached
+tarball in the chain is checked against its manifest again, and
+`--rootfs` must not exist or must be an empty directory.
+
+The chain is then applied in order into the rootfs:
+
+- the rootfs layer (`core`) is one tar of the whole tree and is
+  extracted as is;
+- a delta layer holds the two upper directories of the deck build,
+  root.build then root.patched, each starting with its own `./` entry,
+  and carries what overlayfs recorded there: a character device 0:0 is
+  a whiteout, meaning the path from the layers below is removed; a
+  directory with `trusted.overlay.opaque=y` replaces the directory
+  below instead of merging with it.
+
+For each of the two members, in order, the whiteout and opaque paths
+are removed from the rootfs, then the member is extracted over it with
+`tar --xattrs`, the whiteout nodes excluded and the `trusted.overlay.*`
+attributes left out, so the result carries no trace of the overlay.
+The order matters: a directory root.patched marked opaque must not keep
+what root.build put in it. `tar` and `zstd` are run as subprocesses
+with argument lists; the decompressed tar lives in a scratch directory
+next to the rootfs for the duration and is removed whatever happens.
+`trusted.overlay.redirect` (renamed directories) is not handled; the
+deck builds do not produce it.
+
+With `--template FILE`, the rootfs is then packed into `FILE`, a
+`.tar.zst` that `pct create` and the Proxmox web UI take as a local
+template (docs/proxmox-distribution.md), and `FILE.sha512` is written in
+`sha512sum` format because that is the digest the pveam index carries.
+The tar stream is deterministic in the same way the layers are (brief
+section 5.4): entries sorted by name, numeric owners, every mtime set to
+the top manifest's `source_date_epoch`, posix format without the
+volatile pax fields, extended attributes kept. Two assemblies of the
+same chain give the same tar; the compressed file is identical when the
+same zstd version is used.
+
+```
+# keel assemble lamp --rootfs /var/lib/lxc/lamp/rootfs \
+    --template /var/lib/vz/template/cache/debian-13-keel-lamp_19.0-1_amd64.tar.zst
+core: extracted (1 members, 0 whiteouts, 0 opaque directories)
+lamp: extracted (2 members, 31 whiteouts, 185 opaque directories)
+rootfs: /var/lib/lxc/lamp/rootfs
+template: /var/lib/vz/template/cache/debian-13-keel-lamp_19.0-1_amd64.tar.zst (417216340 bytes, sha512 ...)
+```
+
+### Root
+
+Restoring owners, device nodes and extended attributes is only possible
+as root, so `assemble` refuses to start as anyone else with
+`ASSEMBLE_NEEDS_ROOT` (11) and a message saying so, rather than
+producing a tree that looks right and is not. `pull` needs no
+privileges beyond writing the cache.
+
+## Exit codes of `pull` and `assemble`
+
+| Code | Name | Raised when |
+| --- | --- | --- |
+| 0 | `OK` | Every layer resolved and is in the cache; the rootfs (and template) was written |
+| 1 | `USAGE` | `--source` or `--rootfs` missing, unknown option |
+| 6 | `MANIFEST_INVALID` | A manifest at the source, on disk or in the cache does not validate, or names another layer than the one asked for |
+| 7 | `LAYER_MISMATCH` | A parent's sha256 differs from the child's `parent_sha256`, the chain loops, a download's size or sha256 differs from the manifest, or a cached tarball no longer matches at assembly time |
+| 10 | `LAYER_UNAVAILABLE` | A manifest or tarball is not at the source or the transfer failed, the cache cannot be written, or `assemble` finds a layer of the chain missing from the cache |
+| 11 | `ASSEMBLE_NEEDS_ROOT` | `assemble` was run by a user other than root |
+| 12 | `ASSEMBLE_FAILED` | The rootfs is not empty or cannot be created, a member name would escape it, or tar or zstd exited non zero (a template path that cannot be written is reported here, after the rootfs is complete) |
+
+## From confconsole
+
+```python
+from keel import exits, layers
+
+try:
+    report = layers.pull("lamp", "http://[2001:db8:19::1]/layers",
+                         "/var/cache/keel/layers")
+except layers.LayerError as e:
+    show_error(f"{e} ({exits.DESCRIPTIONS[e.code]})")
+else:
+    for result in report.results:
+        show_line(result.line())
+    show_line(report.summary())
+```
+
+`layers.assemble(name, cache_dir, rootfs, template=None, sha256=None)`
+has the same shape and returns a report whose `lines()` are what the
+command prints. Both raise `LayerError` with the exit code in `code`.
+
 ## Fixtures
 
 `tests/fixtures/layers/` holds the real `core` and `lamp` manifests,
 `.sha256` and `.hash` files from a build. The tarballs are not committed;
-the tests write small stand ins and rewrite the digests and sizes to
-match, so the suite runs without the build host.
+the verify tests write small stand ins and rewrite the digests and sizes
+to match. The pull and assemble tests build small real layers with the
+`tarfile` module: a core tar and a delta whose whiteout is a character
+device 0:0 and whose opaque directories carry the xattr in the pax
+header, exactly as `tar --xattrs` stores them, so the overlay semantics
+are exercised without overlayfs and without root. The http source is
+served by `http.server` on `[::1]`.
