@@ -135,7 +135,9 @@ it.
 | Observed | Action |
 | --- | --- |
 | A line that names the host and carries the declared fully qualified name, at any address | `unchanged (/etc/hosts maps forum2 to forum2.keellinux.org)` |
-| A line for the target address naming the host, such as the `127.0.1.1 forum2` that `09hostname` left | The line is replaced where it stood, so nothing resolves the short name ahead of the fully qualified one |
+| A line for the target address naming the host | The line is replaced where it stood, so the entry keeps its position in the file |
+| A line that names the host, and nothing else, without a fully qualified name, at any address: the `127.0.1.1 forum2` that `09hostname` leaves | Replaced where it stood, and dropped where the entry went elsewhere, because a name is resolved from the first line that carries it: kept, the short line would answer first and `hostname -f` would still answer `forum2` although the file holds `forum2.keellinux.org` |
+| A line that names the host beside another name (`127.0.0.1 localhost forum2`) | Kept: rewriting a line that belongs to another name is not this phase's business. The entry is written all the same, and the plan says in one line that the kept line answers first and has to be edited by hand |
 | No such line | The entry is appended |
 
 The address is the static IPv6 address the spec declares for an interface

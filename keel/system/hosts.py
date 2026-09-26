@@ -55,10 +55,16 @@ def plan_hosts(
     if settled is not None:
         return [unchanged(FIELD, settled)]
     entry = " ".join([address, *names])
-    return [Step(FIELD, (WriteFile(
+    actions = [WriteFile(
         HOSTS, with_entry(hosts, address, entry, set(names)), HOSTS_MODE,
         None, f"write /{HOSTS} with {entry!r}",
-    ),))]
+    )]
+    actions += [Note(
+        f"kept: {shadow!r} names {name} beside another name and answers"
+        f" before the entry, so hostname -f keeps answering {name};"
+        f" edit that line by hand"
+    ) for shadow in _shadowing(hosts, address, set(names))]
+    return [Step(FIELD, tuple(actions))]
 
 
 def entry_address(network: dict) -> str:
@@ -100,11 +106,11 @@ def with_entry(
 ) -> str:
     """The file with `entry` in place of the lines it supersedes
 
-    A line for the same address that names the same host is what
-    09hostname left behind (`127.0.1.1 forum2`), and it is replaced where
+    The line 09hostname left behind (`127.0.1.1 forum2`) is replaced where
     it stood, so the entry keeps its position in the file and nothing
-    resolves the short name ahead of the fully qualified one. Every other
-    line, comments and blanks included, is kept as it was.
+    resolves the short name ahead of the fully qualified one, whether or
+    not the entry goes at that same address. Every other line, comments
+    and blanks included, is kept as it was.
     """
     kept: list[str] = []
     written = False
@@ -121,7 +127,43 @@ def with_entry(
 
 
 def _superseded(line: str, address: str, names: set[str]) -> bool:
+    """Whether the entry being written stands in for this line
+
+    Two kinds of line are replaced. One at the address being written that
+    names the host: that is the entry itself, wherever the operator put it.
+    And one that names the host and nothing else without giving it a fully
+    qualified name, at any address: that is the `127.0.1.1 blog` line
+    09hostname leaves behind. The second has to go, because a name is
+    resolved from the first line that carries it, so the short entry would
+    answer first and `hostname -f` would keep answering the short name
+    although the fully qualified entry is in the file.
+
+    A line that names the host beside another name (`127.0.0.1 localhost
+    blog`) is not this phase's to rewrite, and is kept; the plan says so.
+    """
     fields = line.split()
     if line.strip().startswith("#") or len(fields) < 2:
         return False
-    return fields[0] == address and bool(names & set(fields[1:]))
+    listed = set(fields[1:])
+    if not (names & listed):
+        return False
+    if fields[0] == address:
+        return True
+    return listed <= names and not any("." in one for one in listed)
+
+
+def _shadowing(hosts: File, address: str, names: set[str]) -> list[str]:
+    """The kept lines that name the host and would answer before the entry"""
+    return [
+        line.strip() for line in (hosts.text or "").splitlines()
+        if not _superseded(line, address, names)
+        and _names_the_host_alone(line, names)
+    ]
+
+
+def _names_the_host_alone(line: str, names: set[str]) -> bool:
+    fields = line.split()
+    if line.strip().startswith("#") or len(fields) < 2:
+        return False
+    listed = set(fields[1:])
+    return bool(names & listed) and not any("." in one for one in listed)
