@@ -7,7 +7,9 @@ by field, where each value came from or why it could not be inferred
 container, and the service comes back.
 
 It is read only, needs no root for most of what it reads, and never
-reads a secret.
+reads a secret. `keel diff` ([docs/diff.md](diff.md)) compares a spec
+with a machine through this same collector, so every source named below
+is also what diff observes.
 
 ```
 keel inspect

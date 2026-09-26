@@ -11,12 +11,12 @@ which means every operation runs headless from the same code path.
 ## Status
 
 Working today: `spec validate`, `spec render`, `spec apply`, `inspect`
-(see [docs/inspect.md](docs/inspect.md)), `pull`, `assemble`, and the
-layers half of `verify` (see [docs/layers.md](docs/layers.md)).
+(see [docs/inspect.md](docs/inspect.md)), `diff` (see
+[docs/diff.md](docs/diff.md)), `pull`, `assemble`, and the layers half of
+`verify` (see [docs/layers.md](docs/layers.md)).
 
-Stubs that print what they will do, name the brief section covering them and
-exit 9: `diff`, and the packages half of `verify`. They never pretend to
-work.
+One stub prints what it will do, names the brief section covering it and
+exits 9: the packages half of `verify`. It never pretends to work.
 
 ## Commands
 
@@ -26,7 +26,7 @@ work.
 | `keel spec render` | Print the conf that `apply` would write, with every secret masked |
 | `keel spec apply` | Write the conf, leaving an existing non empty conf untouched |
 | `keel inspect` | Write a spec from the running machine, or from an offline root, and report every field with its source or why it was not inferred; secrets are never read (brief sections 5.2 and 7) |
-| `keel diff` | Report drift between the declared and the running state (brief section 5.2, not implemented yet) |
+| `keel diff` | Report drift between the spec and the running machine, or an offline root, field by field, through the same collector `inspect` uses; secrets are never compared, nothing is written (brief section 5.2) |
 | `keel verify` | Check the installed layers against their manifests, one line per layer (brief section 5.4; packages not implemented yet) |
 | `keel pull` | Fetch the layers of an appliance that the cache does not have yet, from a directory or an http(s) URL, checking every digest (brief section 5.1) |
 | `keel assemble` | Extract a cached chain into a rootfs, honouring whiteouts and opaque directories, and pack it as a Proxmox template with its sha512 (brief section 5.1; root only) |
@@ -54,6 +54,13 @@ Every command accepts the same three options, so a caller never has to branch:
 | `--output FILE` | Write the spec here, mode 0600. Default: stdout |
 | `--report FILE` | Write the field by field report here. Default: stderr |
 | `--secrets-dir DIR` | Where the secret placeholders point. Default: `/etc/keel/secrets`. Never read or written |
+
+`keel diff` accepts:
+
+| Option | Meaning |
+| --- | --- |
+| `--root DIR` | Filesystem to compare with the spec: `/` (the default, the live system), a mounted container rootfs, or the tree `keel assemble` produced |
+| `--format text|json` | One line per field and a summary (the default), or one JSON document for a calling program |
 
 `keel pull` and `keel assemble` accept:
 
@@ -87,7 +94,8 @@ Defined in one place, `keel/exits.py`, and reproduced here.
 | 10 | `LAYER_UNAVAILABLE` | `pull` could not fetch a manifest or tarball from the source or write the cache; `assemble` found a layer of the chain missing from the cache |
 | 11 | `ASSEMBLE_NEEDS_ROOT` | `assemble` was run by a user other than root; nothing was written |
 | 12 | `ASSEMBLE_FAILED` | The rootfs is not empty or cannot be created, or `tar` or `zstd` failed while extracting or packing |
-| 13 | `INSPECT_INCOMPLETE` | `inspect` wrote the spec, but a required field (hostname, fqdn, interfaces, alerts, updates) could not be inferred; the report says which and why |
+| 13 | `INSPECT_INCOMPLETE` | `inspect` wrote the spec, but a required field (hostname, fqdn, interfaces, alerts, updates) could not be inferred; or `diff` found no drift, but a declared field could not be observed. The report says which and why |
+| 14 | `DRIFT_FOUND` | `diff` found at least one declared field whose observed value differs. Drift wins over unobserved fields, so a report with both exits 14 |
 
 Two rules that callers depend on:
 
@@ -102,7 +110,10 @@ Two rules that callers depend on:
   have, and `assemble` never extracts a tarball it did not check;
 - `inspect` never reads a secret: every secret is written as a file
   reference and reported as not extracted, and the spec is written even
-  when the exit code says it is incomplete.
+  when the exit code says it is incomplete;
+- `diff` compares only what the spec declares, never reads a secret and
+  writes nothing; a spec `inspect` wrote diffs clean against the machine
+  it was read from.
 
 ## An instance file
 
