@@ -352,11 +352,14 @@ class TestPullAndAssemble(CLITestCase):
 
 
 class TestStubs(CLITestCase):
+    """The packages half of verify is the one stub left"""
+
     def test_stubs_exit_not_implemented(self):
-        self.assertEqual(self.run_cli("diff"), exits.NOT_IMPLEMENTED)
+        code = self.run_cli("verify", "--layers-dir", self.tmpdir)
+        self.assertEqual(code, exits.NOT_IMPLEMENTED)
 
     def test_stub_names_the_brief_section(self):
-        out = self.module_run("diff")
+        out = self.module_run("verify", "--layers-dir", self.tmpdir)
         self.assertEqual(out.returncode, exits.NOT_IMPLEMENTED)
         self.assertIn("not implemented yet", out.stderr.decode())
         self.assertIn("BRIEF.md section", out.stderr.decode())
@@ -429,20 +432,22 @@ class TestEntryPoints(CLITestCase):
         return raised.exception.code
 
     def test_importing_the_module_entry_point_does_not_run_the_cli(self):
-        with mock.patch.object(sys, "argv", ["keel", "diff"]):
+        with mock.patch.object(sys, "argv", ["keel", "verify"]):
             importlib.import_module("keel.__main__")
         sys.modules.pop("keel.__main__", None)
 
     def test_python_dash_m_keel_exits_with_the_command_code(self):
         code = self.run_as_main(
-            lambda: runpy.run_module("keel", run_name="__main__"), "diff"
+            lambda: runpy.run_module("keel", run_name="__main__"),
+            "verify", "--layers-dir", self.tmpdir,
         )
         self.assertEqual(code, exits.NOT_IMPLEMENTED)
 
     def test_cli_module_run_as_a_script_exits_with_the_command_code(self):
         script = join(ROOT, "keel", "cli.py")
         code = self.run_as_main(
-            lambda: runpy.run_path(script, run_name="__main__"), "diff"
+            lambda: runpy.run_path(script, run_name="__main__"),
+            "verify", "--layers-dir", self.tmpdir,
         )
         self.assertEqual(code, exits.NOT_IMPLEMENTED)
 

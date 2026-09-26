@@ -19,6 +19,7 @@ LAYER_UNAVAILABLE = 10
 ASSEMBLE_NEEDS_ROOT = 11
 ASSEMBLE_FAILED = 12
 INSPECT_INCOMPLETE = 13
+DRIFT_FOUND = 14
 
 DESCRIPTIONS = {
     OK: "success, including the no-op cases",
@@ -37,5 +38,8 @@ DESCRIPTIONS = {
     ASSEMBLE_NEEDS_ROOT: "assemble must run as root",
     ASSEMBLE_FAILED: "the rootfs or the template could not be written",
     INSPECT_INCOMPLETE: "inspect wrote a spec, but a required field could"
-    " not be inferred",
+    " not be inferred; or diff found no drift, but a declared field could"
+    " not be observed",
+    DRIFT_FOUND: "diff found at least one declared field whose observed"
+    " value differs",
 }
