@@ -8,7 +8,13 @@ probes, so there is one code path for reading a machine and a spec
 written by inspect diffs clean against the machine it was read from.
 
 It is read only: nothing is written to the system, to the spec or
-anywhere else. Secrets are never read, on either side.
+anywhere else. Secrets are never read, on either side, and the secret
+files the spec names are not required to exist: the spec is validated
+with `check_secret_files=False`, so the structure of every secret
+reference is checked (exactly one backend, a path that is a string) but
+not the file behind it. A secret is a reference, and the machine being
+compared may not hold the value; a spec fresh from `keel inspect` never
+does.
 
 ```
 keel diff
@@ -29,7 +35,7 @@ keel diff --root /mnt/old-appliance --spec old.yaml
 | --- | --- | --- |
 | 0 | `OK` | Every declared field that inspect can observe has the same value on the machine |
 | 2 | `SPEC_UNREADABLE` | The spec cannot be read or is not valid YAML |
-| 3 | `SPEC_INVALID` | The spec fails validation; every error is printed, nothing is inspected |
+| 3 | `SPEC_INVALID` | The spec fails validation; every error is printed, nothing is inspected. A secret file that does not exist is not such an error for `diff` (see above); a malformed secret reference is |
 | 13 | `INSPECT_INCOMPLETE` | No drift, but at least one declared field could not be observed; the line says why, in inspect's words |
 | 14 | `DRIFT_FOUND` | At least one declared field has a different value on the machine |
 
@@ -161,12 +167,46 @@ code = comparison.code
 ## Inspect, then diff
 
 `keel inspect --output FILE` followed by `keel diff --spec FILE` on the
-same machine exits 0 with no drift and no unknown field. A spec fresh from
-inspect names secret files that do not exist yet, and `diff` validates
-the spec like every other command, so it reports those files as missing
-(exit 3) until the operator creates them, or points `inspect
---secrets-dir` at a directory that has them. That is the intended
-reminder from [docs/inspect.md](inspect.md), not a diff of its own.
+same machine exits 0 with no drift and no unknown field, and does so on
+a machine where the secret files the spec names have never been created.
+A spec fresh from inspect declares every secret as a placeholder:
+
+```
+$ keel inspect --root /mnt/old-appliance --output old.yaml --report old.txt
+$ grep -A1 root_password old.yaml
+  root_password:
+    file: /etc/keel/secrets/root_password
+$ ls /etc/keel/secrets/root_password
+ls: cannot access '/etc/keel/secrets/root_password': No such file or directory
+$ keel diff --spec old.yaml --root /mnt/old-appliance
+instance.hostname: same (blog)
+instance.fqdn: same (blog.example.org)
+network.managed_by: same (host)
+network.interfaces.eth0.ipv6.method: same (static)
+network.interfaces.eth0.ipv6.address: same (2001:db8:1::10/64)
+network.interfaces.eth0.ipv6.gateway: same (fe80::1)
+...
+secrets: not compared (values are never read, on either side)
+hub.api_key: same (skip)
+...
+diff: 22 same, 0 drift, 0 unknown, 0 not declared, 2 not compared; no drift
+$ echo $?
+0
+```
+
+`diff` does not require those files because it never compares their
+values, so their absence is not drift and cannot be an error. `spec
+apply`, which does read them, still refuses to run until they exist with
+the right owner and mode, and `keel spec validate` still reports each
+missing file unless it is given `--no-secret-files`
+([docs/spec.md](spec.md)). That remains the intended reminder from
+[docs/inspect.md](inspect.md); `diff` is simply not the command that
+delivers it.
+
+Whatever the tree, the round trip exits 0, or 13 when a field the spec
+declares cannot be observed on the machine (a value the operator added by
+hand to a spec inspect wrote from a tree with no `/etc/hostname`, say).
+It never exits 3 because of a secret file.
 
 ## Tests
 
@@ -174,6 +214,8 @@ reminder from [docs/inspect.md](inspect.md), not a diff of its own.
 functions, one test per branch, and each observable section with a spec
 that matches the `turnkey` fixture and one that drifts on that section.
 `tests/test_diff_cli.py` covers the exit codes, their precedence, the
-JSON document, the no-write guarantee, and the round trip: every fixture
-tree under `tests/fixtures/inspect/` inspected into a spec and diffed
-against itself reports no drift, no unknown field and exits 0.
+JSON document, the no-write guarantee, a missing secret file being no
+error while a malformed reference still is, and the round trip: every
+fixture tree under `tests/fixtures/inspect/` inspected into a spec and
+diffed against itself reports no drift, no unknown field and exits 0,
+with the secret placeholders pointing at files that do not exist.

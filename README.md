@@ -22,11 +22,11 @@ exits 9: the packages half of `verify`. It never pretends to work.
 
 | Command | What it does |
 | --- | --- |
-| `keel spec validate` | Check the spec and report every error it finds, not just the first |
+| `keel spec validate` | Check the spec and report every error it finds, not just the first; the secret files are checked too, unless `--no-secret-files` |
 | `keel spec render` | Print the conf that `apply` would write, with every secret masked |
 | `keel spec apply` | Write the conf, leaving an existing non empty conf untouched |
 | `keel inspect` | Write a spec from the running machine, or from an offline root, and report every field with its source or why it was not inferred; secrets are never read (brief sections 5.2 and 7) |
-| `keel diff` | Report drift between the spec and the running machine, or an offline root, field by field, through the same collector `inspect` uses; secrets are never compared, nothing is written (brief section 5.2) |
+| `keel diff` | Report drift between the spec and the running machine, or an offline root, field by field, through the same collector `inspect` uses; secrets are never compared and their files need not exist, nothing is written (brief section 5.2) |
 | `keel verify` | Check the installed layers against their manifests, one line per layer (brief section 5.4; packages not implemented yet) |
 | `keel pull` | Fetch the layers of an appliance that the cache does not have yet, from a directory or an http(s) URL, checking every digest (brief section 5.1) |
 | `keel assemble` | Extract a cached chain into a rootfs, honouring whiteouts and opaque directories, and pack it as a Proxmox template with its sha512 (brief section 5.1; root only) |
@@ -38,6 +38,12 @@ Every command accepts the same three options, so a caller never has to branch:
 | `--spec FILE` | Instance spec to read. Default: `$KEEL_SPEC`, else `/etc/keel/instance.yaml` |
 | `--conf FILE` | Conf file to write. Default: `$KEEL_CONF`, else `/etc/inithooks.conf` |
 | `--non-interactive` | Never prompt. This is already the only behaviour; the flag is accepted so that callers can pass it unconditionally |
+
+`keel spec validate` also accepts:
+
+| Option | Meaning |
+| --- | --- |
+| `--no-secret-files` | Check the structure of every secret reference but not that the file exists with the right owner and mode. For a machine that does not hold the secrets. The output says whether the files were checked |
 
 `keel verify` also accepts:
 
@@ -113,7 +119,9 @@ Two rules that callers depend on:
   when the exit code says it is incomplete;
 - `diff` compares only what the spec declares, never reads a secret and
   writes nothing; a spec `inspect` wrote diffs clean against the machine
-  it was read from.
+  it was read from, even when the secret files it names do not exist
+  there, because secrets are references and a machine that is only being
+  compared may not hold them.
 
 ## An instance file
 
