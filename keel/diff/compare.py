@@ -45,7 +45,16 @@ SECRET_REASON = "a secret reference; values are never read"
 # the file, ready for the day the switch is turned on, and are not
 # compared meanwhile: nothing on the machine is supposed to match them.
 DISABLED_FEATURES = {"tls.acme": "enabled"}
-KEYWORD_FIELDS = ("security.alerts", "security.updates", "hub.api_key")
+KEYWORD_FIELDS = (
+    "security.alerts", "security.updates_at_first_boot", "hub.api_key",
+)
+# A field the first boot consumes and the machine keeps no record of.
+FIRST_BOOT_FIELDS = {
+    "security.updates_at_first_boot":
+        "a first boot input: 95secupdates installs the pending security"
+        " updates once, and the appliance's update schedule, which is what"
+        " the machine shows, is the same whichever value was used",
+}
 DOMAIN_LEAVES = ("hostname", "fqdn", "domains")
 ADDRESS_LEAVES = ("address",)
 HOST_LEAVES = ("gateway", "nameservers")
@@ -91,7 +100,7 @@ def compare_section(
         return [FieldDiff("hub.api_key", NOT_COMPARED, reason=SECRET_REASON)]
     wanted = dict(flatten(section, declared or {}))
     found = dict(flatten(section, observed or {}))
-    skipped = disabled(section, wanted)
+    skipped = not_compared(section, wanted)
     fields = [
         FieldDiff(path, NOT_COMPARED, value, found.get(path), skipped[path])
         if path in skipped
@@ -104,6 +113,16 @@ def compare_section(
         if path not in wanted
     ]
     return fields
+
+
+def not_compared(section: str, wanted: dict[str, object]) -> dict[str, str]:
+    """Every declared path of this section that diff deliberately skips"""
+    skipped = {
+        path: reason for path, reason in FIRST_BOOT_FIELDS.items()
+        if path in wanted
+    }
+    skipped.update(disabled(section, wanted))
+    return skipped
 
 
 def disabled(section: str, wanted: dict[str, object]) -> dict[str, str]:

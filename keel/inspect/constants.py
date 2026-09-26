@@ -42,5 +42,5 @@ REQUIRED = (
     "instance.fqdn",
     "network.interfaces",
     "security.alerts",
-    "security.updates",
+    "security.updates_at_first_boot",
 )

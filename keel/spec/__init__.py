@@ -11,6 +11,7 @@ from keel.spec.apply import (
     unsupported,
     write_conf,
 )
+from keel.spec.compat import canonical, deprecations
 from keel.spec.constants import (
     CONF_DEFAULT,
     CONF_ENV,
@@ -38,9 +39,11 @@ __all__ = [
     "SPEC_DEFAULT",
     "SPEC_ENV",
     "SpecError",
+    "canonical",
     "check_network",
     "conf_is_populated",
     "default_managed_by",
+    "deprecations",
     "load",
     "mask",
     "masked_secrets",
