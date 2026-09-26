@@ -28,16 +28,18 @@ keel spec apply --system --root /mnt/rootfs
 ```
 
 With `--system`, after the conf, `apply` converges the parts of the spec
-that describe system state rather than hook input: `users` and `locale`.
-The flag is off by default in this version. It becomes the default when
-the first-boot hook (`00declarative` in inithooks) calls it, at which point
-this document is updated.
+that describe system state rather than hook input: `instance.fqdn`, `users`
+and `locale`. The flag is off by default in this version. It becomes the
+default when the first-boot hook (`00declarative` in inithooks) calls it,
+at which point this document is updated. That hook must call it after
+`09hostname`, which sets the hostname and rewrites `/etc/hosts` with a
+`sed` over the old name.
 
 The phase is built as brief section 6 and decision 0003 ask: the state is
 read once (`keel.system.state`), the plan is a pure function of the spec
-and that state (`keel.system.plan`, `users`, `locale`), and one small
-module (`keel.system.effects`) is the only code that runs a command or
-writes a file. Commands are run with argv lists, never through a shell.
+and that state (`keel.system.plan`, `hosts`, `users`, `locale`), and one
+small module (`keel.system.effects`) is the only code that runs a command
+or writes a file. Commands are run with argv lists, never through a shell.
 Every decision is unit tested against fixture trees under `--root`,
 exactly as `inspect` is.
 
@@ -57,6 +59,35 @@ exactly as `inspect` is.
 Only what differs from the observed state is planned, so a second run
 finds nothing to do. Every action prints one line, `field: action: done`,
 and a dry run prints `field: would action`.
+
+**instance.fqdn** (`/etc/hosts`)
+
+Upstream `09hostname` writes `/etc/hostname` and replaces the old name
+wherever it appears, but it never writes a fully qualified entry: a
+container that declares `instance.fqdn` boots with `127.0.1.1 forum2`,
+`hostname -f` answers `forum2`, and `keel diff` reports the field as
+unknown because inspect cannot find the name anywhere. This phase writes
+it.
+
+| Observed | Action |
+| --- | --- |
+| A line that names the host and carries the declared fully qualified name, at any address | `unchanged (/etc/hosts maps forum2 to forum2.keellinux.org)` |
+| A line for the target address naming the host, such as the `127.0.1.1 forum2` that `09hostname` left | The line is replaced where it stood, so nothing resolves the short name ahead of the fully qualified one |
+| No such line | The entry is appended |
+
+The address is the static IPv6 address the spec declares for an interface
+when it declares one, which is the Debian convention for a machine with a
+permanent address, and `127.0.1.1` otherwise, because an address a router
+hands out is a lease and must never be frozen into a file. A static IPv4
+address alone does not carry the name: the family the appliance is reached
+on is IPv6. Either way the entry is local resolution only; what the
+appliance is reachable at is its global address.
+
+Everything else in the file, comments and blank lines included, is kept as
+it was, and the file is written mode 0644. Whether the entry is already
+there is decided by the same reader `keel inspect` uses
+(`keel.inspect.hostname.fqdn_in_hosts`), so what apply writes is what
+inspect reads back and diff calls `same`.
 
 **users.<name>** (accounts)
 
@@ -127,6 +158,7 @@ into an empty scratch tree:
 $ keel inspect --root tests/fixtures/inspect/turnkey --output blog.yaml
 $ keel spec apply --spec blog.yaml --conf /tmp/conf --system --root /tmp/scratch --dry-run
 dry run: /tmp/conf not written
+instance.fqdn: would write /etc/hosts with '2001:db8:1::10 blog.example.org blog' (mode 0644)
 users.root: would create user root (useradd --root /tmp/scratch --create-home --shell /bin/bash root)
 users.root.authorized_keys: would ensure /root/.ssh (mode 0700, owner root)
 users.root.authorized_keys: would write /root/.ssh/authorized_keys with 2 key(s) (mode 0600, owner root)
@@ -137,13 +169,13 @@ locale.timezone: would write /etc/timezone (mode 0644)
 locale.timezone: would link /etc/localtime (-> /usr/share/zoneinfo/Europe/Lisbon)
 locale.lang: would write /etc/default/locale with LANG=en_US.UTF-8 (mode 0644)
 locale.lang: not generated: not the live system
-dry run: 9 change(s) planned, nothing written
+dry run: 10 change(s) planned, nothing written
 ```
 
 Run for real, then run again, and the second run prints `unchanged` on
 every line and `apply --system: 0 change(s), 0 failed`. `keel diff --spec
-blog.yaml --root /tmp/scratch` then reports every `users` and `locale`
-field as `same`: that round trip is a test
+blog.yaml --root /tmp/scratch` then reports `instance.fqdn` and every
+`users` and `locale` field as `same`: that round trip is a test
 (`tests/test_apply_system_cli.py`, `TestRoundTrip`).
 
 ### What is never done
@@ -154,6 +186,9 @@ field as `same`: that round trip is a test
   A key not in the spec disappears from `authorized_keys` only because the
   file is rewritten as declared.
 - Creating groups, or anything about a user beyond shell, groups and keys.
+- The hostname itself: `/etc/hostname` is `09hostname`'s, from the
+  `HOSTNAME` variable phase 1 writes. This phase only adds the fully
+  qualified name to `/etc/hosts`.
 - Generating a locale for a tree other than the live system.
 - Touching the conf when a populated one exists, or anything at all with
   `--dry-run`.
@@ -185,7 +220,7 @@ if code != exits.OK:
 
 `tests/test_system_plan.py` covers the readers of passwd and group, the
 observed state (offline and live, with `locale -a` and the command lookup
-replaced), the root check and every branch of the two planners with hand
+replaced), the root check and every branch of the three planners with hand
 built states and the fixture trees. `tests/test_system_execute.py` covers
 the effects against a temporary root with `subprocess.run` replaced, and
 the executor with a fake effects object. `tests/test_apply_system_cli.py`

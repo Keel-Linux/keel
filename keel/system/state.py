@@ -27,6 +27,7 @@ class SystemState:
     live: bool
     passwd: File
     group: File
+    hosts: File
     key_files: dict[str, File]
     timezone: File
     localtime_target: str | None
@@ -51,6 +52,7 @@ def observe(root: str, doc: dict) -> SystemState:
         live=live,
         passwd=passwd,
         group=tree.read(paths.GROUP),
+        hosts=tree.read(paths.HOSTS),
         key_files=key_files,
         timezone=tree.read(paths.TIMEZONE),
         localtime_target=tree.readlink(paths.LOCALTIME),

@@ -33,6 +33,9 @@ AS_USER = mock.patch("os.geteuid", return_value=1000)
 
 SPEC = (
     "version: 1\n"
+    "instance:\n"
+    "  hostname: blog\n"
+    "  fqdn: blog.example.org\n"
     "users:\n"
     "  root:\n"
     "    authorized_keys:\n"
@@ -109,8 +112,11 @@ class TestApplySystem(ApplySystemTestCase):
         self.assertIn(f"{self.spec} applied to {self.conf}", out)
         self.assertIn("users.admin: create user admin (useradd --root", out)
         self.assertIn("--shell /bin/bash --groups sudo admin): done", out)
-        self.assertIn("apply --system: 9 change(s), 0 failed", out)
+        self.assertIn("apply --system: 10 change(s), 0 failed", out)
         self.assertNotIn("Warning: users", err)
+        self.assertNotIn("Warning: instance.fqdn", err)
+        self.assertEqual(self.read("etc/hosts"),
+                         "127.0.1.1 blog.example.org blog\n")
         self.assertEqual(self.read("home/admin/.ssh/authorized_keys"),
                          f"{KEY}\n")
         keys = join(self.root, "home", "admin", ".ssh", "authorized_keys")
@@ -154,7 +160,8 @@ class TestApplySystem(ApplySystemTestCase):
                          f"dry run: {self.conf} not written")
         self.assertIn("users.admin: would create user admin", out)
         self.assertIn("locale.timezone: would write /etc/timezone", out)
-        self.assertIn("dry run: 9 change(s) planned, nothing written", out)
+        self.assertIn("dry run: 10 change(s) planned, nothing written",
+                      out)
         self.assertFalse(os.path.exists(self.conf))
         self.assertEqual(sorted(os.listdir(self.root)), ["etc"])
         self.assertEqual(os.listdir(join(self.root, "etc")), ["group"])
@@ -186,7 +193,7 @@ class TestApplySystem(ApplySystemTestCase):
         self.assertIn("users.admin.authorized_keys: skipped: write", out)
         self.assertIn("locale.timezone: write /etc/timezone (mode 0644): done",
                       out)
-        self.assertIn("apply --system: 3 change(s), 4 failed", out)
+        self.assertIn("apply --system: 4 change(s), 4 failed", out)
         self.assertTrue(os.path.exists(self.conf))
 
     def test_a_populated_conf_is_kept_and_the_system_still_converges(self):
@@ -195,7 +202,7 @@ class TestApplySystem(ApplySystemTestCase):
         code, out, err = self.apply()
         self.assertEqual(code, exits.OK)
         self.assertIn(f"Warning: {self.conf} is not empty, ignoring", err)
-        self.assertIn("apply --system: 9 change(s), 0 failed", out)
+        self.assertIn("apply --system: 10 change(s), 0 failed", out)
         with open(self.conf) as fob:
             self.assertEqual(fob.read(), "export ROOT_PASS=preseeded\n")
 
@@ -249,6 +256,8 @@ class TestApplySystem(ApplySystemTestCase):
                                  "--conf", self.conf)
         self.assertEqual(code, exits.OK)
         self.assertNotIn("apply --system", out)
+        self.assertIn("Warning: instance.fqdn: the /etc/hosts entry is"
+                      " written by apply --system only", err)
         self.assertIn("Warning: users: accounts and authorized keys are"
                       " written by apply --system only", err)
         self.assertIn("Warning: locale:", err)
@@ -276,26 +285,31 @@ class TestRoundTrip(ApplySystemTestCase):
                 fob.write("provided-by-the-operator\n")
             os.chmod(path, 0o600)
 
-    def test_users_and_locale_show_no_drift_after_apply(self):
+    def test_users_locale_and_the_fqdn_show_no_drift_after_apply(self):
         code, _, _ = run_cli("inspect", "--root", TURNKEY, "--output",
                              self.spec, "--secrets-dir", self.secrets)
         self.assertEqual(code, exits.OK)
         declared = spec.load(self.spec)
         self.assertEqual(declared["users"]["admin"]["groups"], ["adm", "sudo"])
+        with open(join(self.root, "etc", "hostname"), "w") as fob:
+            fob.write("blog\n")
 
         code, out, _ = self.apply()
         self.assertEqual(code, exits.OK, out)
-        self.assertIn("apply --system: 9 change(s), 0 failed", out)
+        self.assertIn("apply --system: 10 change(s), 0 failed", out)
+        self.assertEqual(self.read("etc/hosts"),
+                         "2001:db8:1::10 blog.example.org blog\n")
 
         code, out, _ = run_cli("diff", "--spec", self.spec, "--root",
                                self.root, "--format", "json")
         fields = {
             field["field"]: field["status"]
             for field in json.loads(out)["fields"]
-            if field["field"].split(".")[0] in ("users", "locale")
+            if field["field"].split(".")[0] in ("users", "locale", "instance")
         }
         self.assertEqual(set(fields.values()), {"same"}, fields)
         self.assertEqual(sorted(fields), [
+            "instance.fqdn", "instance.hostname",
             "locale.lang", "locale.timezone", "users.admin.authorized_keys",
             "users.admin.groups", "users.admin.shell",
             "users.root.authorized_keys", "users.root.shell",
