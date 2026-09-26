@@ -19,6 +19,7 @@ from unittest import mock
 
 from helpers import spec  # noqa: F401
 from layers_helpers import (
+    LAMP_VERSION,
     build_source,
     build_tree,
     hash_text,
@@ -267,6 +268,12 @@ class TestPullAndAssemble(CLITestCase):
             self.cache, "--non-interactive", *argv,
         )
 
+    def assemble(self, *argv: str) -> tuple[int, str, str]:
+        return self.run_cli_captured(
+            "assemble", "lamp", "--rootfs", self.rootfs, "--cache-dir",
+            self.cache, "--non-interactive", *argv,
+        )
+
     def test_pull_reports_every_layer_and_the_bytes_transferred(self):
         code, out, _ = self.pull()
         self.assertEqual(code, exits.OK)
@@ -302,6 +309,47 @@ class TestPullAndAssemble(CLITestCase):
         self.assertTrue(os.path.exists(
             join(self.cache, f"core-{self.fields['core']['sha256']}.tar.zst")
         ))
+
+    def test_assemble_as_a_user_exits_assemble_needs_root(self):
+        self.pull()
+        with mock.patch("os.geteuid", return_value=1000):
+            code, _, err = self.assemble()
+        self.assertEqual(code, exits.ASSEMBLE_NEEDS_ROOT)
+        self.assertIn("Error: assemble must run as root", err)
+
+    def test_assemble_as_root_extracts_and_packs(self):
+        self.pull()
+        template = join(self.tmpdir, "lamp.tar.zst")
+        with mock.patch("os.geteuid", return_value=0):
+            code, out, _ = self.assemble("--template", template)
+        self.assertEqual(code, exits.OK)
+        with open(join(self.rootfs, "etc", "turnkey_version"), "rb") as fob:
+            self.assertEqual(fob.read(), LAMP_VERSION)
+        self.assertTrue(os.path.exists(template + ".sha512"))
+        lines = out.splitlines()
+        self.assertEqual(lines[0], "core: extracted (1 members, 0 whiteouts,"
+                         " 0 opaque directories)")
+        self.assertEqual(lines[2], f"rootfs: {self.rootfs}")
+        self.assertTrue(lines[3].startswith(f"template: {template} ("))
+
+    def test_assemble_of_a_layer_not_pulled_exits_layer_unavailable(self):
+        with mock.patch("os.geteuid", return_value=0):
+            code, _, err = self.assemble()
+        self.assertEqual(code, exits.LAYER_UNAVAILABLE)
+        self.assertIn("run keel pull first", err)
+
+    def test_assemble_reports_an_os_error_as_assemble_failed(self):
+        with mock.patch.object(commands.layers, "assemble",
+                               side_effect=OSError("zstd: not found")):
+            code, _, err = self.assemble()
+        self.assertEqual(code, exits.ASSEMBLE_FAILED)
+        self.assertEqual(err, "Error: assemble: zstd: not found\n")
+
+    def test_assemble_without_a_rootfs_exits_usage(self):
+        with self.assertRaises(SystemExit) as raised:
+            self.run_cli("assemble", "lamp")
+        self.assertEqual(raised.exception.code, exits.USAGE)
+
 
 class TestStubs(CLITestCase):
     def test_stubs_exit_not_implemented(self):
