@@ -268,7 +268,7 @@ class TestCompareAgainstFixture(unittest.TestCase):
             "version": 1,
             "instance": {"hostname": "BLOG", "fqdn": "blog.example.org."},
             "network": {
-                "managed_by": "host",
+                "managed_by": "file",
                 "interfaces": {"eth0": {"ipv6": {
                     "method": "static", "address": "2001:DB8:1::10/64",
                     "gateway": "FE80::1"}}},

@@ -8,7 +8,7 @@ from os.path import join
 
 from helpers import doc, env, errors, spec
 
-from keel.spec.fields import is_ipv4  # noqa: E402
+from keel.spec.fields import is_ipv4, is_ipv6  # noqa: E402
 
 
 class TestMapping(unittest.TestCase):
@@ -103,30 +103,129 @@ class TestMapping(unittest.TestCase):
         )
 
 
+IPV4_ONLY = (
+    "version: 1\n"
+    "network:\n"
+    "  managed_by: file\n"
+    "  interfaces:\n"
+    "    eth0:\n"
+    "      ipv4:\n"
+    "        method: static\n"
+    "        address: 192.0.2.10/24\n"
+    "        gateway: 192.0.2.1\n"
+    "  nameservers:\n"
+    "    - 192.0.2.53\n"
+    "    - 2001:db8:1::53\n"
+)
+IPV4_ONLY_CONF = (
+    "export IP_CONFIG=static\n"
+    "export IP_ADDRESS=192.0.2.10\n"
+    "export IP_NETMASK=255.255.255.0\n"
+    "export IP_GW=192.0.2.1\n"
+    "export IP_DNS1=192.0.2.53\n"
+)
+
+
 class TestNetworkMapping(unittest.TestCase):
-    def file_managed(self, ipv4: str) -> dict:
+    def file_managed(self, family: str, method: str) -> dict:
         return env(
             "version: 1\n"
             "network:\n"
             "  managed_by: file\n"
             "  interfaces:\n"
             "    eth0:\n"
-            "      ipv4:\n"
-            f"        method: {ipv4}\n"
-            "      ipv6:\n"
-            "        method: auto\n"
+            f"      {family}:\n"
+            f"        method: {method}\n"
         )
 
     def test_ipv4_none_exports_nothing(self):
-        self.assertEqual(self.file_managed("none"), {})
+        self.assertEqual(self.file_managed("ipv4", "none"), {})
 
     def test_ipv4_dhcp_exports_only_the_method(self):
-        self.assertEqual(self.file_managed("dhcp"), {"IP_CONFIG": "dhcp"})
+        self.assertEqual(self.file_managed("ipv4", "dhcp"),
+                         {"IP_CONFIG": "dhcp"})
 
-    def test_is_ipv4_tells_the_families_apart(self):
+    def test_ipv6_none_exports_nothing(self):
+        self.assertEqual(self.file_managed("ipv6", "none"), {})
+
+    def test_ipv6_dhcp_and_auto_both_export_the_dhcp_method(self):
+        for method in ("dhcp", "auto"):
+            with self.subTest(method=method):
+                self.assertEqual(self.file_managed("ipv6", method),
+                                 {"IP6_CONFIG": "dhcp"})
+
+    def test_ipv6_manual_exports_only_the_method(self):
+        self.assertEqual(self.file_managed("ipv6", "manual"),
+                         {"IP6_CONFIG": "manual"})
+
+    def test_spec_without_an_ipv6_block_renders_as_before(self):
+        document = doc(IPV4_ONLY)
+        self.assertEqual(spec.validate(document), [])
+        self.assertEqual(spec.render_env(document, {}), IPV4_ONLY_CONF)
+
+    def test_an_ipv4_nameserver_never_lands_in_the_ip6_dns_variables(self):
+        exported = env(
+            "version: 1\n"
+            "network:\n"
+            "  managed_by: file\n"
+            "  interfaces:\n"
+            "    eth0:\n"
+            "      ipv6:\n"
+            "        method: dhcp\n"
+            "  nameservers:\n"
+            "    - 192.0.2.53\n"
+            "    - 192.0.2.54\n"
+            "    - 2001:db8:1::53\n"
+        )
+        self.assertEqual(exported, {
+            "IP_DNS1": "192.0.2.53", "IP_DNS2": "192.0.2.54",
+            "IP6_CONFIG": "dhcp", "IP6_DNS1": "2001:db8:1::53",
+        })
+
+    def test_ipv6_nameservers_are_not_exported_without_an_ipv6_block(self):
+        exported = env(
+            "version: 1\n"
+            "network:\n"
+            "  managed_by: file\n"
+            "  nameservers:\n"
+            "    - 2001:db8:1::53\n"
+            "    - 192.0.2.53\n"
+        )
+        self.assertEqual(exported, {"IP_DNS1": "192.0.2.53"})
+
+    def test_the_last_ipv6_block_wins_as_a_whole(self):
+        static = (
+            "        method: static\n"
+            "        address: 2001:db8:1::10/64\n"
+            "        gateway: fe80::1\n"
+        )
+        auto = "        method: auto\n"
+        for first, second, expected in (
+            (static, auto, {"IP6_CONFIG": "dhcp"}),
+            (auto, static, {"IP6_CONFIG": "static",
+                            "IP6_ADDRESS": "2001:db8:1::10/64",
+                            "IP6_GW": "fe80::1"}),
+        ):
+            with self.subTest(expected=expected):
+                exported = env(
+                    "version: 1\n"
+                    "network:\n"
+                    "  managed_by: file\n"
+                    "  interfaces:\n"
+                    "    eth0:\n"
+                    "      ipv6:\n" + first +
+                    "    eth1:\n"
+                    "      ipv6:\n" + second
+                )
+                self.assertEqual(exported, expected)
+
+    def test_is_ipv4_and_is_ipv6_tell_the_families_apart(self):
         self.assertTrue(is_ipv4("192.0.2.53"))
         self.assertFalse(is_ipv4("2001:db8:1::53"))
         self.assertFalse(is_ipv4("ns.example.org"))
+        self.assertTrue(is_ipv6("2001:db8:1::53"))
+        self.assertFalse(is_ipv6("192.0.2.53"))
+        self.assertFalse(is_ipv6("ns.example.org"))
 
 
 class TestDomains(unittest.TestCase):
