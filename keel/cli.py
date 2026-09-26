@@ -14,6 +14,7 @@ import signal
 import sys
 
 from keel import __version__, commands, exits
+from keel.inspect import ROOT_DEFAULT, SECRETS_DIR_DEFAULT
 from keel.layers import (
     CACHE_DEFAULT,
     CACHE_ENV,
@@ -98,11 +99,13 @@ def build_parser() -> argparse.ArgumentParser:
         commands.spec_apply,
     )
 
-    _add_command(
+    inspect_parser = _add_command(
         subparsers, "inspect",
-        "write a spec from the running machine (not implemented yet)",
+        "write a spec from the running machine, or from an offline root,"
+        " reporting what could not be inferred",
         commands.inspect,
     )
+    add_inspect_options(inspect_parser)
     _add_command(
         subparsers, "diff",
         "report drift between declared and running (not implemented yet)",
@@ -199,6 +202,35 @@ def add_assemble_options(parser: argparse.ArgumentParser) -> None:
         help="which cached version of LAYER, when more than one is cached",
     )
     add_cache_option(parser)
+
+
+def add_inspect_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--root",
+        default=ROOT_DEFAULT,
+        metavar="DIR",
+        help="filesystem to inspect: the live system, a mounted container"
+        f" rootfs or a tree keel assemble produced (default: {ROOT_DEFAULT})",
+    )
+    parser.add_argument(
+        "--output",
+        default=None,
+        metavar="FILE",
+        help="write the spec here, mode 0600 (default: stdout)",
+    )
+    parser.add_argument(
+        "--report",
+        default=None,
+        metavar="FILE",
+        help="write the field by field report here (default: stderr)",
+    )
+    parser.add_argument(
+        "--secrets-dir",
+        default=SECRETS_DIR_DEFAULT,
+        metavar="DIR",
+        help="where the secret placeholders point; the values are never"
+        f" read or written (default: {SECRETS_DIR_DEFAULT})",
+    )
 
 
 def _add_spec_action(subparsers, name: str, help_text: str, handler) -> None:

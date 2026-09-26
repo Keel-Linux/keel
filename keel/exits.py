@@ -18,6 +18,7 @@ NOT_IMPLEMENTED = 9
 LAYER_UNAVAILABLE = 10
 ASSEMBLE_NEEDS_ROOT = 11
 ASSEMBLE_FAILED = 12
+INSPECT_INCOMPLETE = 13
 
 DESCRIPTIONS = {
     OK: "success, including the no-op cases",
@@ -25,7 +26,8 @@ DESCRIPTIONS = {
     SPEC_UNREADABLE: "spec file cannot be read or is not valid YAML",
     SPEC_INVALID: "spec file is valid YAML but fails validation",
     SECRET_ERROR: "a referenced secret is missing or badly protected",
-    CONF_ERROR: "the conf file cannot be written",
+    CONF_ERROR: "the conf file, or the file inspect writes, cannot be"
+    " written",
     MANIFEST_INVALID: "a layer manifest cannot be read or fails validation",
     LAYER_MISMATCH: "a layer does not match its manifest",
     SIGNATURE_UNVERIFIED: "a layer hash file could not be verified",
@@ -34,4 +36,6 @@ DESCRIPTIONS = {
     " not in it",
     ASSEMBLE_NEEDS_ROOT: "assemble must run as root",
     ASSEMBLE_FAILED: "the rootfs or the template could not be written",
+    INSPECT_INCOMPLETE: "inspect wrote a spec, but a required field could"
+    " not be inferred",
 }
