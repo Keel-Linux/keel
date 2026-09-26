@@ -10,7 +10,7 @@ import unittest
 
 from helpers import spec  # noqa: F401
 
-from keel.inspect import app, hostname, interfaces, locale, network
+from keel.inspect import app, hostname, interfaces, ipv6, locale, network
 from keel.inspect import secrets, security, tls, users
 from keel.inspect.report import (
     INFERRED,
@@ -32,6 +32,22 @@ PASSWD = (
     "admin:x:1000:1000::/home/admin:/bin/bash\n"
 )
 GROUP = "root:x:0:\nadm:x:4:admin\nsudo:x:27:admin\nadmin:x:1000:\n"
+IP_ADDR = "ip -6 addr show"
+# `ip -6 addr show` on a container whose address came from a router
+# advertisement: the global address carries mngtmpaddr, the link local one
+# does not, and lo is there to be skipped.
+SLAAC_OUTPUT = (
+    "1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 state UNKNOWN qlen 1000\n"
+    "    inet6 ::1/128 scope host proto kernel_lo \n"
+    "6: eth0@if2: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n"
+    "    inet6 2001:db8:1::bc/64 scope global dynamic mngtmpaddr"
+    " noprefixroute \n"
+    "    inet6 fe80::bc/64 scope link proto kernel_ll \n"
+)
+SLAAC = ipv6.Runtime(File(IP_ADDR, SLAAC_OUTPUT))
+NO_EVIDENCE = ipv6.Runtime(File(IP_ADDR, problem="not run"))
+LEASE = File("/x/var/lib/dhcpcd/eth0.lease6", "ia_na 2001:db8:2::10/128\n")
+LEASED = ipv6.Runtime(File(IP_ADDR, SLAAC_OUTPUT), (LEASE,))
 
 
 def statuses(findings: list[Finding], field: str) -> list[str]:
@@ -166,11 +182,78 @@ class TestInterfacesParser(unittest.TestCase):
         self.assertIsNone(stanzas[0].option("address"))
 
 
+class TestIPv6Evidence(unittest.TestCase):
+    """keel.inspect.ipv6: what the machine says about an inet6 dhcp stanza"""
+
+    def test_addresses_are_read_per_interface_with_their_flags(self):
+        found = ipv6.parse_addresses(File(IP_ADDR, SLAAC_OUTPUT))
+        self.assertEqual(
+            [(a.iface, a.scope) for a in found],
+            [("lo", "host"), ("eth0", "global"), ("eth0", "link")],
+        )
+        self.assertTrue(found[1].from_router_advertisement)
+        self.assertFalse(found[0].from_router_advertisement)
+        self.assertFalse(found[2].from_router_advertisement)
+        self.assertEqual(found[1].flags,
+                         ("dynamic", "mngtmpaddr", "noprefixroute"))
+
+    def test_lines_that_name_no_address_or_no_interface_are_skipped(self):
+        text = (
+            "    inet6 2001:db8::1/64 scope global mngtmpaddr\n"
+            "2: eth0: <UP>\n"
+            "    inet6\n"
+            "    inet 192.0.2.10/24 scope global\n"
+            "    inet6 2001:db8::2/64\n"
+            "    inet6 2001:db8::3/64 scope\n"
+        )
+        found = ipv6.parse_addresses(File(IP_ADDR, text))
+        self.assertEqual([(a.address, a.scope, a.flags) for a in found],
+                         [("2001:db8::2/64", "", ()),
+                          ("2001:db8::3/64", "", ())])
+        self.assertEqual(ipv6.parse_addresses(ABSENT), ())
+
+    def test_a_lease_is_matched_by_interface_and_must_hold_something(self):
+        generic = File("/x/var/lib/dhcp/dhclient6.leases", "lease6 {}\n")
+        named = File("/x/var/lib/dhcp/dhclient6.eth1.leases", "lease6 {}\n")
+        empty = File("/x/var/lib/dhcpcd/eth0.lease6", "\n")
+        self.assertEqual(ipv6.lease_of("eth0", (LEASE,)), LEASE)
+        self.assertEqual(ipv6.lease_of("eth9", (generic,)), generic)
+        self.assertEqual(ipv6.lease_of("eth1", (named,)), named)
+        self.assertIsNone(ipv6.lease_of("eth0", (named,)))
+        self.assertIsNone(ipv6.lease_of("eth0", (empty, ABSENT)))
+
+    def test_a_router_advertisement_address_means_auto(self):
+        method, source = ipv6.resolve_method("eth0", SLAAC)
+        self.assertEqual(method, "auto")
+        self.assertIn("2001:db8:1::bc/64 on eth0 is marked mngtmpaddr", source)
+
+    def test_a_lease_means_dhcp_and_wins_over_a_slaac_address(self):
+        method, source = ipv6.resolve_method("eth0", LEASED)
+        self.assertEqual(method, "dhcp")
+        self.assertIn("holds a DHCPv6 lease", source)
+        self.assertIn("router advertisement address is configured as well",
+                      source)
+        method, source = ipv6.resolve_method(
+            "eth0", ipv6.Runtime(ABSENT, (LEASE,))
+        )
+        self.assertEqual(method, "dhcp")
+        self.assertNotIn("as well", source)
+
+    def test_no_evidence_either_way_is_not_a_guess(self):
+        method, source = ipv6.resolve_method("eth0", NO_EVIDENCE)
+        self.assertIsNone(method)
+        self.assertIn("ip -6 addr show not run", source)
+        self.assertIn("no DHCPv6 lease for eth0", source)
+        _, source = ipv6.resolve_method("eth1", SLAAC)
+        self.assertIn("lists no mngtmpaddr address for eth1", source)
+
+
 class TestNetwork(unittest.TestCase):
-    def probe(self, text, resolv="", container=False, extra=()):
+    def probe(self, text, resolv="", container=False, extra=(),
+              runtime=SLAAC):
         files = [File("/x/etc/network/interfaces", text), *extra]
         return network.probe_network(
-            files, File("/x/etc/resolv.conf", resolv), container
+            files, File("/x/etc/resolv.conf", resolv), container, runtime
         )
 
     def test_static_ipv6_is_read_and_stays_with_the_file(self):
@@ -227,6 +310,41 @@ class TestNetwork(unittest.TestCase):
         self.assertIn("is not an ipv6 address", reasons[4])
         self.assertIn("no interface stanza besides lo", reasons[5])
 
+    def test_inet6_dhcp_is_read_back_as_the_method_the_machine_shows(self):
+        section, findings = self.probe(
+            "iface eth0 inet6 dhcp\n    gateway fe80::1\n"
+        )
+        self.assertEqual(section["interfaces"]["eth0"]["ipv6"],
+                         {"method": "auto", "gateway": "fe80::1"})
+        field = "network.interfaces.eth0.ipv6"
+        self.assertIn("marked mngtmpaddr", reason(findings, field))
+
+        section, findings = self.probe("iface eth0 inet6 dhcp\n",
+                                       runtime=LEASED)
+        self.assertEqual(section["interfaces"]["eth0"]["ipv6"],
+                         {"method": "dhcp"})
+        self.assertIn("DHCPv6 lease", reason(findings, field))
+
+    def test_inet6_dhcp_without_evidence_is_left_out_and_reported(self):
+        section, findings = self.probe(
+            "iface eth0 inet dhcp\niface eth0 inet6 dhcp\n",
+            runtime=NO_EVIDENCE,
+        )
+        self.assertEqual(section["interfaces"]["eth0"],
+                         {"ipv4": {"method": "dhcp"}})
+        field = "network.interfaces.eth0.ipv6"
+        self.assertEqual(statuses(findings, field), [NOT_INFERRED])
+        self.assertIn("inet6 dhcp is written for method auto and for method"
+                      " dhcp alike", reason(findings, field))
+
+    def test_ipv4_dhcp_is_never_ambiguous(self):
+        section, findings = self.probe("iface eth0 inet dhcp\n",
+                                       runtime=NO_EVIDENCE)
+        self.assertEqual(section["interfaces"]["eth0"]["ipv4"],
+                         {"method": "dhcp"})
+        self.assertEqual(reason(findings, "network.interfaces.eth0.ipv4"),
+                         "/x/etc/network/interfaces")
+
     def test_malformed_header_is_reported_and_the_rest_is_kept(self):
         section, findings = self.probe("iface eth0\niface eth1 inet dhcp\n")
         self.assertEqual(list(section["interfaces"]), ["eth1"])
@@ -235,7 +353,7 @@ class TestNetwork(unittest.TestCase):
 
     def test_absent_interfaces_file_is_a_required_gap(self):
         section, findings = network.probe_network(
-            [ABSENT], File("/x/etc/resolv.conf", ""), False
+            [ABSENT], File("/x/etc/resolv.conf", ""), False, SLAAC
         )
         self.assertIsNone(section)
         self.assertEqual(reason(findings, "network.interfaces"),
@@ -267,7 +385,7 @@ class TestNetwork(unittest.TestCase):
 
     def test_absent_resolv_conf_is_reported(self):
         _, findings = network.probe_network(
-            [File("/x/i", "iface eth0 inet6 dhcp\n")], ABSENT, False
+            [File("/x/i", "iface eth0 inet6 dhcp\n")], ABSENT, False, SLAAC
         )
         self.assertEqual(reason(findings, "network.nameservers"),
                          "/x/absent not present")

@@ -22,7 +22,7 @@ from helpers import spec
 
 from keel import exits
 from keel.cli import main
-from keel.inspect import collect, inspect_root
+from keel.inspect import collect, constants, inspect_root
 from keel.inspect.tree import NOT_PRESENT, PERMISSION_DENIED, Tree
 
 FIXTURES = join(dirname(abspath(__file__)), "fixtures", "inspect")
@@ -85,6 +85,10 @@ class TestTree(unittest.TestCase):
 
 
 class TestCollector(unittest.TestCase):
+    @staticmethod
+    def reason(result, field: str) -> str:
+        return next(f.source for f in result.findings if f.field == field)
+
     def test_turnkey_tree_yields_a_complete_spec(self):
         result = inspect_root(TURNKEY, "/run/keel/secrets")
         self.assertTrue(result.complete)
@@ -111,6 +115,9 @@ class TestCollector(unittest.TestCase):
         self.assertEqual(network["interfaces"],
                          {"eth0": {"ipv6": {"method": "dhcp"},
                                    "ipv4": {"method": "dhcp"}}})
+        self.assertIn("holds a DHCPv6 lease", self.reason(
+            result, "network.interfaces.eth0.ipv6"
+        ))
         self.assertEqual(result.spec["app"]["options"],
                          {"ip_bind": "[2001:db8:2::10]"})
         self.assertEqual(result.spec["secrets"]["app_password"],
@@ -149,6 +156,23 @@ class TestCollector(unittest.TestCase):
             live = collect.hostname_f(Tree("/"))
         self.assertEqual(live.text, "blog.example.org\n")
         self.assertEqual(run.call_args.args[0], ["hostname", "-f"])
+
+    def test_the_ipv6_evidence_is_the_command_and_the_lease_files(self):
+        tree = Tree(DHCP)
+        self.assertEqual([file.path for file in collect.leases(tree)],
+                         [join(DHCP, "var/lib/dhcpcd/eth0.lease6")])
+        self.assertEqual(collect.leases(Tree(TURNKEY)), ())
+        offline = collect.run_command(tree, constants.IP_ADDR_COMMAND)
+        self.assertEqual(offline.path, "ip -6 addr show")
+        self.assertEqual(offline.problem, collect.OFFLINE)
+
+        completed = subprocess.CompletedProcess([], 0, "1: lo: <UP>\n", "")
+        with mock.patch.object(collect.subprocess, "run",
+                               return_value=completed) as run:
+            live = collect.run_command(Tree("/"), constants.IP_ADDR_COMMAND)
+        self.assertEqual(live.text, "1: lo: <UP>\n")
+        self.assertEqual(run.call_args.args[0],
+                         ["ip", "-6", "addr", "show"])
 
     def test_hostname_f_failures_are_recorded_not_raised(self):
         failed = subprocess.CompletedProcess([], 1, "", "")
