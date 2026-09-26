@@ -146,3 +146,21 @@ def verify_layers(args) -> int:
         print(result.line())
     print(report.summary())
     return report.code
+
+
+def pull(args) -> int:
+    """Fetch the layers of `args.layer` that the cache does not have
+
+    One line per layer on stdout, fetched or cached, then a summary with
+    the bytes transferred. A failure prints the reason and returns the
+    code that names it.
+    """
+    try:
+        report = layers.pull(args.layer, args.source, args.cache_dir)
+    except layers.LayerError as e:
+        error(str(e))
+        return e.code
+    for result in report.results:
+        print(result.line())
+    print(report.summary())
+    return exits.OK

@@ -66,6 +66,12 @@ class Manifest:
     def source_date_epoch(self) -> int:
         return int(self.fields["source_date_epoch"])
 
+    def text(self) -> str:
+        """The manifest as bt-layer writes it, one `key value` per line"""
+        return "".join(
+            f"{key} {value}\n" for key, value in self.fields.items()
+        )
+
 
 def parse(text: str) -> dict[str, str]:
     """Split manifest text into fields
@@ -159,7 +165,14 @@ def load(path: str) -> Manifest:
             text = fob.read()
     except (OSError, UnicodeDecodeError) as e:
         raise ManifestError(path, [f"cannot read: {e}"]) from e
+    return from_text(path, text)
 
+
+def from_text(path: str, text: str) -> Manifest:
+    """Parse and validate manifest text fetched from somewhere else
+
+    `path` names where the text came from, for the error messages.
+    """
     try:
         fields = parse(text)
     except ManifestError as e:

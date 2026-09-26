@@ -14,7 +14,12 @@ import signal
 import sys
 
 from keel import __version__, commands, exits
-from keel.layers import LAYERS_DEFAULT, LAYERS_ENV
+from keel.layers import (
+    CACHE_DEFAULT,
+    CACHE_ENV,
+    LAYERS_DEFAULT,
+    LAYERS_ENV,
+)
 from keel.spec import CONF_DEFAULT, CONF_ENV, SPEC_DEFAULT, SPEC_ENV
 
 
@@ -37,6 +42,10 @@ def conf_default() -> str:
 
 def layers_default() -> str:
     return os.environ.get(LAYERS_ENV, LAYERS_DEFAULT)
+
+
+def cache_default() -> str:
+    return os.environ.get(CACHE_ENV, CACHE_DEFAULT)
 
 
 def add_common_options(parser: argparse.ArgumentParser) -> None:
@@ -106,6 +115,13 @@ def build_parser() -> argparse.ArgumentParser:
         commands.verify,
     )
     add_layer_options(verify_parser)
+
+    pull_parser = _add_command(
+        subparsers, "pull",
+        "fetch the layers of an appliance that the cache does not have",
+        commands.pull,
+    )
+    add_pull_options(pull_parser)
     return parser
 
 
@@ -124,6 +140,32 @@ def add_layer_options(parser: argparse.ArgumentParser) -> None:
         help="directory of layer tarballs and hash files (default: the"
         " layers directory)",
     )
+
+
+def add_cache_option(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--cache-dir",
+        default=cache_default(),
+        metavar="DIR",
+        help=f"layer cache (default: ${CACHE_ENV} or {CACHE_DEFAULT})",
+    )
+
+
+def add_pull_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "layer",
+        metavar="LAYER",
+        help="layer name to look up at the source, or the path of its"
+        " manifest file",
+    )
+    parser.add_argument(
+        "--source",
+        required=True,
+        metavar="URL-or-DIR",
+        help="where manifests and tarballs are served: an http(s) URL such"
+        " as http://[2001:db8::1]/layers, or a directory",
+    )
+    add_cache_option(parser)
 
 
 def _add_spec_action(subparsers, name: str, help_text: str, handler) -> None:

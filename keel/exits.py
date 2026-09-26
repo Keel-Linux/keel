@@ -15,6 +15,7 @@ MANIFEST_INVALID = 6
 LAYER_MISMATCH = 7
 SIGNATURE_UNVERIFIED = 8
 NOT_IMPLEMENTED = 9
+LAYER_UNAVAILABLE = 10
 
 DESCRIPTIONS = {
     OK: "success, including the no-op cases",
@@ -27,4 +28,6 @@ DESCRIPTIONS = {
     LAYER_MISMATCH: "a layer does not match its manifest",
     SIGNATURE_UNVERIFIED: "a layer hash file could not be verified",
     NOT_IMPLEMENTED: "command is a documented stub, not implemented yet",
+    LAYER_UNAVAILABLE: "a layer could not be fetched into the cache, or is"
+    " not in it",
 }

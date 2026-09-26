@@ -13,3 +13,16 @@ class ManifestError(Exception):
         self.path = path
         self.errors = list(errors)
         super().__init__(f"{path}: " + "; ".join(self.errors))
+
+
+class LayerError(Exception):
+    """pull or assemble cannot go on; `code` is the exit code to return
+
+    Raised with the code from keel.exits that names the reason, so the
+    command function prints the message and returns the code without
+    knowing which step failed.
+    """
+
+    def __init__(self, code: int, message: str):
+        self.code = code
+        super().__init__(message)

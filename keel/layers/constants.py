@@ -10,9 +10,13 @@ import re
 
 LAYERS_DEFAULT = "/var/lib/keel/layers"
 LAYERS_ENV = "KEEL_LAYERS_DIR"
+CACHE_DEFAULT = "/var/cache/keel/layers"
+CACHE_ENV = "KEEL_CACHE_DIR"
 
 MANIFEST_SUFFIX = ".manifest"
 HASH_SUFFIX = ".hash"
+TARBALL_SUFFIX = ".tar.zst"
+PART_SUFFIX = ".part"
 NONE = "none"
 
 KIND_ROOTFS = "rootfs"
@@ -49,3 +53,6 @@ SIGNED_MESSAGE_MARK = "-----BEGIN PGP SIGNED MESSAGE-----"
 SIGNATURE_MARK = "-----BEGIN PGP SIGNATURE-----"
 
 READ_CHUNK = 1 << 20
+
+URL_SCHEMES = ("http", "https")
+FETCH_TIMEOUT = 60
