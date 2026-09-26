@@ -257,9 +257,10 @@ class TestApplySystem(ApplySystemTestCase):
         self.assertEqual(code, exits.OK)
         self.assertNotIn("apply --system", out)
         self.assertIn("Warning: instance.fqdn: the /etc/hosts entry is"
-                      " written by apply --system only", err)
+                      " written by the system phase (--system,"
+                      " --system-only) only", err)
         self.assertIn("Warning: users: accounts and authorized keys are"
-                      " written by apply --system only", err)
+                      " written by the system phase", err)
         self.assertIn("Warning: locale:", err)
         self.assertEqual(sorted(os.listdir(self.root)), ["etc"])
 
@@ -270,6 +271,130 @@ class TestApplySystem(ApplySystemTestCase):
                 contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(commands.spec_apply(args), exits.OK)
         self.assertTrue(os.path.exists(self.conf))
+
+
+class TestSystemOnly(ApplySystemTestCase):
+    """--system-only: the system phase alone, with no conf phase at all
+
+    The first boot runs the conf phase at hook 00 and the system phase at
+    hook 10, so the second run must not repeat the first: resolving the
+    secrets again would regenerate a `generate: true` password after the
+    earlier hooks had already applied the first value.
+    """
+
+    def only(self, *extra: str) -> tuple[int, str, str]:
+        with mock.patch.object(effects.subprocess, "run",
+                               side_effect=fake_shadow_tools):
+            return run_cli("spec", "apply", "--spec", self.spec, "--conf",
+                           self.conf, "--system-only", "--root", self.root,
+                           *extra)
+
+    def test_converges_the_system_and_never_writes_the_conf(self):
+        code, out, err = self.only()
+        self.assertEqual((code, err), (exits.OK, ""))
+        self.assertEqual(out.splitlines()[0],
+                         f"apply --system-only: {self.conf}"
+                         " not read or written")
+        self.assertNotIn(f"applied to {self.conf}", out)
+        self.assertIn("apply --system-only: 10 change(s), 0 failed", out)
+        self.assertEqual(self.read("etc/hosts"),
+                         "127.0.1.1 blog.example.org blog\n")
+        self.assertFalse(os.path.exists(self.conf))
+
+    def test_a_populated_conf_is_left_exactly_as_it_was(self):
+        with open(self.conf, "w") as fob:
+            fob.write("export ROOT_PASS=set-by-the-conf-phase\n")
+        code, out, err = self.only()
+        self.assertEqual((code, err), (exits.OK, ""))
+        self.assertIn("not read or written", out)
+        with open(self.conf) as fob:
+            self.assertEqual(fob.read(),
+                             "export ROOT_PASS=set-by-the-conf-phase\n")
+
+    def test_no_secret_is_resolved_so_a_generated_password_survives(self):
+        self.write_spec(SPEC + "first_login_wizard: true\n"
+                        "secrets:\n  root_password:\n"
+                        "    generate: true\n")
+        with mock.patch.object(commands.spec, "resolve_secrets") as resolve:
+            code, out, _ = self.only()
+        self.assertEqual(code, exits.OK)
+        resolve.assert_not_called()
+        self.assertIn("apply --system-only: 10 change(s), 0 failed", out)
+
+    def test_a_secret_file_that_does_not_exist_is_not_an_error(self):
+        self.write_spec(SPEC + "secrets:\n  root_password:\n"
+                        f"    file: {join(self.tmpdir, 'absent')}\n")
+        code, out, err = self.only()
+        self.assertEqual((code, err), (exits.OK, ""))
+        self.assertIn("apply --system-only: 10 change(s), 0 failed", out)
+
+    def test_a_spec_declaring_nothing_this_phase_converges_is_a_no_op(self):
+        self.write_spec("version: 1\ninstance:\n  hostname: blog\n")
+        code, out, err = self.only()
+        self.assertEqual((code, err), (exits.OK, ""))
+        self.assertIn("apply --system-only: nothing declared that this"
+                      " phase converges", out)
+        self.assertNotIn("change(s)", out)
+        self.assertEqual(sorted(os.listdir(join(self.root, "etc"))),
+                         ["group", "passwd"])
+
+    def test_a_failed_action_names_the_flag_in_the_summary(self):
+        def failing(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 1, "", "useradd: no\n")
+
+        with mock.patch.object(effects.subprocess, "run", side_effect=failing):
+            code, out, _ = run_cli(
+                "spec", "apply", "--spec", self.spec, "--conf", self.conf,
+                "--system-only", "--root", self.root,
+            )
+        self.assertEqual(code, exits.APPLY_FAILED)
+        self.assertIn("apply --system-only: 4 change(s), 4 failed", out)
+        self.assertFalse(os.path.exists(self.conf))
+
+    def test_dry_run_prints_the_plan_and_writes_nothing(self):
+        code, out, err = self.only("--dry-run")
+        self.assertEqual((code, err), (exits.OK, ""))
+        self.assertEqual(out.splitlines()[0],
+                         f"apply --system-only: {self.conf}"
+                         " not read or written")
+        self.assertIn("instance.fqdn: would write /etc/hosts", out)
+        self.assertIn("dry run: 10 change(s) planned, nothing written", out)
+        self.assertEqual(sorted(os.listdir(join(self.root, "etc"))),
+                         ["group", "passwd"])
+
+    def test_the_live_system_refusal_names_the_flag_that_asked(self):
+        with AS_USER:
+            code, out, err = run_cli("spec", "apply", "--spec", self.spec,
+                                     "--conf", self.conf, "--system-only")
+        self.assertEqual(code, exits.APPLY_NEEDS_ROOT)
+        self.assertIn("apply --system-only on the live system must run as"
+                      " root", err)
+        self.assertEqual(out, "")
+
+    def test_dry_run_on_the_live_system_needs_no_root(self):
+        with AS_USER:
+            code, out, _ = run_cli("spec", "apply", "--spec", self.spec,
+                                   "--conf", self.conf, "--system-only",
+                                   "--dry-run")
+        self.assertEqual(code, exits.OK)
+        self.assertIn("nothing written", out)
+
+    def test_both_phase_flags_at_once_is_a_usage_error(self):
+        with self.assertRaises(SystemExit) as raised:
+            run_cli("spec", "apply", "--spec", self.spec, "--system",
+                    "--system-only")
+        self.assertEqual(raised.exception.code, exits.USAGE)
+
+    def test_dry_run_alone_still_requires_a_phase_flag(self):
+        with self.assertRaises(SystemExit) as raised:
+            run_cli("spec", "apply", "--spec", self.spec, "--dry-run")
+        self.assertEqual(raised.exception.code, exits.USAGE)
+
+    def test_an_absent_spec_is_a_no_op_before_anything_else(self):
+        os.remove(self.spec)
+        code, out, err = self.only()
+        self.assertEqual((code, out), (exits.OK, ""))
+        self.assertIn("not found, nothing to do", err)
 
 
 class TestRoundTrip(ApplySystemTestCase):
