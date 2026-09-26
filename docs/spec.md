@@ -296,16 +296,49 @@ this version: only the key is declared here.
 ```yaml
 security:
   alerts: admin@example.org
-  updates: force
+  updates_at_first_boot: force
 ```
 
 | Field | State | Conf variable | Notes |
 | --- | --- | --- | --- |
 | `security.alerts` | read | `SEC_ALERTS` | An email address, or `skip` |
-| `security.updates` | read | `SEC_UPDATES` | `skip` or `force` |
+| `security.updates_at_first_boot` | read | `SEC_UPDATES` | `skip` or `force`. Renamed from `security.updates`, which is still accepted with a warning |
 
 `skip` and `force` are upper cased on the way out, because the hooks compare
 them upper case. An email address is passed through unchanged.
+
+### What `updates_at_first_boot` controls, and what it does not
+
+`force` makes the `95secupdates` hook install the pending security updates
+once, during the first boot, without asking. `skip` makes it install nothing
+and log that it was skipped. Unset, the hook asks, which is why the field is
+required for a headless boot ([docs/inspect.md](inspect.md)).
+
+It does not control whether the appliance keeps its security updates current
+afterwards. That is `cron-apt`, which the image ships configured either way,
+so a machine with `updates_at_first_boot: skip` still installs security
+updates on a schedule. The field was called `security.updates`, which said
+the opposite: `keel inspect` read the cron-apt install action, reported
+`force`, and every spec that declared `skip` drifted against a machine that
+was doing exactly what the spec asked. The name now says what the value
+does, and `keel diff` does not compare it at all, because the machine keeps
+no record of which value was used ([docs/diff.md](diff.md)).
+
+### Deprecated names
+
+A field that is renamed keeps working under the old name for the benefit of
+specs already on disk:
+
+```
+$ keel spec validate --spec instance.yaml
+Warning: instance.yaml: security.updates is deprecated, rename it to security.updates_at_first_boot: it reads as the machine's update policy, and it only ever controlled whether the first boot installs the pending security updates; the appliance keeps them current either way
+instance.yaml: ok (secret files checked)
+```
+
+The table is `keel.spec.compat.RENAMED`. Every command warns once, then
+works on the document under the current names, so nothing else in the
+library knows the old ones. A file that declares both names keeps the
+current one, and the warning says so.
 
 ## first_login_wizard
 

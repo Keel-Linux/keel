@@ -35,8 +35,8 @@ keel inspect --root /mnt/old-appliance --secrets-dir /etc/keel/secrets
 The required fields are the ones whose first boot hook prompts when its
 variable is unset, so a spec without them cannot be applied headless:
 `instance.hostname`, `instance.fqdn`, `network.interfaces`,
-`security.alerts` and `security.updates`. Every other gap is reported
-and leaves the exit code alone.
+`security.alerts` and `security.updates_at_first_boot`. Every other gap is
+reported and leaves the exit code alone.
 
 ## What is inferred, and from where
 
@@ -56,7 +56,7 @@ means running as root would have read it.
 | `tls.acme.*` | `/etc/dehydrated/confconsole.domains.txt`, else `/etc/dehydrated/domains.txt`; `/etc/dehydrated/confconsole.config` | The files confconsole's Let's Encrypt plugin writes. `enabled: true` with the domains when a domains file has any; `challenge` from `CHALLENGETYPE`, defaulting to `http-01` as dehydrated does. No `/etc/dehydrated`, or no domains, gives `enabled: false` |
 | `app.email`, `app.domain`, `app.options.*` | `/etc/inithooks.conf` | Root only, and often gone after the first boot. `APP_EMAIL`, `APP_DOMAIN` and every other `APP_*` variable except `APP_PASS`. Without a conf, `app.domain` falls back to `instance.fqdn` and `app.email` is reported as not inferred |
 | `security.alerts` | `/etc/inithooks.conf`, else `/etc/aliases`, else `/etc/cron-apt/config` | The secalerts hook writes a `root:` alias with the address and sets `MAILON=output`. An external root alias is the address; `MAILON=never`, or an aliases file without one, means `skip` |
-| `security.updates` | `/etc/inithooks.conf`, else `/etc/cron-apt/action.d/5-install`, else `/etc/apt/apt.conf.d/20auto-upgrades` | A cron-apt install action or `Unattended-Upgrade "1"` means `force`; nothing configured means `skip` |
+| `security.updates_at_first_boot` | `/etc/inithooks.conf`, else `/etc/cron-apt/action.d/5-install`, else `/etc/apt/apt.conf.d/20auto-upgrades` | `SEC_UPDATES` while the conf is still there is the value itself. Otherwise the appliance's update posture stands in for it: a cron-apt install action or `Unattended-Upgrade "1"` gives `force`, nothing configured gives `skip`, and the report says the first boot value leaves no trace. `keel diff` does not compare the field for that reason ([docs/diff.md](diff.md)) |
 | `users.<name>.authorized_keys` | `/root/.ssh/authorized_keys`, `/home/*/.ssh/authorized_keys` | Public key lines only, with any leading options (`no-pty`, `from=`) removed. Users without a readable file with at least one key are left out |
 | `users.<name>.shell` | `/etc/passwd` | The shell column of the user's entry; not inferred when the file is unreadable or has no entry for the user |
 | `users.<name>.groups` | `/etc/group` | The groups whose member list names the user, in file order; left out when there are none. Only the public columns of either file are read, never `/etc/shadow` |

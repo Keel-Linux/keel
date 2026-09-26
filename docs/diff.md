@@ -76,9 +76,9 @@ tls.acme.domains: same (blog.example.org)
 secrets: not compared (values are never read, on either side)
 hub.api_key: same (skip)
 security.alerts: same (admin@example.org)
-security.updates: unknown (declared force; not inferred: /etc/cron-apt/config permission denied (root only))
+security.updates_at_first_boot: not compared (a first boot input: 95secupdates installs the pending security updates once, and the appliance's update schedule, which is what the machine shows, is the same whichever value was used)
 locale.timezone: same (Europe/Lisbon)
-diff: 12 same, 1 drift, 1 unknown, 1 not declared, 1 not compared; drift found
+diff: 12 same, 1 drift, 0 unknown, 1 not declared, 2 not compared; drift found
 ```
 
 ## What is compared, and against what
@@ -100,7 +100,7 @@ is `unknown`, never `drift`, and `network.managed_by` is unknown whenever
 the interfaces are, because inspect derives one from the other.
 
 Normalisation, so that spelling is not drift: keywords (`security.alerts`,
-`security.updates`, `hub.api_key`) and domain names (`hostname`, `fqdn`,
+`security.updates_at_first_boot`, `hub.api_key`) and domain names (`hostname`, `fqdn`,
 `tls.acme.domains`) compare case insensitively and without a trailing dot;
 addresses, gateways and nameservers compare in canonical form
 (`2001:DB8:0001::10/64` equals `2001:db8:1::10/64`); booleans compare as
@@ -114,6 +114,7 @@ it:
 | `secrets` | Values are never read, on either side. A `hub.api_key` given as a secret reference is not compared for the same reason |
 | `app` | `inithooks.conf` is root only and consumed at first boot, so `app` values leave no trace to compare against; inspect's `app.domain` falls back to the fqdn, which would be a false drift |
 | `first_login_wizard`, `preseed` | Render time switches with no trace on the running machine |
+| `security.updates_at_first_boot` | A first boot input: the `95secupdates` hook installs the pending security updates once and leaves nothing behind, and the cron-apt schedule the machine does show is shipped with the image whichever value was used. inspect writes the field from that schedule so the spec it produces is applicable, and says in the report that it is a proxy ([docs/inspect.md](inspect.md)) |
 
 `version` is a property of the file, not of the machine, and is not
 listed.
@@ -165,12 +166,12 @@ which is exactly the change that should be reviewable on its own.
       "reason": ""
     },
     {
-      "field": "security.updates",
+      "field": "security.alerts",
       "section": "security",
       "status": "unknown",
-      "declared": "force",
+      "declared": "admin@example.org",
       "observed": null,
-      "reason": "/etc/cron-apt/config permission denied (root only)"
+      "reason": "/etc/aliases permission denied (root only)"
     }
   ],
   "counts": {"same": 1, "drift": 0, "unknown": 1, "not_declared": 0, "not_compared": 0},
