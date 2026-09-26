@@ -238,6 +238,9 @@ def _validate_tls(tls: Any) -> list[str]:
     for key in acme:
         if key not in ("enabled", "challenge", "domains"):
             errors.append(f"tls.acme.{key}: unknown key")
+    enabled = acme.get("enabled")
+    if enabled is not None and not isinstance(enabled, bool):
+        errors.append("tls.acme.enabled: must be true or false")
     if acme.get("challenge") not in (None, "http-01", "dns-01"):
         errors.append("tls.acme.challenge: must be http-01 or dns-01")
     domains = acme.get("domains")
