@@ -33,6 +33,11 @@ def read_spec(
     passed to spec.validate(): a command that never reads a secret value
     passes False, so the spec is usable on a machine that does not hold
     the secret files.
+
+    A field under a deprecated name is warned about once, naming the
+    current name, and the document every command works on is the
+    canonical one (keel.spec.compat), so nothing downstream knows about
+    the old names.
     """
     if not os.path.exists(path):
         print(f"{path}: not found, nothing to do", file=sys.stderr)
@@ -43,6 +48,10 @@ def read_spec(
     except spec.SpecError as e:
         error(str(e))
         return None, exits.SPEC_UNREADABLE
+
+    for message in spec.deprecations(doc):
+        warn(f"{path}: {message}")
+    doc = spec.canonical(doc)
 
     errors = spec.validate(doc, check_secret_files=check_secret_files)
     if errors:

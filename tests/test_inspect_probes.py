@@ -32,6 +32,8 @@ PASSWD = (
     "admin:x:1000:1000::/home/admin:/bin/bash\n"
 )
 GROUP = "root:x:0:\nadm:x:4:admin\nsudo:x:27:admin\nadmin:x:1000:\n"
+FIELD = "updates_at_first_boot"
+UPDATES = f"security.{FIELD}"
 IP_ADDR = "ip -6 addr show"
 # `ip -6 addr show` on a container whose address came from a router
 # advertisement: the global address carries mngtmpaddr, the link local one
@@ -498,6 +500,9 @@ class TestApp(unittest.TestCase):
 
 
 class TestSecurity(unittest.TestCase):
+    """The field is updates_at_first_boot: what the hook reads, not the
+    policy the appliance keeps (keel.inspect.security)"""
+
     ALIASES = File("/x/etc/aliases",
                    "postmaster: root\nroot: admin@example.org\n")
     NEVER = File("/x/etc/cron-apt/config", 'MAILON="never"\n')
@@ -513,18 +518,20 @@ class TestSecurity(unittest.TestCase):
     def test_inithooks_conf_wins_when_readable(self):
         conf = File("/x/c", "SEC_ALERTS=SKIP\nSEC_UPDATES=FORCE\n")
         section, _ = self.probe(conf=conf, aliases=self.ALIASES)
-        self.assertEqual(section, {"alerts": "skip", "updates": "force"})
+        self.assertEqual(section, {"alerts": "skip",
+                                   "updates_at_first_boot": "force"})
         conf = File("/x/c", "SEC_ALERTS=ops@example.org\nSEC_UPDATES=maybe\n")
         section, _ = self.probe(conf=conf, install=self.INSTALL)
         self.assertEqual(section, {"alerts": "ops@example.org",
-                                   "updates": "force"})
+                                   "updates_at_first_boot": "force"})
 
     def test_root_alias_and_cron_apt_install_action(self):
         section, findings = self.probe(aliases=self.ALIASES,
                                        install=self.INSTALL)
         self.assertEqual(section, {"alerts": "admin@example.org",
-                                   "updates": "force"})
+                                   "updates_at_first_boot": "force"})
         self.assertIn("root alias", reason(findings, "security.alerts"))
+        self.assertIn("update posture", reason(findings, UPDATES))
 
     def test_local_root_alias_with_mail_never_means_skip(self):
         aliases = File("/x/etc/aliases", "no colon here\nroot: admin\n")
@@ -550,19 +557,18 @@ class TestSecurity(unittest.TestCase):
 
     def test_unattended_upgrades_means_force(self):
         section, findings = self.probe(auto=self.AUTO)
-        self.assertEqual(section["updates"], "force")
-        self.assertIn("unattended", reason(findings, "security.updates"))
+        self.assertEqual(section[FIELD], "force")
+        self.assertIn("unattended", reason(findings, UPDATES))
 
     def test_cron_apt_without_install_action_means_skip(self):
         section, findings = self.probe(config=self.OUTPUT)
-        self.assertEqual(section["updates"], "skip")
-        self.assertIn("no install action",
-                      reason(findings, "security.updates"))
+        self.assertEqual(section[FIELD], "skip")
+        self.assertIn("no install action", reason(findings, UPDATES))
 
     def test_nothing_configured_means_skip(self):
         section, findings = self.probe()
-        self.assertEqual(section["updates"], "skip")
-        self.assertIn("neither", reason(findings, "security.updates"))
+        self.assertEqual(section[FIELD], "skip")
+        self.assertIn("neither", reason(findings, UPDATES))
 
 
 class TestSecrets(unittest.TestCase):

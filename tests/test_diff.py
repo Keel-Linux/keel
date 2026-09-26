@@ -124,7 +124,9 @@ class TestFlattenAndNormalize(unittest.TestCase):
         })
 
     def test_keywords_and_domains_compare_case_insensitively(self):
-        self.assertEqual(normalize("security.updates", "FORCE"), "force")
+        self.assertEqual(
+            normalize("security.updates_at_first_boot", "FORCE"), "force"
+        )
         self.assertEqual(normalize("hub.api_key", "SKIP"), "skip")
         self.assertEqual(normalize("instance.fqdn", "Blog.Example.org."),
                          "blog.example.org")
@@ -323,7 +325,8 @@ class TestCompareAgainstFixture(unittest.TestCase):
             "tls": {"acme": {"enabled": True, "challenge": "dns-01",
                              "domains": ["blog.example.org",
                                          "www.blog.example.org"]}},
-            "security": {"alerts": "admin@example.org", "updates": "FORCE"},
+            "security": {"alerts": "admin@example.org",
+                         "updates_at_first_boot": "FORCE"},
             "hub": {"api_key": "SKIP"},
             "users": {"admin": {"authorized_keys": [
                 "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureAdminKeyMaterial"
@@ -335,7 +338,11 @@ class TestCompareAgainstFixture(unittest.TestCase):
         result = compare(self.matching(), self.observed)
         self.assertEqual(result.count(DRIFT), 0)
         self.assertEqual(result.count(UNKNOWN), 0)
-        self.assertEqual(result.count(SAME), 16)
+        self.assertEqual(result.count(SAME), 15)
+        self.assertEqual(
+            [f.field for f in result.fields if f.status == NOT_COMPARED],
+            ["security.updates_at_first_boot"],
+        )
         undeclared = [f.field for f in result.fields
                       if f.status == NOT_DECLARED]
         self.assertEqual(undeclared, [
@@ -358,7 +365,7 @@ class TestCompareAgainstFixture(unittest.TestCase):
                                     ["2001:db8:1::53"]),
             "tls.acme.challenge": ("tls", "acme", {"enabled": True,
                                                    "challenge": "http-01"}),
-            "security.updates": ("security", "updates", "skip"),
+            "security.alerts": ("security", "alerts", "ops@example.org"),
             "hub.api_key": ("hub", "api_key", "SKIP "),
             "users.admin.authorized_keys": ("users", "admin",
                                             {"authorized_keys": [KEY]}),
@@ -380,6 +387,20 @@ class TestCompareAgainstFixture(unittest.TestCase):
                 else:
                     self.assertEqual(drifted, [field])
                     self.assertEqual(result.code, exits.DRIFT_FOUND)
+
+    def test_the_first_boot_field_never_drifts_whatever_it_declares(self):
+        """updates_at_first_boot is an input the machine keeps no record of"""
+        for value in ("skip", "force"):
+            with self.subTest(value=value):
+                declared = self.matching()
+                declared["security"] = {**declared["security"],
+                                        "updates_at_first_boot": value}
+                result = compare(declared, self.observed)
+                field = by_field(result)["security.updates_at_first_boot"]
+                self.assertEqual(field.status, NOT_COMPARED)
+                self.assertIn("95secupdates installs the pending security"
+                              " updates once", field.reason)
+                self.assertEqual(result.code, exits.OK)
 
     def test_diff_root_runs_the_collector_and_the_comparison(self):
         result = diff_root(self.matching(), TURNKEY)

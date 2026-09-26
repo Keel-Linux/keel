@@ -41,7 +41,7 @@ MATCHING = (
     "        gateway: fe80::1\n"
     "security:\n"
     "  alerts: admin@example.org\n"
-    "  updates: force\n"
+    "  updates_at_first_boot: force\n"
 )
 
 
@@ -74,8 +74,8 @@ class TestDiffCommand(DiffTestCase):
                       " (observed dhcp)", lines)
         self.assertEqual(
             lines[-1],
-            "diff: 8 same, 0 drift, 0 unknown, 17 not declared,"
-            " 0 not compared; no drift",
+            "diff: 7 same, 0 drift, 0 unknown, 17 not declared,"
+            " 1 not compared; no drift",
         )
 
     def test_drift_exits_drift_found(self):
@@ -88,7 +88,9 @@ class TestDiffCommand(DiffTestCase):
         self.assertTrue(out.endswith("; drift found\n"))
 
     def test_unobservable_declared_fields_exit_incomplete(self):
-        path = self.write_spec(MATCHING.replace("  updates: force\n", ""))
+        path = self.write_spec(
+            MATCHING.replace("  updates_at_first_boot: force\n", "")
+        )
         code, out, _ = run_cli("diff", "--spec", path, "--root", MISSING)
         self.assertEqual(code, exits.INSPECT_INCOMPLETE)
         self.assertIn("instance.hostname: unknown (declared blog; not"
@@ -99,11 +101,19 @@ class TestDiffCommand(DiffTestCase):
             "; no drift, but declared fields could not be observed\n"))
 
     def test_drift_takes_precedence_over_unknown_fields(self):
-        path = self.write_spec(MATCHING)
+        path = self.write_spec(MATCHING.replace("alerts: admin@example.org",
+                                                "alerts: skip"))
+        code, out, _ = run_cli("diff", "--spec", path, "--root", TURNKEY)
+        self.assertEqual(code, exits.DRIFT_FOUND)
+        self.assertIn("security.alerts: drift (declared skip, observed"
+                      " admin@example.org)", out)
+        path = self.write_spec(
+            MATCHING + "tls:\n  acme:\n    enabled: true\n", "drifted.yaml"
+        )
         code, out, _ = run_cli("diff", "--spec", path, "--root", MISSING)
         self.assertEqual(code, exits.DRIFT_FOUND)
-        self.assertIn("security.updates: drift (declared force, observed"
-                      " skip)", out)
+        self.assertIn("tls.acme.enabled: drift (declared true, observed"
+                      " false)", out)
         self.assertIn(": unknown (", out)
 
     def test_json_format_carries_everything_a_caller_needs(self):
@@ -115,7 +125,8 @@ class TestDiffCommand(DiffTestCase):
         self.assertEqual(document["spec"], path)
         self.assertEqual(document["root"], TURNKEY)
         self.assertEqual(document["exit_code"], exits.OK)
-        self.assertEqual(document["counts"]["same"], 8)
+        self.assertEqual(document["counts"]["same"], 7)
+        self.assertEqual(document["counts"]["not_compared"], 1)
         first = document["fields"][0]
         self.assertEqual(first, {
             "field": "instance.hostname", "section": "instance",

@@ -15,6 +15,7 @@ value.
 
 from typing import Any
 
+from keel.spec.compat import canonical
 from keel.spec.constants import (
     SCHEMA_VERSION,
     SECRET_BACKENDS,
@@ -39,7 +40,13 @@ def validate(doc: dict, *, check_secret_files: bool = True) -> list[str]:
 
     With `check_secret_files` false, a `file:` secret reference is still
     checked for structure, but the file itself is not looked at.
+
+    The document is canonicalised first (keel.spec.compat), so a spec
+    that still uses a deprecated field name is validated under the name
+    it means, not rejected as unknown. The warning about the old name is
+    printed by the caller, which is keel.commands.read_spec.
     """
+    doc = canonical(doc)
     errors: list[str] = []
 
     if doc.get("version") != SCHEMA_VERSION:
@@ -198,7 +205,7 @@ def _validate_security(security: Any) -> list[str]:
 
     errors = []
     for key in security:
-        if key not in ("alerts", "updates"):
+        if key not in ("alerts", "updates_at_first_boot"):
             errors.append(f"security.{key}: unknown key")
 
     alerts = security.get("alerts")
@@ -208,9 +215,11 @@ def _validate_security(security: Any) -> list[str]:
                 "security.alerts: must be 'skip' or an email address"
             )
 
-    updates = security.get("updates")
+    updates = security.get("updates_at_first_boot")
     if updates is not None and str(updates).lower() not in ("skip", "force"):
-        errors.append("security.updates: must be 'skip' or 'force'")
+        errors.append(
+            "security.updates_at_first_boot: must be 'skip' or 'force'"
+        )
     return errors
 
 

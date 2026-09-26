@@ -284,12 +284,12 @@ class TestSecurity(unittest.TestCase):
 
     def test_rejects_updates_that_is_not_skip_or_force(self):
         messages(
-            "version: 1\nsecurity:\n  updates: weekly\n",
-            "security.updates: must be 'skip' or 'force'",
+            "version: 1\nsecurity:\n  updates_at_first_boot: weekly\n",
+            "security.updates_at_first_boot: must be 'skip' or 'force'",
         )
 
     def test_accepts_skip_and_force_in_any_case(self):
-        text = "version: 1\nsecurity:\n  alerts: SKIP\n  updates: Force\n"
+        text = "version: 1\nsecurity:\n  alerts: SKIP\n  updates_at_first_boot: Force\n"
         self.assertEqual(errors(text), [])
 
 

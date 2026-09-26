@@ -181,7 +181,7 @@ app:
 
 security:
   alerts: admin@example.org
-  updates: force
+  updates_at_first_boot: force
 
 hub:
   api_key: skip

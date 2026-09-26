@@ -46,7 +46,8 @@ def render_env(doc: dict, secrets: dict[str, str]) -> str:
 
     security = doc.get("security") or {}
     _set(env, "SEC_ALERTS", _keyword(security.get("alerts")))
-    _set(env, "SEC_UPDATES", _keyword(security.get("updates")))
+    _set(env, "SEC_UPDATES",
+         _keyword(security.get("updates_at_first_boot")))
 
     if doc.get("first_login_wizard"):
         env["AUTO_RUN"] = "TRUE"
