@@ -10,7 +10,8 @@ Default path: `/etc/keel/instance.yaml`, overridable with `$KEEL_SPEC` or
 
 | Marking | Meaning |
 | --- | --- |
-| read | Validated and acted on by `spec apply` today |
+| read | Validated and rendered into the conf by `spec apply` today |
+| system | Validated, and converged by `spec apply --system` ([docs/apply.md](apply.md)); without the flag `apply` warns that the section was left alone |
 | accepted | Validated, but `spec apply` does not act on it yet; `apply` prints a warning where the gap is silent otherwise |
 
 Anything not listed is rejected. Unknown keys are errors at every level, so a
@@ -25,6 +26,11 @@ declarative front end without any hook changing.
 
 If the conf file already holds something other than whitespace, `apply` leaves
 it alone, warns, and exits 0. The spec never overwrites a preseed.
+
+With `--system`, `apply` then converges the `users` and `locale` sections
+against the system itself (accounts, authorized keys, timezone, language),
+only where they differ, and never touches a password. That phase, its flags
+and what it never does are in [docs/apply.md](apply.md).
 
 ## Top level
 
@@ -304,15 +310,26 @@ users:
   root:
     authorized_keys:
       - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyMaterialOnly admin@blog
+  admin:
+    shell: /bin/bash
+    groups: [sudo, adm]
+    authorized_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyMaterialOnly admin@laptop
 ```
 
 | Field | State | Notes |
 | --- | --- | --- |
-| `users.<name>` | accepted | A user name (lower case, as `useradd` accepts). The value is a mapping with the one key below, or empty |
-| `users.<name>.authorized_keys` | accepted | A list of public key lines: a key type (`ssh-`, `ecdsa-`, `sk-`) followed by the key material. Nothing else about a user is modelled |
+| `users.<name>` | system | A user name (lower case, as `useradd` accepts). The value is a mapping of the keys below, or empty. `apply --system` creates the account when absent and never deletes one |
+| `users.<name>.authorized_keys` | system | A list of public key lines: a key type (`ssh-`, `ecdsa-`, `sk-`) followed by the key material. `apply --system` sets `<home>/.ssh/authorized_keys` to exactly these lines, mode 0600, owned by the user |
+| `users.<name>.shell` | system | An absolute path such as `/bin/bash`. Passed to `useradd --shell` on creation, `usermod --shell` when an existing account has another |
+| `users.<name>.groups` | system | A list of group names the user belongs to. Passed to `useradd --groups` on creation; missing ones are added with `usermod --append --groups`, none is removed. The groups must exist |
 
-`keel inspect` writes this section from the `authorized_keys` files it finds.
-Nothing creates the accounts or installs the keys yet, so `apply` warns.
+Nothing else about a user is modelled, and in particular no password: the
+`secrets` section names the root password by reference and the hooks set it
+(`ROOT_PASS`). `keel inspect` writes this section from the `authorized_keys`
+files it finds, with the shell from `/etc/passwd` and the groups from
+`/etc/group`. Without `--system`, `apply` warns that the section was left
+alone.
 
 ## locale
 
@@ -324,11 +341,13 @@ locale:
 
 | Field | State | Notes |
 | --- | --- | --- |
-| `locale.timezone` | accepted | A zoneinfo name such as `Europe/Lisbon` or `Etc/UTC` |
-| `locale.lang` | accepted | A locale name such as `en_US.UTF-8` or `C.UTF-8` |
+| `locale.timezone` | system | A zoneinfo name such as `Europe/Lisbon` or `Etc/UTC`. `apply --system` sets it through `timedatectl` on the live system, else writes `/etc/timezone` and the `/etc/localtime` symlink |
+| `locale.lang` | system | A locale name such as `en_US.UTF-8` or `C.UTF-8`. `apply --system` writes `LANG` in `/etc/default/locale` and generates the locale on the live system (`locale-gen`, else `localedef`) |
 
 Written by `keel inspect` from `/etc/timezone` (or the `/etc/localtime`
-symlink) and `/etc/default/locale`. Nothing applies it yet, so `apply` warns.
+symlink) and `/etc/default/locale`. Applied only where the observed value
+differs ([docs/apply.md](apply.md)). Without `--system`, `apply` warns that
+the section was left alone.
 
 ## Not in the spec yet
 

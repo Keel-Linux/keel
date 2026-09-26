@@ -87,8 +87,9 @@ The sections inspect observes are compared: `instance`, `network`, `tls`,
 leaf paths the inspect report uses, so `network.interfaces.eth0.ipv6`
 becomes one line per `method`, `address` and `gateway`, and a list
 (`network.nameservers`, `tls.acme.domains`, `users.<name>.authorized_keys`)
-is one leaf compared as a sequence, in order. The sources of every
-observed value are in [docs/inspect.md](inspect.md).
+is one leaf compared as a sequence, in order, except `users.<name>.groups`,
+which is a membership and compares as a set. The sources of every observed
+value are in [docs/inspect.md](inspect.md).
 
 A field inspect wrote is compared as it stands, even when inspect also
 noted something about that field it could not express (a `v4tunnel`
