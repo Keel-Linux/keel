@@ -112,10 +112,39 @@ class TestPlanHosts(unittest.TestCase):
                          "\n# a comment\n::1 ip6-localhost ip6-loopback\n")
 
     def test_a_declared_static_ipv6_address_carries_the_name(self):
-        action = only(self.plan(network=self.STATIC, hosts=self.HOSTS)[0])
+        """And the short name line goes, wherever the entry lands
+
+        Kept, it would answer first, because a name is resolved from the
+        first line that carries it, and hostname -f would still answer
+        blog although the file holds blog.example.org.
+        """
+        step = self.plan(network=self.STATIC, hosts=self.HOSTS)[0]
+        action = only(step)
         self.assertEqual(action.content,
-                         "127.0.0.1 localhost\n127.0.1.1 blog\n"
-                         "\n# a comment\n::1 ip6-localhost ip6-loopback\n"
+                         "127.0.0.1 localhost\n"
+                         "2001:db8:1::10 blog.example.org blog\n"
+                         "\n# a comment\n::1 ip6-localhost ip6-loopback\n")
+
+    def test_a_line_naming_the_host_beside_another_name_is_kept_and_named(self):
+        """Rewriting somebody else's line is not this phase's business"""
+        hosts = File("/x/etc/hosts", "127.0.0.1 localhost blog\n")
+        step = self.plan(network=self.STATIC, hosts=hosts)[0]
+        write, note = step.actions
+        self.assertEqual(write.content, "127.0.0.1 localhost blog\n"
+                         "2001:db8:1::10 blog.example.org blog\n")
+        self.assertEqual(
+            note.describe(),
+            "kept: '127.0.0.1 localhost blog' names blog beside another"
+            " name and answers before the entry, so hostname -f keeps"
+            " answering blog; edit that line by hand")
+        self.assertEqual(step.changes, 1)
+
+    def test_every_short_name_line_goes_and_the_entry_takes_the_first(self):
+        hosts = File("/x/etc/hosts",
+                     "127.0.0.1 localhost\n::1 blog\n127.0.1.1 blog\n")
+        action = only(self.plan(network=self.STATIC, hosts=hosts)[0])
+        self.assertEqual(action.content,
+                         "127.0.0.1 localhost\n"
                          "2001:db8:1::10 blog.example.org blog\n")
 
     def test_a_dynamic_address_is_never_written_into_the_file(self):
