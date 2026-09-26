@@ -42,15 +42,11 @@ def validate_network(network: Any) -> list[str]:
     if error:
         return errors + [error]
     for name, iface in (interfaces or {}).items():
-        errors.extend(
-            _validate_interface(
-                f"network.interfaces.{name}", iface, str(managed_by or "")
-            )
-        )
+        errors.extend(_validate_interface(f"network.interfaces.{name}", iface))
     return errors
 
 
-def _validate_interface(key: str, iface: Any, managed_by: str) -> list[str]:
+def _validate_interface(key: str, iface: Any) -> list[str]:
     error = mapping_error(key, iface)
     if error or not iface:
         return [error] if error else []
@@ -61,14 +57,6 @@ def _validate_interface(key: str, iface: Any, managed_by: str) -> list[str]:
             errors.append(f"{key}.{family}: unknown key")
     errors.extend(_validate_family(f"{key}.ipv4", iface.get("ipv4"), 4))
     errors.extend(_validate_family(f"{key}.ipv6", iface.get("ipv6"), 6))
-
-    ipv6 = iface.get("ipv6") or {}
-    if managed_by == "file" and ipv6.get("method") == "static":
-        errors.append(
-            f"{key}.ipv6: static addresses cannot be written to"
-            " /etc/network/interfaces by this version; use"
-            " network.managed_by: host and set the address on the host"
-        )
     return errors
 
 
