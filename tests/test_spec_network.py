@@ -82,8 +82,8 @@ class TestNetwork(unittest.TestCase):
         self.assertEqual(exported["IP_DNS1"], "192.0.2.53")
         self.assertEqual(exported["IP_DNS2"], "192.0.2.54")
 
-    def test_file_managed_static_ipv6_is_refused_in_this_version(self):
-        found = errors(
+    def test_file_managed_ipv6_static_maps_to_ip6_variables(self):
+        exported = env(
             "version: 1\n"
             "network:\n"
             "  managed_by: file\n"
@@ -92,8 +92,46 @@ class TestNetwork(unittest.TestCase):
             "      ipv6:\n"
             "        method: static\n"
             "        address: 2001:db8:1::10/64\n"
+            "        gateway: fe80::1\n"
+            "  nameservers:\n"
+            "    - 2001:db8:1::53\n"
+            "    - 2001:db8:2::53\n"
+            "    - 2001:db8:3::53\n"
         )
-        self.assertTrue(found)
+        self.assertEqual(exported, {
+            "IP6_CONFIG": "static",
+            "IP6_ADDRESS": "2001:db8:1::10/64",
+            "IP6_GW": "fe80::1",
+            "IP6_DNS1": "2001:db8:1::53",
+            "IP6_DNS2": "2001:db8:2::53",
+        })
+
+    def test_both_families_static_render_both_sets_of_variables(self):
+        exported = env(
+            "version: 1\n"
+            "network:\n"
+            "  managed_by: file\n"
+            "  interfaces:\n"
+            "    eth0:\n"
+            "      ipv4:\n"
+            "        method: static\n"
+            "        address: 192.0.2.10/24\n"
+            "        gateway: 192.0.2.1\n"
+            "      ipv6:\n"
+            "        method: static\n"
+            "        address: 2001:DB8:1::10/64\n"
+            "  nameservers:\n"
+            "    - 192.0.2.53\n"
+            "    - 2001:db8:1::53\n"
+        )
+        self.assertEqual(list(exported), [
+            "IP_CONFIG", "IP_ADDRESS", "IP_NETMASK", "IP_GW", "IP_DNS1",
+            "IP6_CONFIG", "IP6_ADDRESS", "IP6_DNS1",
+        ])
+        self.assertEqual(exported["IP6_ADDRESS"], "2001:db8:1::10/64")
+        self.assertEqual(exported["IP_DNS1"], "192.0.2.53")
+        self.assertEqual(exported["IP6_DNS1"], "2001:db8:1::53")
+        self.assertNotIn("IP6_GW", exported)
 
     def test_rejects_unknown_managed_by(self):
         self.assertTrue(errors("version: 1\nnetwork:\n  managed_by: magic\n"))

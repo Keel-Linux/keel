@@ -22,8 +22,9 @@ def probe_network(
 
     `interfaces` is /etc/network/interfaces followed by the files it
     sources from interfaces.d. `in_container` is the LXC marker: a
-    container's addresses belong to the host, and so does any static IPv6
-    address, because this version of apply cannot write one to a file.
+    container's addresses belong to the host; anywhere else the stanzas,
+    static IPv6 included, are what the 01ipconfig hook writes from the
+    spec, so the file owns them.
     """
     findings: list[Finding] = []
     declared, nameservers = _interfaces(interfaces, findings)
@@ -31,14 +32,10 @@ def probe_network(
 
     network: dict = {}
     if declared:
-        static6 = any(
-            iface.get("ipv6", {}).get("method") == "static"
-            for iface in declared.values()
-        )
-        network["managed_by"] = "host" if in_container or static6 else "file"
+        network["managed_by"] = "host" if in_container else "file"
         findings.append(inferred(
             "network.managed_by", network["managed_by"],
-            _managed_reason(in_container, static6),
+            _managed_reason(in_container),
         ))
         network["interfaces"] = declared
     if nameservers:
@@ -53,12 +50,10 @@ def probe_network(
     return (network or None), findings
 
 
-def _managed_reason(in_container: bool, static6: bool) -> str:
+def _managed_reason(in_container: bool) -> str:
     if in_container:
         return "LXC marker present, the host owns the interfaces"
-    if static6:
-        return "a static IPv6 address cannot be written by apply yet"
-    return "no LXC marker and no static IPv6 address"
+    return "no LXC marker, the interfaces file owns the addresses"
 
 
 def _interfaces(

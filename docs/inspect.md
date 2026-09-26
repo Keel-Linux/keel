@@ -51,7 +51,7 @@ means running as root would have read it.
 | `instance.fqdn` | `/etc/hosts`, then `hostname -f`, then `/etc/hostname` | The dotted name on the `/etc/hosts` line that names the host. `hostname -f` runs only on the live root, never on an offline tree. A dotted `/etc/hostname` is its own fqdn |
 | `network.interfaces.<name>.ipv6` | `/etc/network/interfaces` and `/etc/network/interfaces.d/*` | `iface <name> inet6 <method>` stanzas: `static` (with `address`, a `netmask` prefix length when the address has none, and `gateway`), `dhcp`, `auto`, `manual`. Any other method (`v4tunnel`, `6to4`) is reported as having no spec equivalent |
 | `network.interfaces.<name>.ipv4` | same files | `inet` stanzas: `static` (a dotted `netmask` becomes a prefix length), `dhcp`, `manual`. `lo` is skipped |
-| `network.managed_by` | the LXC marker `/var/lib/turnkey-info/inithooks.service/lxc`, or the stanzas | `host` when the marker exists or any static IPv6 address was found, because `apply` cannot write a static IPv6 address to a file yet (docs/spec.md); `file` otherwise |
+| `network.managed_by` | the LXC marker `/var/lib/turnkey-info/inithooks.service/lxc` | `host` when the marker exists, the container case; `file` otherwise, because the stanzas, static IPv6 included, are what the `01ipconfig` hook writes from the `IP_*` and `IP6_*` variables (docs/spec.md) |
 | `network.nameservers` | `/etc/resolv.conf` and `dns-nameservers` options | Deduplicated, IPv6 first. A loopback resolver (`127.0.0.53`, `::1`) is reported, not recorded: the upstream servers are not visible in the file |
 | `tls.acme.*` | `/etc/dehydrated/confconsole.domains.txt`, else `/etc/dehydrated/domains.txt`; `/etc/dehydrated/confconsole.config` | The files confconsole's Let's Encrypt plugin writes. `enabled: true` with the domains when a domains file has any; `challenge` from `CHALLENGETYPE`, defaulting to `http-01` as dehydrated does. No `/etc/dehydrated`, or no domains, gives `enabled: false` |
 | `app.email`, `app.domain`, `app.options.*` | `/etc/inithooks.conf` | Root only, and often gone after the first boot. `APP_EMAIL`, `APP_DOMAIN` and every other `APP_*` variable except `APP_PASS`. Without a conf, `app.domain` falls back to `instance.fqdn` and `app.email` is reported as not inferred |
@@ -99,7 +99,7 @@ One line per field, then a summary:
 instance.hostname: blog (from /etc/hostname)
 instance.fqdn: blog.example.org (from /etc/hosts)
 network.interfaces.eth0.ipv6: static 2001:db8:1::10/64 gateway fe80::1 (from /etc/network/interfaces)
-network.managed_by: host (from a static IPv6 address cannot be written by apply yet)
+network.managed_by: file (from no LXC marker, the interfaces file owns the addresses)
 secrets.root_password: file: /etc/keel/secrets/root_password (not extracted: values are never read; create the file (mode 0600) before apply)
 app.email: not inferred: /etc/inithooks.conf not present
 inspect: 20 inferred, 1 not inferred (0 required), 2 secrets to provide; spec complete
@@ -128,11 +128,14 @@ what the first boot would have asked.
 
 ## Tests
 
-`tests/fixtures/inspect/` holds three trees: `turnkey` (a WordPress like
+`tests/fixtures/inspect/` holds four trees: `turnkey` (a WordPress like
 appliance with a static IPv6 address, dehydrated with `dns-01`, cron-apt,
 two users with keys), `dhcp` (a Core container with DHCP on both
 families, sourced `interfaces.d`, a readable `inithooks.conf` and a
-`localtime` symlink) and `missing` (almost empty). Every probe is tested
+`localtime` symlink), `static` (the `interfaces` file the `01ipconfig`
+hook writes when both families are static, so that inspecting it, rendering
+the result and diffing it back report the `IP_*` and `IP6_*` keys and no
+drift) and `missing` (almost empty). Every probe is tested
 as a pure function in `tests/test_inspect_probes.py`; the reader, the
 collector, the exit codes and the round trip through `spec validate` and
 `spec render` are in `tests/test_inspect_cli.py`.

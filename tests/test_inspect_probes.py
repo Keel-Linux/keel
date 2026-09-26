@@ -168,7 +168,7 @@ class TestNetwork(unittest.TestCase):
             files, File("/x/etc/resolv.conf", resolv), container
         )
 
-    def test_static_ipv6_hands_the_network_to_the_host(self):
+    def test_static_ipv6_is_read_and_stays_with_the_file(self):
         section, findings = self.probe(
             "iface eth0 inet dhcp\n"
             "iface eth0 inet6 static\n"
@@ -182,8 +182,9 @@ class TestNetwork(unittest.TestCase):
         })
         self.assertEqual(section["interfaces"]["eth0"]["ipv4"],
                          {"method": "dhcp"})
-        self.assertEqual(section["managed_by"], "host")
-        self.assertIn("static IPv6", reason(findings, "network.managed_by"))
+        self.assertEqual(section["managed_by"], "file")
+        self.assertIn("interfaces file owns",
+                      reason(findings, "network.managed_by"))
 
     def test_ipv4_netmask_is_turned_into_a_prefix_length(self):
         section, _ = self.probe(

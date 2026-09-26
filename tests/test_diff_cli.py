@@ -32,7 +32,7 @@ MATCHING = (
     "  hostname: blog\n"
     "  fqdn: blog.example.org\n"
     "network:\n"
-    "  managed_by: host\n"
+    "  managed_by: file\n"
     "  interfaces:\n"
     "    eth0:\n"
     "      ipv6:\n"
@@ -93,7 +93,7 @@ class TestDiffCommand(DiffTestCase):
         self.assertEqual(code, exits.INSPECT_INCOMPLETE)
         self.assertIn("instance.hostname: unknown (declared blog; not"
                       " inferred: ", out)
-        self.assertIn("network.managed_by: unknown (declared host;", out)
+        self.assertIn("network.managed_by: unknown (declared file;", out)
         self.assertNotIn(": drift (", out)
         self.assertTrue(out.endswith(
             "; no drift, but declared fields could not be observed\n"))

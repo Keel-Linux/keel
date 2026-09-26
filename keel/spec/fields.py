@@ -51,10 +51,19 @@ def email_error(key: str, value: Any) -> str | None:
 
 
 def is_ipv4(value: str) -> bool:
+    return _version(value) == 4
+
+
+def is_ipv6(value: str) -> bool:
+    return _version(value) == 6
+
+
+def _version(value: str) -> int | None:
+    """The address family of a string, or None when it is not an address"""
     try:
-        return ipaddress.ip_address(value).version == 4
+        return ipaddress.ip_address(value).version
     except ValueError:
-        return False
+        return None
 
 
 def is_unicast(address: Any) -> bool:

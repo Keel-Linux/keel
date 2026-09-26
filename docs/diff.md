@@ -63,7 +63,7 @@ declared section: `not compared`, with the reason.
 ```
 instance.hostname: same (blog)
 instance.fqdn: drift (declared blog.example.org, observed shop.example.org)
-network.managed_by: same (host)
+network.managed_by: same (file)
 network.interfaces.eth0.ipv6.method: same (static)
 network.interfaces.eth0.ipv6.address: same (2001:db8:1::10/64)
 network.interfaces.eth0.ipv6.gateway: same (fe80::1)
@@ -181,7 +181,7 @@ ls: cannot access '/etc/keel/secrets/root_password': No such file or directory
 $ keel diff --spec old.yaml --root /mnt/old-appliance
 instance.hostname: same (blog)
 instance.fqdn: same (blog.example.org)
-network.managed_by: same (host)
+network.managed_by: same (file)
 network.interfaces.eth0.ipv6.method: same (static)
 network.interfaces.eth0.ipv6.address: same (2001:db8:1::10/64)
 network.interfaces.eth0.ipv6.gateway: same (fe80::1)

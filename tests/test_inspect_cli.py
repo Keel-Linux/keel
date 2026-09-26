@@ -3,9 +3,10 @@
 
 The fixture trees under tests/fixtures/inspect stand in for machines:
 `turnkey` is a TurnKey like appliance with a static IPv6 address, `dhcp`
-a container with DHCP on both families, `missing` a tree with almost
-nothing in it. The round trip test inspects the first one, then runs
-`keel spec validate` and `keel spec render` on the result.
+a container with DHCP on both families, `static` the interfaces file the
+01ipconfig hook writes from IP_* and IP6_* keys, `missing` a tree with
+almost nothing in it. The round trip tests inspect a tree, then run
+`keel spec validate`, `keel spec render` and `keel diff` on the result.
 """
 
 import contextlib
@@ -27,6 +28,7 @@ from keel.inspect.tree import NOT_PRESENT, PERMISSION_DENIED, Tree
 FIXTURES = join(dirname(abspath(__file__)), "fixtures", "inspect")
 TURNKEY = join(FIXTURES, "turnkey")
 DHCP = join(FIXTURES, "dhcp")
+STATIC = join(FIXTURES, "static")
 MISSING = join(FIXTURES, "missing")
 
 
@@ -249,14 +251,58 @@ class TestRoundTrip(unittest.TestCase):
         self.assertEqual(env["ROOT_PASS"], spec.MASK)
         self.assertNotIn("provided-by-the-operator", out)
 
-        # The IPv6 address survives in the spec; the conf has no variable
-        # for it yet (docs/spec.md, network), and the host owns the address.
+        # The file owns the addresses now that the hook writes static IPv6.
+        # The hook configures one interface and the last block of each
+        # family wins: eth1 brings inet static and inet6 auto, so the conf
+        # carries eth1's IPv4 address and IP6_CONFIG=dhcp, no IP6_ADDRESS.
         document = spec.load(self.output)
+        self.assertEqual(document["network"]["managed_by"], "file")
         self.assertEqual(
             document["network"]["interfaces"]["eth0"]["ipv6"]["address"],
             "2001:db8:1::10/64",
         )
-        self.assertNotIn("IP_ADDRESS", env)
+        self.assertEqual(env["IP_CONFIG"], "static")
+        self.assertEqual(env["IP_ADDRESS"], "192.0.2.10")
+        self.assertEqual(env["IP_DNS1"], "192.0.2.53")
+        self.assertEqual(env["IP6_CONFIG"], "dhcp")
+        self.assertEqual(env["IP6_DNS1"], "2001:db8:1::53")
+        self.assertEqual(env["IP6_DNS2"], "2001:db8:1::54")
+        self.assertNotIn("IP6_ADDRESS", env)
+
+    def test_static_stanzas_the_hook_wrote_render_the_keys_behind_them(self):
+        """inspect, render and diff agree on a file 01ipconfig produced"""
+        code, _, _ = run_cli(
+            "inspect", "--root", STATIC, "--output", self.output,
+            "--secrets-dir", self.secrets,
+        )
+        self.assertEqual(code, exits.OK)
+
+        code, out, _ = run_cli("spec", "render", "--spec", self.output)
+        self.assertEqual(code, exits.OK)
+        ip_keys = [line for line in out.splitlines()
+                   if line.startswith("export IP")]
+        self.assertEqual(ip_keys, [
+            "export IP_CONFIG=static",
+            "export IP_ADDRESS=192.0.2.10",
+            "export IP_NETMASK=255.255.255.0",
+            "export IP_GW=192.0.2.1",
+            "export IP_DNS1=192.0.2.53",
+            "export IP6_CONFIG=static",
+            "export IP6_ADDRESS=2001:db8:1::10/64",
+            "export IP6_GW=fe80::1",
+            "export IP6_DNS1=2001:db8:1::53",
+            "export IP6_DNS2=2001:db8:2::53",
+        ])
+
+        code, out, err = run_cli("diff", "--spec", self.output, "--root",
+                                 STATIC)
+        self.assertEqual((code, err), (exits.OK, ""))
+        self.assertIn("network.managed_by: same (file)\n", out)
+        self.assertIn("network.interfaces.eth0.ipv6.address: same"
+                      " (2001:db8:1::10/64)\n", out)
+        self.assertIn("network.interfaces.eth0.ipv4.address: same"
+                      " (192.0.2.10/24)\n", out)
+        self.assertIn(" 0 drift, 0 unknown, 0 not declared,", out)
 
     def test_inspected_container_tree_validates_once_the_fqdn_is_added(self):
         code, _, _ = run_cli(

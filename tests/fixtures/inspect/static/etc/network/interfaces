@@ -1,0 +1,18 @@
+# UNCONFIGURED INTERFACES
+# remove the above line if you edit this file
+
+auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet static
+    hostname blog
+    address 192.0.2.10
+    netmask 255.255.255.0
+    gateway 192.0.2.1
+    dns-nameservers 192.0.2.53
+iface eth0 inet6 static
+    hostname blog
+    address 2001:db8:1::10/64
+    gateway fe80::1
+    dns-nameservers 2001:db8:1::53 2001:db8:2::53

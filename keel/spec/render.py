@@ -11,10 +11,14 @@ import shlex
 from typing import Any
 
 from keel.spec.constants import KEYWORDS, MASK, MASKED_VARS, SECRET_VARS
-from keel.spec.fields import is_ipv4
+from keel.spec.fields import is_ipv4, is_ipv6
 from keel.spec.runtime import managed_by
 
 MAX_NAMESERVERS = 2
+# ifupdown has no SLAAC method of its own: `inet6 dhcp` is what the hook
+# writes for both, and it keeps SLAAC on as confconsole does.
+IP6_CONFIG = {"static": "static", "dhcp": "dhcp", "auto": "dhcp",
+              "manual": "manual"}
 
 
 def render_env(doc: dict, secrets: dict[str, str]) -> str:
@@ -85,37 +89,71 @@ def masked_secrets(doc: dict) -> dict[str, str]:
 
 
 def network_env(network: Any) -> dict[str, str]:
-    """Map the network section onto the IP_* variables 01ipconfig reads
+    """Map the network section onto the IP_* and IP6_* variables of 01ipconfig
 
     Only the file managed case exports anything: when the host owns the
-    interface configuration there is nothing for 01ipconfig to write.
+    interface configuration there is nothing for 01ipconfig to write. The
+    IPv4 variables come first, exactly as before IPv6 was rendered, and the
+    IP6_* variables only appear when an interface declares an ipv6 block,
+    so a spec without one renders the same conf it always did.
+
+    The hook configures one interface. When the spec declares several, the
+    last ipv6 block wins as a whole, so an address is never exported next
+    to another interface's method.
     """
     env: dict[str, str] = {}
     if not isinstance(network, dict) or managed_by(network) != "file":
         return env
 
     interfaces = network.get("interfaces") or {}
+    nameservers = [str(server) for server in network.get("nameservers") or []]
     for iface in interfaces.values():
-        ipv4 = (iface or {}).get("ipv4") or {}
-        method = str(ipv4.get("method") or "none")
-        if method == "none":
-            continue
-        env["IP_CONFIG"] = method
-        if method != "static":
-            continue
-        address = ipaddress.ip_interface(str(ipv4["address"]))
-        env["IP_ADDRESS"] = str(address.ip)
-        env["IP_NETMASK"] = str(address.netmask)
-        _set(env, "IP_GW", ipv4.get("gateway"))
-
-    nameservers = [
-        str(server)
-        for server in (network.get("nameservers") or [])
-        if is_ipv4(str(server))
-    ]
-    for index, server in enumerate(nameservers[:MAX_NAMESERVERS], start=1):
-        env[f"IP_DNS{index}"] = server
+        env.update(_ipv4_env((iface or {}).get("ipv4") or {}))
+    env.update(_dns_env("IP_DNS", filter(is_ipv4, nameservers)))
+    ipv6_env: dict[str, str] = {}
+    for iface in interfaces.values():
+        ipv6_env = _ipv6_env((iface or {}).get("ipv6") or {}) or ipv6_env
+    if ipv6_env:
+        env.update(ipv6_env)
+        env.update(_dns_env("IP6_DNS", filter(is_ipv6, nameservers)))
     return env
+
+
+def _ipv4_env(ipv4: dict) -> dict[str, str]:
+    method = str(ipv4.get("method") or "none")
+    if method == "none":
+        return {}
+    env = {"IP_CONFIG": method}
+    if method != "static":
+        return env
+    address = ipaddress.ip_interface(str(ipv4["address"]))
+    env["IP_ADDRESS"] = str(address.ip)
+    env["IP_NETMASK"] = str(address.netmask)
+    _set(env, "IP_GW", ipv4.get("gateway"))
+    return env
+
+
+def _ipv6_env(ipv6: dict) -> dict[str, str]:
+    """IP6_ADDRESS keeps its prefix length: an inet6 stanza has no netmask"""
+    method = str(ipv6.get("method") or "none")
+    if method == "none":
+        return {}
+    env = {"IP6_CONFIG": IP6_CONFIG[method]}
+    if method != "static":
+        return env
+    env["IP6_ADDRESS"] = str(ipaddress.ip_interface(str(ipv6["address"])))
+    _set(env, "IP6_GW", ipv6.get("gateway"))
+    return env
+
+
+def _dns_env(prefix: str, servers: Any) -> dict[str, str]:
+    """The first two nameservers of one family, as PREFIX1 and PREFIX2"""
+    return {
+        f"{prefix}{index}": server
+        for index, server in enumerate(
+            list(servers)[:MAX_NAMESERVERS], start=1
+        )
+    }
 
 
 def _set(env: dict[str, str], key: str, value: Any) -> None:
