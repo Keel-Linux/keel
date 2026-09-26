@@ -329,6 +329,13 @@ class TestTLS(unittest.TestCase):
             "tls.acme.email: unknown key",
         )
 
+    def test_rejects_an_enabled_that_is_not_a_boolean(self):
+        messages(
+            self.acme("    enabled: 'false'\n"),
+            "tls.acme.enabled: must be true or false",
+        )
+        self.assertEqual(errors(self.acme("    enabled: false\n")), [])
+
     def test_rejects_unknown_challenge(self):
         messages(
             self.acme("    challenge: tls-alpn-01\n"),
