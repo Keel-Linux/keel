@@ -45,6 +45,8 @@ KEYWORD_FIELDS = ("security.alerts", "security.updates", "hub.api_key")
 DOMAIN_LEAVES = ("hostname", "fqdn", "domains")
 ADDRESS_LEAVES = ("address",)
 HOST_LEAVES = ("gateway", "nameservers")
+# Lists whose order carries no meaning: group membership is a set.
+UNORDERED_LEAVES = ("groups",)
 # Fields inspect derives from another one, so they are unknown together.
 DERIVED_FROM = {"network.managed_by": "network.interfaces"}
 
@@ -141,7 +143,10 @@ def flatten(prefix: str, mapping: dict) -> Iterator[tuple[str, object]]:
 def normalize(path: str, value: object) -> object:
     """The comparable form of one value"""
     if isinstance(value, list):
-        return tuple(normalize(path, item) for item in value)
+        items = tuple(normalize(path, item) for item in value)
+        if path.rsplit(".", 1)[-1] in UNORDERED_LEAVES:
+            return tuple(sorted(items, key=str))
+        return items
     if isinstance(value, bool):
         return "true" if value else "false"
     text = str(value).strip()

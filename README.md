@@ -10,7 +10,8 @@ which means every operation runs headless from the same code path.
 
 ## Status
 
-Working today: `spec validate`, `spec render`, `spec apply`, `inspect`
+Working today: `spec validate`, `spec render`, `spec apply` (see
+[docs/apply.md](docs/apply.md)), `inspect`
 (see [docs/inspect.md](docs/inspect.md)), `diff` (see
 [docs/diff.md](docs/diff.md)), `pull`, `assemble`, and the layers half of
 `verify` (see [docs/layers.md](docs/layers.md)).
@@ -24,7 +25,7 @@ exits 9: the packages half of `verify`. It never pretends to work.
 | --- | --- |
 | `keel spec validate` | Check the spec and report every error it finds, not just the first; the secret files are checked too, unless `--no-secret-files` |
 | `keel spec render` | Print the conf that `apply` would write, with every secret masked |
-| `keel spec apply` | Write the conf, leaving an existing non empty conf untouched |
+| `keel spec apply` | Write the conf, leaving an existing non empty conf untouched; with `--system`, also converge users (accounts, authorized keys), timezone and locale, only where they differ, never touching a password (brief section 4, principle 1) |
 | `keel inspect` | Write a spec from the running machine, or from an offline root, and report every field with its source or why it was not inferred; secrets are never read (brief sections 5.2 and 7) |
 | `keel diff` | Report drift between the spec and the running machine, or an offline root, field by field, through the same collector `inspect` uses; secrets are never compared and their files need not exist, nothing is written (brief section 5.2) |
 | `keel verify` | Check the installed layers against their manifests, one line per layer (brief section 5.4; packages not implemented yet) |
@@ -44,6 +45,14 @@ Every command accepts the same three options, so a caller never has to branch:
 | Option | Meaning |
 | --- | --- |
 | `--no-secret-files` | Check the structure of every secret reference but not that the file exists with the right owner and mode. For a machine that does not hold the secrets. The output says whether the files were checked |
+
+`keel spec apply` also accepts:
+
+| Option | Meaning |
+| --- | --- |
+| `--system` | After the conf, converge the system state the spec declares: users with their authorized keys, timezone, locale. Root on the live system. Off by default in this version |
+| `--dry-run` | With `--system`: print the plan and change nothing, not even the conf; reads no secret and needs no root |
+| `--root DIR` | The filesystem `--system` converges: `/` (the default, the live system) or a scratch tree. The conf path stays `--conf` |
 
 `keel verify` also accepts:
 
@@ -102,6 +111,8 @@ Defined in one place, `keel/exits.py`, and reproduced here.
 | 12 | `ASSEMBLE_FAILED` | The rootfs is not empty or cannot be created, or `tar` or `zstd` failed while extracting or packing |
 | 13 | `INSPECT_INCOMPLETE` | `inspect` wrote the spec, but a required field (hostname, fqdn, interfaces, alerts, updates) could not be inferred; or `diff` found no drift, but a declared field could not be observed. The report says which and why |
 | 14 | `DRIFT_FOUND` | `diff` found at least one declared field whose observed value differs. Drift wins over unobserved fields, so a report with both exits 14 |
+| 15 | `APPLY_NEEDS_ROOT` | `apply --system` on the live system was run by a user other than root; nothing was written, not even the conf |
+| 16 | `APPLY_FAILED` | `apply --system` could not make at least one change; the output names it. The conf was written and every other change was made, so the run can be repeated |
 
 Two rules that callers depend on:
 
@@ -121,7 +132,10 @@ Two rules that callers depend on:
   writes nothing; a spec `inspect` wrote diffs clean against the machine
   it was read from, even when the secret files it names do not exist
   there, because secrets are references and a machine that is only being
-  compared may not hold them.
+  compared may not hold them;
+- `apply --system` changes only what differs, deletes nothing and never
+  touches a password; a second run changes nothing, and `--dry-run`
+  changes nothing at all ([docs/apply.md](docs/apply.md)).
 
 ## An instance file
 
@@ -216,6 +230,9 @@ code = commands.spec_apply(args)
 if code != exits.OK:
     show_error(exits.DESCRIPTIONS[code])
 ```
+
+The same call with `system=True`, `dry_run=False` and `root="/"` in the
+Namespace runs the system phase as well ([docs/apply.md](docs/apply.md)).
 
 Every menu action has a headless equivalent with the same exit code, and the
 tests exercise the CLI, so the TUI cannot drift away from it. The layer

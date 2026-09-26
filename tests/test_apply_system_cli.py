@@ -1,0 +1,310 @@
+# Copyright (c) 2026 KeelLinux maintainers
+"""keel spec apply --system end to end, and the round trip through inspect
+
+useradd and usermod are replaced at the subprocess boundary by a fake
+that edits the scratch tree's passwd and group files the way the real
+commands would under --root, so the suite needs no root. Everything else
+(directories, keys files, modes, the timezone files, the locale file) is
+written for real under a temporary root and read back by keel inspect.
+"""
+
+import contextlib
+import io
+import json
+import os
+import subprocess
+import tempfile
+import unittest
+from argparse import Namespace
+from os.path import abspath, dirname, join
+from unittest import mock
+
+from helpers import spec
+
+from keel import commands, exits
+from keel.cli import main
+from keel.system import effects
+
+FIXTURES = join(dirname(abspath(__file__)), "fixtures", "inspect")
+TURNKEY = join(FIXTURES, "turnkey")
+KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyMaterialOnly admin@blog"
+AS_ROOT = mock.patch("os.geteuid", return_value=0)
+AS_USER = mock.patch("os.geteuid", return_value=1000)
+
+SPEC = (
+    "version: 1\n"
+    "users:\n"
+    "  root:\n"
+    "    authorized_keys:\n"
+    f"      - {KEY}\n"
+    "  admin:\n"
+    "    shell: /bin/bash\n"
+    "    groups: [sudo]\n"
+    "    authorized_keys:\n"
+    f"      - {KEY}\n"
+    "locale:\n"
+    "  timezone: Europe/Lisbon\n"
+    "  lang: en_US.UTF-8\n"
+)
+
+
+def run_cli(*argv: str) -> tuple[int, str, str]:
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = main(list(argv))
+    return code, out.getvalue(), err.getvalue()
+
+
+def fake_shadow_tools(argv, **kwargs):
+    """useradd and usermod under --root, as far as passwd and group go"""
+    if argv[0] not in ("useradd", "usermod"):
+        return subprocess.CompletedProcess(argv, 1, "", "not here\n")
+    options = dict(zip(argv, argv[1:]))
+    root = options["--root"]
+    name = argv[-1]
+    if argv[0] == "useradd":
+        home = "/root" if name == "root" else f"/home/{name}"
+        with open(join(root, "etc", "passwd"), "a") as fob:
+            shell = options.get("--shell", "/bin/sh")
+            fob.write(f"{name}:x:{os.getuid()}:{os.getgid()}::{home}:{shell}\n")
+        os.makedirs(join(root, home.strip("/")), exist_ok=True)
+    for group in options.get("--groups", "").split(","):
+        if group:
+            with open(join(root, "etc", "group"), "a") as fob:
+                fob.write(f"{group}:x:27:{name}\n")
+    return subprocess.CompletedProcess(argv, 0, "", "")
+
+
+class ApplySystemTestCase(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.conf = join(self.tmpdir, "inithooks.conf")
+        self.root = join(self.tmpdir, "scratch")
+        os.makedirs(join(self.root, "etc"))
+        for name in ("passwd", "group"):
+            with open(join(self.root, "etc", name), "w") as fob:
+                fob.write("")
+        self.spec = join(self.tmpdir, "instance.yaml")
+        self.write_spec(SPEC)
+
+    def write_spec(self, text: str) -> None:
+        with open(self.spec, "w") as fob:
+            fob.write(text)
+
+    def apply(self, *extra: str) -> tuple[int, str, str]:
+        with mock.patch.object(effects.subprocess, "run",
+                               side_effect=fake_shadow_tools):
+            return run_cli("spec", "apply", "--spec", self.spec, "--conf",
+                           self.conf, "--system", "--root", self.root, *extra)
+
+    def read(self, relative: str) -> str:
+        with open(join(self.root, relative)) as fob:
+            return fob.read()
+
+
+class TestApplySystem(ApplySystemTestCase):
+    def test_converges_a_scratch_tree_then_changes_nothing_on_rerun(self):
+        code, out, err = self.apply()
+        self.assertEqual((code, err), (exits.OK, ""))
+        self.assertIn(f"{self.spec} applied to {self.conf}", out)
+        self.assertIn("users.admin: create user admin (useradd --root", out)
+        self.assertIn("--shell /bin/bash --groups sudo admin): done", out)
+        self.assertIn("apply --system: 9 change(s), 0 failed", out)
+        self.assertNotIn("Warning: users", err)
+        self.assertEqual(self.read("home/admin/.ssh/authorized_keys"),
+                         f"{KEY}\n")
+        keys = join(self.root, "home", "admin", ".ssh", "authorized_keys")
+        self.assertEqual(os.stat(keys).st_mode & 0o777, 0o600)
+        self.assertEqual(os.stat(dirname(keys)).st_mode & 0o777, 0o700)
+        self.assertEqual(self.read("etc/timezone"), "Europe/Lisbon\n")
+        self.assertEqual(os.readlink(join(self.root, "etc", "localtime")),
+                         "/usr/share/zoneinfo/Europe/Lisbon")
+        self.assertEqual(self.read("etc/default/locale"),
+                         "LANG=en_US.UTF-8\n")
+
+        code, out, _ = self.apply()
+        self.assertEqual(code, exits.OK)
+        self.assertIn("apply --system: 0 change(s), 0 failed", out)
+        for line in out.splitlines()[2:-1]:
+            self.assertIn("unchanged", line, line)
+
+    def test_an_existing_user_is_never_recreated_and_keys_are_replaced(self):
+        with open(join(self.root, "etc", "passwd"), "w") as fob:
+            fob.write(f"admin:x:{os.getuid()}:{os.getgid()}::/srv/admin:/bin/sh\n")
+        os.makedirs(join(self.root, "srv", "admin", ".ssh"))
+        with open(join(self.root, "srv", "admin", ".ssh", "authorized_keys"),
+                  "w") as fob:
+            fob.write("ssh-rsa AAAAOld old@key\n")
+
+        code, out, _ = self.apply()
+
+        self.assertEqual(code, exits.OK)
+        self.assertIn("users.admin: change shell from /bin/sh to /bin/bash"
+                      " (usermod --root", out)
+        self.assertIn("users.admin: add to groups sudo (usermod --root", out)
+        self.assertNotIn("create user admin", out)
+        self.assertEqual(self.read("srv/admin/.ssh/authorized_keys"),
+                         f"{KEY}\n")
+
+    def test_dry_run_prints_the_plan_and_writes_nothing(self):
+        os.remove(join(self.root, "etc", "passwd"))
+        code, out, err = self.apply("--dry-run")
+        self.assertEqual((code, err), (exits.OK, ""))
+        self.assertEqual(out.splitlines()[0],
+                         f"dry run: {self.conf} not written")
+        self.assertIn("users.admin: would create user admin", out)
+        self.assertIn("locale.timezone: would write /etc/timezone", out)
+        self.assertIn("dry run: 9 change(s) planned, nothing written", out)
+        self.assertFalse(os.path.exists(self.conf))
+        self.assertEqual(sorted(os.listdir(self.root)), ["etc"])
+        self.assertEqual(os.listdir(join(self.root, "etc")), ["group"])
+
+    def test_dry_run_needs_no_secret_files(self):
+        self.write_spec(SPEC + "secrets:\n  root_password:\n"
+                        f"    file: {join(self.tmpdir, 'absent')}\n")
+        code, out, _ = self.apply("--dry-run")
+        self.assertEqual(code, exits.OK)
+        self.assertIn("nothing written", out)
+        code, _, err = self.apply()
+        self.assertEqual(code, exits.SPEC_INVALID)
+        self.assertIn("secret file not found", err)
+
+    def test_a_failed_command_fails_its_field_and_the_exit_code(self):
+        def failing(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 1, "", "useradd: no\n")
+
+        with mock.patch.object(effects.subprocess, "run", side_effect=failing):
+            code, out, _ = run_cli(
+                "spec", "apply", "--spec", self.spec, "--conf", self.conf,
+                "--system", "--root", self.root,
+            )
+        self.assertEqual(code, exits.APPLY_FAILED)
+        self.assertIn("users.admin: create user admin (useradd --root", out)
+        self.assertIn("): failed: useradd exited 1: useradd: no", out)
+        self.assertIn("users.admin.authorized_keys: ensure /home/admin/.ssh"
+                      " (mode 0700, owner admin): failed: owner not set", out)
+        self.assertIn("users.admin.authorized_keys: skipped: write", out)
+        self.assertIn("locale.timezone: write /etc/timezone (mode 0644): done",
+                      out)
+        self.assertIn("apply --system: 3 change(s), 4 failed", out)
+        self.assertTrue(os.path.exists(self.conf))
+
+    def test_a_populated_conf_is_kept_and_the_system_still_converges(self):
+        with open(self.conf, "w") as fob:
+            fob.write("export ROOT_PASS=preseeded\n")
+        code, out, err = self.apply()
+        self.assertEqual(code, exits.OK)
+        self.assertIn(f"Warning: {self.conf} is not empty, ignoring", err)
+        self.assertIn("apply --system: 9 change(s), 0 failed", out)
+        with open(self.conf) as fob:
+            self.assertEqual(fob.read(), "export ROOT_PASS=preseeded\n")
+
+    def test_the_live_system_refuses_a_user_before_writing_anything(self):
+        with AS_USER:
+            code, out, err = run_cli("spec", "apply", "--spec", self.spec,
+                                     "--conf", self.conf, "--system")
+        self.assertEqual(code, exits.APPLY_NEEDS_ROOT)
+        self.assertIn("must run as root", err)
+        self.assertIn("uid 1000", err)
+        self.assertEqual(out, "")
+        self.assertFalse(os.path.exists(self.conf))
+
+    def test_the_live_system_as_root_runs_the_plan(self):
+        """Root is stood in; observe and effects are replaced, / is untouched"""
+        fake_state = mock.MagicMock()
+        fake_plan = mock.MagicMock()
+        outcome = mock.MagicMock(lines=("users.root: unchanged (x)",),
+                                 failed=0)
+        outcome.summary.return_value = "apply --system: 0 change(s), 0 failed"
+        with AS_ROOT, \
+                mock.patch.object(commands.system, "observe",
+                                  return_value=fake_state) as observe, \
+                mock.patch.object(commands.system, "plan",
+                                  return_value=fake_plan), \
+                mock.patch.object(commands.system, "execute",
+                                  return_value=outcome) as execute:
+            code, out, _ = run_cli("spec", "apply", "--spec", self.spec,
+                                   "--conf", self.conf, "--system")
+        self.assertEqual(code, exits.OK)
+        self.assertEqual(observe.call_args.args[0], "/")
+        self.assertEqual(execute.call_args.args[2], False)
+        self.assertIn("users.root: unchanged (x)\napply --system", out)
+
+    def test_dry_run_on_the_live_system_needs_no_root(self):
+        with AS_USER:
+            code, out, _ = run_cli("spec", "apply", "--spec", self.spec,
+                                   "--conf", self.conf, "--system",
+                                   "--dry-run")
+        self.assertEqual(code, exits.OK)
+        self.assertIn("nothing written", out)
+        self.assertFalse(os.path.exists(self.conf))
+
+    def test_dry_run_requires_system(self):
+        with self.assertRaises(SystemExit) as raised:
+            run_cli("spec", "apply", "--spec", self.spec, "--dry-run")
+        self.assertEqual(raised.exception.code, exits.USAGE)
+
+    def test_without_system_the_conf_is_written_and_the_sections_warned(self):
+        code, out, err = run_cli("spec", "apply", "--spec", self.spec,
+                                 "--conf", self.conf)
+        self.assertEqual(code, exits.OK)
+        self.assertNotIn("apply --system", out)
+        self.assertIn("Warning: users: accounts and authorized keys are"
+                      " written by apply --system only", err)
+        self.assertIn("Warning: locale:", err)
+        self.assertEqual(sorted(os.listdir(self.root)), ["etc"])
+
+    def test_a_namespace_without_the_options_gets_the_conf_only(self):
+        """confconsole builds a Namespace by hand, as the README shows"""
+        args = Namespace(spec=self.spec, conf=self.conf, non_interactive=True)
+        with contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(commands.spec_apply(args), exits.OK)
+        self.assertTrue(os.path.exists(self.conf))
+
+
+class TestRoundTrip(ApplySystemTestCase):
+    """inspect a tree, apply --system into a fresh tree, inspect, diff"""
+
+    def setUp(self):
+        super().setUp()
+        self.secrets = join(self.tmpdir, "secrets")
+        os.mkdir(self.secrets)
+        for name in ("root_password", "db_password"):
+            path = join(self.secrets, name)
+            with open(path, "w") as fob:
+                fob.write("provided-by-the-operator\n")
+            os.chmod(path, 0o600)
+
+    def test_users_and_locale_show_no_drift_after_apply(self):
+        code, _, _ = run_cli("inspect", "--root", TURNKEY, "--output",
+                             self.spec, "--secrets-dir", self.secrets)
+        self.assertEqual(code, exits.OK)
+        declared = spec.load(self.spec)
+        self.assertEqual(declared["users"]["admin"]["groups"], ["adm", "sudo"])
+
+        code, out, _ = self.apply()
+        self.assertEqual(code, exits.OK, out)
+        self.assertIn("apply --system: 9 change(s), 0 failed", out)
+
+        code, out, _ = run_cli("diff", "--spec", self.spec, "--root",
+                               self.root, "--format", "json")
+        fields = {
+            field["field"]: field["status"]
+            for field in json.loads(out)["fields"]
+            if field["field"].split(".")[0] in ("users", "locale")
+        }
+        self.assertEqual(set(fields.values()), {"same"}, fields)
+        self.assertEqual(sorted(fields), [
+            "locale.lang", "locale.timezone", "users.admin.authorized_keys",
+            "users.admin.groups", "users.admin.shell",
+            "users.root.authorized_keys", "users.root.shell",
+        ])
+
+        code, out, _ = self.apply()
+        self.assertEqual(code, exits.OK)
+        self.assertIn("apply --system: 0 change(s), 0 failed", out)
+
+
+if __name__ == "__main__":
+    unittest.main()

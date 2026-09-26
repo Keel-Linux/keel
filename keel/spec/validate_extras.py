@@ -1,9 +1,10 @@
 # Copyright (c) 2026 KeelLinux maintainers
-"""Validation of the sections that are accepted but not acted on yet
+"""Validation of the users and locale sections
 
-users and locale are named by brief section 5.2 and written by
-`keel inspect`. Nothing applies them yet, so `apply` warns about them
-(see keel.spec.apply.unsupported) instead of dropping them silently.
+Both are named by brief section 5.2, written by `keel inspect` and
+converged by `spec apply --system` (keel.system). Without --system, apply
+warns about them (keel.spec.apply.unsupported) instead of dropping them
+silently.
 """
 
 import re
@@ -12,13 +13,15 @@ from typing import Any
 from keel.spec.fields import list_error, mapping_error
 
 USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}\$?$")
+SHELL_RE = re.compile(r"^/[A-Za-z0-9_./+-]+$")
 TIMEZONE_RE = re.compile(r"^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$")
 LANG_RE = re.compile(r"^[A-Za-z0-9_.@-]+$")
 KEY_TYPES = ("ssh-", "ecdsa-", "sk-")
+USER_KEYS = ("authorized_keys", "shell", "groups")
 
 
 def validate_users(users: Any) -> list[str]:
-    """Each user is a mapping holding a list of public keys, nothing else"""
+    """Each user is a mapping of public keys, a shell and groups, or empty"""
     error = mapping_error("users", users)
     if error or not users:
         return [error] if error else []
@@ -33,10 +36,12 @@ def validate_users(users: Any) -> list[str]:
             errors.extend([error] if error else [])
             continue
         for field in user:
-            if field != "authorized_keys":
+            if field not in USER_KEYS:
                 errors.append(f"{key}.{field}: unknown key")
         keys = user.get("authorized_keys")
         errors.extend(_validate_keys(f"{key}.authorized_keys", keys))
+        errors.extend(_validate_shell(f"{key}.shell", user.get("shell")))
+        errors.extend(_validate_groups(f"{key}.groups", user.get("groups")))
     return errors
 
 
@@ -57,6 +62,27 @@ def _is_public_key(line: Any) -> bool:
         return False
     fields = line.split()
     return len(fields) >= 2 and fields[0].startswith(KEY_TYPES)
+
+
+def _validate_shell(key: str, shell: Any) -> list[str]:
+    """An absolute path with no parent references, as useradd -s takes"""
+    if shell is None:
+        return []
+    if not isinstance(shell, str) or not SHELL_RE.match(shell) \
+            or ".." in shell:
+        return [f"{key}: must be an absolute path such as /bin/bash"]
+    return []
+
+
+def _validate_groups(key: str, groups: Any) -> list[str]:
+    error = list_error(key, groups)
+    if error:
+        return [error]
+    return [
+        f"{key}: not a valid group name ({str(group)[:24]!r})"
+        for group in groups or []
+        if not USERNAME_RE.match(str(group))
+    ]
 
 
 def validate_locale(locale: Any) -> list[str]:

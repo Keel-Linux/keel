@@ -103,11 +103,13 @@ def build_parser() -> argparse.ArgumentParser:
         "print the conf that apply would write, secrets masked",
         commands.spec_render,
     )
-    _add_spec_action(
+    apply_parser = _add_spec_action(
         spec_actions, "apply",
-        "write the conf, leaving an existing non empty conf alone",
+        "write the conf, leaving an existing non empty conf alone; with"
+        " --system also converge users and locale",
         commands.spec_apply,
     )
+    add_apply_options(apply_parser)
 
     inspect_parser = _add_command(
         subparsers, "inspect",
@@ -226,6 +228,23 @@ def add_root_option(parser: argparse.ArgumentParser, verb: str) -> None:
     )
 
 
+def add_apply_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--system",
+        action="store_true",
+        help="after the conf, converge the system state the spec declares"
+        " (users with their authorized keys, locale, timezone); root on the"
+        " live system (default: the conf only)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="with --system: print the plan and change nothing, not even"
+        " the conf",
+    )
+    add_root_option(parser, "converge with --system")
+
+
 def add_diff_options(parser: argparse.ArgumentParser) -> None:
     add_root_option(parser, "compare with the spec")
     parser.add_argument(
@@ -287,6 +306,8 @@ def main(argv: list[str] | None = None) -> int:
     if handler is None:
         parser.print_help(sys.stderr)
         return exits.USAGE
+    if getattr(args, "dry_run", False) and not args.system:
+        parser.error("--dry-run requires --system")
     return handler(args)
 
 

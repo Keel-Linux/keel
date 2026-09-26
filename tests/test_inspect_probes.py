@@ -27,6 +27,11 @@ ABSENT = File("/x/absent", problem=NOT_PRESENT)
 HOSTNAME_F = File("hostname -f", "blog.example.org\n")
 OFFLINE = File("hostname -f", problem="not run")
 KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyMaterialOnly admin@blog"
+PASSWD = (
+    "root:x:0:0:root:/root:/bin/bash\n"
+    "admin:x:1000:1000::/home/admin:/bin/bash\n"
+)
+GROUP = "root:x:0:\nadm:x:4:admin\nsudo:x:27:admin\nadmin:x:1000:\n"
 
 
 def statuses(findings: list[Finding], field: str) -> list[str]:
@@ -475,17 +480,57 @@ class TestUsers(unittest.TestCase):
     def test_public_keys_are_kept_without_their_options(self):
         text = f"# c\n{KEY}\nno-pty,from=\"2001:db8::1\" {KEY}\nssh-rsa\n"
         section, findings = users.probe_users(
-            [("root", File("/x/root/.ssh/authorized_keys", text))]
+            [("root", File("/x/root/.ssh/authorized_keys", text))],
+            ABSENT, ABSENT,
         )
         self.assertEqual(section, {"root": {"authorized_keys": [KEY, KEY]}})
         self.assertEqual(reason(findings, "users.root.authorized_keys"),
                          "/x/root/.ssh/authorized_keys")
 
+    def test_shell_and_groups_come_from_passwd_and_group(self):
+        passwd = File("/x/etc/passwd", PASSWD)
+        group = File("/x/etc/group", GROUP)
+        section, findings = users.probe_users(
+            [("admin", File("/x/home/admin/.ssh/authorized_keys", KEY)),
+             ("root", File("/x/root/.ssh/authorized_keys", KEY))],
+            passwd, group,
+        )
+        self.assertEqual(section["admin"], {
+            "authorized_keys": [KEY], "shell": "/bin/bash",
+            "groups": ["adm", "sudo"],
+        })
+        self.assertEqual(section["root"],
+                         {"authorized_keys": [KEY], "shell": "/bin/bash"})
+        self.assertEqual(reason(findings, "users.admin.shell"), "/x/etc/passwd")
+        self.assertEqual(reason(findings, "users.admin.groups"), "/x/etc/group")
+        self.assertEqual(statuses(findings, "users.root.groups"), [])
+
+    def test_unreadable_passwd_and_group_are_reported_per_user(self):
+        denied = File("/x/etc/passwd", problem="permission denied")
+        section, findings = users.probe_users(
+            [("root", File("/x/root/.ssh/authorized_keys", KEY))],
+            denied, File("/x/etc/group", problem="permission denied"),
+        )
+        self.assertEqual(section, {"root": {"authorized_keys": [KEY]}})
+        self.assertEqual(reason(findings, "users.root.shell"),
+                         "/x/etc/passwd permission denied")
+        self.assertEqual(reason(findings, "users.root.groups"),
+                         "/x/etc/group permission denied")
+
+    def test_a_user_without_a_passwd_entry_has_no_shell(self):
+        section, findings = users.probe_users(
+            [("ghost", File("/x/home/ghost/.ssh/authorized_keys", KEY))],
+            File("/x/etc/passwd", PASSWD), File("/x/etc/group", GROUP),
+        )
+        self.assertEqual(section, {"ghost": {"authorized_keys": [KEY]}})
+        self.assertEqual(reason(findings, "users.ghost.shell"),
+                         "no entry in /x/etc/passwd")
+
     def test_unreadable_or_keyless_files_are_reported(self):
         section, findings = users.probe_users([
             ("root", ABSENT),
             ("admin", File("/x/home/admin/.ssh/authorized_keys", "# none\n")),
-        ])
+        ], ABSENT, ABSENT)
         self.assertIsNone(section)
         self.assertEqual(reason(findings, "users.root.authorized_keys"),
                          "/x/absent not present")

@@ -53,8 +53,12 @@ def check_network(doc: dict) -> list[str]:
     return messages
 
 
-def unsupported(doc: dict) -> list[str]:
-    """Return the declared features this version does not act on"""
+def unsupported(doc: dict, system: bool = False) -> list[str]:
+    """Return the declared features this run does not act on
+
+    users and locale are converged by the --system phase (keel.system);
+    without it they are accepted and left alone, and the warning says so.
+    """
     messages = []
     acme = (doc.get("tls") or {}).get("acme") or {}
     if acme.get("enabled"):
@@ -62,14 +66,16 @@ def unsupported(doc: dict) -> list[str]:
             "tls.acme: certificates are not requested by this version;"
             " use confconsole to get one"
         )
+    if system:
+        return messages
     if doc.get("users"):
         messages.append(
-            "users: accounts and authorized keys are not written by this"
-            " version"
+            "users: accounts and authorized keys are written by apply"
+            " --system only, not in this run"
         )
     if doc.get("locale"):
         messages.append(
-            "locale: the timezone and language are not applied by this"
-            " version"
+            "locale: the timezone and language are applied by apply"
+            " --system only, not in this run"
         )
     return messages

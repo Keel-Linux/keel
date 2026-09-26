@@ -58,12 +58,15 @@ means running as root would have read it.
 | `security.alerts` | `/etc/inithooks.conf`, else `/etc/aliases`, else `/etc/cron-apt/config` | The secalerts hook writes a `root:` alias with the address and sets `MAILON=output`. An external root alias is the address; `MAILON=never`, or an aliases file without one, means `skip` |
 | `security.updates` | `/etc/inithooks.conf`, else `/etc/cron-apt/action.d/5-install`, else `/etc/apt/apt.conf.d/20auto-upgrades` | A cron-apt install action or `Unattended-Upgrade "1"` means `force`; nothing configured means `skip` |
 | `users.<name>.authorized_keys` | `/root/.ssh/authorized_keys`, `/home/*/.ssh/authorized_keys` | Public key lines only, with any leading options (`no-pty`, `from=`) removed. Users without a readable file with at least one key are left out |
+| `users.<name>.shell` | `/etc/passwd` | The shell column of the user's entry; not inferred when the file is unreadable or has no entry for the user |
+| `users.<name>.groups` | `/etc/group` | The groups whose member list names the user, in file order; left out when there are none. Only the public columns of either file are read, never `/etc/shadow` |
 | `locale.timezone` | `/etc/timezone`, else the `/etc/localtime` symlink | The zone name after `zoneinfo/` in the link target, so an offline tree works without following the link |
 | `locale.lang` | `/etc/default/locale` | `LANG` only |
 | `hub.api_key` | nothing | Always `skip`: keys are never read, and the Hub is being decoupled (brief section 5.6) |
 
-`users` and `locale` are accepted by the spec and validated, but nothing
-applies them yet; `apply` warns about them (docs/spec.md).
+`users` and `locale` are the sections `keel spec apply --system` converges
+([docs/apply.md](apply.md)); a spec inspect wrote applies clean into a
+fresh tree and diffs clean against it afterwards.
 
 ## What is never inferred
 
@@ -130,7 +133,7 @@ what the first boot would have asked.
 
 `tests/fixtures/inspect/` holds four trees: `turnkey` (a WordPress like
 appliance with a static IPv6 address, dehydrated with `dns-01`, cron-apt,
-two users with keys), `dhcp` (a Core container with DHCP on both
+two users with keys, their `passwd` and `group` entries), `dhcp` (a Core container with DHCP on both
 families, sourced `interfaces.d`, a readable `inithooks.conf` and a
 `localtime` symlink), `static` (the `interfaces` file the `01ipconfig`
 hook writes when both families are static, so that inspecting it, rendering
