@@ -56,8 +56,9 @@ def check_network(doc: dict) -> list[str]:
 def unsupported(doc: dict, system: bool = False) -> list[str]:
     """Return the declared features this run does not act on
 
-    users and locale are converged by the --system phase (keel.system);
-    without it they are accepted and left alone, and the warning says so.
+    instance.fqdn, users and locale are converged by the --system phase
+    (keel.system); without it they are accepted and left alone, and the
+    warning says so.
     """
     messages = []
     acme = (doc.get("tls") or {}).get("acme") or {}
@@ -68,6 +69,11 @@ def unsupported(doc: dict, system: bool = False) -> list[str]:
         )
     if system:
         return messages
+    if (doc.get("instance") or {}).get("fqdn"):
+        messages.append(
+            "instance.fqdn: the /etc/hosts entry is written by apply"
+            " --system only, not in this run"
+        )
     if doc.get("users"):
         messages.append(
             "users: accounts and authorized keys are written by apply"

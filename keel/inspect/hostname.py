@@ -36,15 +36,29 @@ def _first_word(file: File) -> str | None:
     return lines[0].split()[0] if lines else None
 
 
-def _fqdn(
-    name: str, hostname_path: str, hosts: File, hostname_f: File
-) -> tuple[str | None, str]:
+def fqdn_in_hosts(name: str, hosts: File) -> str | None:
+    """The fully qualified name /etc/hosts gives `name`, or None
+
+    The dotted name on the first line that names the host, either
+    outright or as the first label of one of its names. `apply --system`
+    asks this same function before writing the entry
+    (keel.system.hosts), so what apply writes is what inspect reads.
+    """
     for line in hosts.lines():
         names = line.split()[1:]
         if any(n == name or n.split(".")[0] == name for n in names):
             for candidate in names:
                 if "." in candidate:
-                    return candidate, hosts.path
+                    return candidate
+    return None
+
+
+def _fqdn(
+    name: str, hostname_path: str, hosts: File, hostname_f: File
+) -> tuple[str | None, str]:
+    found = fqdn_in_hosts(name, hosts)
+    if found is not None:
+        return found, hosts.path
 
     answer = _first_word(hostname_f)
     if answer and "." in answer:
