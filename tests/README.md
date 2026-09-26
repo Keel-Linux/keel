@@ -5,7 +5,7 @@ and branch coverage, with every subcommand, exit code and error path
 exercised (docs/decisions/0003-test-coverage-standard.md).
 
 Run the suite from the repository root. It needs pytest, PyYAML,
-coverage, the `tar` and `zstd` commands and the IPv6 loopback (the pull
+coverage, the `tar`, `zstd` and `bats` commands and the IPv6 loopback (the pull
 tests serve a directory on `[::1]` from a thread), no other network, no
 root and no installed package: the assemble tests stand root in by
 patching `os.geteuid`, and their synthetic layers never need a device
@@ -36,3 +36,11 @@ tests read the fixture trees under `tests/fixtures/inspect/` through
 spec apply --system` tests converge temporary trees through `--root`, with
 `useradd` and `usermod` replaced at the subprocess boundary and root stood
 in by patching `os.geteuid` (docs/apply.md, Tests).
+
+The one shell file the package ships, the firstboot hook
+`firstboot.d/10keel-system`, is tested with bats in `tests/hook.bats`, with
+`keel` replaced by a script on `PATH` that records its arguments and
+answers with a chosen exit code. `tests/test_hook_bats.py` runs that suite
+from pytest, so the repository keeps one required check and a broken hook
+fails the same gate as a broken module. Without `bats` installed that test
+skips, except in CI, where a silent skip would leave the hook untested.

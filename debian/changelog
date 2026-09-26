@@ -1,3 +1,23 @@
+keel (0.2.0) unstable; urgency=medium
+
+  * The package now ships a first boot hook,
+    /usr/lib/inithooks/firstboot.d/10keel-system, which converges the system
+    state the instance description declares by running "keel spec apply
+    --system-only". It is numbered to run after 09hostname, whose sed over
+    the old name would otherwise edit or lose the /etc/hosts entry, and
+    before the hooks at 15, 29 and 30 that depend on the fully qualified
+    name. The package that owns the keel command owns the hook that runs it,
+    so inithooks needs no dependency on keel and an image without keel has
+    no hook there. The hook is a no-op with exit 0 where there is no
+    description, under turnkey-init, and where the description declares
+    nothing that phase converges; it logs through the inithooks log and
+    never aborts a boot for a failure it cannot fix.
+  * keel spec apply gains --system-only, the system phase without the conf
+    phase: no secret is resolved, so a generated password the earlier hooks
+    already applied is never regenerated.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Sat, 26 Sep 2026 21:46:05 +0000
+
 keel (0.1.0) unstable; urgency=medium
 
   * Initial release: the instance spec (load, validate, render, apply) and

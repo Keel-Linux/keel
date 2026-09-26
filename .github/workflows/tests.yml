@@ -1,5 +1,11 @@
 # Coverage gate for the keel library and CLI: 95 percent (decision 0003,
 # project-authored code). The check is "tests / coverage". Raise only.
+#
+# The package also ships one shell file, the firstboot hook
+# firstboot.d/10keel-system, which is tested with bats (tests/hook.bats).
+# tests/test_hook_bats.py runs that suite from pytest so the repository
+# keeps one required check, and fails instead of skipping when bats is
+# missing in CI; hence bats and shellcheck here.
 name: tests
 on:
   pull_request:
@@ -11,3 +17,4 @@ jobs:
     with:
       threshold: 95
       package: keel
+      apt-packages: bats shellcheck

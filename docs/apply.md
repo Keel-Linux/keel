@@ -256,6 +256,52 @@ blog.yaml --root /tmp/scratch` then reports `instance.fqdn` and every
 - Touching the conf when a populated one exists, or anything at all with
   `--dry-run`.
 
+## The first boot
+
+The conf phase runs at hook `00declarative`, which renders the description
+into the conf every later hook reads. The system phase runs at
+`10keel-system`, the hook this package ships into
+`/usr/lib/inithooks/firstboot.d`:
+
+```
+00declarative     the conf phase: keel renders the description
+01ipconfig        the address
+09hostname        /etc/hostname, and a sed over the old name in /etc/hosts
+10keel-system     the system phase: keel spec apply --system-only
+15regen-sslcert   the certificate, on the name settled above
+29, 30 ...        the init fence, the root password
+```
+
+Position 10 is the one place it fits. Earlier than `09hostname` and the
+`sed` that hook runs over the old name would edit or lose the `/etc/hosts`
+entry; later than 29 and the certificate and the init fence would be made
+on a name the appliance does not yet carry. It asks for `--system-only`
+because the conf phase has already run at position 00 and must not run
+again: see above for what a second run would do to a generated password.
+
+The package that owns the `keel` command owns the hook that runs it, so
+inithooks keeps no dependency on keel, and an image without keel simply has
+no hook there.
+
+The hook exits 0 and converges nothing when:
+
+- `_TURNKEY_INIT` is set, because `turnkey-init` is an interactive run and
+  the operator's answers must not be overruled by a file;
+- there is no description: `INITHOOKS_DECL` names one outright, otherwise
+  `/etc/keel/instance.yaml` and then `/etc/inithooks.yaml` are looked for,
+  the same two paths in the same order that `00declarative` searches;
+- the description declares nothing this phase converges, which the library
+  says in one line rather than printing an empty plan.
+
+Every line of the command's output is logged through the inithooks log
+(`logger -t inithooks` and `$INITHOOKS_LOGFILE`), as the other hooks log,
+prefixed with the hook name. A failure is logged with its exit code and
+the boot carries on: the hook exits 0 whatever `keel` returned, because an
+appliance that cannot converge one field must still finish booting, and
+because the drift is then visible in `keel diff` where an operator can act
+on it. The suite is `tests/hook.bats`, run inside the one gate job by
+`tests/test_hook_bats.py`.
+
 ## From the library
 
 confconsole calls the command function, as for phase 1, and passes the

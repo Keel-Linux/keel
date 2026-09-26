@@ -1,0 +1,100 @@
+#!/bin/bash -e
+# converge the system state the instance description declares
+#
+# Position: after 09hostname, which sets the hostname and rewrites
+# /etc/hosts with a sed over the old name, so an entry written before it
+# would be edited or lost; and before the hooks at 15, 29 and 30, which
+# regenerate the certificate and raise the init fence on the name this hook
+# settles. The conf phase is 00declarative's, at position 00, and has
+# already run by the time this hook does.
+#
+# Shipped by the keel package and not by inithooks: the package that owns
+# the keel command owns the hook that runs it, so inithooks keeps no
+# dependency on keel, and an image without keel has no hook here.
+#
+# Asks for the system phase alone (keel spec apply --system-only). Running
+# the conf phase a second time in one boot would resolve the secrets again,
+# and a secret declared generate: true would get a fresh value after
+# 30rootpass had already set and shown the first one, leaving the appliance
+# with a password nothing knows.
+#
+# No failure here aborts the boot: an appliance that cannot converge a
+# field must still finish booting, and say what it could not do.
+
+INITHOOKS_DEFAULT="${INITHOOKS_DEFAULT:-/etc/default/inithooks}"
+if [[ -e "$INITHOOKS_DEFAULT" ]]; then
+    # shellcheck source=default/inithooks
+    source "$INITHOOKS_DEFAULT"
+fi
+INITHOOKS_LOGFILE="${INITHOOKS_LOGFILE:-/var/log/inithooks.log}"
+
+# Where the description is looked for, in order, when INITHOOKS_DECL does
+# not name one outright: the same two paths, in the same order, that
+# inithooks 00declarative searches. This hook cannot ask that hook, because
+# keel does not depend on inithooks, so the list is repeated here and
+# tested here; a colon separated override keeps it out of the way of an
+# image that keeps its description elsewhere.
+KEEL_SPEC_PATHS="${KEEL_SPEC_PATHS:-/etc/keel/instance.yaml:/etc/inithooks.yaml}"
+KEEL="${KEEL:-keel}"
+
+_hook=$(basename "$0")
+
+log() {
+    local level=$1
+    shift
+    logger -t inithooks -p "$level" "[$_hook] $*" || true
+    if [[ -f "$INITHOOKS_LOGFILE" ]]; then
+        echo "${level^^}: [$_hook] $*" >> "$INITHOOKS_LOGFILE"
+    fi
+}
+
+info() { log info "$*"; }
+warn() { log warning "$*"; }
+
+# turnkey-init is an explicit interactive run: the operator is answering
+# the dialogs, and a description must not overrule the answers
+if [[ -n "$_TURNKEY_INIT" ]]; then
+    exit 0
+fi
+
+spec=
+if [[ -n "$INITHOOKS_DECL" ]]; then
+    spec="$INITHOOKS_DECL"
+else
+    IFS=: read -r -a candidates <<< "$KEEL_SPEC_PATHS"
+    for candidate in "${candidates[@]}"; do
+        if [[ -e "$candidate" ]]; then
+            spec="$candidate"
+            break
+        fi
+    done
+fi
+
+if [[ -z "$spec" ]] || [[ ! -e "$spec" ]]; then
+    info "no instance description (searched ${INITHOOKS_DECL:-$KEEL_SPEC_PATHS}), nothing to converge"
+    exit 0
+fi
+
+if ! command -v "$KEEL" >/dev/null; then
+    warn "$KEEL is not installed, $spec was not converged"
+    exit 0
+fi
+
+status=0
+output=$("$KEEL" spec apply --system-only --spec "$spec" 2>&1) || status=$?
+
+while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    if [[ "$status" -eq 0 ]]; then
+        info "$line"
+    else
+        warn "$line"
+    fi
+done <<< "$output"
+
+if [[ "$status" -ne 0 ]]; then
+    warn "keel spec apply --system-only exited $status:" \
+         "$spec is not fully converged, the boot carries on"
+fi
+
+exit 0

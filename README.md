@@ -19,6 +19,14 @@ Working today: `spec validate`, `spec render`, `spec apply` (see
 One stub prints what it will do, names the brief section covering it and
 exits 9: the packages half of `verify`. It never pretends to work.
 
+The package also ships one first boot hook,
+`/usr/lib/inithooks/firstboot.d/10keel-system`, which converges the system
+state the instance description declares (`spec apply --system-only`) after
+`09hostname` and before the hooks that depend on the name. The package that
+owns the `keel` command owns the hook that runs it, so inithooks keeps no
+dependency on keel. What it does, and what it deliberately does not do, is
+in [docs/apply.md](docs/apply.md).
+
 ## Commands
 
 | Command | What it does |
@@ -247,7 +255,10 @@ pytest
 python3 -m unittest discover tests
 ```
 
-Both runners run the same suite. It needs `tar`, `zstd` and the IPv6
+Both runners run the same suite, including the firstboot hook's bats suite
+(`tests/hook.bats`), which `tests/test_hook_bats.py` runs so that one check
+gates the whole repository; it skips only where `bats` is not installed, and
+never in CI. The suite needs `tar`, `zstd`, `bats` and the IPv6
 loopback, no other network, no root and no installed package. The coverage standard (95 percent, lines and branches) and the
 commands that check it are in `tests/README.md`.
 
