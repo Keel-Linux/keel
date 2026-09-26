@@ -4,6 +4,12 @@
 from keel.inspect.report import Finding, inferred, missing
 from keel.inspect.tree import File
 
+# No upstream hook writes a fully qualified entry, so a machine without one
+# is not a machine that lost it: it is a machine where the system phase of
+# apply has not run. The reason says which, so the operator reading a diff
+# report knows what closes the gap (docs/diff.md, docs/apply.md).
+WRITTEN_BY = "the system phase of apply writes it (spec apply --system-only)"
+
 
 def probe_hostname(
     hostname: File, hosts: File, hostname_f: File
@@ -72,4 +78,5 @@ def _fqdn(
         checked.append(f"{hostname_f.path} {hostname_f.problem}")
     else:
         checked.append(f"{hostname_f.path} answered {answer!r}")
+    checked.append(WRITTEN_BY)
     return None, "; ".join(checked)

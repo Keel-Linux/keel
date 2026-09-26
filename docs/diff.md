@@ -148,6 +148,50 @@ the same way `apply` reads it. The alternative, a schema that refuses
 operator to write the domains and turn the feature on in the same edit,
 which is exactly the change that should be reviewable on its own.
 
+### A field the system phase converges
+
+`instance.fqdn` is the first field `apply` writes and `diff` reads back
+(`--system`, `--system-only`, [docs/apply.md](apply.md)). It stays an
+ordinary compared field, with the ordinary verdicts, and it is deliberately
+not in the table above.
+
+What makes a boot end at exit 0 is that something writes the field, not
+that `diff` stopped asking. The hook `10keel-system` runs the system phase
+after `09hostname`, so `/etc/hosts` carries the declared name before the
+first `diff` an operator ever runs, and the round trip closes without
+anybody running `apply` by hand.
+
+Excusing the field from the comparison would have cost the one signal that
+the converge happened. `not compared` would read the same on an appliance
+that applied its description, on an image too old to carry the hook, and on
+a machine where somebody edited `/etc/hosts` afterwards. The rule for that
+table is about the machine and not about who writes the value: a field is
+`not compared` when the machine keeps no trace of it (`secrets`, `app`,
+`preseed`, `security.updates_at_first_boot`) or when the spec turns off the
+feature that governs it. A converged field leaves exactly the trace `apply`
+wrote, and `apply` asks the reader `inspect` uses before writing it
+(`keel.inspect.hostname.fqdn_in_hosts`), so the two sides cannot disagree
+about spelling or placement: `same` is reachable and stays.
+
+| On the machine | diff reports | Exit |
+| --- | --- | --- |
+| The boot ran the hook, or an operator ran `apply --system` | `same` | 0 |
+| The value was changed afterwards, in the file or in the spec | `drift` | 14 |
+| No trace at all: an image with no hook, and `apply` never run | `unknown`, and the reason names what writes the field | 13 |
+
+The third row is what an operator meets on an image that predates the hook,
+so the reason says so rather than only listing what was checked:
+
+```
+instance.fqdn: unknown (declared blog.example.org; not inferred: /etc/hosts has no fully qualified name for blog; hostname -f not run: the root is not the live system; the system phase of apply writes it (spec apply --system-only))
+```
+
+The loop is a test: `tests/test_apply_system_cli.py`, `TestBootThenDiff`,
+puts a fixture tree in the state `09hostname` leaves, diffs it (`unknown`,
+exit 13, with that reason), runs the system phase, and diffs again
+(`same`, exit 0), then checks that editing the file behind the spec is
+`drift` and not an excused field.
+
 ## JSON
 
 `--format json` prints one document to stdout:
