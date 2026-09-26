@@ -62,8 +62,9 @@ def _domains(files: list[File]) -> tuple[list[str], str]:
 def _challenge(config: File) -> tuple[str | None, str]:
     value = config.assignments().get("CHALLENGETYPE")
     if value is None:
-        return DEFAULT_CHALLENGE, f"{config.path} sets no CHALLENGETYPE," \
-            " dehydrated defaults to http-01"
+        state = config.problem or "sets no CHALLENGETYPE"
+        return DEFAULT_CHALLENGE, f"{config.path} {state}, dehydrated" \
+            " defaults to http-01"
     if value not in CHALLENGES:
         return None, f"{config.path} sets CHALLENGETYPE={value!r}, which" \
             " the spec does not know"
