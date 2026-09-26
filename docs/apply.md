@@ -134,7 +134,8 @@ it.
 
 | Observed | Action |
 | --- | --- |
-| A line that names the host and carries the declared fully qualified name, at any address | `unchanged (/etc/hosts maps forum2 to forum2.keellinux.org)` |
+| The first line that names the host carries the declared fully qualified name, at any address | `unchanged (/etc/hosts maps forum2 to forum2.keellinux.org)` |
+| The entry is in the file, and a line that names the host without it stands before the entry | The file is not settled: a resolver answers from the first line that carries the name, so `hostname -f` answers the short name. The line is dropped and the entry is written |
 | A line for the target address naming the host | The line is replaced where it stood, so the entry keeps its position in the file |
 | A line that names the host, and nothing else, without a fully qualified name, at any address: the `127.0.1.1 forum2` that `09hostname` leaves | Replaced where it stood, and dropped where the entry went elsewhere, because a name is resolved from the first line that carries it: kept, the short line would answer first and `hostname -f` would still answer `forum2` although the file holds `forum2.keellinux.org` |
 | A line that names the host beside another name (`127.0.0.1 localhost forum2`) | Kept: rewriting a line that belongs to another name is not this phase's business. The entry is written all the same, and the plan says in one line that the kept line answers first and has to be edited by hand |
@@ -149,10 +150,13 @@ on is IPv6. Either way the entry is local resolution only; what the
 appliance is reachable at is its global address.
 
 Everything else in the file, comments and blank lines included, is kept as
-it was, and the file is written mode 0644. Whether the entry is already
+it was, and the file is written mode 0644. Whether the name is already
 there is decided by the same reader `keel inspect` uses
-(`keel.inspect.hostname.fqdn_in_hosts`), so what apply writes is what
-inspect reads back and diff calls `same`.
+(`keel.inspect.hostname.fqdn_in_hosts`), which reads the file the way a
+resolver does, so what apply writes is what inspect reads back and diff
+calls `same`. Otherwise the field is settled only when the file the write
+would produce is the file that is already there, which is why an entry
+another line shadows is converged instead of being called unchanged.
 
 **users.<name>** (accounts)
 
