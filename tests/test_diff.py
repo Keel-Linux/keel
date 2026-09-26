@@ -300,6 +300,9 @@ class TestCompareAgainstFixture(unittest.TestCase):
             "network.interfaces.eth1.ipv4.address",
             "network.interfaces.eth1.ipv4.gateway",
             "users.root.authorized_keys",
+            "users.root.shell",
+            "users.admin.shell",
+            "users.admin.groups",
         ])
         self.assertEqual(result.code, exits.OK)
 
