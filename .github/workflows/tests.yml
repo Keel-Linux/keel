@@ -18,3 +18,10 @@ jobs:
       threshold: 95
       package: keel
       apt-packages: bats shellcheck
+  # A change that ships must come with a changelog entry, or it cannot be
+  # installed and never reaches an appliance. The rule and its tests are
+  # bin/require-changelog of the .github repository. The check is
+  # "package / changelog"; it runs on pull requests only.
+  package:
+    if: github.event_name == 'pull_request'
+    uses: keel-linux/.github/.github/workflows/require-changelog.yml@main
