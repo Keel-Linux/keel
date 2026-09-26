@@ -24,6 +24,9 @@ from keel.layers import (
 from keel.spec import CONF_DEFAULT, CONF_ENV, SPEC_DEFAULT, SPEC_ENV
 
 
+DIFF_FORMATS = ("text", "json")
+
+
 class Parser(argparse.ArgumentParser):
     """argparse exits 2 on a usage error; Keel reserves 2 for the spec"""
 
@@ -106,11 +109,13 @@ def build_parser() -> argparse.ArgumentParser:
         commands.inspect,
     )
     add_inspect_options(inspect_parser)
-    _add_command(
+    diff_parser = _add_command(
         subparsers, "diff",
-        "report drift between declared and running (not implemented yet)",
+        "report drift between the spec and the running machine, or an"
+        " offline root",
         commands.diff,
     )
+    add_diff_options(diff_parser)
     verify_parser = _add_command(
         subparsers, "verify",
         "check the installed layers against their manifests (packages not"
@@ -204,14 +209,29 @@ def add_assemble_options(parser: argparse.ArgumentParser) -> None:
     add_cache_option(parser)
 
 
-def add_inspect_options(parser: argparse.ArgumentParser) -> None:
+def add_root_option(parser: argparse.ArgumentParser, verb: str) -> None:
     parser.add_argument(
         "--root",
         default=ROOT_DEFAULT,
         metavar="DIR",
-        help="filesystem to inspect: the live system, a mounted container"
+        help=f"filesystem to {verb}: the live system, a mounted container"
         f" rootfs or a tree keel assemble produced (default: {ROOT_DEFAULT})",
     )
+
+
+def add_diff_options(parser: argparse.ArgumentParser) -> None:
+    add_root_option(parser, "compare with the spec")
+    parser.add_argument(
+        "--format",
+        choices=DIFF_FORMATS,
+        default=DIFF_FORMATS[0],
+        help="one line per field, or one JSON document for a calling"
+        " program (default: %(default)s)",
+    )
+
+
+def add_inspect_options(parser: argparse.ArgumentParser) -> None:
+    add_root_option(parser, "inspect")
     parser.add_argument(
         "--output",
         default=None,

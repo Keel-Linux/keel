@@ -9,6 +9,7 @@ import os
 import sys
 
 from keel import exits, layers, spec
+from keel import diff as drift
 from keel import inspect as inspection
 
 
@@ -136,9 +137,24 @@ def inspect(args) -> int:
 
 
 def diff(args) -> int:
-    return not_implemented(
-        "diff", "5.2", "report drift between the declared and running state"
-    )
+    """Report drift between the spec and the machine under --root
+
+    The declared side is the spec, loaded and validated like every other
+    command reads it; the observed side is what the inspect collector
+    finds. One line per field on stdout, or one JSON document with
+    --format json, and nothing is written anywhere. Drift decides the
+    exit code before unknown fields do (docs/diff.md).
+    """
+    doc, code = read_spec(args.spec)
+    if doc is None:
+        return code
+    comparison = drift.diff_root(doc, args.root)
+    if args.format == "json":
+        print(drift.to_json(comparison, args.spec), end="")
+    else:
+        for line in drift.report_lines(comparison):
+            print(line)
+    return comparison.code
 
 
 def verify(args) -> int:
