@@ -4,6 +4,7 @@
 import ipaddress
 
 from keel.inspect.interfaces import Stanza, parse_interfaces
+from keel.inspect.ipv6 import Runtime, resolve_method
 from keel.inspect.report import Finding, inferred, missing
 from keel.inspect.tree import File
 
@@ -13,10 +14,13 @@ METHODS = {
     "ipv4": ("static", "dhcp", "manual"),
 }
 LOOPBACK = "lo"
+# The one ifupdown method that does not settle the spec method by itself.
+AMBIGUOUS_IPV6 = "dhcp"
 
 
 def probe_network(
-    interfaces: list[File], resolv: File, in_container: bool
+    interfaces: list[File], resolv: File, in_container: bool,
+    runtime: Runtime,
 ) -> tuple[dict | None, list[Finding]]:
     """Build the network section
 
@@ -24,10 +28,12 @@ def probe_network(
     sources from interfaces.d. `in_container` is the LXC marker: a
     container's addresses belong to the host; anywhere else the stanzas,
     static IPv6 included, are what the 01ipconfig hook writes from the
-    spec, so the file owns them.
+    spec, so the file owns them. `runtime` is the live IPv6 evidence
+    (keel.inspect.ipv6), needed because one ifupdown method stands for
+    two spec methods.
     """
     findings: list[Finding] = []
-    declared, nameservers = _interfaces(interfaces, findings)
+    declared, nameservers = _interfaces(interfaces, findings, runtime)
     nameservers += _resolvers(resolv, findings)
 
     network: dict = {}
@@ -57,7 +63,7 @@ def _managed_reason(in_container: bool) -> str:
 
 
 def _interfaces(
-    files: list[File], findings: list[Finding]
+    files: list[File], findings: list[Finding], runtime: Runtime
 ) -> tuple[dict, list[str]]:
     readable = [file for file in files if file.readable]
     if not readable:
@@ -81,7 +87,9 @@ def _interfaces(
                 continue
             family = FAMILIES[stanza.family]
             field = f"network.interfaces.{stanza.iface}.{family}"
-            section, finding = _family(field, family, stanza, file.path)
+            section, finding = _family(
+                field, family, stanza, file.path, runtime
+            )
             findings.append(finding)
             if section is not None:
                 declared.setdefault(stanza.iface, {})[family] = section
@@ -95,15 +103,18 @@ def _interfaces(
 
 
 def _family(
-    field: str, family: str, stanza: Stanza, path: str
+    field: str, family: str, stanza: Stanza, path: str, runtime: Runtime
 ) -> tuple[dict | None, Finding]:
     if stanza.method not in METHODS[family]:
         return None, missing(
             field, f"method {stanza.method} in {path} has no spec equivalent"
         )
-    section: dict = {"method": stanza.method}
-    summary = stanza.method
-    if stanza.method == "static":
+    method, source = _method(family, stanza, path, runtime)
+    if method is None:
+        return None, missing(field, source)
+    section: dict = {"method": method}
+    summary = method
+    if method == "static":
         address, problem = _address(stanza, family)
         if problem:
             return None, missing(field, f"{problem} in {path}")
@@ -113,7 +124,21 @@ def _family(
     if gateway:
         section["gateway"] = gateway
         summary += f" gateway {gateway}"
-    return section, inferred(field, summary, path)
+    return section, inferred(field, summary, source)
+
+
+def _method(
+    family: str, stanza: Stanza, path: str, runtime: Runtime
+) -> tuple[str | None, str]:
+    """The spec method a stanza means, and the source that settles it
+
+    Every ifupdown method is its own spec method except `inet6 dhcp`,
+    which the hook writes for `auto` and for `dhcp` alike; that one is
+    settled by what the machine did with it, or by nothing at all.
+    """
+    if family != "ipv6" or stanza.method != AMBIGUOUS_IPV6:
+        return stanza.method, path
+    return resolve_method(stanza.iface, runtime)
 
 
 def _address(stanza: Stanza, family: str) -> tuple[str | None, str | None]:
