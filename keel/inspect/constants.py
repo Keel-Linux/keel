@@ -28,8 +28,12 @@ DEFAULT_LOCALE = "etc/default/locale"
 PASSWD = "etc/passwd"
 GROUP = "etc/group"
 DATABASE_DIRS = ("etc/mysql", "etc/postgresql")
+# Where a DHCPv6 client writes its lease down, dhcpcd first, dhclient
+# second: the trace that tells a DHCPv6 address from a SLAAC one.
+DHCP6_LEASES = ("var/lib/dhcpcd/*.lease6", "var/lib/dhcp/dhclient6*.leases")
 
 HOSTNAME_COMMAND = ("hostname", "-f")
+IP_ADDR_COMMAND = ("ip", "-6", "addr", "show")
 
 # A spec missing any of these cannot be applied headless: the hook behind
 # each one prompts when its variable is unset.

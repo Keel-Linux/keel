@@ -1,0 +1,4 @@
+# A dhcpcd DHCPv6 lease, trimmed: its presence is what inspect reads, so
+# that the `dhcp` tree is a machine that really took a DHCPv6 lease and
+# not a SLAAC one. The bytes of a real lease are binary.
+ia_na 2001:db8:2::10/128

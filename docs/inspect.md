@@ -49,7 +49,7 @@ means running as root would have read it.
 | Appliance (header comment only) | `/etc/turnkey_version` | `turnkey-<name>-<version>-<codename>-<arch>`, hyphenated names included |
 | `instance.hostname` | `/etc/hostname` | First word of the first line |
 | `instance.fqdn` | `/etc/hosts`, then `hostname -f`, then `/etc/hostname` | The dotted name on the `/etc/hosts` line that names the host. `hostname -f` runs only on the live root, never on an offline tree. A dotted `/etc/hostname` is its own fqdn |
-| `network.interfaces.<name>.ipv6` | `/etc/network/interfaces` and `/etc/network/interfaces.d/*` | `iface <name> inet6 <method>` stanzas: `static` (with `address`, a `netmask` prefix length when the address has none, and `gateway`), `dhcp`, `auto`, `manual`. Any other method (`v4tunnel`, `6to4`) is reported as having no spec equivalent |
+| `network.interfaces.<name>.ipv6` | `/etc/network/interfaces` and `/etc/network/interfaces.d/*`, plus `ip -6 addr show` and the DHCPv6 lease files for an `inet6 dhcp` stanza | `iface <name> inet6 <method>` stanzas: `static` (with `address`, a `netmask` prefix length when the address has none, and `gateway`), `auto`, `manual`. An `inet6 dhcp` stanza stands for both `auto` and `dhcp`, so it is settled by the machine (see below) or reported as not inferred. Any other method (`v4tunnel`, `6to4`) is reported as having no spec equivalent |
 | `network.interfaces.<name>.ipv4` | same files | `inet` stanzas: `static` (a dotted `netmask` becomes a prefix length), `dhcp`, `manual`. `lo` is skipped |
 | `network.managed_by` | the LXC marker `/var/lib/turnkey-info/inithooks.service/lxc` | `host` when the marker exists, the container case; `file` otherwise, because the stanzas, static IPv6 included, are what the `01ipconfig` hook writes from the `IP_*` and `IP6_*` variables (docs/spec.md) |
 | `network.nameservers` | `/etc/resolv.conf` and `dns-nameservers` options | Deduplicated, IPv6 first. A loopback resolver (`127.0.0.53`, `::1`) is reported, not recorded: the upstream servers are not visible in the file |
@@ -67,6 +67,23 @@ means running as root would have read it.
 `users` and `locale` are the sections `keel spec apply --system` converges
 ([docs/apply.md](apply.md)); a spec inspect wrote applies clean into a
 fresh tree and diffs clean against it afterwards.
+
+### SLAAC or DHCPv6, for an `inet6 dhcp` stanza
+
+ifupdown writes `iface <name> inet6 dhcp` for `method: auto` and for
+`method: dhcp` alike, so the file settles nothing. The machine does:
+
+| Evidence | Reported |
+| --- | --- |
+| A DHCPv6 lease file covering the interface: `/var/lib/dhcpcd/<name>.lease6`, `/var/lib/dhcp/dhclient6.<name>.leases`, or a plain `/var/lib/dhcp/dhclient6.leases`, holding anything | `dhcp`, from the lease file |
+| No lease, and a global address marked `mngtmpaddr` in `ip -6 addr show`: the mark the kernel puts on an address whose prefix came from a router advertisement | `auto`, from the command |
+| Both | `dhcp`, and the report says a router advertisement address is present as well |
+| Neither | not inferred, naming the stanza, the state of the command and the lease paths that were searched |
+
+`ip -6 addr show` runs only on the live root, like `hostname -f`; the lease
+files are read under `--root` as well, because a lease is on disk. So an
+offline root still reads a DHCPv6 machine as `dhcp`, and reports a SLAAC one
+as not inferred rather than guessing.
 
 ## What is never inferred
 
@@ -91,7 +108,8 @@ owned by root) before `apply`; until then `keel spec validate` reports
 each missing file, which is the intended reminder.
 
 Live state that is not configuration is also left out: the addresses a
-DHCP or SLAAC interface holds right now, running services, installed
+DHCP or SLAAC interface holds right now (they are read to tell one method
+from the other, never recorded as an address), running services, installed
 packages (that is `keel verify`).
 
 ## The report

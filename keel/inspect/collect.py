@@ -2,8 +2,9 @@
 """Read a root filesystem and hand the files to the probes
 
 This is the thin layer with side effects: it reads files under the root
-and runs `hostname -f` when the root is the live system. Everything it
-learns is passed to pure probe functions.
+and, on the live system, runs the two commands the probes need
+(`hostname -f` and `ip -6 addr show`). Everything it learns is passed to
+pure probe functions.
 """
 
 import os
@@ -12,6 +13,7 @@ import subprocess
 from keel.inspect import constants as paths
 from keel.inspect.app import probe_app, probe_appliance
 from keel.inspect.hostname import probe_hostname
+from keel.inspect.ipv6 import Runtime
 from keel.inspect.locale import probe_locale
 from keel.inspect.network import probe_network
 from keel.inspect.report import Finding, Inspection
@@ -47,6 +49,7 @@ def inspect_root(
         [tree.read(paths.INTERFACES)] + tree.read_dir(paths.INTERFACES_D),
         tree.read(paths.RESOLV_CONF),
         tree.exists(paths.LXC_MARKER),
+        Runtime(run_command(tree, paths.IP_ADDR_COMMAND), leases(tree)),
     )
     findings += found
     _add(spec, "network", network)
@@ -109,21 +112,43 @@ def _add(spec: dict, key: str, section: dict | None) -> None:
         spec[key] = section
 
 
-def hostname_f(tree: Tree) -> File:
-    """Run `hostname -f`, only when inspecting the live system"""
-    command = " ".join(paths.HOSTNAME_COMMAND)
+def run_command(tree: Tree, argv: tuple[str, ...]) -> File:
+    """Keep a command's output as a File, only on the live system
+
+    An offline root answers questions about another machine, so a
+    command run here would describe the wrong one; the reason is
+    recorded and the probes report the field as not inferred.
+    """
+    command = " ".join(argv)
     if tree.root != paths.ROOT_DEFAULT:
         return File(command, problem=OFFLINE)
     try:
         out = subprocess.run(
-            list(paths.HOSTNAME_COMMAND), capture_output=True, text=True,
-            check=False,
+            list(argv), capture_output=True, text=True, check=False,
         )
     except OSError as e:
         return File(command, problem=f"failed: {e.strerror}")
     if out.returncode != 0:
         return File(command, problem=f"exited {out.returncode}")
     return File(command, out.stdout)
+
+
+def hostname_f(tree: Tree) -> File:
+    """Run `hostname -f`, only when inspecting the live system"""
+    return run_command(tree, paths.HOSTNAME_COMMAND)
+
+
+def leases(tree: Tree) -> tuple[File, ...]:
+    """Every DHCPv6 lease file under the root, in path order
+
+    A lease file is on disk, so an offline root carries it too; it is
+    the one piece of IPv6 evidence that survives without the machine.
+    """
+    return tuple(
+        tree.read(name)
+        for pattern in paths.DHCP6_LEASES
+        for name in tree.glob(pattern)
+    )
 
 
 def key_files(tree: Tree) -> list[tuple[str, File]]:

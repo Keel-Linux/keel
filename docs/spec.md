@@ -79,7 +79,7 @@ network:
 | Field | State | Notes |
 | --- | --- | --- |
 | `network.managed_by` | read | `host` or `file`. Default: `host` on a container, `file` otherwise, decided at apply time |
-| `network.interfaces.<name>.ipv6.method` | read | One of `static`, `dhcp`, `auto`, `manual`, `none` |
+| `network.interfaces.<name>.ipv6.method` | read | One of `static`, `dhcp`, `auto`, `manual`, `none`. `auto` is an address from a router advertisement (SLAAC), `dhcp` an address from a DHCPv6 lease; see "auto and dhcp are two things" below |
 | `network.interfaces.<name>.ipv6.address` | read | Required when the method is `static`. Must carry a prefix length and must be a unicast address, so link local, loopback and multicast are rejected |
 | `network.interfaces.<name>.ipv6.gateway` | read | An IPv6 address. A link local gateway such as `fe80::1` is normal and is accepted |
 | `network.interfaces.<name>.ipv4.method` | read | One of `static`, `dhcp`, `manual`, `none`. Optional everywhere |
@@ -113,10 +113,35 @@ What "read" means per case:
 | `ipv4.method: static` | `IP_CONFIG=static`, `IP_ADDRESS` (the address alone), `IP_NETMASK` (dotted, from the prefix length), `IP_GW` when set |
 | `ipv4.method: none`, or no `ipv4` block | nothing |
 | `ipv6.method: static` | `IP6_CONFIG=static`, `IP6_ADDRESS` (address with its prefix length, as an `inet6` stanza has no netmask), `IP6_GW` when set |
-| `ipv6.method: dhcp` or `auto` | `IP6_CONFIG=dhcp`. ifupdown has no SLAAC method of its own: `inet6 dhcp` is what the hook writes for both today, and it keeps SLAAC on as confconsole does. `keel inspect` therefore reads such a stanza back as `dhcp` |
+| `ipv6.method: dhcp` or `auto` | `IP6_CONFIG=dhcp`. ifupdown has one method for both: `inet6 dhcp` is what the hook writes either way, and it keeps SLAAC on as confconsole does |
 | `ipv6.method: manual` | `IP6_CONFIG=manual` |
 | `ipv6.method: none`, or no `ipv6` block | nothing, and no `IP6_DNS*` |
 | `nameservers` | `IP_DNS1`, `IP_DNS2` from the IPv4 entries; `IP6_DNS1`, `IP6_DNS2` from the IPv6 entries |
+
+### auto and dhcp are two things
+
+`auto` means the address is formed from a router advertisement (SLAAC).
+`dhcp` means it comes from a DHCPv6 lease. Both are written to
+`/etc/network/interfaces` as `iface <name> inet6 dhcp`, because ifupdown has
+no separate method, so the file cannot say which one a spec declared.
+
+The running machine can, and `keel inspect` reads it there:
+
+| Evidence | Method reported |
+| --- | --- |
+| A DHCPv6 lease file for the interface (`/var/lib/dhcpcd/<name>.lease6`, `/var/lib/dhcp/dhclient6*.leases`) | `dhcp` |
+| No lease, and a global address marked `mngtmpaddr` in `ip -6 addr show`, which is how the kernel marks an address whose prefix came from a router advertisement | `auto` |
+| Neither | not inferred, naming both candidates and everything that was checked |
+
+The third line is deliberate: inspect used to answer `dhcp` for an `inet6
+dhcp` stanza whatever the machine had done with it, so a SLAAC container
+reported drift against a spec that correctly declared `auto`. A field that
+cannot be read is reported as not inferred, which `keel diff` shows as
+unknown with that reason, and never as drift.
+
+An offline root (`--root DIR`) has the lease files but no live addresses, so
+a machine that took a DHCPv6 lease is still read as `dhcp` there, and a SLAAC
+one is not inferred.
 
 A static address on both families:
 
