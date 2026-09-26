@@ -102,8 +102,11 @@ class TestCollector(unittest.TestCase):
         self.assertEqual(result.spec["tls"]["acme"]["challenge"], "dns-01")
         self.assertEqual(list(result.spec["secrets"]),
                          ["root_password", "db_password"])
-        self.assertEqual(result.spec["security"],
-                         {"alerts": "admin@example.org", "updates": "force"})
+        self.assertEqual(
+            result.spec["security"],
+            {"alerts": "admin@example.org",
+             "updates_at_first_boot": "force"},
+        )
         self.assertEqual(list(result.spec["users"]), ["root", "admin"])
         self.assertEqual(result.spec["locale"]["timezone"], "Europe/Lisbon")
 
@@ -138,7 +141,7 @@ class TestCollector(unittest.TestCase):
             "tls": {"acme": {"enabled": False}},
             "secrets": {"root_password": {
                 "file": "/etc/keel/secrets/root_password"}},
-            "security": {"updates": "skip"},
+            "security": {"updates_at_first_boot": "skip"},
             "hub": {"api_key": "skip"},
         })
 

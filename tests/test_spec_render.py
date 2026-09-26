@@ -49,7 +49,7 @@ class TestMapping(unittest.TestCase):
             "  api_key: skip\n"
             "security:\n"
             "  alerts: skip\n"
-            "  updates: force\n"
+            "  updates_at_first_boot: force\n"
         )
         self.assertEqual(exported["HUB_APIKEY"], "SKIP")
         self.assertEqual(exported["SEC_ALERTS"], "SKIP")
