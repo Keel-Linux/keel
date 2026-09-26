@@ -17,7 +17,7 @@ from keel.spec.fields import MAX_DOMAIN_LENGTH  # noqa: E402
 
 SECTIONS = (
     "instance", "secrets", "app", "hub", "security", "network", "tls",
-    "preseed",
+    "preseed", "users", "locale",
 )
 
 

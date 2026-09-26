@@ -27,6 +27,9 @@ coverage report
 coverage report --fail-under=95
 ```
 
-The commands that inspect the running host (`turnkey-version` and `ip`)
-are replaced at the subprocess boundary in `tests/test_spec_runtime.py`,
-so the suite gives the same answer on every host.
+The commands that inspect the running host (`turnkey-version`, `ip` and
+`hostname -f`) are replaced at the subprocess boundary in
+`tests/test_spec_runtime.py` and `tests/test_inspect_cli.py`, so the suite
+gives the same answer on every host. The `keel inspect` tests read the
+fixture trees under `tests/fixtures/inspect/` through `--root`, never `/`
+(docs/inspect.md, Tests).

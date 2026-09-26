@@ -1,0 +1,2 @@
+# one line per certificate
+blog.example.org www.blog.example.org

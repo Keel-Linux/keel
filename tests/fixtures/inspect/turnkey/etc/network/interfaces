@@ -1,0 +1,19 @@
+# TurnKey like tree with a static IPv6 address and DHCP for IPv4
+
+auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet6 static
+    address 2001:db8:1::10/64
+    gateway fe80::1
+    dns-nameservers 2001:db8:1::53
+iface eth0 inet dhcp
+    hostname blog
+
+allow-hotplug eth1
+iface eth1 inet6 auto
+iface eth1 inet static
+    address 192.0.2.10
+    netmask 255.255.255.0
+    gateway 192.0.2.1

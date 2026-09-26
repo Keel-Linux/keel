@@ -22,6 +22,7 @@ from keel.spec.fields import (
     mapping_error,
 )
 from keel.spec.secretstore import secret_file_error
+from keel.spec.validate_extras import validate_locale, validate_users
 from keel.spec.validate_network import validate_network
 
 
@@ -44,6 +45,8 @@ def validate(doc: dict) -> list[str]:
     errors.extend(validate_network(doc.get("network")))
     errors.extend(_validate_tls(doc.get("tls")))
     errors.extend(_validate_preseed(doc.get("preseed")))
+    errors.extend(validate_users(doc.get("users")))
+    errors.extend(validate_locale(doc.get("locale")))
     return errors
 
 

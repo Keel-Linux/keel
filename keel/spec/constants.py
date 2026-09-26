@@ -26,6 +26,8 @@ TOP_LEVEL_KEYS = (
     "security",
     "first_login_wizard",
     "preseed",
+    "users",
+    "locale",
 )
 SECRET_VARS = {
     "root_password": "ROOT_PASS",

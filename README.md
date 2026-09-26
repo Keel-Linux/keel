@@ -10,13 +10,13 @@ which means every operation runs headless from the same code path.
 
 ## Status
 
-Working today: `spec validate`, `spec render`, `spec apply`, `pull`,
-`assemble`, and the layers half of `verify` (see
-[docs/layers.md](docs/layers.md)).
+Working today: `spec validate`, `spec render`, `spec apply`, `inspect`
+(see [docs/inspect.md](docs/inspect.md)), `pull`, `assemble`, and the
+layers half of `verify` (see [docs/layers.md](docs/layers.md)).
 
 Stubs that print what they will do, name the brief section covering them and
-exit 9: `inspect`, `diff`, and the packages half of `verify`. They never
-pretend to work.
+exit 9: `diff`, and the packages half of `verify`. They never pretend to
+work.
 
 ## Commands
 
@@ -25,7 +25,7 @@ pretend to work.
 | `keel spec validate` | Check the spec and report every error it finds, not just the first |
 | `keel spec render` | Print the conf that `apply` would write, with every secret masked |
 | `keel spec apply` | Write the conf, leaving an existing non empty conf untouched |
-| `keel inspect` | Write a spec from the running machine (brief section 5.2, not implemented yet) |
+| `keel inspect` | Write a spec from the running machine, or from an offline root, and report every field with its source or why it was not inferred; secrets are never read (brief sections 5.2 and 7) |
 | `keel diff` | Report drift between the declared and the running state (brief section 5.2, not implemented yet) |
 | `keel verify` | Check the installed layers against their manifests, one line per layer (brief section 5.4; packages not implemented yet) |
 | `keel pull` | Fetch the layers of an appliance that the cache does not have yet, from a directory or an http(s) URL, checking every digest (brief section 5.1) |
@@ -45,6 +45,15 @@ Every command accepts the same three options, so a caller never has to branch:
 | --- | --- |
 | `--layers-dir DIR` | Directory of layer manifests. Default: `$KEEL_LAYERS_DIR`, else `/var/lib/keel/layers` |
 | `--tarballs-dir DIR` | Directory of the tarballs and `.hash` files. Default: the layers directory |
+
+`keel inspect` accepts:
+
+| Option | Meaning |
+| --- | --- |
+| `--root DIR` | Filesystem to inspect: `/` (the default, the live system), a mounted container rootfs, or the tree `keel assemble` produced |
+| `--output FILE` | Write the spec here, mode 0600. Default: stdout |
+| `--report FILE` | Write the field by field report here. Default: stderr |
+| `--secrets-dir DIR` | Where the secret placeholders point. Default: `/etc/keel/secrets`. Never read or written |
 
 `keel pull` and `keel assemble` accept:
 
@@ -70,7 +79,7 @@ Defined in one place, `keel/exits.py`, and reproduced here.
 | 2 | `SPEC_UNREADABLE` | The spec file cannot be read, or is not valid YAML, or is not a mapping |
 | 3 | `SPEC_INVALID` | The spec file is valid YAML but fails validation; every error is printed |
 | 4 | `SECRET_ERROR` | A referenced secret is missing, or is readable by somebody other than its owner |
-| 5 | `CONF_ERROR` | The conf file cannot be written |
+| 5 | `CONF_ERROR` | The conf file, or the spec or report `inspect` writes, cannot be written |
 | 6 | `MANIFEST_INVALID` | A layer manifest cannot be read or fails validation; every problem is printed |
 | 7 | `LAYER_MISMATCH` | A layer tarball, parent chain or `.hash` digest does not match its manifest |
 | 8 | `SIGNATURE_UNVERIFIED` | Every layer matches, but a `.hash` file is present whose signature was not verified (no trusted key is configured yet) |
@@ -78,6 +87,7 @@ Defined in one place, `keel/exits.py`, and reproduced here.
 | 10 | `LAYER_UNAVAILABLE` | `pull` could not fetch a manifest or tarball from the source or write the cache; `assemble` found a layer of the chain missing from the cache |
 | 11 | `ASSEMBLE_NEEDS_ROOT` | `assemble` was run by a user other than root; nothing was written |
 | 12 | `ASSEMBLE_FAILED` | The rootfs is not empty or cannot be created, or `tar` or `zstd` failed while extracting or packing |
+| 13 | `INSPECT_INCOMPLETE` | `inspect` wrote the spec, but a required field (hostname, fqdn, interfaces, alerts, updates) could not be inferred; the report says which and why |
 
 Two rules that callers depend on:
 
@@ -89,7 +99,10 @@ Two rules that callers depend on:
 - `verify` never claims more than it checked: a signature is reported as
   present, never as verified, until a trusted key exists;
 - `pull` never puts a tarball in the cache under a digest it does not
-  have, and `assemble` never extracts a tarball it did not check.
+  have, and `assemble` never extracts a tarball it did not check;
+- `inspect` never reads a secret: every secret is written as a file
+  reference and reported as not extracted, and the spec is written even
+  when the exit code says it is incomplete.
 
 ## An instance file
 

@@ -9,6 +9,7 @@ import os
 import sys
 
 from keel import exits, layers, spec
+from keel import inspect as inspection
 
 
 def warn(message: str) -> None:
@@ -102,12 +103,36 @@ def not_implemented(command: str, section: str, summary: str) -> int:
 
 
 def inspect(args) -> int:
-    return not_implemented(
-        "inspect",
-        "5.2",
-        "write a spec from a running machine, reporting what it could"
-        " not infer",
-    )
+    """Write a spec from the machine under --root, and report every field
+
+    The spec goes to stdout or --output (mode 0600), the report to stderr
+    or --report. A required field that could not be inferred makes the
+    exit code INSPECT_INCOMPLETE, but the spec is written all the same,
+    with placeholders, so the operator edits instead of starting over.
+    """
+    result = inspection.inspect_root(args.root, args.secrets_dir)
+    text = inspection.to_yaml(result)
+    report = "".join(f"{line}\n" for line in inspection.report_lines(result))
+    try:
+        if args.output:
+            spec.write_conf(text, args.output)
+        else:
+            print(text, end="")
+        if args.report:
+            with open(args.report, "w") as fob:
+                fob.write(report)
+        else:
+            print(report, end="", file=sys.stderr)
+    except OSError as e:
+        error(f"inspect: {e}")
+        return exits.CONF_ERROR
+    if not result.complete:
+        error(
+            "inspect: required fields not inferred: "
+            + ", ".join(result.missing_required)
+        )
+        return exits.INSPECT_INCOMPLETE
+    return exits.OK
 
 
 def diff(args) -> int:

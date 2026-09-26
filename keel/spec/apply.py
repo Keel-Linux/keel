@@ -55,10 +55,21 @@ def check_network(doc: dict) -> list[str]:
 
 def unsupported(doc: dict) -> list[str]:
     """Return the declared features this version does not act on"""
+    messages = []
     acme = (doc.get("tls") or {}).get("acme") or {}
     if acme.get("enabled"):
-        return [
+        messages.append(
             "tls.acme: certificates are not requested by this version;"
             " use confconsole to get one"
-        ]
-    return []
+        )
+    if doc.get("users"):
+        messages.append(
+            "users: accounts and authorized keys are not written by this"
+            " version"
+        )
+    if doc.get("locale"):
+        messages.append(
+            "locale: the timezone and language are not applied by this"
+            " version"
+        )
+    return messages
