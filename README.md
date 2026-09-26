@@ -181,3 +181,7 @@ python3 -m unittest discover tests
 Both runners run the same suite. It needs no network, no root and no installed
 package. The coverage standard (95 percent, lines and branches) and the
 commands that check it are in `tests/README.md`.
+
+## License
+
+GPL-3.0-or-later. See LICENSE. Parts are derived from TurnKey Linux inithooks (GPL-2.0-or-later, Copyright 2009 Alon Swartz and 2010-2026 TurnKey Linux maintainers).
