@@ -1,3 +1,21 @@
+keel (0.2.1) unstable; urgency=medium
+
+  * The system phase keeps one entry for the host in /etc/hosts. A line that
+    names the host without a fully qualified name, the 127.0.1.1 <name> line
+    09hostname leaves, is replaced wherever it stands and not only at the
+    address being written: a resolver answers from the first line that
+    carries the name, so the short line answered first and hostname -f kept
+    answering the short name although the file held the fully qualified one.
+  * The reader of /etc/hosts stops at the first line that names the host, the
+    way a resolver does. An entry another line answers before is no longer
+    reported by inspect, is no longer called same by diff, and is converged by
+    the system phase instead of being called settled. Proved on a container
+    booted from the published core layer: hostname -f answered the short name
+    on such a file, and the phase turned it into one entry.
+  * An unknown fully qualified name says which command writes it.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Sat, 26 Sep 2026 22:55:00 +0000
+
 keel (0.2.0) unstable; urgency=medium
 
   * The package now ships a first boot hook,
