@@ -19,6 +19,7 @@ Architecture: all
 Depends:
  python3 (>= 3.12),
  python3-yaml,
+ zstd,
  ${python3:Depends},
  ${misc:Depends},
 Description: Declarative management of one appliance instance

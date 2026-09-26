@@ -146,3 +146,44 @@ def verify_layers(args) -> int:
         print(result.line())
     print(report.summary())
     return report.code
+
+
+def pull(args) -> int:
+    """Fetch the layers of `args.layer` that the cache does not have
+
+    One line per layer on stdout, fetched or cached, then a summary with
+    the bytes transferred. A failure prints the reason and returns the
+    code that names it.
+    """
+    try:
+        report = layers.pull(args.layer, args.source, args.cache_dir)
+    except layers.LayerError as e:
+        error(str(e))
+        return e.code
+    for result in report.results:
+        print(result.line())
+    print(report.summary())
+    return exits.OK
+
+
+def assemble(args) -> int:
+    """Extract the chain of `args.layer` into a rootfs; pack it when asked
+
+    Runs as root only. An OSError that the library did not turn into a
+    LayerError (tar or zstd missing, a disk full) is reported the same
+    way and returns ASSEMBLE_FAILED.
+    """
+    try:
+        report = layers.assemble(
+            args.layer, args.cache_dir, args.rootfs, args.template,
+            args.sha256,
+        )
+    except layers.LayerError as e:
+        error(str(e))
+        return e.code
+    except OSError as e:
+        error(f"assemble: {e}")
+        return exits.ASSEMBLE_FAILED
+    for line in report.lines():
+        print(line)
+    return exits.OK
