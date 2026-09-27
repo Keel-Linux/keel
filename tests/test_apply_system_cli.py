@@ -566,3 +566,78 @@ class TestRoundTrip(ApplySystemTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+DB_SPEC = (
+    "version: 1\n"
+    "database:\n"
+    "  server:\n"
+    "    engine: mariadb\n"
+    "    role: replica\n"
+    "    replication:\n"
+    "      primary:\n"
+    '        host: "2804:710:d0:5::10"\n'
+)
+
+
+class TestDatabasePromote(unittest.TestCase):
+    """The command exists, refuses what it must and changes nothing here"""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.spec = join(self.root, "instance.yaml")
+        with open(self.spec, "w") as fob:
+            fob.write(DB_SPEC)
+
+    def promote(self, *extra):
+        return run_cli(
+            "database", "promote", "--spec", self.spec,
+            "--root", join(self.root, "tree"), *extra,
+        )
+
+    def test_an_offline_root_is_a_no_op_that_says_why(self):
+        with AS_ROOT:
+            code, out, _ = self.promote()
+
+        self.assertEqual(code, exits.OK)
+        self.assertIn("not the live system", out)
+        self.assertIn("database promote: 0 change(s), 0 failed", out)
+
+    def test_a_dry_run_needs_no_root(self):
+        with AS_USER:
+            code, out, _ = self.promote("--dry-run")
+
+        self.assertEqual(code, exits.OK)
+        self.assertIn("dry run", out)
+
+    def test_the_live_system_needs_root(self):
+        with AS_USER:
+            code, _, err = run_cli(
+                "database", "promote", "--spec", self.spec
+            )
+
+        self.assertEqual(code, exits.APPLY_NEEDS_ROOT)
+        self.assertIn("database promote", err)
+
+    def test_a_description_that_is_not_there_is_nothing_to_do(self):
+        code, _, err = run_cli(
+            "database", "promote", "--spec", join(self.root, "absent.yaml")
+        )
+
+        self.assertEqual(code, exits.OK)
+        self.assertIn("nothing to do", err)
+
+    def test_a_description_with_no_server_is_a_refusal(self):
+        path = join(self.root, "bare.yaml")
+        with open(path, "w") as fob:
+            fob.write("version: 1\n")
+
+        with AS_ROOT:
+            code, out, _ = run_cli(
+                "database", "promote", "--spec", path,
+                "--root", join(self.root, "tree"),
+            )
+
+        self.assertEqual(code, exits.APPLY_FAILED)
+        self.assertIn("declares no database.server", out)

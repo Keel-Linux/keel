@@ -193,6 +193,19 @@ def replicate_from(host: str, port: int, password: str) -> Statements:
     )
 
 
+def stop_replicating() -> Statements:
+    """Stop replicating and forget where from, which is half of promoting
+
+    `RESET SLAVE ALL` and not `STOP SLAVE` alone: a node that still holds
+    the coordinates of its old primary would start following it again at
+    the next restart, which is the split brain promotion exists to avoid.
+    """
+    return Statements(
+        "STOP SLAVE;\nRESET SLAVE ALL;\n",
+        "stop replicating and forget the primary",
+    )
+
+
 def destroy(schemas: list[str]) -> Statements:
     """Drop every schema that is not the server's own
 

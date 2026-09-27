@@ -20,7 +20,7 @@ from test_inspect_database import (
 from keel.inspect.tree import File
 from keel.system import dbmariadb as mariadb
 from keel.system.actions import Note, Refuse, Run, RunSql, WriteFile
-from keel.system.database import plan_database
+from keel.system.database import plan_database, plan_promote
 from keel.system.dbstate import Credential, DatabaseState
 
 MACHINE_ID = "0123456789abcdef0123456789abcdef\n"
@@ -495,3 +495,71 @@ class TestPromotionIsASeparateAct(unittest.TestCase):
     def test_a_primary_that_is_already_one_is_configured_normally(self):
         plan = self.observed_primary("primary", allowed_from=[PREFIX])
         self.assertIn("log_bin", written(plan["database.server"]))
+
+
+class TestPromotion(unittest.TestCase):
+    """Its own operation, and the one keel makes the operator type"""
+
+    DOC = declaring(
+        role="replica", replication={"primary": {"host": PRIMARY_HOST}},
+    )
+
+    def promote(self, observed, doc=None):
+        return {
+            step.field: step.actions
+            for step in plan_promote(doc or self.DOC, observed)
+        }
+
+    def replicating(self, **kwargs):
+        return state(
+            answered=dict(MARIADB_STANDALONE, status=MARIADB_REPLICA_STATUS),
+            **kwargs,
+        )
+
+    def test_a_replica_stops_replicating_and_forgets_the_primary(self):
+        plan = self.promote(self.replicating())
+        text = sql(plan["database.server.role"])
+        self.assertIn("STOP SLAVE", text)
+        self.assertIn("RESET SLAVE ALL", text)
+
+    def test_it_says_what_the_description_now_disagrees_with(self):
+        plan = self.promote(self.replicating())
+        notes = " ".join(
+            one.summary for one in only(plan["database.server.role"], Note)
+        )
+        self.assertIn("keel diff reports as drift", notes)
+        self.assertIn("Change the description to primary", notes)
+
+    def test_it_says_that_nothing_stopped_the_old_primary(self):
+        plan = self.promote(self.replicating())
+        notes = " ".join(
+            one.summary for one in only(plan["database.server.role"], Note)
+        )
+        self.assertIn("There is no failover in Keel", notes)
+
+    def test_a_standalone_is_not_promoted(self):
+        plan = self.promote(state())
+        self.assertIn("only a replica can be promoted", refusals(plan))
+        self.assertEqual(only(plan["database.server.role"], RunSql), [])
+
+    def test_a_primary_is_not_promoted_again(self):
+        plan = self.promote(state(
+            answered=dict(MARIADB_STANDALONE, grants=f"{PATTERN}\n")
+        ))
+        self.assertIn("only a replica can be promoted", refusals(plan))
+
+    def test_a_description_with_no_server_has_no_role_to_promote(self):
+        plan = self.promote(None, doc={})
+        self.assertIn("declares no database.server", refusals(plan))
+
+    def test_a_server_that_cannot_be_asked_is_not_promoted(self):
+        plan = self.promote(state(problem="exited 1"))
+        self.assertIn("never changed on a guess", refusals(plan))
+
+    def test_an_offline_root_promotes_nothing(self):
+        plan = self.promote(self.replicating(live=False))
+        self.assertEqual(only(plan["database.server.role"], RunSql), [])
+        self.assertIn(
+            "not the live system",
+            only(plan["database.server.role"], Note)[0].summary,
+        )

@@ -126,6 +126,10 @@ ALREADY = "unchanged (already replicating from [{host}]:{port})"
 NOT_DECLARED = (
     "not declared, so the authorizations the server holds are left alone"
 )
+NO_SERVER = (
+    "the description declares no database.server, so there is no role to"
+    " promote and nothing says what this machine should become"
+)
 
 
 def plan_database(
@@ -151,6 +155,52 @@ def plan_database(
     if role == REPLICA:
         steps.append(_replication(server, state, observed, confirmed))
     return steps
+
+
+PROMOTE_FIELD = "database.server.role"
+NOT_A_REPLICA = (
+    "this machine is {observed} and only a replica can be promoted."
+    " Nothing was changed"
+)
+AFTER = (
+    "this node is a primary now and the description still says replica,"
+    " which keel diff reports as drift and must not be corrected"
+    " automatically. Change the description to primary and run"
+    " `keel spec apply --system-only` to give it a binary log of its own"
+)
+OLD_PRIMARY = (
+    "nothing here stopped the old primary or told anybody else about"
+    " this. There is no failover in Keel: two writable servers on one"
+    " dataset is what this command can cause, and only the operator"
+    " knows the old primary is gone"
+)
+
+
+def plan_promote(doc: dict, state: DatabaseState | None) -> list[Step]:
+    """Make this replica a primary, which apply is never allowed to do
+
+    Its own operation because it is its own decision. Replication in Keel
+    has no automatic failover, so the fact that the old primary should
+    stop being one is knowledge no machine here has and only the operator
+    does. Afterwards the description still says replica and the machine
+    says primary, which is drift by design (docs/diff.md).
+    """
+    if state is None:
+        return [Step(PROMOTE_FIELD, (Refuse(NO_SERVER),))]
+    refusal = _cannot_act(state, REPLICA)
+    if refusal:
+        return [Step(PROMOTE_FIELD, (refusal,))]
+    observed = str(state.reading.role.value)
+    if observed != REPLICA:
+        return [Step(PROMOTE_FIELD, (
+            Refuse(NOT_A_REPLICA.format(observed=observed)),
+        ))]
+    statements = mariadb.stop_replicating()
+    return [Step(PROMOTE_FIELD, (
+        RunSql(mariadb.CLIENT, statements.text, statements.summary),
+        Note(AFTER),
+        Note(OLD_PRIMARY),
+    ))]
 
 
 def _cannot_act(state: DatabaseState, role: str) -> Action | None:

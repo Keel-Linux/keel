@@ -1,3 +1,17 @@
+keel (0.3.5) unstable; urgency=medium
+
+  * keel database promote makes this replica a primary. Its own command
+    because it is its own decision: apply never promotes, and Keel has no
+    automatic failover, so whether the old primary is gone is knowledge
+    only the operator has. It stops replication and forgets the primary
+    with RESET SLAVE ALL, so the node does not follow it again at the
+    next restart, and then says that the description now disagrees with
+    the machine and that nothing here stopped the old primary.
+  * It refuses anything that is not a replica, refuses a server that
+    cannot be asked what it is, and --dry-run needs no root.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Sun, 27 Sep 2026 15:10:00 +0000
+
 keel (0.3.4) unstable; urgency=medium
 
   * keel spec apply --system-only configures a MariaDB server in the role
