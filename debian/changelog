@@ -1,3 +1,80 @@
+keel (0.3.2) unstable; urgency=medium
+
+  * keel diff compares the database section. The engine, the role and the
+    listen addresses are compared against what the server says it is; the
+    endpoint a replica replicates from and the origins a primary authorizes
+    are compared when the declared role has a use for them; and the
+    credentials, being references whose values are never read, are not
+    compared at all.
+  * A declared replica against an observed primary is drift that carries a
+    warning saying never to correct it automatically, because demoting a
+    primary destroys everything written to it since the replica last agreed.
+    The mirror image, a declared primary against an observed replica, carries
+    its own: promoting splits the pair into two writable servers. docs/diff.md
+    states this as a rule of the project, for the phase that will configure
+    replication and not only read it. The warning is in the JSON document as
+    well, so a caller shows it without reproducing it.
+  * A field the declared role has no use for is not compared: a standalone may
+    carry the authorizations it will need as a primary, the way a certificate
+    configuration waits behind tls.acme.enabled. The role itself is always
+    compared. Where the declared and observed roles disagree, the role line
+    carries the drift and the field it governs is unknown, naming the role the
+    machine is in, so one fact produces one drift line.
+  * Listen addresses and authorized origins compare as sets and in canonical
+    form. A name is never resolved: an authorization that names a host and a
+    server that holds an address are two different things, and resolving
+    before comparing is how a name that stopped resolving would pass as same.
+  * inspect says why a field of another role was not read, so the reason
+    reaches the diff line.
+  * MariaDB is asked for its replica status without --skip-column-names.
+    SHOW REPLICA STATUS\G prints one "Name: value" per line and that flag
+    takes the names away, so the primary's address arrived as a bare line and
+    the reading found no primary on a machine that was plainly replicating.
+    Found on the bench, which is why the bench is part of this issue: the
+    fixtures agreed with the code. The role no longer depends on a value
+    happening to contain a colon either; any output at all is a replica row,
+    because SHOW REPLICA STATUS prints nothing on a server that replicates
+    from nowhere.
+  * allowed_from accepts a host pattern, 2001:db8:1:%, which is the only
+    spelling MariaDB has for an IPv6 prefix in a grant: it takes an address and
+    a netmask for IPv4 alone. Found on the bench, on a primary authorized from
+    a /64, where inspect read the pattern off the server and the description it
+    wrote did not validate. A test now asserts that every origin the reading
+    can produce is one the schema accepts, on both SQL engines.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Sun, 27 Sep 2026 11:05:00 +0000
+
+keel (0.3.1) unstable; urgency=medium
+
+  * keel inspect reads the database section, both subjects independently. The
+    server side asks the server what it is rather than reading a configuration
+    file, because a file that reads correctly is what shipped the PostgreSQL
+    appliance listening on IPv4 only: MariaDB is asked for its replica status,
+    its connected replicas and the Host of every account that may replicate;
+    PostgreSQL for pg_is_in_recovery(), pg_stat_replication,
+    pg_stat_wal_receiver and its pg_hba rules for the replication pseudo
+    database, through pg_hba_file_rules, which is the server's own parse and
+    not the file; Redis for INFO replication, INFO cluster and INFO server.
+  * An engine counts as installed when its server binary is present, not when
+    its configuration directory is, because mysql-common puts /etc/mysql on a
+    machine that holds the client alone.
+  * A machine in a mode the description has no role for, a Galera node or a
+    Redis Cluster node, is reported as a role that could not be inferred,
+    naming the mode. So is a server that is installed and cannot be asked: an
+    offline root, a stopped service, or a Redis with requirepass set, which
+    refuses redis-cli and which inspect will not read a secret to get past.
+    The whole section is not inferred in that case, so every field of it is
+    unknown to keel diff and none of it is drift.
+  * database.server.listen comes from the listening sockets, filtered on the
+    port the server itself reported, so it is what the machine answers on and
+    not what it was told to answer on.
+  * The client side is read from the application's own configuration, which is
+    the one place that fact lives: wp-config.php and NodeBB's config.json, one
+    reader per application in a table that grows as appliances arrive. No
+    password is read from any of them.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Sun, 27 Sep 2026 10:20:00 +0000
+
 keel (0.3.0) unstable; urgency=medium
 
   * The instance description gains a database section with two subjects, which

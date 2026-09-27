@@ -12,6 +12,9 @@ import subprocess
 
 from keel.inspect import constants as paths
 from keel.inspect.app import probe_app, probe_appliance
+from keel.inspect.database import Installed, probe_database
+from keel.inspect.dbclient import READERS, Reader
+from keel.inspect.dbengines import ENGINES
 from keel.inspect.hostname import probe_hostname
 from keel.inspect.ipv6 import Runtime
 from keel.inspect.locale import probe_locale
@@ -93,6 +96,12 @@ def inspect_root(
     findings += found
     _add(spec, "users", users)
 
+    database, found = probe_database(
+        database_servers(tree), client_configs(tree)
+    )
+    findings += found
+    _add(spec, "database", database)
+
     locale, found = probe_locale(
         tree.read(paths.TIMEZONE),
         tree.readlink(paths.LOCALTIME),
@@ -149,6 +158,43 @@ def leases(tree: Tree) -> tuple[File, ...]:
         for pattern in paths.DHCP6_LEASES
         for name in tree.glob(pattern)
     )
+
+
+def database_servers(tree: Tree) -> tuple[Installed, ...]:
+    """Every database server installed under the root, with its answers
+
+    An engine is present when its server binary is, not when its
+    configuration directory is: mysql-common puts /etc/mysql on a machine
+    that only holds the client. Each server is then asked what it is; on an
+    offline root the questions are not run and every field of the reading
+    reports why.
+    """
+    sockets = run_command(tree, paths.LISTENING_COMMAND)
+    found = []
+    for engine in ENGINES:
+        binary = engine.installed(tree.glob)
+        if binary is None:
+            continue
+        answers = {
+            name: run_command(tree, argv)
+            for name, argv in engine.questions.items()
+        }
+        found.append(
+            Installed(engine, tree.path(binary), answers, sockets)
+        )
+    return tuple(found)
+
+
+def client_configs(tree: Tree) -> tuple[tuple[Reader, File], ...]:
+    """The application configuration of every reader that finds its file"""
+    found = []
+    for reader in READERS:
+        for pattern in reader.patterns:
+            matches = tree.glob(pattern)
+            if matches:
+                found.append((reader, tree.read(matches[0])))
+                break
+    return tuple(found)
 
 
 def key_files(tree: Tree) -> list[tuple[str, File]]:

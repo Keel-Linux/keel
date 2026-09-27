@@ -1,0 +1,2 @@
+# Stands in for the MariaDB server binary: its presence is what tells
+# inspect that this machine runs a server and not only a client.

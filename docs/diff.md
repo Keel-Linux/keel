@@ -84,7 +84,7 @@ diff: 12 same, 1 drift, 0 unknown, 1 not declared, 2 not compared; drift found
 ## What is compared, and against what
 
 The sections inspect observes are compared: `instance`, `network`, `tls`,
-`security`, `hub`, `users` and `locale`. Each is flattened to the dotted
+`security`, `hub`, `users`, `locale` and `database`. Each is flattened to the dotted
 leaf paths the inspect report uses, so `network.interfaces.eth0.ipv6`
 becomes one line per `method`, `address` and `gateway`, and a list
 (`network.nameservers`, `tls.acme.domains`, `users.<name>.authorized_keys`)
@@ -197,6 +197,87 @@ exit 13, with that reason), runs the system phase, and diffs again
 (`same`, exit 0), then checks that editing the file behind the spec is
 `drift` and not an excused field.
 
+## The database section
+
+Compared like every other observed section, with three rules of its own.
+
+### A declared replica against an observed primary is never corrected
+
+Demoting a primary destroys data: everything written to it since the replica
+last agreed with it is gone, and no amount of care in the code can get it back.
+So this drift, and its mirror image, carry a warning on the line and are stated
+here as a rule of the project and not of one function:
+
+```
+database.server.role: drift (declared replica, observed primary; never correct this automatically: the machine is a primary and demoting one destroys the data written to it since the replica last agreed. Demotion is an operator action)
+database.server.role: drift (declared primary, observed replica; never correct this automatically: promoting a replica splits the pair into two writable servers unless the old primary is known to be gone. Promotion is an operator action)
+```
+
+**No command in this project may change the role of a database server to make
+this line go away.** `keel diff` writes nothing anywhere, which is what makes
+saying so cheap today; the rule is written down because the phase that *does*
+configure replication comes next (decision 0013, phase 3), and the convergence
+it brings must leave promotion and demotion where they belong, which is with
+the operator. The most common way to meet this drift is a promotion that
+already happened, after a primary failed: the machine is right and the
+description is out of date, and editing the description is the correction.
+
+The `note` is carried in the JSON document as well, so a caller such as
+confconsole shows the warning without reproducing it.
+
+### A field the declared role has no use for is not compared
+
+A standalone may carry the authorizations it will need as a primary, and a
+primary may carry the endpoint it would replicate from after a demotion. Both
+are a change prepared before it is made, the same case as a certificate
+configuration behind `tls.acme.enabled: false`, and the machine is not supposed
+to carry either meanwhile:
+
+```
+database.server.role: same (standalone)
+database.server.replication.allowed_from: not compared (the declared role is standalone, so this field describes nothing; it is compared when the role is primary)
+```
+
+The role itself is always compared, so a machine that became a primary behind
+the description's back is still drift.
+
+Where the declared role and the observed role disagree, the role line carries
+the drift and the field it governs is `unknown`, with `inspect`'s reason naming
+the role the machine is actually in. One fact produces one drift line.
+
+### Origins and addresses compare as sets, and a name is never resolved
+
+`database.server.listen` and `database.server.replication.allowed_from` are
+sets: order carries no meaning, and `2001:0DB8:1::/64` equals `2001:db8:1::/64`.
+
+A name in `allowed_from` is compared as a name, lower cased and without a
+trailing dot, and **is never resolved**. An authorization that names a host and
+a server that holds an address are two different things. MariaDB resolves the
+`Host` of a grant and `pg_hba` reverse resolves the client address, both fail
+quietly, and a diff that resolved the declared name before comparing would
+report `same` for an authorization that matches nothing at all
+([docs/spec.md](spec.md)).
+
+### The rest of the section
+
+| Field | Compared against |
+| --- | --- |
+| `database.server.engine` | the server binary that is installed |
+| `database.server.role` | what the server says it is |
+| `database.server.listen` | the sockets the machine holds open on that server's port |
+| `database.server.replication.primary.*` | the primary the server says it replicates from, when the declared role is `replica` |
+| `database.server.replication.allowed_from` | the origins the server holds an authorization for, when the declared role is `primary` |
+| `database.server.replication.secret`, `database.client.primary.secret` | not compared: a reference whose value is never read, on either side |
+| `database.client.engine`, `database.client.primary.*` | the application's own configuration |
+| `database.client.replicas` | `unknown`: no application configuration `inspect` reads expresses a read endpoint ([docs/inspect.md](inspect.md)) |
+
+A machine where the server is installed and could not be asked reports the
+whole of `database.server` as `unknown`, with the reason naming the engine, the
+binary and the command that failed, so an offline root and a stopped service
+are never read as drift. A machine with no database server at all reports
+nothing, so a description that declares one **is** drift against it, which is
+the true statement: there is no server there.
+
 ## JSON
 
 `--format json` prints one document to stdout:
@@ -212,7 +293,8 @@ exit 13, with that reason), runs the system phase, and diffs again
       "status": "same",
       "declared": "blog",
       "observed": "blog",
-      "reason": ""
+      "reason": "",
+      "note": ""
     },
     {
       "field": "security.alerts",
@@ -220,7 +302,8 @@ exit 13, with that reason), runs the system phase, and diffs again
       "status": "unknown",
       "declared": "admin@example.org",
       "observed": null,
-      "reason": "/etc/aliases permission denied (root only)"
+      "reason": "/etc/aliases permission denied (root only)",
+      "note": ""
     }
   ],
   "counts": {"same": 1, "drift": 0, "unknown": 1, "not_declared": 0, "not_compared": 0},
@@ -231,7 +314,9 @@ exit 13, with that reason), runs the system phase, and diffs again
 ```
 
 `declared` and `observed` are the values as the spec and inspect hold
-them (a string, a boolean, a list), `null` when absent. `exit_code` is the
+them (a string, a boolean, a list), `null` when absent. `note` is the
+warning a drift line carries where acting on it the wrong way round would
+destroy something; it is empty everywhere else. `exit_code` is the
 code the command returns, so a caller shows the right message without
 reproducing the precedence rule. From Python, confconsole calls the same
 function the CLI does:
@@ -291,6 +376,9 @@ It never exits 3 because of a secret file.
 
 ## Tests
 
+`tests/test_diff_database.py` covers the database section: the role, the
+warning on the drift that must never be corrected, the fields another role
+has no use for, and the set comparison that never resolves a name.
 `tests/test_diff.py` covers the model and the comparison as pure
 functions, one test per branch, and each observable section with a spec
 that matches the `turnkey` fixture and one that drifts on that section.

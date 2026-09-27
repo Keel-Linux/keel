@@ -342,6 +342,26 @@ class TestAllowedFrom(unittest.TestCase):
             "        - 2001:db8:1::20\n        - replica.example.org\n"
         )
 
+    def test_a_mariadb_host_pattern_is_accepted(self):
+        """The only spelling MariaDB has for an IPv6 prefix in a grant
+
+        Measured on the bench: a MariaDB primary authorized from a /64
+        holds `2804:710:d0:5:%`, and inspect reads that back, so a schema
+        that refused it would break the round trip on every primary.
+        """
+        valid(
+            "version: 1\ndatabase:\n  server:\n    engine: mariadb\n"
+            "    role: primary\n    replication:\n      allowed_from:\n"
+            "        - 2001:db8:1:%\n        - 192.0.2.%\n"
+            "        - replica_.example.org\n"
+        )
+
+    def test_a_pattern_of_nothing_but_a_wildcard_is_accepted(self):
+        valid(
+            "version: 1\ndatabase:\n  server:\n    engine: mariadb\n"
+            '    role: primary\n    replication:\n      allowed_from: ["%"]\n'
+        )
+
     def test_allowed_from_must_be_a_list(self):
         messages(
             "version: 1\ndatabase:\n  server:\n    engine: postgresql\n"
@@ -370,7 +390,7 @@ class TestAllowedFrom(unittest.TestCase):
             "version: 1\ndatabase:\n  server:\n    engine: postgresql\n"
             "    role: primary\n    replication:\n      allowed_from:\n"
             '        - "not a host"\n',
-            "is not an address, a prefix or a name",
+            "is not an address, a prefix, a host pattern or a name",
         )
 
     def test_localhost_is_refused_as_an_origin(self):
@@ -386,7 +406,7 @@ class TestAllowedFrom(unittest.TestCase):
             "version: 1\ndatabase:\n  server:\n    engine: postgresql\n"
             "    role: primary\n    replication:\n      allowed_from:\n"
             '        - ""\n',
-            "must be an address, a prefix or a name",
+            "must be an address, a prefix, a host pattern or a name",
         )
 
 

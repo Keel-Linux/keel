@@ -34,6 +34,10 @@ DHCP6_LEASES = ("var/lib/dhcpcd/*.lease6", "var/lib/dhcp/dhclient6*.leases")
 
 HOSTNAME_COMMAND = ("hostname", "-f")
 IP_ADDR_COMMAND = ("ip", "-6", "addr", "show")
+# What a server is bound to, asked of the kernel rather than of the
+# server's own setting: docs/traps.md, "Asserting the configuration is not
+# asserting the behaviour".
+LISTENING_COMMAND = ("ss", "-lntH")
 
 # A spec missing any of these cannot be applied headless: the hook behind
 # each one prompts when its variable is unset.

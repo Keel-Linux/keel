@@ -30,6 +30,7 @@ from keel.spec.constants import TOP_LEVEL_KEYS
 
 OBSERVED_SECTIONS = (
     "instance", "network", "tls", "security", "hub", "users", "locale",
+    "database",
 )
 NOT_COMPARED_REASONS = {
     "secrets": "values are never read, on either side",
@@ -41,6 +42,13 @@ NOT_COMPARED_REASONS = {
     " machine",
 }
 SECRET_REASON = "a secret reference; values are never read"
+# Where a secret reference can stand outside the `secrets` section. Each is
+# a mapping naming a backend, so the flattened paths below it are the
+# reference and not fields of the machine.
+SECRET_PREFIXES = (
+    "database.server.replication.secret",
+    "database.client.primary.secret",
+)
 # A feature the spec turns off with one field. Its other fields stay in
 # the file, ready for the day the switch is turned on, and are not
 # compared meanwhile: nothing on the machine is supposed to match them.
@@ -57,11 +65,47 @@ FIRST_BOOT_FIELDS = {
 }
 DOMAIN_LEAVES = ("hostname", "fqdn", "domains")
 ADDRESS_LEAVES = ("address",)
-HOST_LEAVES = ("gateway", "nameservers")
-# Lists whose order carries no meaning: group membership is a set.
-UNORDERED_LEAVES = ("groups",)
+HOST_LEAVES = ("gateway", "nameservers", "host", "listen")
+# An origin an authorization names: an address, a prefix, or a name. A name
+# is never resolved here, so a description that names a host and a server
+# that holds an address are drift and not a match, which is the whole
+# reason for reading the origins off the server (docs/spec.md).
+ORIGIN_LEAVES = ("allowed_from",)
+# Lists whose order carries no meaning: group membership is a set, and so
+# are the addresses a server answers on and the origins it authorizes.
+UNORDERED_LEAVES = ("groups", "listen", "allowed_from")
 # Fields inspect derives from another one, so they are unknown together.
 DERIVED_FROM = {"network.managed_by": "network.interfaces"}
+# A field that describes nothing unless the declared role is one of these.
+# The same rule as DISABLED_FEATURES, keyed on a value instead of a switch:
+# an operator prepares a primary's authorizations on a standalone before
+# promoting it, the way a certificate configuration is prepared behind
+# tls.acme.enabled, and comparing them meanwhile reports drift on a correct
+# description.
+ROLE_ONLY = {
+    "database.server.replication.primary": ("replica",),
+    "database.server.replication.allowed_from": ("primary",),
+}
+ROLE_FIELD = "database.server.role"
+ROLE_REASON = (
+    "the declared role is {role}, so this field describes nothing; it is"
+    " compared when the role is {roles}"
+)
+# Drift that must never be turned into an action. diff writes nothing
+# anywhere, so this is a note on the line and a rule in docs/diff.md: the
+# operator reading the report is the one who could do the damage.
+NEVER_CORRECTED = {
+    (ROLE_FIELD, "replica", "primary"): (
+        "never correct this automatically: the machine is a primary and"
+        " demoting one destroys the data written to it since the replica"
+        " last agreed. Demotion is an operator action"
+    ),
+    (ROLE_FIELD, "primary", "replica"): (
+        "never correct this automatically: promoting a replica splits the"
+        " pair into two writable servers unless the old primary is known to"
+        " be gone. Promotion is an operator action"
+    ),
+}
 
 
 def compare(declared: dict, inspection: Inspection) -> Comparison:
@@ -122,7 +166,51 @@ def not_compared(section: str, wanted: dict[str, object]) -> dict[str, str]:
         if path in wanted
     }
     skipped.update(disabled(section, wanted))
+    skipped.update(other_role(wanted))
+    skipped.update(secret_references(wanted))
     return skipped
+
+
+def other_role(wanted: dict[str, object]) -> dict[str, str]:
+    """The declared paths that the declared role has nothing to say about
+
+    A standalone or a replica may carry a primary's authorization list, and
+    a primary may carry the endpoint it would replicate from after a
+    demotion; both are a promotion or a demotion prepared in advance, and
+    the machine is not supposed to carry either meanwhile. The role itself
+    is always compared.
+    """
+    role = wanted.get(ROLE_FIELD)
+    if role is None:
+        return {}
+    skipped = {}
+    for field, roles in ROLE_ONLY.items():
+        if str(role) in roles:
+            continue
+        reason = ROLE_REASON.format(role=role, roles=" or ".join(roles))
+        skipped.update({
+            path: reason for path in wanted if _under(path, field)
+        })
+    return skipped
+
+
+def _under(path: str, field: str) -> bool:
+    """Whether a flattened leaf path is that field or a leaf of it"""
+    return path == field or path.startswith(f"{field}.")
+
+
+def secret_references(wanted: dict[str, object]) -> dict[str, str]:
+    """Every declared path that is part of a secret reference
+
+    A credential is a reference and its value is never read, on either
+    side, so the path that names the file is not a field to compare. The
+    same rule as the `secrets` section and `hub.api_key`, written as a
+    table because the database section has one on each side.
+    """
+    return {
+        path: SECRET_REASON for path in wanted
+        if any(_under(path, prefix) for prefix in SECRET_PREFIXES)
+    }
 
 
 def disabled(section: str, wanted: dict[str, object]) -> dict[str, str]:
@@ -160,10 +248,25 @@ def compare_field(
         reason = unknown_reason(path, unknowns)
         if reason is not None:
             return FieldDiff(path, UNKNOWN, declared, None, reason)
-        return FieldDiff(path, DRIFT, declared, None)
+        return FieldDiff(path, DRIFT, declared, None, note=note(
+            path, declared, None
+        ))
     if normalize(path, declared) == normalize(path, observed):
         return FieldDiff(path, SAME, declared, observed)
-    return FieldDiff(path, DRIFT, declared, observed)
+    return FieldDiff(path, DRIFT, declared, observed, note=note(
+        path, declared, observed
+    ))
+
+
+def note(path: str, declared: object, observed: object) -> str:
+    """The warning that belongs on this drift, when there is one
+
+    Every drift is the operator's to act on, and one of them can destroy
+    data if it is acted on the wrong way round, so the line says which.
+    """
+    return NEVER_CORRECTED.get(
+        (path, str(declared), str(observed)), ""
+    )
 
 
 def unknown_reason(path: str, unknowns: dict[str, str]) -> str | None:
@@ -207,6 +310,8 @@ def normalize(path: str, value: object) -> object:
     leaf = path.rsplit(".", 1)[-1]
     if path in KEYWORD_FIELDS or leaf in DOMAIN_LEAVES:
         return text.lower().rstrip(".")
+    if leaf in ORIGIN_LEAVES:
+        return _origin(text)
     if leaf in ADDRESS_LEAVES:
         return _address(text, ipaddress.ip_interface)
     if leaf in HOST_LEAVES:
@@ -219,3 +324,26 @@ def _address(text: str, parse) -> str:
         return str(parse(text))
     except ValueError:
         return text
+
+
+def _origin(text: str) -> str:
+    """An origin in canonical form, with a name left alone but lower cased
+
+    A name is never resolved: an authorization that names a host and a
+    server that holds an address are two different things, and calling them
+    the same is how a name that stopped resolving would pass unnoticed.
+    """
+    if "/" in text:
+        return _address(text, lambda value: ipaddress.ip_network(
+            value, strict=False
+        ))
+    if _version(text) is not None:
+        return _address(text, ipaddress.ip_address)
+    return text.lower().rstrip(".")
+
+
+def _version(text: str) -> int | None:
+    try:
+        return ipaddress.ip_address(text).version
+    except ValueError:
+        return None

@@ -1,0 +1,9 @@
+# A tree that runs a database server and an application that uses it.
+
+auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet6 static
+    address 2001:db8:1::20/64
+    gateway fe80::1
