@@ -127,14 +127,45 @@ class TestTheServerIsNotAskedOnAGuess(unittest.TestCase):
 
     def test_a_machine_with_no_identity_gets_no_invented_server_id(self):
         plan = steps(declaring(role="standalone"), state(machine_id=""))
-        self.assertIn("no identity to derive a server id from",
+        self.assertIn("nothing of its own to derive a server id from",
                       refusals(plan))
 
-    def test_two_machines_get_two_server_ids(self):
+    def test_two_machine_ids_give_two_server_ids(self):
         first = mariadb.server_id("0123456789abcdef0123456789abcdef")
         second = mariadb.server_id("fedcba9876543210fedcba9876543210")
         self.assertNotEqual(first, second)
         self.assertGreater(first, 0)
+
+    def test_one_machine_id_and_two_addresses_still_give_two(self):
+        """The published core layer ships one machine-id for every machine
+
+        Measured on the build host: the `core` layer's rootfs carries a
+        populated /etc/machine-id, so both nodes of the gate and both live
+        appliances hold the same value. A server id derived from it alone
+        was the same on both nodes, which is the one thing that stops
+        replication outright.
+        """
+        shared = "f0e97605ab594989b4d78f4a126b5b37"
+
+        first = mariadb.server_id(shared, ["::1", "2804:710:d0:5::20"])
+        second = mariadb.server_id(shared, ["::1", "2804:710:d0:5::21"])
+
+        self.assertNotEqual(first, second)
+
+    def test_the_addresses_alone_are_enough(self):
+        found = mariadb.server_id("", ["2804:710:d0:5::20"])
+
+        self.assertIsNotNone(found)
+        self.assertGreater(found, 0)
+
+    def test_the_order_the_addresses_were_written_in_does_not_change_it(self):
+        one = mariadb.server_id("abc", ["::1", "127.0.0.1"])
+        other = mariadb.server_id("abc", ["127.0.0.1", "::1"])
+
+        self.assertEqual(one, other)
+
+    def test_a_declared_listen_of_blanks_is_no_identity_either(self):
+        self.assertIsNone(mariadb.server_id("  ", ["  "]))
 
 
 class TestTheConfiguration(unittest.TestCase):
