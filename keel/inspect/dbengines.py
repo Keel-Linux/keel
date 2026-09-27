@@ -44,12 +44,18 @@ PRIMARY = "primary"
 REPLICA = "replica"
 STANDALONE = "standalone"
 
+# The SQL of each question, and whether the answer needs its column names.
+# `\\G` prints one `Name: value` per line and `--skip-column-names` takes the
+# names away, leaving values nothing identifies: measured on the bench, where
+# the primary's address arrived as a bare line and the reading found no
+# primary at all on a machine that plainly had one.
 MARIADB_SQL = {
-    "status": "SHOW REPLICA STATUS\\G",
-    "replicas": "SHOW REPLICA HOSTS",
-    "variables": "SHOW GLOBAL VARIABLES WHERE Variable_name IN"
-                 " ('wsrep_on', 'log_bin', 'server_id', 'port')",
-    "grants": "SELECT Host FROM mysql.user WHERE Repl_slave_priv = 'Y'",
+    "status": ("SHOW REPLICA STATUS\\G", True),
+    "replicas": ("SHOW REPLICA HOSTS", False),
+    "variables": ("SHOW GLOBAL VARIABLES WHERE Variable_name IN"
+                  " ('wsrep_on', 'log_bin', 'server_id', 'port')", False),
+    "grants": ("SELECT Host FROM mysql.user WHERE Repl_slave_priv = 'Y'",
+               False),
 }
 POSTGRESQL_SQL = {
     "state": "SELECT pg_is_in_recovery(),"
@@ -100,10 +106,11 @@ class Engine:
         return None
 
 
-def mariadb_argv(sql: str) -> tuple[str, ...]:
-    return (
-        "mariadb", "--batch", "--skip-column-names", "--execute", sql,
-    )
+def mariadb_argv(sql: str, named: bool = False) -> tuple[str, ...]:
+    """The client invocation for one question; `named` keeps the columns"""
+    if named:
+        return ("mariadb", "--batch", "--execute", sql)
+    return ("mariadb", "--batch", "--skip-column-names", "--execute", sql)
 
 
 def psql_argv(sql: str) -> tuple[str, ...]:
@@ -125,11 +132,13 @@ def read_mariadb(answers: dict[str, File], sockets: File) -> Reading:
     )
     allowed = _mariadb_allowed(answers["grants"])
     status = answers["status"]
-    replicating = field_lines(status)
+    # Any output at all is a replica row: SHOW REPLICA STATUS prints
+    # nothing on a server that replicates from nowhere.
+    replicating = bool(status.lines())
     role = _mariadb_role(variables, replicating, answers, allowed)
     return Reading(
         role=role,
-        primary=_primary_from(replicating, status,
+        primary=_primary_from(field_lines(status), status,
                               PRIMARY_HOST_KEYS, PRIMARY_PORT_KEYS),
         allowed_from=allowed,
         listen=listening_on(
@@ -139,7 +148,7 @@ def read_mariadb(answers: dict[str, File], sockets: File) -> Reading:
 
 
 def _mariadb_role(
-    variables: dict[str, str], replicating: dict[str, str],
+    variables: dict[str, str], replicating: bool,
     answers: dict[str, File], allowed: Value,
 ) -> Value:
     if variables.get("wsrep_on", "").upper() == "ON":
@@ -412,7 +421,8 @@ ENGINES = (
         client="mariadb",
         port=3306,
         questions={
-            name: mariadb_argv(sql) for name, sql in MARIADB_SQL.items()
+            name: mariadb_argv(sql, named)
+            for name, (sql, named) in MARIADB_SQL.items()
         },
         read=read_mariadb,
     ),

@@ -156,6 +156,27 @@ class TestMariaDB(unittest.TestCase):
         reading = mariadb_reading(answered, SOCKETS)
         self.assertEqual(reading.primary.value, {"host": "2001:db8:1::10"})
 
+    def test_the_status_question_keeps_its_column_names(self):
+        """`\\G` names each field and --skip-column-names takes that away
+
+        Measured on the bench: with the names gone, the primary's address
+        arrived as a bare line and the reading found no primary at all on a
+        machine that was plainly replicating.
+        """
+        engine = next(one for one in ENGINES if one.name == "mariadb")
+        self.assertNotIn(
+            "--skip-column-names", engine.questions["status"]
+        )
+        self.assertIn(
+            "--skip-column-names", engine.questions["variables"]
+        )
+
+    def test_a_status_row_with_no_colon_in_it_is_still_a_replica(self):
+        answered = dict(MARIADB_STANDALONE, status="1 row\n")
+        reading = mariadb_reading(answered, SOCKETS)
+        self.assertEqual(reading.role.value, "replica")
+        self.assertIsNone(reading.primary.value)
+
     def test_a_galera_node_has_no_role_in_the_spec_yet(self):
         answered = dict(
             MARIADB_STANDALONE,
