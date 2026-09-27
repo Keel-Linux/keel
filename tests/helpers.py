@@ -41,5 +41,7 @@ def env(text: str) -> dict:
     return exported
 
 
-def errors(text: str) -> list[str]:
-    return spec.validate(doc(text))
+def errors(text: str, check_secret_files: bool = True) -> list[str]:
+    return spec.validate(
+        doc(text), check_secret_files=check_secret_files
+    )

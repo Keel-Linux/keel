@@ -46,3 +46,23 @@ first_login_wizard: false
 
 preseed:
   AUTOGROW: ONCE
+
+# Two subjects, never one field (docs/spec.md): this machine runs a MariaDB
+# server and the blog on it uses that server. Addresses are literal, because
+# on Debian localhost is an IPv4 only name.
+database:
+  server:
+    engine: mariadb
+    role: standalone
+    listen:
+      - "::1"
+      - 127.0.0.1
+  client:
+    engine: mariadb
+    primary:
+      host: "::1"
+      port: 3306
+      name: blog
+      user: blog
+      secret:
+        file: /etc/keel/secrets/db_password

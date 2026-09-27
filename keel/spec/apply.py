@@ -60,8 +60,20 @@ def unsupported(doc: dict, system: bool = False) -> list[str]:
     (keel.system), which is asked for with --system or --system-only;
     without either they are accepted and left alone, and the warning says
     so.
+
+    The database section is read and compared and never applied, by any
+    run: this phase of decision 0013 is vocabulary, reading and
+    comparison. The warning says so with either flag and without one,
+    because becoming a replica replaces the local data with a copy of the
+    primary and no run of apply may do that behind an operator's back.
     """
     messages = []
+    if doc.get("database"):
+        messages.append(
+            "database: no database configuration is written by this"
+            " version; the section is read by keel inspect and compared by"
+            " keel diff only"
+        )
     acme = (doc.get("tls") or {}).get("acme") or {}
     if acme.get("enabled"):
         messages.append(

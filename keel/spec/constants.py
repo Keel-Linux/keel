@@ -28,6 +28,7 @@ TOP_LEVEL_KEYS = (
     "preseed",
     "users",
     "locale",
+    "database",
 )
 SECRET_VARS = {
     "root_password": "ROOT_PASS",
@@ -41,3 +42,17 @@ SECRET_BACKENDS = ("file", "generate")
 MANAGED_BY = ("host", "file")
 IPV4_METHODS = ("static", "dhcp", "manual", "none")
 IPV6_METHODS = ("static", "dhcp", "auto", "manual", "none")
+
+# The two subjects of the database section, which one field cannot serve: a
+# machine that runs a server has a role, a machine that uses one names the
+# endpoints it uses. A machine can have both, or either alone.
+DATABASE_SUBJECTS = ("server", "client")
+DATABASE_ENGINES = ("mariadb", "postgresql", "redis")
+# Roles a server can be in. Multi-primary (Galera, Redis Cluster) and the
+# shard roles are not here: a machine in one of those is reported as a role
+# the spec has no value for, which is why nothing here has to be renamed
+# when they arrive (decision 0013).
+SERVER_ROLES = ("standalone", "primary", "replica")
+# The port each engine listens on when the description names none.
+DEFAULT_PORTS = {"mariadb": 3306, "postgresql": 5432, "redis": 6379}
+MAX_PORT = 65535
