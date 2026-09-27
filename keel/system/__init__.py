@@ -11,9 +11,10 @@ is unit tested against fixture trees and the side effects stay thin.
 import os
 
 from keel.inspect import ROOT_DEFAULT
-from keel.system.actions import Note, Plan, Step
+from keel.system.actions import Note, Plan, Refuse, Step
 from keel.system.effects import Effects
 from keel.system.execute import Outcome, execute
+from keel.system.database import plan_promote
 from keel.system.plan import plan
 from keel.system.state import SystemState, observe
 
@@ -39,6 +40,7 @@ def needs_root(root: str, label: str = "apply --system") -> str | None:
 __all__ = [
     "Effects",
     "Note",
+    "Refuse",
     "Outcome",
     "Plan",
     "Step",
@@ -47,4 +49,5 @@ __all__ = [
     "needs_root",
     "observe",
     "plan",
+    "plan_promote",
 ]

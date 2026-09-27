@@ -13,7 +13,14 @@ import subprocess
 from keel.inspect import constants as paths
 from keel.inspect.accounts import passwd_entries
 from keel.inspect.tree import Tree
-from keel.system.actions import Change, MakeDir, Run, Symlink, WriteFile
+from keel.system.actions import (
+    Change,
+    MakeDir,
+    Run,
+    RunSql,
+    Symlink,
+    WriteFile,
+)
 
 NOT_RUNNABLE = 127
 
@@ -27,6 +34,8 @@ class Effects:
         try:
             if isinstance(action, Run):
                 return self.run(action.argv)
+            if isinstance(action, RunSql):
+                return self.run(action.argv, action.statements)
             if isinstance(action, WriteFile):
                 return self.write(action)
             if isinstance(action, MakeDir):
@@ -35,10 +44,21 @@ class Effects:
         except OSError as e:
             return f"{e.strerror or e}"
 
-    def run(self, argv: tuple[str, ...]) -> str | None:
+    def run(self, argv: tuple[str, ...], stdin: str | None = None) -> (
+        str | None
+    ):
+        """Run a command, with `stdin` when the action carries statements
+
+        The statements never reach the argument vector, which is world
+        readable in the process list, and never reach the message on
+        failure either: the client quotes the statement it choked on, so
+        the reason is taken from the stream and the statements are not
+        echoed back by keel.
+        """
         try:
             out = subprocess.run(
                 list(argv), capture_output=True, text=True, check=False,
+                input=stdin,
             )
         except OSError as e:
             return f"cannot run {argv[0]}: {e.strerror}"

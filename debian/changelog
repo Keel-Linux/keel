@@ -1,3 +1,57 @@
+keel (0.3.5) unstable; urgency=medium
+
+  * keel database promote makes this replica a primary. Its own command
+    because it is its own decision: apply never promotes, and Keel has no
+    automatic failover, so whether the old primary is gone is knowledge
+    only the operator has. It stops replication and forgets the primary
+    with RESET SLAVE ALL, so the node does not follow it again at the
+    next restart, and then says that the description now disagrees with
+    the machine and that nothing here stopped the old primary.
+  * It refuses anything that is not a replica, refuses a server that
+    cannot be asked what it is, and --dry-run needs no root.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Sun, 27 Sep 2026 15:10:00 +0000
+
+keel (0.3.4) unstable; urgency=medium
+
+  * keel spec apply --system-only configures a MariaDB server in the role
+    database.server declares: the server id, the addresses it answers on
+    and the binary log in one drop-in, restarting the server only when
+    that file changed; a grant of replication per entry of allowed_from
+    on a primary, in the host pattern spelling MariaDB has for a prefix,
+    with an origin the description dropped withdrawn; and CHANGE MASTER
+    TO with MASTER_USE_GTID on a replica. Phase 3 of handbook decision
+    0013, MariaDB first.
+  * Becoming a replica destroys the local database, so apply refuses
+    unless the server holds no database but its own, or the operator
+    passes --destroy-local-database in that invocation. A server that
+    cannot be asked what it holds is refused too, pointing a replica at a
+    different primary is the same act, and nothing else in keel passes
+    the flag, so a first boot cannot destroy anything.
+  * apply never promotes a replica and never demotes a primary. Where the
+    observed role would need either, it refuses and names the operation.
+    This is the acting side of the rule docs/diff.md already states.
+  * The server id comes from /etc/machine-id and the declared listen
+    addresses, and never from the description alone: two appliances
+    deployed from one description would collide, and two nodes with the
+    same server id stop replicating. Both sources, because the published
+    core layer ships a populated machine-id, so every appliance assembled
+    from it holds the same value; measured on two nodes of the gate, which
+    took the same server id from it. The addresses a pair answers on
+    differ by construction on one /64.
+  * The replication credential is the only secret --system-only resolves,
+    and it is the only one it needs. It never reaches an argument vector
+    or the printed plan, it is escaped as a MariaDB literal, and a file
+    holding a control character is refused rather than mangled.
+  * The line that confirms the destruction repeats the reason and not the
+    remedy: a run that went ahead telling the operator that nothing was
+    changed would be a lie. Measured on the build host, where it said both.
+  * New actions: RunSql, statements on standard input whose description
+    never shows them, and Refuse, a step that did not happen and says why,
+    counted as a failure so the exit code tells the truth.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Sun, 27 Sep 2026 14:40:00 +0000
+
 keel (0.3.3) unstable; urgency=medium
 
   * An origin and the host pattern MariaDB holds for it are one

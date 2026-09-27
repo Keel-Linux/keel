@@ -3,14 +3,16 @@
 
 One line per action on stdout, in plan order. `label` is how the run was
 asked for (--system, --system-only), so the summary names it. A failed
-action fails its step: the actions after it in that step are skipped (a home directory is
-not populated for an account that was not created), the other steps go
-on, and the summary counts what happened.
+action fails its step: the actions after it in that step are skipped (a
+home directory is not populated for an account that was not created),
+the other steps go on, and the summary counts what happened. A refusal
+fails its step the same way in a dry run, because a dry run that planned
+the actions behind a refusal would describe a run that cannot happen.
 """
 
 from dataclasses import dataclass
 
-from keel.system.actions import Note, Plan
+from keel.system.actions import Note, Plan, Refuse
 from keel.system.effects import Effects
 
 
@@ -42,11 +44,15 @@ def execute(
             prefix = f"{step.field}: "
             if isinstance(action, Note):
                 lines.append(prefix + action.describe())
+            elif isinstance(action, Refuse):
+                lines.append(prefix + "refused: " + action.describe())
+                failed += 1
+                broken = True
+            elif broken:
+                lines.append(prefix + "skipped: " + action.describe())
             elif dry_run:
                 lines.append(prefix + "would " + action.describe())
                 changed += 1
-            elif broken:
-                lines.append(prefix + "skipped: " + action.describe())
             else:
                 problem = effects.apply(action)
                 if problem is None:

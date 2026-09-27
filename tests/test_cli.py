@@ -444,6 +444,19 @@ class TestUsage(CLITestCase):
         self.assertIn("usage:", err.getvalue())
         self.assertIn("Error:", err.getvalue())
 
+    def test_destroying_the_database_needs_the_phase_that_could(self):
+        # The flag confirms one decision of the system phase, so asking
+        # for it without that phase is a typo, not a quiet no-op.
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            with self.assertRaises(SystemExit) as raised:
+                self.run_cli(
+                    "spec", "apply", "--destroy-local-database",
+                    "--spec", "/nonexistent",
+                )
+        self.assertEqual(raised.exception.code, exits.USAGE)
+        self.assertIn("requires --system or --system-only", err.getvalue())
+
     def test_no_command_exits_usage(self):
         self.assertEqual(self.run_cli(), exits.USAGE)
 

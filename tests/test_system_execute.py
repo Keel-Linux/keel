@@ -21,7 +21,9 @@ from keel.system.actions import (
     MakeDir,
     Note,
     Plan,
+    Refuse,
     Run,
+    RunSql,
     Step,
     Symlink,
     WriteFile,
@@ -208,6 +210,79 @@ class TestExecute(unittest.TestCase):
                          "locale.timezone: unchanged (Etc/UTC)")
         self.assertEqual(outcome.summary(),
                          "dry run: 3 change(s) planned, nothing written")
+
+
+class TestStatements(EffectsTestCase):
+    """SQL goes on standard input, never in an argument vector"""
+
+    def test_the_statements_reach_the_client_on_standard_input(self):
+        action = RunSql(
+            ("mariadb", "--batch"), "GRANT REPLICATION SLAVE;\n", "grant"
+        )
+        with mock.patch.object(
+            subprocess, "run", return_value=completed(0)
+        ) as run:
+            problem = Effects(self.root).apply(action)
+
+        self.assertIsNone(problem)
+        self.assertEqual(
+            run.call_args.kwargs["input"], "GRANT REPLICATION SLAVE;\n"
+        )
+        self.assertEqual(run.call_args.args[0], ["mariadb", "--batch"])
+
+    def test_a_credential_never_reaches_the_description_of_the_action(self):
+        action = RunSql(
+            ("mariadb",), "ALTER USER 'repl'@'%' IDENTIFIED BY 'hunter2';",
+            "authorize replication",
+        )
+
+        self.assertNotIn("hunter2", action.describe())
+        self.assertIn("1 statement(s) on standard input", action.describe())
+
+    def test_a_failing_client_reports_the_code_and_not_the_statements(self):
+        action = RunSql(("mariadb",), "SELECT 'hunter2';", "do it")
+        with mock.patch.object(
+            subprocess, "run", return_value=completed(1, err="denied")
+        ):
+            problem = Effects(self.root).apply(action)
+
+        self.assertEqual(problem, "mariadb exited 1: denied")
+        self.assertNotIn("hunter2", problem)
+
+
+class TestRefusal(unittest.TestCase):
+    """A refusal is a failure with a reason, never a silent no-op"""
+
+    PLAN = Plan((
+        Step("database.server.replication.primary", (
+            Refuse("becoming a replica would replace the local database"),
+            Run(("systemctl", "restart", "mariadb"), "restart"),
+        )),
+        Step("locale.timezone", (Note("unchanged (Etc/UTC)"),)),
+    ))
+
+    def test_it_counts_as_failed_and_skips_the_rest_of_its_step(self):
+        effects = FakeEffects()
+
+        outcome = execute(self.PLAN, effects)
+
+        self.assertEqual(effects.applied, [])
+        self.assertEqual((outcome.changed, outcome.failed), (0, 1))
+        self.assertTrue(outcome.lines[0].endswith(
+            "refused: becoming a replica would replace the local database"
+        ))
+        self.assertTrue(outcome.lines[1].startswith(
+            "database.server.replication.primary: skipped: restart"
+        ))
+
+    def test_a_dry_run_refuses_too_rather_than_planning_the_change(self):
+        outcome = execute(self.PLAN, FakeEffects(), dry_run=True)
+
+        self.assertIn("refused: ", outcome.lines[0])
+        self.assertEqual(outcome.changed, 0)
+
+    def test_a_refusal_is_not_counted_as_a_planned_change(self):
+        self.assertEqual(self.PLAN.changes, 1)
 
 
 if __name__ == "__main__":

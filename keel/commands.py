@@ -131,7 +131,10 @@ def spec_apply(args) -> int:
             return code
     if not with_system:
         return exits.OK
-    return apply_system(doc, root, dry_run, phase_label(system_only))
+    return apply_system(
+        doc, root, dry_run, phase_label(system_only),
+        getattr(args, "destroy_local_database", False),
+    )
 
 
 def phase_label(system_only: bool) -> str:
@@ -163,20 +166,55 @@ def apply_conf(args, doc: dict, with_system: bool) -> int:
 
 
 def apply_system(
-    doc: dict, root: str, dry_run: bool, label: str = "apply --system"
+    doc: dict, root: str, dry_run: bool, label: str = "apply --system",
+    confirmed: bool = False,
 ) -> int:
     """Observe, plan, then carry out or only print; one line per action
 
     A spec that declares none of the fields this phase converges is a
     no-op that says so, so a first boot hook reading the log can tell an
     empty plan from a run that did nothing because it failed.
+
+    `confirmed` is --destroy-local-database, and it reaches exactly one
+    decision: whether becoming a replica may drop the databases this
+    server holds. Nothing else in keel passes it, so a first boot cannot.
     """
     state = system.observe(root, doc)
-    plan = system.plan(doc, state)
+    plan = system.plan(doc, state, confirmed)
     if not plan.steps:
         print(f"{label}: nothing declared that this phase converges")
         return exits.OK
     outcome = system.execute(plan, system.Effects(root), dry_run, label)
+    for line in outcome.lines:
+        print(line)
+    print(outcome.summary())
+    return exits.APPLY_FAILED if outcome.failed else exits.OK
+
+
+def database_promote(args) -> int:
+    """Make this replica a primary; never something apply decides
+
+    Its own command because it is its own decision, and the one keel
+    makes the operator type. Replication here has no automatic failover:
+    whether the old primary is gone is knowledge this machine does not
+    have, and two writable servers on one dataset is what promoting the
+    wrong node produces.
+    """
+    root = getattr(args, "root", inspection.ROOT_DEFAULT)
+    dry_run = getattr(args, "dry_run", False)
+    doc, code = read_spec(args.spec, check_secret_files=False)
+    if doc is None:
+        return code
+    if not dry_run:
+        refusal = system.needs_root(root, "database promote")
+        if refusal:
+            error(refusal)
+            return exits.APPLY_NEEDS_ROOT
+    state = system.observe(root, doc)
+    plan = system.Plan(tuple(system.plan_promote(doc, state.database)))
+    outcome = system.execute(
+        plan, system.Effects(root), dry_run, "database promote"
+    )
     for line in outcome.lines:
         print(line)
     print(outcome.summary())
