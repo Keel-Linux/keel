@@ -364,9 +364,13 @@ class TestBecomingAReplicaDestroysTheLocalDatabase(unittest.TestCase):
         text = sql(plan["database.server.replication.primary"])
         self.assertIn("DROP DATABASE IF EXISTS `wordpress`", text)
         self.assertIn("CHANGE MASTER TO", text)
-        self.assertIn("confirmed with --destroy-local-database",
-                      only(plan["database.server.replication.primary"],
-                           Note)[0].summary)
+        note = only(
+            plan["database.server.replication.primary"], Note
+        )[0].summary
+        self.assertIn("confirmed with --destroy-local-database", note)
+        self.assertIn("wordpress", note)
+        # A run that went ahead must not also say nothing was changed.
+        self.assertNotIn("Nothing was changed", note)
 
     def test_a_server_that_cannot_say_what_it_holds_is_refused(self):
         plan = self.replica(schemas=None)

@@ -96,10 +96,17 @@ REPOINT = (
 DESTRUCTION = (
     "becoming a replica replaces the local database with a copy of the"
     " primary, and this server holds {count} database(s) that are not its"
-    " own ({schemas}). Nothing was changed. Move the data elsewhere, or"
-    " run the same command again with --destroy-local-database to drop"
-    " them and build the replica"
+    " own ({schemas})"
 )
+# What to do instead, said only when apply is declining. The confirmed
+# line repeats the reason and not the remedy: a run that went ahead
+# telling the operator that nothing was changed would be a lie.
+REMEDY = (
+    ". Nothing was changed. Move the data elsewhere, or run the same"
+    " command again with --destroy-local-database to drop them and build"
+    " the replica"
+)
+CONFIRMED = "confirmed with --destroy-local-database: {reason}"
 UNKNOWN_CONTENT = (
     "the server could not be asked which databases it holds ({problem}),"
     " and becoming a replica replaces them; not knowing is not permission"
@@ -348,11 +355,10 @@ def _become_replica(
     held = mariadb.user_schemas((state.schemas.text or "").splitlines())
     actions: list[Action] = []
     if held or why:
-        refusal = _refusal(held, why)
+        reason = _reason(held, why)
         if not confirmed:
-            return Step(REPLICATION, (Refuse(refusal),))
-        actions.append(Note("confirmed with --destroy-local-database: "
-                            + refusal))
+            return Step(REPLICATION, (Refuse(reason + REMEDY),))
+        actions.append(Note(CONFIRMED.format(reason=reason)))
     if held:
         destruction = mariadb.destroy(held)
         actions.append(
@@ -363,7 +369,8 @@ def _become_replica(
     return Step(REPLICATION, tuple(actions))
 
 
-def _refusal(held: list[str], why: str) -> str:
+def _reason(held: list[str], why: str) -> str:
+    """Why this is the step that loses data, without the remedy"""
     if why:
         return why
     return DESTRUCTION.format(count=len(held), schemas=", ".join(held))

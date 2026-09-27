@@ -43,6 +43,9 @@ keel (0.3.4) unstable; urgency=medium
     and it is the only one it needs. It never reaches an argument vector
     or the printed plan, it is escaped as a MariaDB literal, and a file
     holding a control character is refused rather than mangled.
+  * The line that confirms the destruction repeats the reason and not the
+    remedy: a run that went ahead telling the operator that nothing was
+    changed would be a lie. Measured on the build host, where it said both.
   * New actions: RunSql, statements on standard input whose description
     never shows them, and Refuse, a step that did not happen and says why,
     counted as a failure so the exit code tells the truth.
