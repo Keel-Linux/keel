@@ -227,6 +227,39 @@ class TestNormalisation(unittest.TestCase):
             found["database.server.replication.allowed_from"], SAME
         )
 
+    def test_the_prefix_and_the_pattern_mariadb_holds_are_one_origin(self):
+        """The preferred form against the only spelling MariaDB has
+
+        docs/spec.md tells an operator to write the prefix and says the
+        server can only hold `2804:710:d0:5:%`. If the two were drift, the
+        preferred form would report drift on every MariaDB primary, which
+        would make it unusable.
+        """
+        declared = declaring(
+            role="primary",
+            replication={"allowed_from": ["2804:710:d0:5::/64"]},
+        )
+        observed = observe(
+            dict(MARIADB_STANDALONE, grants="2804:710:d0:5:%\n")
+        )
+        found = verdicts(declared, observed)
+        self.assertEqual(
+            found["database.server.replication.allowed_from"], SAME
+        )
+
+    def test_a_pattern_for_a_wider_prefix_is_still_drift(self):
+        declared = declaring(
+            role="primary",
+            replication={"allowed_from": ["2804:710:d0:5::/64"]},
+        )
+        observed = observe(
+            dict(MARIADB_STANDALONE, grants="2804:710:d0:%\n")
+        )
+        found = verdicts(declared, observed)
+        self.assertEqual(
+            found["database.server.replication.allowed_from"], DRIFT
+        )
+
     def test_a_name_is_never_resolved_and_an_address_is_not_that_name(self):
         declared = declaring(
             role="primary",

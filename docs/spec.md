@@ -533,8 +533,14 @@ address and a netmask for IPv4 only, so a grant that authorizes an IPv6 `/64`
 can only be written `2001:db8:1:%`, and that is what the server holds and what
 `inspect` reads back off it. The field accepts it for that reason: a schema that
 refused it would make `allowed_from` unusable on MariaDB and would report drift
-on every primary `inspect` described. Prefer `/64` where the engine takes it;
-the apply phase of decision 0013 is what will translate one into the other.
+on every primary `inspect` described.
+
+**Write the prefix.** A group aligned prefix and the pattern for it are one
+origin: `keel diff` compares them as the same value, and `keel spec apply`
+grants the pattern the engine needs from the prefix the description wrote
+(`keel.spec.origins`). A prefix that stops inside a group, a `/56` or a `/28`,
+has no pattern at all, and apply says so rather than authorizing a wider or a
+narrower range than the description asked for.
 
 **A name is accepted and it is fragile.** MariaDB resolves the `Host` of a
 grant, and `pg_hba.conf` matches a name by reverse resolving the client address

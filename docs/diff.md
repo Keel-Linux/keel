@@ -250,6 +250,15 @@ the role the machine is actually in. One fact produces one drift line.
 `database.server.listen` and `database.server.replication.allowed_from` are
 sets: order carries no meaning, and `2001:0DB8:1::/64` equals `2001:db8:1::/64`.
 
+**A prefix and the host pattern MariaDB holds for it are one origin.**
+`2804:710:d0:5::/64` and `2804:710:d0:5:%` authorize the same range, and the
+second is the only spelling that engine has for it ([docs/spec.md](spec.md)).
+So an origin is compared as the prefix it names, counting a group aligned
+pattern out at sixteen bits a group. Without that, the form docs/spec.md tells
+an operator to prefer would report drift on every MariaDB primary, which would
+make the preferred form unusable. A pattern that stops inside a group, or that
+names a wider range than the description asked for, is drift as before.
+
 A name in `allowed_from` is compared as a name, lower cased and without a
 trailing dot, and **is never resolved**. An authorization that names a host and
 a server that holds an address are two different things. MariaDB resolves the

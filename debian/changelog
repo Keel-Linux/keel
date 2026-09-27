@@ -1,3 +1,18 @@
+keel (0.3.3) unstable; urgency=medium
+
+  * An origin and the host pattern MariaDB holds for it are one
+    authorization. docs/spec.md tells an operator to prefer a prefix and
+    records that MariaDB can only spell an IPv6 prefix as
+    2804:710:d0:5:%, so keel diff now compares the two as the same value
+    instead of reporting drift on every primary whose description used the
+    preferred form. keel.spec.origins is the one place the two spellings
+    meet: canonical() for the comparison, host_pattern() for the grant the
+    apply phase writes.
+  * A pattern that stops inside a group, and one that names a wider range
+    than the description asked for, are drift as before.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Sun, 27 Sep 2026 13:20:00 +0000
+
 keel (0.3.2) unstable; urgency=medium
 
   * keel diff compares the database section. The engine, the role and the
