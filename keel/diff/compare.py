@@ -27,6 +27,7 @@ from keel.diff.report import (
 )
 from keel.inspect.report import NOT_INFERRED, Finding, Inspection
 from keel.spec.constants import TOP_LEVEL_KEYS
+from keel.spec.origins import canonical as canonical_origin
 
 OBSERVED_SECTIONS = (
     "instance", "network", "tls", "security", "hub", "users", "locale",
@@ -66,10 +67,12 @@ FIRST_BOOT_FIELDS = {
 DOMAIN_LEAVES = ("hostname", "fqdn", "domains")
 ADDRESS_LEAVES = ("address",)
 HOST_LEAVES = ("gateway", "nameservers", "host", "listen")
-# An origin an authorization names: an address, a prefix, or a name. A name
-# is never resolved here, so a description that names a host and a server
-# that holds an address are drift and not a match, which is the whole
-# reason for reading the origins off the server (docs/spec.md).
+# An origin an authorization names: an address, a prefix, a host pattern
+# or a name. The prefix and the pattern that authorize the same range are
+# one value in two spellings (keel.spec.origins). A name is never resolved
+# here, so a description that names a host and a server that holds an
+# address are drift and not a match, which is the whole reason for reading
+# the origins off the server (docs/spec.md).
 ORIGIN_LEAVES = ("allowed_from",)
 # Lists whose order carries no meaning: group membership is a set, and so
 # are the addresses a server answers on and the origins it authorizes.
@@ -311,7 +314,7 @@ def normalize(path: str, value: object) -> object:
     if path in KEYWORD_FIELDS or leaf in DOMAIN_LEAVES:
         return text.lower().rstrip(".")
     if leaf in ORIGIN_LEAVES:
-        return _origin(text)
+        return canonical_origin(text)
     if leaf in ADDRESS_LEAVES:
         return _address(text, ipaddress.ip_interface)
     if leaf in HOST_LEAVES:
@@ -326,24 +329,3 @@ def _address(text: str, parse) -> str:
         return text
 
 
-def _origin(text: str) -> str:
-    """An origin in canonical form, with a name left alone but lower cased
-
-    A name is never resolved: an authorization that names a host and a
-    server that holds an address are two different things, and calling them
-    the same is how a name that stopped resolving would pass unnoticed.
-    """
-    if "/" in text:
-        return _address(text, lambda value: ipaddress.ip_network(
-            value, strict=False
-        ))
-    if _version(text) is not None:
-        return _address(text, ipaddress.ip_address)
-    return text.lower().rstrip(".")
-
-
-def _version(text: str) -> int | None:
-    try:
-        return ipaddress.ip_address(text).version
-    except ValueError:
-        return None
