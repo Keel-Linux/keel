@@ -220,7 +220,7 @@ Every role writes one file,
 
 | Line | Where it comes from |
 | --- | --- |
-| `server_id` | Derived from `/etc/machine-id`, never from the description: two appliances deployed from one description would collide, and two nodes with the same server id stop replicating. A machine with no machine-id is refused rather than given an invented one |
+| `server_id` | Derived from `/etc/machine-id` **and** `listen`, never from the description alone: two appliances deployed from one description would collide, and two nodes with the same server id stop replicating. Both, because the published `core` layer ships a populated machine-id, so every appliance assembled from it holds the same value (docs/traps.md); a pair on one /64 differs in its addresses whatever the layer shipped. A machine with neither is refused rather than given an invented one |
 | `bind-address` | `database.server.listen`, written as the literal list it is. Absent from the description means the file says nothing and the packaged setting stands |
 | `skip_name_resolve` | `ON`, unless an entry of `allowed_from` is a name: MariaDB matches a grant whose host is a name only while it resolves client addresses. The line of the plan says so, because docs/spec.md calls a name fragile for exactly this reason |
 | `log_bin`, `binlog_format` | On a primary alone. A replica reads the primary's log and needs none of its own |

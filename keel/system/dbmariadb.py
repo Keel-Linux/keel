@@ -68,19 +68,36 @@ class Statements:
     summary: str
 
 
-def server_id(machine_id: str) -> int | None:
-    """A server id of this machine's own, or None when it has no identity
+def server_id(machine_id: str, listen: list | None = None) -> int | None:
+    """A server id of this machine's own, or None when it has nothing to
+    derive one from
 
-    Every node of a pair needs a different one and nothing outside the
-    machine may choose it, so it is derived from `/etc/machine-id`, which
-    systemd gives each machine at its first boot. A description cannot
-    carry it: two appliances deployed from one description would collide,
-    and replication between them would stop with a duplicate id.
+    Every node of a pair needs a different one and no description may
+    choose it: two appliances deployed from one description would collide,
+    and two nodes with the same server id stop replicating. So it is
+    derived from what is this machine's own, and from two things and not
+    one, because the first turned out not to be enough.
+
+    `/etc/machine-id` is what systemd gives a machine at its first boot,
+    and it is the right source. Measured on the bench: the published
+    `core` layer ships a populated one, so every appliance assembled from
+    it, and both live appliances on the build host, hold the same value
+    and would take the same server id. That is a defect of the layer
+    (docs/traps.md), and a feature that breaks silently when it is
+    present is a feature that breaks. The addresses the server answers on
+    are mixed in for that reason: a pair on one /64 differs there by
+    construction, whatever the layer shipped.
+
+    So two machines collide only when they hold the same machine-id and
+    answer on the same addresses, which is to say when they are the same
+    machine.
     """
     text = (machine_id or "").strip()
-    if not text:
+    parts = [str(one).strip() for one in (listen or [])]
+    if not text and not any(parts):
         return None
-    digest = hashlib.sha256(text.encode()).digest()
+    seed = "\n".join([text] + sorted(parts))
+    digest = hashlib.sha256(seed.encode()).digest()
     return int.from_bytes(digest[:8], "big") % SERVER_ID_MODULUS + 1
 
 

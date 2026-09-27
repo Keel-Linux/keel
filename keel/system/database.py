@@ -72,9 +72,10 @@ NOT_ASKED = (
     " never changed on a guess"
 )
 NO_IDENTITY = (
-    "{path} is empty or unreadable, so this machine has no identity to"
-    " derive a server id from; two nodes with the same server id stop"
-    " replicating, so none is invented here"
+    "{path} is empty or unreadable and database.server.listen names no"
+    " address, so this machine has nothing of its own to derive a server"
+    " id from; two nodes with the same server id stop replicating, so"
+    " none is invented here"
 )
 PROMOTION = (
     "this machine is a replica and the description says {declared}."
@@ -229,7 +230,9 @@ def _wrong_way_round(declared: str, observed: str) -> str:
 
 def _configuration(server: dict, state: DatabaseState, role: str) -> Step:
     """The server id, the addresses it answers on, and the binary log"""
-    identity = mariadb.server_id(state.machine_id.text or "")
+    identity = mariadb.server_id(
+        state.machine_id.text or "", server.get("listen")
+    )
     if identity is None:
         return Step(FIELD, (
             Refuse(NO_IDENTITY.format(path=state.machine_id.path)),

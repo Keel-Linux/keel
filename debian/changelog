@@ -31,9 +31,14 @@ keel (0.3.4) unstable; urgency=medium
   * apply never promotes a replica and never demotes a primary. Where the
     observed role would need either, it refuses and names the operation.
     This is the acting side of the rule docs/diff.md already states.
-  * The server id comes from /etc/machine-id and never from the
-    description: two appliances deployed from one description would
-    collide, and two nodes with the same server id stop replicating.
+  * The server id comes from /etc/machine-id and the declared listen
+    addresses, and never from the description alone: two appliances
+    deployed from one description would collide, and two nodes with the
+    same server id stop replicating. Both sources, because the published
+    core layer ships a populated machine-id, so every appliance assembled
+    from it holds the same value; measured on two nodes of the gate, which
+    took the same server id from it. The addresses a pair answers on
+    differ by construction on one /64.
   * The replication credential is the only secret --system-only resolves,
     and it is the only one it needs. It never reaches an argument vector
     or the printed plan, it is escaped as a MariaDB literal, and a file
