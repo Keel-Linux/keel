@@ -63,6 +63,8 @@ means running as root would have read it.
 | `locale.timezone` | `/etc/timezone`, else the `/etc/localtime` symlink | The zone name after `zoneinfo/` in the link target, so an offline tree works without following the link |
 | `locale.lang` | `/etc/default/locale` | `LANG` only |
 | `hub.api_key` | nothing | Always `skip`: keys are never read, and the Hub is being decoupled (brief section 5.6) |
+| `database.server.*` | the server itself, over its own client: `mariadb`, `psql`, `redis-cli`, plus `ss -lntH` for the listen addresses | Only on the live root, and only when the engine's server binary is installed. What is asked of each engine, and what the answers mean, is in "The database section" below |
+| `database.client.*` | the application's own configuration: `wp-config.php`, NodeBB's `config.json` | The one place the fact lives. No password is read from any of them |
 
 `users` and `locale` are the sections `keel spec apply --system` converges
 ([docs/apply.md](apply.md)); a spec inspect wrote applies clean into a
@@ -84,6 +86,91 @@ ifupdown writes `iface <name> inet6 dhcp` for `method: auto` and for
 files are read under `--root` as well, because a lease is on disk. So an
 offline root still reads a DHCPv6 machine as `dhcp`, and reports a SLAAC one
 as not inferred rather than guessing.
+
+## The database section: two readings, each on its own
+
+A machine that runs a database server has a role; a machine that uses a
+database has somewhere it reaches one. They are read independently. A machine
+with no server installed reports nothing for `database.server`, a machine with
+no application reports nothing for `database.client`, and a machine with both
+reports both.
+
+### The server side is asked, never read from a file
+
+The role is what the server says it is. Reading it from a configuration file
+would repeat the trap that shipped the PostgreSQL appliance listening on IPv4
+only: the file read correctly and the service did something else
+(docs/traps.md, "Asserting the configuration is not asserting the behaviour").
+
+An engine counts as installed when its **server** binary is present, not when
+its configuration directory is: `mysql-common` puts `/etc/mysql` on a machine
+that holds the client alone.
+
+| Engine | Installed when | Asked |
+| --- | --- | --- |
+| mariadb | `/usr/sbin/mariadbd` or `/usr/sbin/mysqld` | `SHOW REPLICA STATUS`, `SHOW REPLICA HOSTS`, `SHOW GLOBAL VARIABLES` for `wsrep_on` and `port`, and the `Host` of every account with `Repl_slave_priv` |
+| postgresql | `/usr/lib/postgresql/*/bin/postgres` or `pg_ctl` | `pg_is_in_recovery()`, `pg_stat_replication`, `pg_stat_wal_receiver`, `primary_conninfo`, and `pg_hba_file_rules` for the `replication` pseudo database |
+| redis | `/usr/bin/redis-server` | `INFO replication`, `INFO cluster`, `INFO server` |
+
+Redis is the cleanest of the three and it set the standard rather than the SQL
+engines lowering it: `role:master` or `role:slave` with `master_host` and
+`master_port`, and `cluster_enabled` in one line. Each SQL engine is asked the
+same question in its own words.
+
+| Evidence | `database.server.role` |
+| --- | --- |
+| Redis `cluster_enabled:1`, or MariaDB `wsrep_on` `ON` | not inferred, naming the mode and saying the spec has no role for it yet |
+| Redis `role:slave`, MariaDB a `SHOW REPLICA STATUS` row, PostgreSQL `pg_is_in_recovery()` true | `replica`, with `replication.primary` from the same answer |
+| A replica is connected: Redis `connected_slaves` above zero, MariaDB `SHOW REPLICA HOSTS`, PostgreSQL a row in `pg_stat_replication` | `primary` |
+| No replica connected, and the server holds an authorization: a MariaDB grant, or a `pg_hba` rule, from anywhere but this machine | `primary` |
+| None of the above | `standalone` |
+
+Two consequences worth stating, because they are visible in `keel diff`:
+
+- **A primary whose replicas are all down still reads as a primary on the SQL
+  engines**, because a grant and a `pg_hba` rule are durable records of who may
+  replicate. **On Redis it reads as `standalone`**, because Redis keeps no such
+  record at all; the report says exactly that, so the drift explains itself.
+- **A server that is installed and cannot be asked reports the whole section as
+  not inferred**, naming the engine, the binary that proved it and the command
+  that failed. That is the same shape as an unreadable `/etc/network/interfaces`
+  reporting `network.interfaces`, and it means every field under
+  `database.server` is `unknown` to `keel diff` rather than drift. An offline
+  root (`--root DIR`) is always this case, and so is a stopped service, and so
+  is a Redis with `requirepass` set, because `redis-cli` is refused and
+  `inspect` never reads a secret to get past it.
+
+Two servers on one machine report the section as not inferred as well, naming
+both: the description holds one `database.server`, so there is nowhere to write
+two roles down.
+
+`database.server.listen` comes from `ss -lntH`, filtered on the port the server
+itself reported, so it is the addresses the machine is really answering on and
+not the setting it was given. `database.server.replication.allowed_from` is the
+origins the server holds an authorization for, a MariaDB `Host` verbatim and a
+`pg_hba` address and netmask joined into a prefix. Redis reports it as not
+inferred: it has no per origin authorization, and the reason says so.
+
+### The client side is the application's own configuration
+
+A server can be asked what it is. An application cannot be asked where it will
+connect next, and watching its open sockets would report a connection rather
+than a declaration, so this one place is read from configuration, which is
+where the fact lives and the only place it lives.
+
+| Application | File | Read |
+| --- | --- | --- |
+| wordpress | `/var/www/*/wp-config.php`, `/var/www/wp-config.php` | `DB_HOST`, split into a host and a port, with `DB_NAME` and `DB_USER` |
+| nodebb | `/var/www/nodebb/config.json`, `/opt/nodebb/config.json` | `database`, which names the engine, and that engine's `host`, `port`, `database` and `username` |
+
+One reader per application, in a table that grows as appliances arrive. A file
+that is there and cannot be read or parsed is reported as not inferred, naming
+it. No password is read out of any of these files.
+
+`database.client.replicas` is always reported as not inferred when a client
+section is written, because no application configuration above expresses a read
+endpoint. A description that declares read replicas is therefore `unknown` in
+`keel diff` and never drift.
 
 ## What is never inferred
 
@@ -149,14 +236,17 @@ what the first boot would have asked.
 
 ## Tests
 
-`tests/fixtures/inspect/` holds four trees: `turnkey` (a WordPress like
+`tests/fixtures/inspect/` holds five trees: `turnkey` (a WordPress like
 appliance with a static IPv6 address, dehydrated with `dns-01`, cron-apt,
 two users with keys, their `passwd` and `group` entries), `dhcp` (a Core container with DHCP on both
 families, sourced `interfaces.d`, a readable `inithooks.conf` and a
 `localtime` symlink), `static` (the `interfaces` file the `01ipconfig`
 hook writes when both families are static, so that inspecting it, rendering
 the result and diffing it back report the `IP_*` and `IP6_*` keys and no
-drift) and `missing` (almost empty). Every probe is tested
+drift) `database` (a machine that both runs a MariaDB server and holds a
+WordPress configuration pointing at it, so both subjects of the database
+section are exercised, the server one through the offline path that can ask
+nothing) and `missing` (almost empty). Every probe is tested
 as a pure function in `tests/test_inspect_probes.py`; the reader, the
 collector, the exit codes and the round trip through `spec validate` and
 `spec render` are in `tests/test_inspect_cli.py`.

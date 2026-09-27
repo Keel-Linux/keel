@@ -22,11 +22,18 @@ from helpers import spec
 
 from keel import exits
 from keel.cli import main
-from keel.inspect import collect, constants, inspect_root
+from keel.inspect import (
+    collect,
+    constants,
+    inspect_root,
+    report_lines,
+    to_yaml,
+)
 from keel.inspect.tree import NOT_PRESENT, PERMISSION_DENIED, Tree
 
 FIXTURES = join(dirname(abspath(__file__)), "fixtures", "inspect")
 TURNKEY = join(FIXTURES, "turnkey")
+DATABASE = join(FIXTURES, "database")
 DHCP = join(FIXTURES, "dhcp")
 STATIC = join(FIXTURES, "static")
 MISSING = join(FIXTURES, "missing")
@@ -345,3 +352,44 @@ class TestRoundTrip(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDatabaseTree(TestCollector):
+    """The `database` fixture: a server installed and an application using it
+
+    An offline root cannot ask a server what it is, so the role is reported
+    as not inferred naming the command; the client side is the application's
+    own configuration, which an offline tree does carry.
+    """
+
+    def test_a_server_that_cannot_be_asked_writes_no_server_section(self):
+        result = inspect_root(DATABASE)
+        self.assertNotIn("server", result.spec["database"])
+        reason = self.reason(result, "database.server")
+        self.assertIn("mariadb server is installed", reason)
+        self.assertIn("SHOW REPLICA STATUS", reason)
+        self.assertIn("not the live system", reason)
+
+    def test_the_client_side_is_read_from_the_application_config(self):
+        result = inspect_root(DATABASE)
+        self.assertEqual(result.spec["database"]["client"], {
+            "engine": "mariadb",
+            "primary": {
+                "host": "::1", "port": 3306,
+                "name": "wordpress", "user": "wordpress",
+            },
+        })
+
+    def test_no_password_from_the_application_config_is_reported(self):
+        result = inspect_root(DATABASE)
+        printed = to_yaml(result) + " ".join(report_lines(result))
+        self.assertNotIn("hunter2", printed)
+
+    def test_the_spec_it_writes_validates(self):
+        result = inspect_root(DATABASE)
+        self.assertEqual(
+            spec.validate(result.spec, check_secret_files=False), []
+        )
+
+    def test_a_tree_with_no_database_reports_no_section(self):
+        self.assertNotIn("database", inspect_root(MISSING).spec)

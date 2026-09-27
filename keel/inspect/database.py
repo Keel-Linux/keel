@@ -1,0 +1,201 @@
+# Copyright (c) 2026 KeelLinux maintainers
+"""The database section: what this machine is, and where its data is
+
+Two subjects and two independent readings. The server side asks the server
+running here what it is; the client side reads what the application here is
+pointed at. A machine with no server reports nothing for the first, a
+machine with no application nothing for the second, and a machine with both
+reports both (issue 25).
+
+Nothing here reads the filesystem or runs a command: keel.inspect.collect
+gathers the answers and hands them over, so every branch below is a pure
+function of what came back.
+"""
+
+from dataclasses import dataclass, field
+
+from keel.inspect.dbclient import NO_READ_ENDPOINTS, Reader, client_section
+from keel.inspect.dbengines import Engine
+from keel.inspect.dbreading import Reading, Value
+from keel.inspect.report import Finding, inferred, missing
+from keel.inspect.tree import File
+
+SERVER = "database.server"
+CLIENT = "database.client"
+REPLICA = "replica"
+PRIMARY = "primary"
+# A field that describes nothing unless the server is in one of these roles.
+# Reading it anyway would report a primary's authorizations on a replica
+# that has none, which is a fact about the role and not about the field.
+ROLE_FIELDS = {"replication.primary": (REPLICA,),
+               "replication.allowed_from": (PRIMARY,)}
+# A server that is installed and cannot say what it is. The whole section
+# is reported as not inferred, the way an unreadable interfaces file reports
+# network.interfaces, so every field under it is unknown to diff and none of
+# them is drift. The engine, which the binary does settle, is named in the
+# reason: writing a section with an engine and no role would be a
+# description that does not validate, and inspect writes a description an
+# operator can apply after editing.
+NOT_ASKED = (
+    "the {engine} server is installed ({binary}) and could not be asked what"
+    " it is: {problem}"
+)
+SEVERAL_ENGINES = (
+    "this machine runs {count} database servers ({engines}); the description"
+    " has one database.server, so the role of each cannot be written down"
+    " separately yet"
+)
+
+
+@dataclass(frozen=True)
+class Installed:
+    """One database server found on the machine, and what it answered"""
+
+    engine: Engine
+    binary: str
+    answers: dict[str, File] = field(default_factory=dict)
+    sockets: File = field(default_factory=lambda: File(""))
+
+    def reading(self) -> Reading:
+        return self.engine.read(self.answers, self.sockets)
+
+
+def probe_database(
+    servers: tuple[Installed, ...],
+    client_files: tuple[tuple[Reader, File], ...],
+) -> tuple[dict | None, list[Finding]]:
+    """Build the database section from both readings, each on its own"""
+    findings: list[Finding] = []
+    section: dict = {}
+
+    server, found = probe_server(servers)
+    findings += found
+    if server is not None:
+        section["server"] = server
+
+    client, found = probe_client(client_files)
+    findings += found
+    if client is not None:
+        section["client"] = client
+
+    return (section or None), findings
+
+
+def probe_server(
+    servers: tuple[Installed, ...],
+) -> tuple[dict | None, list[Finding]]:
+    """What the server running here says it is, or nothing at all
+
+    No server installed is not a gap: there is nothing to report and
+    nothing is reported, so a description that declares one drifts against
+    this machine rather than being excused.
+    """
+    if not servers:
+        return None, []
+    if len(servers) > 1:
+        names = ", ".join(one.engine.name for one in servers)
+        return None, [
+            missing(
+                SERVER,
+                SEVERAL_ENGINES.format(count=len(servers), engines=names),
+            )
+        ]
+
+    installed = servers[0]
+    engine = installed.engine
+    reading = installed.reading()
+    if not reading.role.known:
+        return None, [missing(
+            SERVER,
+            NOT_ASKED.format(
+                engine=engine.name, binary=installed.binary,
+                problem=reading.role.problem,
+            ),
+        )]
+
+    section: dict = {"engine": engine.name}
+    findings = [
+        inferred(f"{SERVER}.engine", engine.name, installed.binary)
+    ]
+    role = _add(section, findings, f"{SERVER}.role", "role", reading.role)
+    _add(section, findings, f"{SERVER}.listen", "listen", reading.listen)
+
+    replication: dict = {}
+    for name, value in (
+        ("primary", reading.primary),
+        ("allowed_from", reading.allowed_from),
+    ):
+        if not _applies(f"replication.{name}", role):
+            continue
+        _add(
+            replication, findings, f"{SERVER}.replication.{name}", name,
+            value,
+        )
+    if replication:
+        section["replication"] = replication
+    return section, findings
+
+
+def _applies(path: str, role: object) -> bool:
+    """Whether a field describes anything in the role that was observed"""
+    roles = ROLE_FIELDS.get(path)
+    return roles is None or str(role) in roles
+
+
+def _add(
+    section: dict, findings: list[Finding], path: str, key: str, value: Value,
+) -> object:
+    """Record one field of a reading, as a value or as a reason"""
+    if not value.known:
+        findings.append(missing(path, value.problem))
+        return None
+    section[key] = value.value
+    findings.append(inferred(path, _shown(value.value), value.source))
+    return value.value
+
+
+def _shown(value: object) -> str:
+    if isinstance(value, list):
+        return ", ".join(str(item) for item in value)
+    if isinstance(value, dict):
+        return " ".join(f"{name} {item}" for name, item in value.items())
+    return str(value)
+
+
+def probe_client(
+    client_files: tuple[tuple[Reader, File], ...],
+) -> tuple[dict | None, list[Finding]]:
+    """Where the application here is pointed, from its own configuration"""
+    if not client_files:
+        return None, []
+
+    findings: list[Finding] = []
+    for reader, config in client_files:
+        if not config.readable:
+            findings.append(
+                missing(f"{CLIENT}.primary", f"{config.path} {config.problem}")
+            )
+            continue
+        endpoint, source = reader.read(config)
+        if endpoint is None:
+            findings.append(missing(f"{CLIENT}.primary", source))
+            continue
+        section = client_section(endpoint)
+        findings.append(
+            inferred(f"{CLIENT}.engine", endpoint.engine, source)
+        )
+        findings.append(
+            inferred(
+                f"{CLIENT}.primary",
+                _shown(section["primary"]),
+                source,
+            )
+        )
+        findings.append(
+            missing(
+                f"{CLIENT}.replicas",
+                NO_READ_ENDPOINTS.format(path=source),
+            )
+        )
+        return section, findings
+    return None, findings

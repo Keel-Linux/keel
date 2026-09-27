@@ -1,3 +1,34 @@
+keel (0.3.1) unstable; urgency=medium
+
+  * keel inspect reads the database section, both subjects independently. The
+    server side asks the server what it is rather than reading a configuration
+    file, because a file that reads correctly is what shipped the PostgreSQL
+    appliance listening on IPv4 only: MariaDB is asked for its replica status,
+    its connected replicas and the Host of every account that may replicate;
+    PostgreSQL for pg_is_in_recovery(), pg_stat_replication,
+    pg_stat_wal_receiver and its pg_hba rules for the replication pseudo
+    database, through pg_hba_file_rules, which is the server's own parse and
+    not the file; Redis for INFO replication, INFO cluster and INFO server.
+  * An engine counts as installed when its server binary is present, not when
+    its configuration directory is, because mysql-common puts /etc/mysql on a
+    machine that holds the client alone.
+  * A machine in a mode the description has no role for, a Galera node or a
+    Redis Cluster node, is reported as a role that could not be inferred,
+    naming the mode. So is a server that is installed and cannot be asked: an
+    offline root, a stopped service, or a Redis with requirepass set, which
+    refuses redis-cli and which inspect will not read a secret to get past.
+    The whole section is not inferred in that case, so every field of it is
+    unknown to keel diff and none of it is drift.
+  * database.server.listen comes from the listening sockets, filtered on the
+    port the server itself reported, so it is what the machine answers on and
+    not what it was told to answer on.
+  * The client side is read from the application's own configuration, which is
+    the one place that fact lives: wp-config.php and NodeBB's config.json, one
+    reader per application in a table that grows as appliances arrive. No
+    password is read from any of them.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Sun, 27 Sep 2026 10:20:00 +0000
+
 keel (0.3.0) unstable; urgency=medium
 
   * The instance description gains a database section with two subjects, which
