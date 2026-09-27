@@ -79,6 +79,12 @@ def is_unicast(address: Any) -> bool:
 
 
 LOCALHOST_NAMES = ("localhost", "ip6-localhost", "ip6-loopback")
+# The form MariaDB uses for a prefix. MariaDB takes an address and a netmask
+# for IPv4 only, so the single way to authorize an IPv6 /64 in a grant is a
+# host pattern, `2001:db8:1:%`, and that is what the server holds and what
+# inspect reads back off it. Refusing it would make the field unusable on
+# MariaDB and would break the round trip on any primary.
+PATTERN_RE = re.compile(r"^[0-9A-Za-z:._%-]*[%_][0-9A-Za-z:._%-]*$")
 LOCALHOST_REASON = (
     "Debian maps ::1 to ip6-localhost and never to localhost, so a resolver"
     " asked for localhost answers one family only; write ::1 and 127.0.0.1"
@@ -103,15 +109,20 @@ def literal_address_error(key: str, value: Any) -> str | None:
 
 
 def origin_error(key: str, value: Any) -> str | None:
-    """An origin an authorization names: an address, a prefix or a name
+    """An origin an authorization names: an address, a prefix, a pattern
+    or a name
 
     A prefix is the form to prefer, because with IPv6 and no NAT the /64 a
     fleet lives on is stable where a single address goes stale every time a
-    container is rebuilt. A name is accepted and is fragile: see
+    container is rebuilt. A MariaDB host pattern is the same idea in the
+    only spelling that engine has for IPv6, and it is what inspect reads
+    back off a MariaDB primary. A name is accepted and is fragile: see
     docs/spec.md.
     """
     if not isinstance(value, str) or not value.strip():
-        return f"{key}: must be an address, a prefix or a name"
+        return (
+            f"{key}: must be an address, a prefix, a host pattern or a name"
+        )
     text = value.strip()
     if text.lower() in LOCALHOST_NAMES:
         return f'{key}: "{text}" is ambiguous: {LOCALHOST_REASON}'
@@ -123,9 +134,12 @@ def origin_error(key: str, value: Any) -> str | None:
         return None
     if _version(text) is not None:
         return None
+    if PATTERN_RE.match(text):
+        return None
     if domain_error(key, text) is not None:
         return (
-            f'{key}: "{text}" is not an address, a prefix or a name'
+            f'{key}: "{text}" is not an address, a prefix, a host pattern'
+            " or a name"
         )
     return None
 

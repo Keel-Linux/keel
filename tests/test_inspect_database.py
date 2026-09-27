@@ -707,3 +707,59 @@ class TestCollectorBranches(unittest.TestCase):
         )
         reading = postgresql_reading(answered, SOCKETS)
         self.assertEqual(reading.primary.value, {"host": "2001:db8:1::10"})
+
+
+class TestWhatInspectWritesValidates(unittest.TestCase):
+    """Every section the reading can produce is one the schema accepts
+
+    The round trip rests on this: inspect writes a description an operator
+    edits and applies, so a value the server holds and the schema refuses is
+    a defect in the vocabulary. The MariaDB host pattern was exactly that,
+    found on a primary authorized from a /64.
+    """
+
+    def validate(self, section: dict) -> list[str]:
+        from keel import spec
+
+        return spec.validate(
+            {"version": 1, "database": section}, check_secret_files=False
+        )
+
+    def one(self, engine_name: str, answered: dict):
+        engine = next(e for e in ENGINES if e.name == engine_name)
+        return Installed(
+            engine, f"/usr/sbin/{engine_name}d",
+            answers(engine, answered), File("ss -lntH", SOCKETS),
+        )
+
+    def test_a_mariadb_primary_authorized_from_a_prefix_validates(self):
+        answered = dict(MARIADB_STANDALONE, grants="2804:710:d0:5:%\n")
+        section, _ = probe_server((self.one("mariadb", answered),))
+        self.assertEqual(
+            section["replication"]["allowed_from"], ["2804:710:d0:5:%"]
+        )
+        self.assertEqual(self.validate({"server": section}), [])
+
+    def test_a_postgresql_primary_with_an_hba_prefix_validates(self):
+        answered = dict(
+            PG_STANDALONE,
+            hba="host\t2001:db8:1::\tffff:ffff:ffff:ffff::\n",
+        )
+        section, _ = probe_server((self.one("postgresql", answered),))
+        self.assertEqual(self.validate({"server": section}), [])
+
+    def test_a_replica_naming_its_primary_validates(self):
+        answered = dict(MARIADB_STANDALONE, status=MARIADB_REPLICA_STATUS)
+        section, _ = probe_server((self.one("mariadb", answered),))
+        self.assertEqual(self.validate({"server": section}), [])
+
+    def test_a_standalone_validates(self):
+        section, _ = probe_server((self.one("redis", REDIS_MASTER),))
+        self.assertEqual(self.validate({"server": section}), [])
+
+    def test_what_the_client_reader_writes_validates(self):
+        section, _ = probe_client((
+            (next(r for r in READERS if r.application == "wordpress"),
+             File("/wp-config.php", WP_CONFIG)),
+        ))
+        self.assertEqual(self.validate({"client": section}), [])

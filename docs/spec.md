@@ -506,7 +506,7 @@ decision 0013 drew: each screen configures the machine it runs on.
 | postgresql | A line in `pg_hba.conf` for the `replication` pseudo database with that address |
 | redis | Reachability: the origin has to be inside `listen`, and the credential is an ACL user or `requirepass`. Redis has no per origin authorization at all, so `inspect` reports this field as one it cannot infer on Redis and says why |
 
-An entry is an address, a prefix, or a name:
+An entry is an address, a prefix, a host pattern, or a name:
 
 ```yaml
 database:
@@ -518,6 +518,7 @@ database:
       allowed_from:
         - 2001:db8:1::/64        # the prefix a fleet lives on: prefer this
         - 2001:db8:2::20         # one machine
+        - 2001:db8:3:%           # a host pattern: MariaDB's own spelling
         - replica.example.org    # a name: accepted, and fragile
       secret:
         file: /etc/keel/secrets/replication_password
@@ -526,6 +527,14 @@ database:
 **A prefix is the form to prefer.** With IPv6 and no NAT the `/64` a fleet
 lives on is a stable fact, where a list of single addresses goes stale every
 time a container is rebuilt.
+
+**A host pattern is a prefix in MariaDB's own spelling.** MariaDB takes an
+address and a netmask for IPv4 only, so a grant that authorizes an IPv6 `/64`
+can only be written `2001:db8:1:%`, and that is what the server holds and what
+`inspect` reads back off it. The field accepts it for that reason: a schema that
+refused it would make `allowed_from` unusable on MariaDB and would report drift
+on every primary `inspect` described. Prefer `/64` where the engine takes it;
+the apply phase of decision 0013 is what will translate one into the other.
 
 **A name is accepted and it is fragile.** MariaDB resolves the `Host` of a
 grant, and `pg_hba.conf` matches a name by reverse resolving the client address

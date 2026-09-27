@@ -35,6 +35,12 @@ keel (0.3.2) unstable; urgency=medium
     happening to contain a colon either; any output at all is a replica row,
     because SHOW REPLICA STATUS prints nothing on a server that replicates
     from nowhere.
+  * allowed_from accepts a host pattern, 2001:db8:1:%, which is the only
+    spelling MariaDB has for an IPv6 prefix in a grant: it takes an address and
+    a netmask for IPv4 alone. Found on the bench, on a primary authorized from
+    a /64, where inspect read the pattern off the server and the description it
+    wrote did not validate. A test now asserts that every origin the reading
+    can produce is one the schema accepts, on both SQL engines.
 
  -- KeelLinux maintainers <admin@keellinux.org>  Sun, 27 Sep 2026 11:05:00 +0000
 
