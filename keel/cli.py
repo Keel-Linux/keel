@@ -112,6 +112,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_apply_options(apply_parser)
 
+    database_parser = subparsers.add_parser(
+        "database", help="operations on the database server of this node"
+    )
+    database_actions = database_parser.add_subparsers(
+        dest="action", metavar="ACTION"
+    )
+    promote_parser = database_actions.add_parser(
+        "promote",
+        help="make this replica a primary: stop replicating and forget"
+        " the primary it was following. Never something apply decides,"
+        " and there is no failover in Keel, so only the operator knows"
+        " the old primary should stop being one",
+    )
+    add_common_options(promote_parser)
+    promote_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print what would be done and change nothing; needs no root",
+    )
+    add_root_option(promote_parser, "promote")
+    promote_parser.set_defaults(handler=commands.database_promote)
+
     inspect_parser = _add_command(
         subparsers, "inspect",
         "write a spec from the running machine, or from an offline root,"
@@ -328,7 +350,7 @@ def main(argv: list[str] | None = None) -> int:
         return exits.USAGE
     system = getattr(args, "system", False) or getattr(
         args, "system_only", False
-    )
+    ) or args.command == "database"
     if getattr(args, "dry_run", False) and not system:
         parser.error("--dry-run requires --system or --system-only")
     if getattr(args, "destroy_local_database", False) and not system:

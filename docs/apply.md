@@ -299,6 +299,27 @@ This is the same rule `keel diff` states as a rule of the project
 ([docs/diff.md](diff.md)), on the acting side: the drift it says must
 never be corrected automatically is drift apply will not correct.
 
+#### `keel database promote`
+
+Promotion is the one thing keel makes the operator type, because it is
+the one decision no machine here can make. It stops replication and
+forgets the primary (`STOP SLAVE`, `RESET SLAVE ALL`, not `STOP SLAVE`
+alone: a node that still held the coordinates would follow its old
+primary again at the next restart), and then says two things:
+
+```
+$ keel database promote
+database.server.role: stop replicating and forget the primary (mariadb --batch, 2 statement(s) on standard input): done
+database.server.role: this node is a primary now and the description still says replica, which keel diff reports as drift and must not be corrected automatically. Change the description to primary and run `keel spec apply --system-only` to give it a binary log of its own
+database.server.role: nothing here stopped the old primary or told anybody else about this. There is no failover in Keel: two writable servers on one dataset is what this command can cause, and only the operator knows the old primary is gone
+database promote: 1 change(s), 0 failed
+```
+
+It refuses anything that is not a replica, and `--dry-run` prints the
+plan and needs no root. The drift it leaves behind is by design: the
+description is the operator's to change, and changing it is what makes
+the node a primary in keel's eyes as well as MariaDB's.
+
 **There is no automatic failover here.** Nothing in this phase looks at
 another machine. Replication without failover is not high availability,
 and when it is wanted the packaged answers are Galera for MariaDB and
