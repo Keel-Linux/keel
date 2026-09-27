@@ -260,5 +260,61 @@ class TestLoad(unittest.TestCase):
         os.rmdir(self.tmpdir)
 
 
+class TestOptionalFields(unittest.TestCase):
+    """A field outside REQUIRED_KEYS is carried, not rejected or dropped
+
+    bt-layer records the fab units a layer carries in `units` and
+    `build_units` (docs/layers.md, Optional fields). Neither is required,
+    so manifests written before those fields existed stay readable, and
+    neither may be lost on the way through: keel pull writes a manifest
+    back out of what it read, and a unit dropped there is a layer whose
+    provenance record no longer says what it is made of.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.fields = fixture_fields("core")
+        self.fields["units"] = "mariadb@1.0.0"
+        self.fields["build_units"] = "default"
+
+    def test_a_manifest_with_the_unit_fields_validates(self):
+        self.assertEqual(manifest.validate(self.fields), [])
+
+    def test_the_unit_fields_are_readable(self):
+        path = write_manifest(self.tmpdir, self.fields)
+        loaded = manifest.load(path)
+        self.assertEqual(loaded.fields["units"], "mariadb@1.0.0")
+        self.assertEqual(loaded.fields["build_units"], "default")
+
+    def test_a_manifest_without_the_unit_fields_validates(self):
+        without = fixture_fields("core")
+        self.assertNotIn("units", without)
+        self.assertEqual(manifest.validate(without), [])
+
+    def test_text_writes_the_manifest_back_byte_for_byte(self):
+        path = write_manifest(self.tmpdir, self.fields)
+        with open(path, encoding="utf-8") as fob:
+            self.assertEqual(manifest.load(path).text(), fob.read())
+
+    def test_a_key_nobody_here_knows_is_kept(self):
+        self.fields["future_field"] = "a value with spaces"
+        path = write_manifest(self.tmpdir, self.fields)
+        loaded = manifest.load(path)
+        self.assertEqual(loaded.fields["future_field"], "a value with spaces")
+        self.assertIn("future_field a value with spaces\n", loaded.text())
+
+    def test_an_unreadable_key_is_still_refused(self):
+        with self.assertRaises(ManifestError) as raised:
+            manifest.parse("layer core\nBuild_Units default\n")
+        self.assertEqual(
+            raised.exception.errors, ["line 2: invalid key 'Build_Units'"]
+        )
+
+    def tearDown(self):
+        for name in os.listdir(self.tmpdir):
+            os.remove(join(self.tmpdir, name))
+        os.rmdir(self.tmpdir)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -67,6 +67,28 @@ The `release`, `arch`, commit, version and overlay fields are recorded
 and shown, not checked: nothing on a running appliance can be compared
 with them yet.
 
+### Optional fields
+
+A key that is not in the table above is kept as it was read and written
+back unchanged, so `bt-layer` can record something new without this code
+changing and without older manifests becoming unreadable. Nothing here
+validates such a field; a reader that wants one has to check it itself.
+
+These are the ones `bt-layer` writes today. Both are absent from every
+manifest written before 2026-09-27, and absent means `none`.
+
+| Key | Meaning |
+| --- | --- |
+| `units` | Every component the layer carries as a fab unit, as `name@version` sorted by name, or `none`. Cumulative: the parent's units merged with the ones this build added, so a child of this layer can subtract the whole stack |
+| `build_units` | The units this build applied: `default` for a rootfs layer, else the ones the parent had not applied, or `none` |
+
+A unit is a component `fab` applies from a directory under the product's
+`UNIT_DIRS`: a plan, an overlay, a conf script and a removelist. A version
+is the content of the unit's `version` file, or the commit of the unit's
+own checkout, or `sha256-` and the first 16 digits of a digest of the
+directory. `bt-layer` refuses to build a layer whose parent applied the
+same unit at another version, because a conf script runs once.
+
 Next to the tarball, `bt-layer` also writes `<tarball>.sha256`
 (`sha256sum` format) and, when a signing key is set, `<tarball>.hash`:
 a text file for a human with a `sha256sum` and a `sha512sum` line and,
