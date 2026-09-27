@@ -18,7 +18,6 @@ from typing import Any
 from keel.spec.compat import canonical
 from keel.spec.constants import (
     SCHEMA_VERSION,
-    SECRET_BACKENDS,
     SECRET_VARS,
     TOP_LEVEL_KEYS,
     WIZARD_ONLY_GENERATE,
@@ -30,9 +29,10 @@ from keel.spec.fields import (
     list_error,
     mapping_error,
 )
-from keel.spec.secretstore import secret_file_error
+from keel.spec.validate_database import validate_database
 from keel.spec.validate_extras import validate_locale, validate_users
 from keel.spec.validate_network import validate_network
+from keel.spec.validate_secret import validate_secret
 
 
 def validate(doc: dict, *, check_secret_files: bool = True) -> list[str]:
@@ -66,6 +66,9 @@ def validate(doc: dict, *, check_secret_files: bool = True) -> list[str]:
     errors.extend(_validate_preseed(doc.get("preseed")))
     errors.extend(validate_users(doc.get("users")))
     errors.extend(validate_locale(doc.get("locale")))
+    errors.extend(
+        validate_database(doc.get("database"), check_secret_files)
+    )
     return errors
 
 
@@ -112,43 +115,6 @@ def _validate_secrets(doc: dict, check_secret_files: bool) -> list[str]:
                 " nobody can log in with the generated value"
             )
     return errors
-
-
-def validate_secret(
-    key: str, spec: Any, check_secret_files: bool = True
-) -> list[str]:
-    """Check one secret reference: exactly one backend, and it works
-
-    "Works" means the file exists with the right owner and mode, which is
-    skipped when `check_secret_files` is false; the structure is checked
-    either way.
-    """
-    if not isinstance(spec, dict):
-        return [f"{key}: must be a mapping"]
-
-    backends = [name for name in SECRET_BACKENDS if name in spec]
-    unknown = [name for name in spec if name not in SECRET_BACKENDS]
-    errors = [f"{key}.{name}: unknown secret backend" for name in unknown]
-    if len(backends) != 1:
-        errors.append(
-            f"{key}: exactly one of {', '.join(SECRET_BACKENDS)} is required"
-        )
-        return errors
-    if "file" in spec:
-        errors.extend(_validate_file_backend(key, spec["file"],
-                                             check_secret_files))
-    return errors
-
-
-def _validate_file_backend(
-    key: str, path: Any, check_secret_files: bool
-) -> list[str]:
-    if not isinstance(path, str) or not path:
-        return [f"{key}.file: must be a path"]
-    if not check_secret_files:
-        return []
-    error = secret_file_error(path)
-    return [f"{key}: {error}"] if error else []
 
 
 def _validate_app(app: Any) -> list[str]:

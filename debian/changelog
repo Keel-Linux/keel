@@ -1,3 +1,35 @@
+keel (0.3.0) unstable; urgency=medium
+
+  * The instance description gains a database section with two subjects, which
+    one field cannot serve: database.server is what a machine that runs a
+    database server is, a role of standalone, primary or replica; and
+    database.client is where a machine that uses a database reaches it, a
+    primary for writes and optionally replicas for reads. A machine can
+    declare both, either or neither. MariaDB, PostgreSQL and Redis are the
+    three engines. Nothing is applied: apply warns that the section was left
+    alone, with or without --system.
+  * Every address in the section is checked as a literal address and the word
+    localhost is refused by name, with the reason in the message: Debian maps
+    ::1 to ip6-localhost and never to localhost, which is how the PostgreSQL
+    appliance shipped listening on IPv4 only. ip6-localhost and ip6-loopback
+    are refused the same way.
+  * A primary authorizes rather than enumerates. In asynchronous replication
+    the replica opens the connection and the primary holds no list of who is
+    replicating, so database.server.replication.allowed_from is a list of
+    origins that may replicate: a prefix, which is the form to prefer with
+    IPv6 and no NAT, a single address, or a name, which is accepted and is
+    fragile because both MariaDB grants and pg_hba resolve names and fail
+    quietly.
+  * The replication and client credentials are file references like every
+    other secret, and docs/spec.md says what the value unlocks per engine,
+    because Redis has requirepass and ACL users rather than a database
+    account.
+  * keel.spec.validate_secret holds the check of one secret reference, which
+    was in keel.spec.validate, so a section validator can use it without
+    importing the validator that calls it.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Sun, 27 Sep 2026 09:40:00 +0000
+
 keel (0.2.1) unstable; urgency=medium
 
   * The system phase keeps one entry for the host in /etc/hosts. A line that

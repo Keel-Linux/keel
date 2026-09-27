@@ -43,8 +43,8 @@ version: 1
 | `version` | read | Must be `1`. Absent or different is an error |
 
 The other top level keys are `instance`, `network`, `tls`, `secrets`, `app`,
-`hub`, `security`, `first_login_wizard`, `preseed`, `users` and `locale`, each
-optional and each a mapping except `first_login_wizard`. A file with `version: 1` and nothing else is valid and renders to an
+`hub`, `security`, `first_login_wizard`, `preseed`, `users`, `locale` and
+`database`, each optional and each a mapping except `first_login_wizard`. A file with `version: 1` and nothing else is valid and renders to an
 empty conf.
 
 ## instance
@@ -406,6 +406,150 @@ Written by `keel inspect` from `/etc/timezone` (or the `/etc/localtime`
 symlink) and `/etc/default/locale`. Applied only where the observed value
 differs ([docs/apply.md](apply.md)). Without `--system`, `apply` warns that
 the section was left alone.
+
+## database
+
+Two subjects, which one field cannot serve. A machine that **runs** a database
+server has a role. A machine that **uses** a database names where that database
+is. A machine can have both, either, or neither, so `server` and `client` are
+separate mappings and neither implies the other.
+
+```yaml
+database:
+  server:
+    engine: mariadb
+    role: standalone
+    listen:
+      - "::1"
+      - 127.0.0.1
+  client:
+    engine: mariadb
+    primary:
+      host: "::1"
+      port: 3306
+      name: wordpress
+      user: wordpress
+      secret:
+        file: /etc/keel/secrets/db_password
+```
+
+Nothing in this section is applied yet: this is the vocabulary, the reading
+([docs/inspect.md](inspect.md)) and the comparison ([docs/diff.md](diff.md)).
+`apply` warns that the section was left alone, and no database configuration
+is written by any command.
+
+### database.server: what this machine is
+
+| Field | State | Notes |
+| --- | --- | --- |
+| `database.server.engine` | accepted | `mariadb`, `postgresql` or `redis`. Required when the section is declared |
+| `database.server.role` | accepted | `standalone`, `primary` or `replica`. Required. A machine in a mode the spec has no value for, a Galera node or a Redis Cluster node, is reported by `inspect` as a role it could not infer rather than forced into one of these three |
+| `database.server.listen` | accepted | A list of literal addresses the server answers on. Never a name, see below |
+| `database.server.replication.primary.host` | accepted | The literal address this node replicates from. Required when the role is `replica` |
+| `database.server.replication.primary.port` | accepted | A port number. Absent means the engine's default: 3306, 5432, 6379 |
+| `database.server.replication.allowed_from` | accepted | A list of origins allowed to replicate from this node. Meaningful when the role is `primary`; see "A primary authorizes, it does not enumerate" |
+| `database.server.replication.secret` | accepted | The replication credential, by reference, with the same backends as `secrets`. What it unlocks differs per engine, see below |
+
+Three roles and no more. `multi_primary` and the shard roles are not in the
+list, and adding them later renames nothing that is in it, which is the point
+of naming the field `role` and not `cloud` or `mode` (decision 0013).
+
+### database.client: where the database this machine uses is
+
+| Field | State | Notes |
+| --- | --- | --- |
+| `database.client.engine` | accepted | `mariadb`, `postgresql` or `redis`. Required when the section is declared |
+| `database.client.primary.host` | accepted | Where writes go, as a literal address. Required. A machine using its own server writes `::1`, or `127.0.0.1`, and never `localhost` |
+| `database.client.primary.port` | accepted | A port number; absent means the engine's default |
+| `database.client.primary.name` | accepted | The database within the server: a schema name for MariaDB and PostgreSQL, the numbered database for Redis |
+| `database.client.primary.user` | accepted | The account the application authenticates as. A Redis server without ACL users has none, so the field is left out there |
+| `database.client.primary.secret` | accepted | The credential, by reference |
+| `database.client.replicas` | accepted | A list of read endpoints, each `host` and optionally `port`. Optional: reads go to the primary when it is empty |
+
+A read endpoint carries no credential of its own. A replica is a copy of the
+primary, so it accepts the same account, and a second credential in the file
+would be a second thing to rotate.
+
+### Addresses are literal, never `localhost`
+
+Every address in this section is checked as a literal address, and the word
+`localhost` is refused by name with the reason in the message:
+
+```
+$ keel spec validate --spec instance.yaml
+Error: instance.yaml: database.server.listen: "localhost" is a name, not an address: Debian maps ::1 to ip6-localhost and never to localhost, so a resolver asked for localhost answers one family only; write ::1 and 127.0.0.1
+```
+
+That is not a style rule. Debian's `/etc/hosts` maps `::1` to `ip6-localhost`
+and never to `localhost`, so `listen_addresses = 'localhost'` in PostgreSQL and
+`bind localhost` in Redis bind one family, which is how the PostgreSQL
+appliance shipped listening on IPv4 only (docs/traps.md). A description that
+can say `localhost` can ship that defect again.
+
+`ip6-localhost` and `ip6-loopback` are refused with the same message, because a
+description that names one family is the same defect written the other way
+round.
+
+### A primary authorizes, it does not enumerate
+
+`allowed_from` is a list of origins that **may** replicate from this node, not
+a list of the replicas that do. In asynchronous replication the replica opens
+the connection and the primary never holds a list of who is replicating, so a
+field that promised one would be a field no machine could ever answer. What the
+machine does hold is who is allowed, which is local configuration of the
+machine the console runs on, and that keeps the whole subject inside the line
+decision 0013 drew: each screen configures the machine it runs on.
+
+| Engine | What an entry becomes |
+| --- | --- |
+| mariadb | A grant of `REPLICATION SLAVE` to the replication account from that origin, which is the `Host` part of the account |
+| postgresql | A line in `pg_hba.conf` for the `replication` pseudo database with that address |
+| redis | Reachability: the origin has to be inside `listen`, and the credential is an ACL user or `requirepass`. Redis has no per origin authorization at all, so `inspect` reports this field as one it cannot infer on Redis and says why |
+
+An entry is an address, a prefix, or a name:
+
+```yaml
+database:
+  server:
+    engine: postgresql
+    role: primary
+    listen: ["::"]
+    replication:
+      allowed_from:
+        - 2001:db8:1::/64        # the prefix a fleet lives on: prefer this
+        - 2001:db8:2::20         # one machine
+        - replica.example.org    # a name: accepted, and fragile
+      secret:
+        file: /etc/keel/secrets/replication_password
+```
+
+**A prefix is the form to prefer.** With IPv6 and no NAT the `/64` a fleet
+lives on is a stable fact, where a list of single addresses goes stale every
+time a container is rebuilt.
+
+**A name is accepted and it is fragile.** MariaDB resolves the `Host` of a
+grant, and `pg_hba.conf` matches a name by reverse resolving the client address
+and then forward resolving the answer. Both fail quietly: the authorization
+stays in place, matches nothing, and the replica is refused with no hint that
+DNS is the reason. So `inspect` reports the origins the **server** holds rather
+than the ones the description asked for, and a name that stopped resolving
+shows up in `keel diff` as drift rather than as nothing at all
+([docs/diff.md](diff.md)).
+
+### What the credential means, per engine
+
+The replication secret and the client secret are file references, like every
+other secret in this format (`secrets` above). What the value unlocks is not
+the same thing in all three engines, and a description that pretended
+otherwise would mislead whoever creates the file:
+
+| Engine | `database.server.replication.secret` | `database.client.primary.secret` |
+| --- | --- | --- |
+| mariadb | The password of the replication account, the one `CHANGE MASTER TO ... MASTER_PASSWORD` uses | The password of `database.client.primary.user` |
+| postgresql | The password of the replication role, what `primary_conninfo` carries | The password of the role in `primary.user` |
+| redis | `masterauth` on the replica: the value of `requirepass`, or the password of the ACL user allowed to replicate. Redis has no database account, so there is no user to name unless an ACL user exists | `requirepass`, or the password of an ACL user |
+
+No value is ever read by `inspect` or compared by `diff`, on any engine.
 
 ## Not in the spec yet
 
