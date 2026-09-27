@@ -58,6 +58,11 @@ exactly as `inspect` is.
 | `--system-only` | Run phase 2 and not phase 1: the conf is neither read nor written and no secret is resolved. Root on the live system |
 | `--dry-run` | With either flag: print the plan and change nothing, not even the conf. Reads no secret, so the secret files need not exist. Needs no root |
 | `--root DIR` | The filesystem phase 2 converges: `/` (the default, the live system) or a scratch tree. Phase 1 is not affected; the conf path is `--conf` |
+| `--destroy-local-database` | Confirm, for this run only, that making this node a replica may drop the databases this server holds. Without it apply refuses and changes nothing. See "database.server" below |
+
+`--destroy-local-database` with neither flag is a usage error as well:
+it confirms one decision of phase 2, so asking for it without phase 2 is
+a typo and not a quiet no-op.
 
 `--dry-run` with neither flag is a usage error (exit 1): phase 1 has
 `spec render` for that. `--system` and `--system-only` together is a
@@ -201,10 +206,108 @@ otherwise `localedef -i SOURCE -c -f CHARSET NAME`. `C`, `POSIX` and
 written and the line says `not generated: not the live system`, since a
 scratch tree has no locale archive of its own.
 
+**database.server** (MariaDB)
+
+Phase 3 of decision 0013: the role this node is in. `keel inspect` asks
+the server what it is and `keel diff` reports the difference; this is the
+acting half. MariaDB first; PostgreSQL and Redis are read and compared
+and say so rather than being configured.
+
+Every role writes one file,
+`/etc/mysql/mariadb.conf.d/99-keel-database.cnf`, and restarts the server
+**only when that file changed**, because `server_id`, `bind-address` and
+`log_bin` cannot be set while it runs.
+
+| Line | Where it comes from |
+| --- | --- |
+| `server_id` | Derived from `/etc/machine-id`, never from the description: two appliances deployed from one description would collide, and two nodes with the same server id stop replicating. A machine with no machine-id is refused rather than given an invented one |
+| `bind-address` | `database.server.listen`, written as the literal list it is. Absent from the description means the file says nothing and the packaged setting stands |
+| `skip_name_resolve` | `ON`, unless an entry of `allowed_from` is a name: MariaDB matches a grant whose host is a name only while it resolves client addresses. The line of the plan says so, because docs/spec.md calls a name fragile for exactly this reason |
+| `log_bin`, `binlog_format` | On a primary alone. A replica reads the primary's log and needs none of its own |
+
+A **primary** then holds its authorizations. Each entry of
+`allowed_from` becomes `CREATE USER`, `ALTER USER` and `GRANT REPLICATION
+SLAVE` for the account `repl` at that origin, written in the spelling
+MariaDB has for it, so the preferred `2804:710:d0:5::/64` becomes
+`2804:710:d0:5:%` (`keel.spec.origins`). An origin the description no
+longer names has its account dropped, because `inspect` reads the
+authorizations off the server and one left behind would drift for ever.
+A prefix that stops inside a group, a `/56`, is refused: authorizing a
+wider or a narrower range than the description asked for is not a
+decision apply makes. `allowed_from` absent, as against empty, leaves the
+server's authorizations alone.
+
+The account name is a constant and not a field. Both ends of a pair must
+name the same account, and a field each operator sets on their own
+machine is a way to end up with two machines that cannot talk, while
+decision 0013 keeps every screen to the machine it runs on.
+
+A **replica** then replicates from `replication.primary`, with
+`MASTER_USE_GTID=slave_pos` and an empty `gtid_slave_pos`, which means
+from the beginning of the primary's binary log. That is the only seeding
+this version does, and it is honest only because of the refusal below: a
+node whose database is empty and a primary whose binary log has not been
+purged are equal at that moment. Seeding a replica from a backup of a
+primary that already held data is the operator's step and keel does not
+do it.
+
+A replica already replicating from the declared endpoint is left alone,
+which matters more here than anywhere else in keel: apply runs at every
+boot, and restarting replication from the beginning of the log on a
+machine that had caught up would throw that away.
+
+#### Becoming a replica destroys the local database
+
+A standby is a copy of its primary, so a machine that holds data cannot
+become one without losing that data. This is the one step of the whole
+feature that loses data and it gets the most explicit treatment:
+
+- **The refusal is the default.** Apply refuses unless the server holds
+  no database but its own (`information_schema`, `mysql`,
+  `performance_schema`, `sys`).
+- **A server that cannot be asked what it holds is refused too.** Not
+  knowing is not permission.
+- **Pointing a replica at a different primary is the same act**, because
+  the copy it holds came from another server.
+- **The override is `--destroy-local-database`, in that invocation.** It
+  drops the databases the refusal named and then builds the replica, and
+  the line of the plan repeats the refusal it is overriding.
+- **Nothing else in keel passes it.** `keel diff` writes nothing
+  anywhere, and the first boot hook `10keel-system` runs
+  `keel spec apply --system-only` with no such flag, so the worst a first
+  boot can do is build a replica out of a database that holds nothing.
+
+```
+$ keel spec apply --system-only
+database.server: write /etc/mysql/mariadb.conf.d/99-keel-database.cnf: replica, server id 1857420371: done
+database.server: restart the server, which is the only way these take effect (systemctl restart mariadb): done
+database.server.replication.primary: refused: becoming a replica replaces the local database with a copy of the primary, and this server holds 1 database(s) that are not its own (wordpress). Nothing was changed. Move the data elsewhere, or run the same command again with --destroy-local-database to drop them and build the replica
+apply --system-only: 2 change(s), 1 failed
+```
+
+#### apply never promotes and never demotes
+
+Where the observed role differs from the declared one in a way that would
+need either, the plan refuses and configures nothing:
+
+| Declared | Observed | What apply does |
+| --- | --- | --- |
+| `primary`, `standalone` | `replica` | Refuses, and names `keel database promote`. Promotion is an operator action |
+| `replica`, `standalone` | `primary` | Refuses. Demoting a primary destroys everything written to it since a replica last agreed |
+
+This is the same rule `keel diff` states as a rule of the project
+([docs/diff.md](diff.md)), on the acting side: the drift it says must
+never be corrected automatically is drift apply will not correct.
+
+**There is no automatic failover here.** Nothing in this phase looks at
+another machine. Replication without failover is not high availability,
+and when it is wanted the packaged answers are Galera for MariaDB and
+Patroni for PostgreSQL.
+
 ### Failures and exit codes
 
-A failed action fails its field: the actions after it in the same field
-are skipped (the keys file of an account that could not be created is not
+A failed action, and a refusal, fail their field: the actions after it in
+the same field are skipped (the keys file of an account that could not be created is not
 written into a home that does not exist), the other fields go on, and the
 summary counts what happened. The exit code is then 16 (`APPLY_FAILED`);
 the conf was written and every other change was made, so the run can
@@ -259,6 +362,13 @@ blog.yaml --root /tmp/scratch` then reports `instance.fqdn` and every
   `HOSTNAME` variable phase 1 writes. This phase only adds the fully
   qualified name to `/etc/hosts`.
 - Generating a locale for a tree other than the live system.
+- Installing a package. A description that declares a database server on
+  a machine with none is a refusal, not an installation.
+- Anything to the database under `--root DIR`: the server of an offline
+  root is another machine's, and a statement sent here would reach the
+  wrong one.
+- Anything at all to `database.client`: where an application reaches a
+  database is the application's own configuration.
 - Touching the conf when a populated one exists, or anything at all with
   `--dry-run`.
 

@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from keel.inspect import constants as paths
 from keel.inspect.accounts import home_of, passwd_entries
 from keel.inspect.tree import File, Tree
+from keel.system.dbstate import DatabaseState, observe_database
 
 LOCALE_GEN = "etc/locale.gen"
 KEYS_UNDER_HOME = ".ssh/authorized_keys"
@@ -35,6 +36,7 @@ class SystemState:
     locale_gen: File
     generated: tuple[str, ...] | None
     available: frozenset[str]
+    database: DatabaseState | None = None
 
 
 def observe(root: str, doc: dict) -> SystemState:
@@ -62,6 +64,7 @@ def observe(root: str, doc: dict) -> SystemState:
         available=frozenset(
             name for name in COMMANDS if shutil.which(name)
         ) if live else frozenset(),
+        database=observe_database(root, doc),
     )
 
 

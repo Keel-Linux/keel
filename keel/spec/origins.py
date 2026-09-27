@@ -54,6 +54,24 @@ def canonical(origin: str) -> str:
     return text.lower().rstrip(".")
 
 
+def is_name(origin: str) -> bool:
+    """Whether an origin is a name rather than an address or a range
+
+    A name is what docs/spec.md accepts and calls fragile, and the apply
+    path has to know: MariaDB matches an account whose host is a name only
+    while it resolves client addresses, so a description that holds one
+    decides whether `skip_name_resolve` can be turned on.
+    """
+    text = str(origin).strip()
+    if not text:
+        return False
+    return (
+        as_prefix(text) is None
+        and _address(text) is None
+        and WILDCARD not in text
+    )
+
+
 def as_prefix(origin: str) -> str | None:
     """The prefix an origin authorizes, or None when it names no whole one
 

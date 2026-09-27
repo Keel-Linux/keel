@@ -61,18 +61,23 @@ def unsupported(doc: dict, system: bool = False) -> list[str]:
     without either they are accepted and left alone, and the warning says
     so.
 
-    The database section is read and compared and never applied, by any
-    run: this phase of decision 0013 is vocabulary, reading and
-    comparison. The warning says so with either flag and without one,
-    because becoming a replica replaces the local data with a copy of the
-    primary and no run of apply may do that behind an operator's back.
+    database.server is converged by the system phase, for MariaDB, and
+    database.client is not converged at all: it names where an
+    application reaches a database, which is the application's own
+    configuration and not this machine's server (decision 0013, phase 1).
     """
     messages = []
-    if doc.get("database"):
+    database = doc.get("database") or {}
+    if database.get("server") and not system:
         messages.append(
-            "database: no database configuration is written by this"
-            " version; the section is read by keel inspect and compared by"
-            " keel diff only"
+            "database.server: the role of this node is converged by the"
+            " system phase (--system, --system-only) only, not in this run"
+        )
+    if database.get("client"):
+        messages.append(
+            "database.client: where this machine reaches a database is"
+            " read by keel inspect and compared by keel diff; no"
+            " application is reconfigured by this version"
         )
     acme = (doc.get("tls") or {}).get("acme") or {}
     if acme.get("enabled"):

@@ -9,7 +9,7 @@ that engine has for the same range.
 import pytest
 
 from keel.spec.fields import origin_error
-from keel.spec.origins import as_prefix, canonical, host_pattern
+from keel.spec.origins import as_prefix, canonical, host_pattern, is_name
 
 
 class TestCanonical:
@@ -74,6 +74,22 @@ class TestCanonical:
         # int() accepts the spaces an address does not, so the groups are
         # counted and the result is still refused when it is assembled.
         assert canonical("2001: db8:%") == "2001: db8:%"
+
+
+class TestIsName:
+    @pytest.mark.parametrize(
+        "origin", ["replica.example.org", "Replica.Example.ORG."]
+    )
+    def test_a_name_is_a_name(self, origin):
+        assert is_name(origin) is True
+
+    @pytest.mark.parametrize(
+        "origin",
+        ["2804:710:d0:5::/64", "2804:710:d0:5:%", "2001:db8::1",
+         "192.0.2.1", ""],
+    )
+    def test_nothing_that_names_a_range_or_an_address_is(self, origin):
+        assert is_name(origin) is False
 
 
 class TestAsPrefix:

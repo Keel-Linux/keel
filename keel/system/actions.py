@@ -60,6 +60,28 @@ class Symlink:
 
 
 @dataclass(frozen=True)
+class RunSql:
+    """Run statements through an engine's own client, on standard input
+
+    A statement can hold a credential, and an argument vector is world
+    readable in the process list, so the statements go on standard input
+    and `describe` never prints them. That is also why a dry run of the
+    database phase shows what will be done and not the SQL that does it.
+    """
+
+    argv: tuple[str, ...]
+    statements: str
+    summary: str
+
+    def describe(self) -> str:
+        count = len([one for one in self.statements.split(";") if one.strip()])
+        return (
+            f"{self.summary} ({shlex.join(self.argv)}, {count} statement(s)"
+            " on standard input)"
+        )
+
+
+@dataclass(frozen=True)
 class Note:
     """Nothing to do for this field, and why: unchanged, or not possible"""
 
@@ -69,8 +91,25 @@ class Note:
         return self.summary
 
 
-Change = Run | WriteFile | MakeDir | Symlink
-Action = Change | Note
+@dataclass(frozen=True)
+class Refuse:
+    """This field was not converged and the run failed, with the reason
+
+    A Note says there was nothing to do. A Refuse says there was, and that
+    apply would not: becoming a replica over a database that holds data,
+    demoting a primary, promoting a replica. It counts as a failure, so
+    the exit code says the machine does not match the description, and the
+    actions after it in the same step are skipped.
+    """
+
+    summary: str
+
+    def describe(self) -> str:
+        return self.summary
+
+
+Change = Run | RunSql | WriteFile | MakeDir | Symlink
+Action = Change | Note | Refuse
 
 
 @dataclass(frozen=True)
@@ -82,7 +121,10 @@ class Step:
 
     @property
     def changes(self) -> int:
-        return sum(1 for action in self.actions if not isinstance(action, Note))
+        return sum(
+            1 for action in self.actions
+            if not isinstance(action, Note | Refuse)
+        )
 
 
 @dataclass(frozen=True)

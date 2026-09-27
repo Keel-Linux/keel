@@ -517,22 +517,41 @@ class TestClient(unittest.TestCase):
 
 
 class TestNotApplied(unittest.TestCase):
-    """This phase is vocabulary, reading and comparison, never applying"""
+    """Which half of the section the conf phase acts on, which is none"""
 
-    def test_apply_warns_that_the_section_is_left_alone(self):
+    def test_the_conf_phase_says_the_role_belongs_to_the_system_phase(self):
         found = spec.unsupported(doc(STANDALONE))
-        matching = [line for line in found if line.startswith("database:")]
+        matching = [
+            line for line in found if line.startswith("database.server:")
+        ]
         self.assertEqual(len(matching), 1)
-        self.assertIn("no database configuration is written", matching[0])
+        self.assertIn("--system-only", matching[0])
 
-    def test_the_warning_stands_with_the_system_flag_too(self):
+    def test_the_system_phase_does_not_repeat_the_warning(self):
         found = spec.unsupported(doc(REPLICA), system=True)
         self.assertEqual(
-            len([line for line in found if line.startswith("database:")]), 1
+            [line for line in found
+             if line.startswith("database.server:")], []
         )
+
+    def test_the_client_side_is_not_converged_by_either_phase(self):
+        client = (
+            "version: 1\n"
+            "database:\n"
+            "  client:\n"
+            "    engine: mariadb\n"
+            "    primary:\n"
+            "      host: \"::1\"\n"
+        )
+        for system in (False, True):
+            found = spec.unsupported(doc(client), system=system)
+            matching = [
+                line for line in found if line.startswith("database.client:")
+            ]
+            self.assertEqual(len(matching), 1, system)
 
     def test_a_spec_without_the_section_says_nothing_about_it(self):
         found = spec.unsupported(doc("version: 1\n"))
         self.assertEqual(
-            [line for line in found if line.startswith("database:")], []
+            [line for line in found if line.startswith("database")], []
         )

@@ -253,6 +253,15 @@ def add_apply_options(parser: argparse.ArgumentParser) -> None:
         help="with --system or --system-only: print the plan and change"
         " nothing, not even the conf",
     )
+    parser.add_argument(
+        "--destroy-local-database",
+        action="store_true",
+        help="confirm, for this run only, that making this node a replica"
+        " of the declared primary may drop the databases it holds; a"
+        " replica is a copy of its primary, so there is no other way."
+        " Without it apply refuses and changes nothing, which is what a"
+        " first boot gets (docs/apply.md)",
+    )
     add_root_option(parser, "converge with --system")
 
 
@@ -317,10 +326,16 @@ def main(argv: list[str] | None = None) -> int:
     if handler is None:
         parser.print_help(sys.stderr)
         return exits.USAGE
-    if getattr(args, "dry_run", False) and not (
-        getattr(args, "system", False) or getattr(args, "system_only", False)
-    ):
+    system = getattr(args, "system", False) or getattr(
+        args, "system_only", False
+    )
+    if getattr(args, "dry_run", False) and not system:
         parser.error("--dry-run requires --system or --system-only")
+    if getattr(args, "destroy_local_database", False) and not system:
+        parser.error(
+            "--destroy-local-database requires --system or --system-only:"
+            " the database phase runs there"
+        )
     return handler(args)
 
 

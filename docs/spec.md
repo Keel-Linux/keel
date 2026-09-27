@@ -433,10 +433,16 @@ database:
         file: /etc/keel/secrets/db_password
 ```
 
-Nothing in this section is applied yet: this is the vocabulary, the reading
-([docs/inspect.md](inspect.md)) and the comparison ([docs/diff.md](diff.md)).
-`apply` warns that the section was left alone, and no database configuration
-is written by any command.
+`database.server` is converged by the system phase of `apply`
+([docs/apply.md](apply.md)) for MariaDB, which writes the server id, the
+addresses, the binary log, the authorizations of a primary and the
+replication of a replica. PostgreSQL and Redis are read
+([docs/inspect.md](inspect.md)) and compared ([docs/diff.md](diff.md)) and
+say so instead of being configured, which is decision 0013 taking the engines
+one at a time.
+
+`database.client` is read and compared and never applied: where an
+application reaches a database is the application's own configuration.
 
 ### database.server: what this machine is
 

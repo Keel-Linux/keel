@@ -131,7 +131,10 @@ def spec_apply(args) -> int:
             return code
     if not with_system:
         return exits.OK
-    return apply_system(doc, root, dry_run, phase_label(system_only))
+    return apply_system(
+        doc, root, dry_run, phase_label(system_only),
+        getattr(args, "destroy_local_database", False),
+    )
 
 
 def phase_label(system_only: bool) -> str:
@@ -163,16 +166,21 @@ def apply_conf(args, doc: dict, with_system: bool) -> int:
 
 
 def apply_system(
-    doc: dict, root: str, dry_run: bool, label: str = "apply --system"
+    doc: dict, root: str, dry_run: bool, label: str = "apply --system",
+    confirmed: bool = False,
 ) -> int:
     """Observe, plan, then carry out or only print; one line per action
 
     A spec that declares none of the fields this phase converges is a
     no-op that says so, so a first boot hook reading the log can tell an
     empty plan from a run that did nothing because it failed.
+
+    `confirmed` is --destroy-local-database, and it reaches exactly one
+    decision: whether becoming a replica may drop the databases this
+    server holds. Nothing else in keel passes it, so a first boot cannot.
     """
     state = system.observe(root, doc)
-    plan = system.plan(doc, state)
+    plan = system.plan(doc, state, confirmed)
     if not plan.steps:
         print(f"{label}: nothing declared that this phase converges")
         return exits.OK
