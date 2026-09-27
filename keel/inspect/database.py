@@ -24,11 +24,24 @@ SERVER = "database.server"
 CLIENT = "database.client"
 REPLICA = "replica"
 PRIMARY = "primary"
-# A field that describes nothing unless the server is in one of these roles.
-# Reading it anyway would report a primary's authorizations on a replica
-# that has none, which is a fact about the role and not about the field.
-ROLE_FIELDS = {"replication.primary": (REPLICA,),
-               "replication.allowed_from": (PRIMARY,)}
+# A field that describes nothing unless the server is in one of these
+# roles, and what the report says when it is not. The field is reported as
+# one that could not be inferred rather than left out silently: a
+# description that declares it against a machine in another role is then
+# unknown to keel diff, with the role named, instead of a second drift line
+# repeating what the role line already said.
+ROLE_FIELDS = {
+    "replication.primary": (
+        (REPLICA,),
+        "the server is a {role}: it replicates from nowhere, so there is no"
+        " primary on the machine to read",
+    ),
+    "replication.allowed_from": (
+        (PRIMARY,),
+        "the server is a {role}: nothing replicates from it, so the"
+        " authorizations it would hold as a primary are not read",
+    ),
+}
 # A server that is installed and cannot say what it is. The whole section
 # is reported as not inferred, the way an unreadable interfaces file reports
 # network.interfaces, so every field under it is unknown to diff and none of
@@ -125,21 +138,23 @@ def probe_server(
         ("primary", reading.primary),
         ("allowed_from", reading.allowed_from),
     ):
-        if not _applies(f"replication.{name}", role):
+        path = f"{SERVER}.replication.{name}"
+        reason = _other_role(f"replication.{name}", role)
+        if reason:
+            findings.append(missing(path, reason))
             continue
-        _add(
-            replication, findings, f"{SERVER}.replication.{name}", name,
-            value,
-        )
+        _add(replication, findings, path, name, value)
     if replication:
         section["replication"] = replication
     return section, findings
 
 
-def _applies(path: str, role: object) -> bool:
-    """Whether a field describes anything in the role that was observed"""
-    roles = ROLE_FIELDS.get(path)
-    return roles is None or str(role) in roles
+def _other_role(path: str, role: object) -> str:
+    """Why this field says nothing in the role that was observed, if so"""
+    roles, reason = ROLE_FIELDS[path]
+    if str(role) in roles:
+        return ""
+    return reason.format(role=role)
 
 
 def _add(

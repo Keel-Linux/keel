@@ -380,15 +380,34 @@ class TestServerSection(unittest.TestCase):
             {"host": "2001:db8:1::10", "port": 3306},
         )
         self.assertNotIn("allowed_from", section["replication"])
+        reason = reason_of(
+            findings, "database.server.replication.allowed_from"
+        )
+        self.assertIn("the server is a replica", reason)
 
     def test_a_primary_reports_the_authorizations_and_not_a_primary(self):
         answered = dict(MARIADB_STANDALONE, grants="2001:db8:1:%\n")
-        section, _ = probe_server((self.one("mariadb", answered),))
+        section, findings = probe_server((self.one("mariadb", answered),))
         self.assertEqual(section["role"], "primary")
         self.assertEqual(
             section["replication"]["allowed_from"], ["2001:db8:1:%"]
         )
         self.assertNotIn("primary", section["replication"])
+        self.assertEqual(
+            statuses(findings, "database.server.replication.primary"),
+            [NOT_INFERRED],
+        )
+
+    def test_a_standalone_says_why_neither_field_was_read(self):
+        _, findings = probe_server(
+            (self.one("mariadb", MARIADB_STANDALONE),)
+        )
+        for name in ("primary", "allowed_from"):
+            with self.subTest(field=name):
+                reason = reason_of(
+                    findings, f"database.server.replication.{name}"
+                )
+                self.assertIn("the server is a standalone", reason)
 
     def test_a_galera_node_writes_no_section_and_names_the_mode(self):
         answered = dict(MARIADB_STANDALONE, variables="wsrep_on\tON\n")

@@ -42,6 +42,9 @@ class FieldDiff:
     declared: object = None
     observed: object = None
     reason: str = ""
+    # A warning that belongs on a drift line, where acting on the drift the
+    # wrong way round would destroy something. diff itself writes nothing.
+    note: str = ""
 
     @property
     def section(self) -> str:
@@ -54,9 +57,10 @@ class FieldDiff:
         if self.status == SAME:
             return show(self.declared)
         if self.status == DRIFT:
+            warning = f"; {self.note}" if self.note else ""
             return (
                 f"declared {show(self.declared)},"
-                f" observed {show(self.observed)}"
+                f" observed {show(self.observed)}{warning}"
             )
         if self.status == UNKNOWN:
             return (
@@ -74,6 +78,7 @@ class FieldDiff:
             "declared": self.declared,
             "observed": self.observed,
             "reason": self.reason,
+            "note": self.note,
         }
 
 

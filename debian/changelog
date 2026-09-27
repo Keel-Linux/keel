@@ -1,3 +1,34 @@
+keel (0.3.2) unstable; urgency=medium
+
+  * keel diff compares the database section. The engine, the role and the
+    listen addresses are compared against what the server says it is; the
+    endpoint a replica replicates from and the origins a primary authorizes
+    are compared when the declared role has a use for them; and the
+    credentials, being references whose values are never read, are not
+    compared at all.
+  * A declared replica against an observed primary is drift that carries a
+    warning saying never to correct it automatically, because demoting a
+    primary destroys everything written to it since the replica last agreed.
+    The mirror image, a declared primary against an observed replica, carries
+    its own: promoting splits the pair into two writable servers. docs/diff.md
+    states this as a rule of the project, for the phase that will configure
+    replication and not only read it. The warning is in the JSON document as
+    well, so a caller shows it without reproducing it.
+  * A field the declared role has no use for is not compared: a standalone may
+    carry the authorizations it will need as a primary, the way a certificate
+    configuration waits behind tls.acme.enabled. The role itself is always
+    compared. Where the declared and observed roles disagree, the role line
+    carries the drift and the field it governs is unknown, naming the role the
+    machine is in, so one fact produces one drift line.
+  * Listen addresses and authorized origins compare as sets and in canonical
+    form. A name is never resolved: an authorization that names a host and a
+    server that holds an address are two different things, and resolving
+    before comparing is how a name that stopped resolving would pass as same.
+  * inspect says why a field of another role was not read, so the reason
+    reaches the diff line.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Sun, 27 Sep 2026 11:05:00 +0000
+
 keel (0.3.1) unstable; urgency=medium
 
   * keel inspect reads the database section, both subjects independently. The

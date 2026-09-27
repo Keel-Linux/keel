@@ -77,7 +77,7 @@ class TestFieldDiff(unittest.TestCase):
         self.assertEqual(field.to_dict(), {
             "field": "network.nameservers", "section": "network",
             "status": "same", "declared": ["::1"], "observed": ["::1"],
-            "reason": "",
+            "reason": "", "note": "",
         })
 
 

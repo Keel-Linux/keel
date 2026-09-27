@@ -25,6 +25,7 @@ FIXTURES = join(dirname(abspath(__file__)), "fixtures", "inspect")
 TURNKEY = join(FIXTURES, "turnkey")
 DHCP = join(FIXTURES, "dhcp")
 MISSING = join(FIXTURES, "missing")
+DATABASE = join(FIXTURES, "database")
 
 MATCHING = (
     "version: 1\n"
@@ -131,7 +132,7 @@ class TestDiffCommand(DiffTestCase):
         self.assertEqual(first, {
             "field": "instance.hostname", "section": "instance",
             "status": "same", "declared": "blog", "observed": "blog",
-            "reason": "",
+            "reason": "", "note": "",
         })
 
     def test_secrets_are_never_compared(self):
@@ -221,7 +222,7 @@ class TestRoundTrip(DiffTestCase):
         self.assertFalse(os.path.exists(self.secrets))
 
     def test_every_fixture_diffs_clean_against_itself(self):
-        for root in (TURNKEY, DHCP, MISSING):
+        for root in (TURNKEY, DHCP, MISSING, DATABASE):
             with self.subTest(root=os.path.basename(root)):
                 output = join(self.tmpdir, f"{os.path.basename(root)}.yaml")
                 self.inspect(root, output)
@@ -237,7 +238,7 @@ class TestRoundTrip(DiffTestCase):
 
     def test_every_fixture_names_secret_files_that_do_not_exist(self):
         """The precondition of the round trip: the spec has placeholders"""
-        for root in (TURNKEY, DHCP, MISSING):
+        for root in (TURNKEY, DHCP, MISSING, DATABASE):
             with self.subTest(root=os.path.basename(root)):
                 output = join(self.tmpdir, f"{os.path.basename(root)}.yaml")
                 self.inspect(root, output)
