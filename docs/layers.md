@@ -255,7 +255,7 @@ layer lamp 9c1b...
 | `release` | `YYYY-MM-DD` | The release revision it names |
 | `rev` | a whole number above zero | Which revision of that release; revisions never overwrite each other |
 | `signed_at` | `YYYY-MM-DDTHH:MM:SSZ` | When it was signed |
-| `expires_at` | the same, and after `signed_at` | When the client stops believing it |
+| `expires_at` | the same, after `signed_at`, and at most 30 days after it | When the client stops believing it |
 | `layer` | a layer name and 64 lowercase hex digits, at least once, never twice for one layer | The sha256 of that layer's manifest in the release revision |
 
 The pointer is one file and not a file beside a detached signature,
@@ -268,25 +268,69 @@ vulnerable release simply by not updating, and the client cannot tell
 that apart from "nothing new". The check is `now >= expires_at`, so the
 moment of expiry is already expired.
 
+**And an expiry has a ceiling, enforced here and not by the publisher.**
+`expires_at - signed_at` may be at most 30 days. Unbounded, "until when"
+is a permanent freeze: one signature from the online key pins an
+appliance to an already published, known vulnerable revision for ever,
+and the rollback refusal never fires because the revision does not go
+backwards. That is the failure mode decision 0016 says the whole design
+exists to prevent, so the bound cannot live in an environment variable on
+the machine holding the key.
+
+**The expiry is only as good as this machine's clock**, and nothing here
+can check a clock. So both directions are handled as far as they can be.
+A pointer signed more than an hour ahead of local time is refused, exit
+17, rather than treated as fresh. And when a pointer has expired, the
+message prints the expiry, the signature time **and** what this machine
+thinks the time is, and names all three possibilities: a mirror that is
+not being updated, a mirror holding this instance back, or a local clock
+that is wrong. A clock that has run ahead expires every pointer there is,
+and an operator told only about the mirror goes and looks at the mirror.
+
 The keyring is `--channel-keyring`, by default `$KEEL_CHANNEL_KEYRING`
 or `/usr/share/keyrings/keel-channel-keyring.gpg`. `gpgv` verifies,
 because it refuses to do anything but verify: it cannot be talked into
 importing a key, consulting a trust database or asking an agent. The
 `keel` package depends on it and does not assume it, since on Debian 13
-apt verifies with `sqv` and `gpgv` is a package of its own. Two of its
-properties are load bearing and were measured, not assumed:
+apt verifies with `sqv` and `gpgv` is a package of its own.
+
+No repository ships that keyring yet, so `keel pull --channel` on a stock
+appliance exits 18 naming the file it could not read. That fails closed,
+which is the right way round, but the feature is not usable until the
+keyring is packaged; `--channel-keyring` or `$KEEL_CHANNEL_KEYRING`
+points at one in the meantime.
+
+Four of gpgv's properties are load bearing, and all four were measured
+rather than assumed:
 
 * it **writes the plain text of a document whose signature it refused**,
-  so `keel.layers.signature` reads that output only after the exit
-  status and a `VALIDSIG` line have been accepted;
+  so `keel.layers.signature` reads that output only after every check
+  below has passed;
+* **its exit status does not mean the key is good, and neither does
+  `VALIDSIG`.** A signature by a revoked primary, by a revoked signing
+  subkey under a live primary, or by an expired key each give exit 0, a
+  `VALIDSIG` line, and `Good signature from` on stderr. `GOODSIG` is the
+  only line gpgv withholds, substituting `REVKEYSIG` or `EXPKEYSIG`. So a
+  `GOODSIG` line is required and the retirement lines are refused
+  outright. This matters more here than anywhere: the channel key is the
+  one unattended online key in the design, the answer to its theft is to
+  revoke it, and a verifier that accepts `VALIDSIG` makes revocation do
+  nothing;
 * it **reads a binary keyring only**, and an armored one gives
-  `NO_PUBKEY`. An armored keyring is accepted here and dearmored in
-  memory, because `.asc` is the form this project publishes keys in.
+  `NO_PUBKEY` — the same message as a wrong key. An armored keyring is
+  accepted here and dearmored in memory;
+* it **accepts SHA-1** unless told otherwise, so `--weak-digest SHA1` is
+  passed and a SHA-1 pointer is refused.
 
-`--channel-signer FINGERPRINT`, repeatable, narrows it further: only
-that key may move a channel, whatever else the keyring holds. The
-fingerprint may be the signing key's or its primary key's, so a subkey
-rotation needs no change on the appliances.
+`--channel-signer FINGERPRINT`, repeatable, or `$KEEL_CHANNEL_SIGNER` as
+a space separated list, narrows it further: only that key may move a
+channel, whatever else the keyring holds. The fingerprint may be the
+signing key's or its primary key's, so a subkey rotation needs no change
+on the appliances — but that also means pinning a primary accepts a
+revoked subkey of it, which is why the retirement refusal above is what
+actually stops one. With neither set, any key in the keyring is accepted,
+so a keyring holding the channel key alone is the other way to get the
+separation decision 0016 argues for.
 
 ## What `keel pull` fetches
 
@@ -344,7 +388,17 @@ layer of the chain. Each manifest's bytes must hash to what the pointer
 signed for that layer; a layer the pointer does not name is a mismatch,
 because nothing signed then says which manifest it should have.
 
-What was resolved is printed above the layer lines:
+What was resolved is printed above the layer lines, always — a pull that
+verified nothing says so, because otherwise it prints exactly what a
+verified one prints:
+
+```
+# keel pull lamp --source /mnt/builds/layers
+flat layout: no channel pointer was read, so nothing here is signed for. Pass --channel stable to follow a signed pointer
+core: cached (326418793 bytes)
+```
+
+For a channel:
 
 ```
 # keel pull lamp --source https://mirror.keellinux.org/layers --channel stable
@@ -360,10 +414,27 @@ default `$KEEL_CHANNEL_STATE` or `/var/lib/keel/channel`, which is what
 
 ### Rollback
 
-`--release 2026-09-28 --rev 1` names an immutable revision and follows
-no pointer. That is how a rollback is asked for, and it always works,
-because a blob is never deleted: every revision that was ever published
-can still be assembled. Given `--channel` as well, the state records
+`--release 2026-09-28 --rev 1` names an immutable revision. It always
+works, because a blob is never deleted: every revision that was ever
+published can still be assembled.
+
+**It is verified, and by the same chain.** A rollback is the operation an
+operator performs after something has already gone wrong, against the
+mirror they have the least reason to trust, so it is not the path that
+skips the signature. Each revision keeps a copy of the pointer that was
+signed for it when a channel was last moved to it, at
+`layers/<release>/<rev>/revision`. `--release/--rev` fetches that,
+verifies it exactly as a channel pointer is verified, requires it to name
+the revision it is filed under, and takes the manifest digests from it. A
+mirror with no `revision` file gets exit 10; one with a rewritten manifest
+gets exit 7. Before this, both were exit 0 with attacker bytes in the
+cache.
+
+The one check not applied is the expiry: an earlier revision is old on
+purpose, and freshness is a question about a channel and not about a
+revision. The output says so.
+
+Given `--channel` as well, the state records
 that the instance is on that revision of that channel, so `keel inspect`
 says it is behind, which after a deliberate rollback is the truth.
 
@@ -490,7 +561,7 @@ privileges beyond writing the cache.
 | 6 | `MANIFEST_INVALID` | A manifest at the source, on disk or in the cache does not validate, or names another layer than the one asked for or filed under |
 | 7 | `LAYER_MISMATCH` | A parent's sha256 differs from the child's `parent_sha256`, the chain loops, a download's size or sha256 differs from the manifest, a cached manifest is filed under another sha256 than it records, or a cached tarball no longer matches at assembly time |
 | 10 | `LAYER_UNAVAILABLE` | A manifest or tarball is not at the source or the transfer failed, the cache cannot be written, or `assemble` finds a layer of the chain missing from the cache |
-| 17 | `CHANNEL_INVALID` | A channel pointer, or the record of the one this instance follows, does not parse or fails validation |
+| 17 | `CHANNEL_INVALID` | A channel pointer, or the record of the one this instance follows, does not parse or fails validation; also a pointer signed in the future, one claiming more than 30 days of life, and a revision pointer naming another revision |
 | 18 | `CHANNEL_UNVERIFIED` | A channel pointer is not signed by a key that may move a channel, or no keyring was given to check it against |
 | 19 | `CHANNEL_EXPIRED` | A channel pointer is past `expires_at`: the mirror is stale, broken or holding this instance back |
 | 20 | `CHANNEL_ROLLBACK` | A channel pointer names an earlier revision than the one this instance is on |

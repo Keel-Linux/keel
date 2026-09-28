@@ -256,7 +256,7 @@ def check_channel(args, result):
     try:
         found = layers.fetch_channel_at(
             state.source, state.channel, args.channel_keyring,
-            tuple(getattr(args, "channel_signers", ()) or ()),
+            signers(args),
         )
     except layers.LayerError as e:
         return result, e.code, str(e)
@@ -368,6 +368,18 @@ def verify_layers(args) -> int:
     return report.code
 
 
+def signers(args) -> tuple[str, ...]:
+    """The fingerprints that may move a channel, from flags or the env
+
+    One reader, because there are two call sites and a mutation run showed
+    that dropping either of them left every test passing.
+    """
+    named = getattr(args, "channel_signers", None)
+    if named is None:
+        named = os.environ.get(layers.SIGNER_ENV, "").split()
+    return tuple(named)
+
+
 def resolution(args) -> layers.Resolution:
     """The layout keel pull was told to resolve through
 
@@ -380,7 +392,7 @@ def resolution(args) -> layers.Resolution:
         release=getattr(args, "release", None),
         rev=getattr(args, "rev", None),
         keyring=getattr(args, "channel_keyring", None),
-        signers=tuple(getattr(args, "channel_signers", ()) or ()),
+        signers=signers(args),
         state=getattr(args, "channel_state", None),
         allow_rollback=getattr(args, "allow_rollback", False),
     )
@@ -402,9 +414,7 @@ def pull(args) -> int:
     except layers.LayerError as e:
         error(str(e))
         return e.code
-    line = report.resolution_line()
-    if line is not None:
-        print(line)
+    print(report.resolution_line())
     for result in report.results:
         print(result.line())
     print(report.summary())

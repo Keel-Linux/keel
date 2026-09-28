@@ -195,14 +195,60 @@ class TestExpiry(unittest.TestCase):
         )
         self.assertTrue(found.expired(now()))
 
-    def test_staleness_says_how_long_ago_and_when_it_was_signed(self):
+    def test_staleness_names_the_expiry_the_signature_and_the_local_clock(
+        self,
+    ):
+        """The local clock is one of the three explanations, so it is named"""
         found = self.channel(timedelta(hours=-2))
-        self.assertEqual(
-            found.staleness(now()),
-            f"stable expired at {stamp(found.expires_at)}, signed at"
-            f" {stamp(found.signed_at)}: the mirror is not being updated,"
-            " or is holding this instance back",
+        moment = now()
+        message = found.staleness(moment)
+        self.assertIn(stamp(found.expires_at), message)
+        self.assertIn(stamp(found.signed_at), message)
+        self.assertIn(stamp(moment), message)
+        self.assertIn("this machine's clock is wrong", message)
+
+    def test_a_pointer_signed_in_the_future_is_not_yet_valid(self):
+        signed = now() + timedelta(days=2)
+        found = channels.from_text(
+            "stable",
+            channel_body(signed_at=signed, expires_at=signed + timedelta(1)),
         )
+        message = found.not_yet_valid(now())
+        self.assertIn("a pointer from the future is refused", message)
+
+    def test_a_pointer_signed_a_moment_ahead_is_accepted(self):
+        signed = now() + timedelta(seconds=30)
+        found = channels.from_text(
+            "stable",
+            channel_body(signed_at=signed, expires_at=signed + timedelta(1)),
+        )
+        self.assertIsNone(found.not_yet_valid(now()))
+
+    def test_an_expiry_further_out_than_the_ceiling_is_refused(self):
+        signed = now()
+        with self.assertRaises(ChannelError) as raised:
+            channels.from_text(
+                "stable",
+                channel_body(
+                    signed_at=signed,
+                    expires_at=signed + timedelta(days=3650),
+                ),
+            )
+        self.assertTrue(
+            any("permanent freeze" in p for p in raised.exception.errors),
+            raised.exception.errors,
+        )
+
+    def test_an_expiry_at_the_ceiling_is_accepted(self):
+        signed = now()
+        found = channels.from_text(
+            "stable",
+            channel_body(
+                signed_at=signed,
+                expires_at=signed + timedelta(days=30),
+            ),
+        )
+        self.assertEqual(found.signed_at, signed)
 
 
 class TestState(unittest.TestCase):
@@ -346,4 +392,27 @@ class TestCorners(unittest.TestCase):
         )
         self.assertIsNone(
             channels.behind(None, self.pointer())
+        )
+
+    def test_a_revision_pointer_that_does_not_validate_raises(self):
+        with self.assertRaises(ChannelError) as raised:
+            channels.revision_from_text(
+                "p", channel_body(release="latest"), "latest", 1
+            )
+        self.assertTrue(raised.exception.errors)
+
+    def test_a_revision_pointer_may_name_either_channel(self):
+        found = channels.revision_from_text(
+            "p", channel_body(name="testing"), "2026-09-28", 1
+        )
+        self.assertEqual(found.name, "testing")
+
+    def test_a_revision_pointer_must_name_the_revision_it_is_filed_under(self):
+        with self.assertRaises(ChannelError) as raised:
+            channels.revision_from_text(
+                "p", channel_body(rev=2), "2026-09-28", 1
+            )
+        self.assertIn(
+            "names 2026-09-28/2, filed under 2026-09-28/1",
+            raised.exception.errors,
         )

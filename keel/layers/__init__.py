@@ -15,6 +15,7 @@ from keel.layers.constants import (
     LAYERS_DEFAULT,
     LAYERS_ENV,
     REQUIRED_KEYS,
+    SIGNER_ENV,
     STATE_DEFAULT,
     STATE_ENV,
 )
@@ -44,6 +45,7 @@ __all__ = [
     "LAYERS_DEFAULT",
     "LAYERS_ENV",
     "REQUIRED_KEYS",
+    "SIGNER_ENV",
     "STATE_DEFAULT",
     "STATE_ENV",
     "AssembleReport",

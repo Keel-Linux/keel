@@ -27,7 +27,7 @@ module only reads what a verified text says.
 
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
 from typing import Mapping
 
@@ -36,6 +36,8 @@ from keel.layers.constants import (
     CHANNEL_REQUIRED_KEYS,
     KEY_RE,
     LAYER_KEY,
+    MAX_FUTURE_SECONDS,
+    MAX_TTL_DAYS,
     NAME_RE,
     SHA256_RE,
     STATE_REQUIRED_KEYS,
@@ -87,13 +89,40 @@ class Channel:
         return now >= self.expires_at
 
     def staleness(self, now: datetime) -> str | None:
-        """Why an expired pointer is refused, or None when it is fresh"""
+        """Why an expired pointer is refused, or None when it is fresh
+
+        Prints the clock it judged against. A machine whose own clock has
+        run ahead expires every pointer there is, and an operator told
+        only "the mirror is not being updated" goes and looks at the
+        mirror. The two explanations have to appear together, because
+        nothing here can tell them apart.
+        """
         if not self.expired(now):
             return None
         return (
             f"{self.name} expired at {format_stamp(self.expires_at)},"
-            f" signed at {format_stamp(self.signed_at)}: the mirror is not"
-            " being updated, or is holding this instance back"
+            f" signed at {format_stamp(self.signed_at)}, and this machine"
+            f" says it is now {format_stamp(now)}: either the mirror is not"
+            " being updated, or it is holding this instance back, or this"
+            " machine's clock is wrong"
+        )
+
+    def not_yet_valid(self, now: datetime) -> str | None:
+        """Why a pointer from the future is refused, or None
+
+        A pointer signed ahead of this machine's clock is either a bad
+        clock somewhere or a pointer built to outlive a revocation. A
+        small tolerance covers drift and the moment of signing; beyond it
+        the honest answer is that the two machines disagree about when it
+        is, and that the client cannot tell which of them is wrong.
+        """
+        if self.signed_at <= now + timedelta(seconds=MAX_FUTURE_SECONDS):
+            return None
+        return (
+            f"{self.name} was signed at {format_stamp(self.signed_at)} and"
+            f" this machine says it is now {format_stamp(now)}: a pointer"
+            " from the future is refused, because a clock this far apart"
+            " makes an expiry mean nothing"
         )
 
 
@@ -174,8 +203,15 @@ def _layer_line(value: str, layers: dict[str, str]) -> list[str]:
     return []
 
 
-def validate(fields: Mapping[str, str], fetched_as: str) -> list[str]:
-    """Every problem with the fields; empty when the pointer is sound"""
+def validate(
+    fields: Mapping[str, str], fetched_as: str | None = None
+) -> list[str]:
+    """Every problem with the fields; empty when the pointer is sound
+
+    `fetched_as` is the channel the caller asked for, and None for a
+    revision's archived pointer, which is named after the revision rather
+    than after a channel and may have been signed for either one.
+    """
     missing = [key for key in CHANNEL_REQUIRED_KEYS if key not in fields]
     if missing:
         return [f"missing keys: {', '.join(missing)}"]
@@ -186,7 +222,7 @@ def validate(fields: Mapping[str, str], fetched_as: str) -> list[str]:
             f"channel: {name!r} is not one of"
             f" {', '.join(layout.CHANNELS)}"
         )
-    elif name != fetched_as:
+    elif fetched_as is not None and name != fetched_as:
         errors.append(
             f"channel: names {name!r}, fetched as {fetched_as!r}"
         )
@@ -215,9 +251,30 @@ def _validate_stamps(fields: Mapping[str, str]) -> list[str]:
                 f" 2026-09-28T04:11:09Z, got {fields[key]!r}"
             )
     if len(parsed) == len(TIMESTAMPS):
-        if parsed["expires_at"] <= parsed["signed_at"]:
-            errors.append("expires_at: must be after signed_at")
+        errors += _validate_ttl(parsed["signed_at"], parsed["expires_at"])
     return errors
+
+
+def _validate_ttl(signed: datetime, expires: datetime) -> list[str]:
+    """The pointer may not claim to be believable for ever
+
+    Unbounded, "until when" is a permanent freeze: one signature from the
+    online key pins an appliance to an already staged, known vulnerable
+    revision indefinitely, and the rollback check never fires because the
+    revision does not go backwards. That is the exact failure mode
+    decision 0016 says the design exists to prevent, so the ceiling is
+    enforced by the client and not left to the publisher's environment.
+    """
+    if expires <= signed:
+        return ["expires_at: must be after signed_at"]
+    if expires - signed > timedelta(days=MAX_TTL_DAYS):
+        return [
+            f"expires_at: {format_stamp(expires)} is"
+            f" {(expires - signed).days} days after signed_at, and no"
+            f" pointer may claim more than {MAX_TTL_DAYS}: an unbounded"
+            " expiry is a permanent freeze"
+        ]
+    return []
 
 
 def validate_layers(layers: Mapping[str, str]) -> list[str]:
@@ -252,6 +309,41 @@ def from_text(fetched_as: str, text: str, path: str | None = None) -> Channel:
         layers=MappingProxyType(dict(layers)),
         text=text,
     )
+
+
+def revision_from_text(
+    path: str, text: str, release: str, rev: int
+) -> Channel:
+    """A revision's archived pointer, for a rollback
+
+    The same format and the same signature as a channel pointer, because
+    it is the same bytes; what differs is what it has to agree with. It
+    must name the revision it is filed under, so a mirror cannot answer a
+    request for one revision with the pointer of another. Its expiry is
+    not enforced: an operator asking for an earlier revision is asking for
+    something old on purpose, and the freshness question belongs to a
+    channel.
+    """
+    fields, layers, errors = parse(text)
+    errors += validate(fields)
+    errors += validate_layers(layers)
+    if errors:
+        raise ChannelError(path, errors)
+    found = Channel(
+        path=path,
+        fields=MappingProxyType(dict(fields)),
+        layers=MappingProxyType(dict(layers)),
+        text=text,
+    )
+    if found.revision != (release, int(rev)):
+        raise ChannelError(
+            path,
+            [
+                f"names {found.release}/{found.rev}, filed under"
+                f" {release}/{rev}"
+            ],
+        )
+    return found
 
 
 def state_text(

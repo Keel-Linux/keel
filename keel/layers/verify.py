@@ -11,8 +11,11 @@ parent_sha256 equal to the parent's recorded sha256, and a
 `<tarball>.hash` file, when present, must name the same sha256.
 
 A signature inside the hash file is detected and reported, never
-verified: the project has no trusted key yet, and this code says so
-rather than claiming a check it did not make.
+verified. There is a trusted key now — the channel keyring `keel pull`
+verifies a pointer against — but it is not what a `.hash` file is signed
+with, and this command is given no keyring. So it still claims nothing
+about a `.hash` signature, and says which check was not made rather than
+which key does not exist.
 """
 
 import hashlib
@@ -44,7 +47,8 @@ STATUS_CODES = {
 SEVERITY = (STATUS_OK, STATUS_UNVERIFIED, STATUS_MISMATCH, STATUS_INVALID)
 
 SIGNATURE_PRESENT = (
-    "signature present, not verified (no trusted key configured)"
+    "signature present, not verified (keel verify reads no keyring; the"
+    " signature that is checked is the channel pointer's, in keel pull)"
 )
 SIGNATURE_ABSENT = "hash file present, not signed"
 
@@ -195,7 +199,7 @@ def check_parent_chain(
 
 def check_hash_file(
     layer: Manifest, tarballs_dir: str, tarball: str
-) -> tuple[list[str], str | None]:
+) -> tuple[list[str], str | None]:  # noqa: D401
     """Problems with the hash file and, when it exists, its signature note
 
     The note is None when there is no hash file, so the layer can be
@@ -210,7 +214,9 @@ def check_hash_file(
     try:
         found = hashfile.load(path)
     except OSError as e:
-        return [f"hash file: {e.strerror or e}"], SIGNATURE_ABSENT
+        # No note: a signature state must not be asserted for bytes
+        # nobody managed to read.
+        return [f"hash file: {e.strerror or e}"], None
     problems = []
     if found.sha256 is None:
         problems.append("hash file: no sha256 line")

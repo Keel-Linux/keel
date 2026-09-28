@@ -23,6 +23,7 @@ from keel.layers import (
     KEYRING_ENV,
     LAYERS_DEFAULT,
     LAYERS_ENV,
+    SIGNER_ENV,
     STATE_DEFAULT,
     STATE_ENV,
 )
@@ -63,6 +64,7 @@ def keyring_default() -> str:
 
 def state_default() -> str:
     return os.environ.get(STATE_ENV, STATE_DEFAULT)
+
 
 
 def add_common_options(parser: argparse.ArgumentParser) -> None:
@@ -268,7 +270,13 @@ def add_pull_options(parser: argparse.ArgumentParser) -> None:
 
 
 def add_channel_options(parser: argparse.ArgumentParser) -> None:
-    """What a channel pointer is verified against, wherever one is read"""
+    """What a pointer is verified against, for the commands that read one
+
+    That is `pull` and `inspect --check-channel`. Not `verify`: it reads
+    manifests and tarballs in a directory, where no pointer lives, and
+    giving it a keyring would suggest it checks a signature it does not.
+    What it says about a `.hash` signature names the check it did not make.
+    """
     parser.add_argument(
         "--channel-keyring",
         default=keyring_default(),
@@ -280,12 +288,14 @@ def add_channel_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--channel-signer",
         action="append",
-        default=[],
+        default=None,
         dest="channel_signers",
         metavar="FINGERPRINT",
         help="only this key may move a channel, given as a full"
         " fingerprint of the signing key or of its primary key; may be"
-        " repeated (default: any key in the keyring)",
+        f" repeated (default: ${SIGNER_ENV}, else any key in the keyring,"
+        " so a keyring holding the channel key alone gets the same"
+        " separation)",
     )
 
 

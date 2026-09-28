@@ -28,6 +28,35 @@ keel (0.4.0) unstable; urgency=medium
   * The flat layout is unchanged and is still what a pull that names no
     channel reads, so every appliance published before the conversion
     keeps working. Removing it is a separate, later change.
+  * A revoked or expired signing key is refused. gpgv exits 0 for both
+    and still prints VALIDSIG, with "Good signature from" on stderr;
+    GOODSIG is the only line it withholds. A verifier that accepted
+    VALIDSIG would make revocation do nothing, which is the one answer
+    there is to the theft of the unattended key that signs a channel.
+    SHA-1 is refused too, with --weak-digest.
+  * keel pull --release/--rev verifies as well, against the pointer each
+    revision archives of itself at layers/<release>/<rev>/revision. A
+    rollback is what an operator does when the mirror is least trusted,
+    so it is not the path that skips the signature. Only the expiry is
+    not enforced there: an earlier revision is old on purpose.
+  * A pointer may claim at most 30 days of life, and one signed in the
+    future is refused. Unbounded, an expiry is a permanent freeze: one
+    signature pins an appliance to a known vulnerable revision for ever
+    and the rollback refusal never fires, which is the failure mode the
+    expiry exists to prevent. The bound is the client's, not the
+    publisher's environment's.
+  * An expired pointer's message prints this machine's clock beside the
+    expiry and names a wrong local clock as one of the three
+    explanations. A clock that has run ahead expires every pointer there
+    is, and the old message sent the operator to the mirror.
+  * A pull that read no pointer says so above the layer lines, so it no
+    longer prints exactly what a verified pull prints.
+  * A `.hash` file is read with a bound and is not stored when it
+    disagrees with the manifest, so an unauthenticated file on the
+    mirror can no longer pick keel verify's exit code for a layer whose
+    bytes match its signed manifest.
+  * $KEEL_CHANNEL_SIGNER sets the keys allowed to move a channel for an
+    image that does not pass --channel-signer on every call.
 
  -- Marcos Méndez <mendez.foto@gmail.com>  Mon, 28 Sep 2026 09:40:00 +0000
 

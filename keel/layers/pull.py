@@ -22,9 +22,13 @@ handbook decision 0016:
   names. The digest chain is then complete: the signature covers the
   sha256 of every manifest, and each manifest covers the sha256 of its
   blob.
-* **a release and a revision** name an immutable revision directly. That
-  is how a rollback is asked for, and it needs no pointer, because the
-  operator is the one choosing.
+* **a release and a revision** name an immutable revision directly, and
+  verify through the pointer that revision archived of itself when a
+  channel was last moved to it. That is how a rollback is asked for, and
+  it is verified exactly as a channel is, minus the expiry: an operator
+  asking for an earlier revision is asking for something old on purpose.
+  Rollback is the operation performed when the mirror is least trusted,
+  so it is not the one that skips the signature.
 """
 
 import hashlib
@@ -33,10 +37,11 @@ from dataclasses import dataclass, field
 
 from keel import exits
 from keel.layers import channel as channels
-from keel.layers import layout, signature
+from keel.layers import hashfile, layout, signature
 from keel.layers import manifest as manifests
 from keel.layers.cache import Cache
 from keel.layers.constants import (
+    HASH_FILE_MAX,
     HASH_SUFFIX,
     KIND_ROOTFS,
     MANIFEST_SUFFIX,
@@ -152,8 +157,13 @@ class PullReport:
             f" {self.transferred} bytes transferred"
         )
 
-    def resolution_line(self) -> str | None:
-        """What was resolved; None for the flat layout, which resolves none"""
+    def resolution_line(self) -> str:
+        """What was resolved, and on whose word
+
+        Never None, and never silent about the flat layout: a pull that
+        verified nothing must not print the same thing as one that checked
+        a signature.
+        """
         if self.channel is not None:
             return (
                 f"channel {self.channel.name}:"
@@ -162,8 +172,16 @@ class PullReport:
                 f" expires {channels.format_stamp(self.channel.expires_at)}"
             )
         if self.revision is not None:
-            return f"release {self.revision}, named on the command line"
-        return None
+            return (
+                f"release {self.revision}, named on the command line,"
+                f" verified against its own signed {layout.REVISION_POINTER}"
+                " pointer (expiry not checked: an earlier revision is old"
+                " on purpose)"
+            )
+        return (
+            "flat layout: no channel pointer was read, so nothing here is"
+            " signed for. Pass --channel stable to follow a signed pointer"
+        )
 
 
 @dataclass(frozen=True)
@@ -353,12 +371,24 @@ def fetch_hash_file(
     Looked for under the same names as the tarball. A source without one
     is not an error: bt-layer writes the file only when a signing key is
     set. Returns whether a file was copied.
+
+    Two limits, because this file is the one thing here nothing
+    authenticates. It is read with a bound, like the tarball is, rather
+    than whole into memory on the mirror's word. And a hash file that
+    disagrees with the manifest is not stored at all: it is not evidence
+    of anything, and stored it would let the mirror pick `keel verify`'s
+    exit code out of {0, 8, 7} for a layer whose bytes match its signed
+    manifest exactly.
     """
     for name in tarball_names(layer, places):
         try:
             with source.open(name + HASH_SUFFIX) as fob:
-                text = fob.read()
+                text = fob.read(HASH_FILE_MAX)
         except OSError:
+            continue
+        found = hashfile.parse(source.path(name + HASH_SUFFIX),
+                              text.decode("utf-8", errors="replace"))
+        if found.sha256 is not None and found.sha256 != layer.sha256:
             continue
         with open(target, "wb") as out:
             out.write(text)
@@ -385,31 +415,18 @@ def fetch_channel(
     be reading unsigned data.
     """
     name = resolution.channel
-    if not resolution.keyring:
-        raise LayerError(
-            exits.CHANNEL_UNVERIFIED,
-            f"{source.path(name)}: no keyring to verify the channel pointer"
-            " against; a pointer nothing verifies is the mirror's word for"
-            " itself",
-        )
+    text = _fetch_pointer(source, name, resolution)
     try:
-        with source.open(name) as fob:
-            data = fob.read()
-    except OSError as e:
-        raise LayerError(
-            exits.LAYER_UNAVAILABLE, f"{source.path(name)}: {e}"
-        ) from e
-    try:
-        verified = signature.verify_bytes(
-            source.path(name), data, resolution.keyring, resolution.signers
-        )
-    except SignatureError as e:
-        raise LayerError(exits.CHANNEL_UNVERIFIED, str(e)) from e
-    try:
-        found = channels.from_text(name, verified.text, source.path(name))
+        found = channels.from_text(name, text, source.path(name))
     except ChannelError as e:
         raise LayerError(exits.CHANNEL_INVALID, str(e)) from e
-    stale = found.staleness(channels.now())
+    now = channels.now()
+    early = found.not_yet_valid(now)
+    if early is not None:
+        raise LayerError(
+            exits.CHANNEL_INVALID, f"{source.path(name)}: {early}"
+        )
+    stale = found.staleness(now)
     if stale is not None:
         raise LayerError(
             exits.CHANNEL_EXPIRED, f"{source.path(name)}: {stale}"
@@ -431,6 +448,52 @@ def fetch_channel_at(
         Source(source_location),
         Resolution(channel=name, keyring=keyring, signers=signers),
     )
+
+
+def fetch_revision(
+    source: Source, resolution: Resolution
+) -> channels.Channel:
+    """The pointer a revision archived of itself; raises LayerError
+
+    Same verification as a channel, same refusals, and the same message
+    when there is no keyring: the rollback path does not get a weaker
+    check than the path that is used when nothing is wrong.
+    """
+    name = layout.revision_path(resolution.release, resolution.rev)
+    data = _fetch_pointer(source, name, resolution)
+    try:
+        return channels.revision_from_text(
+            source.path(name), data, resolution.release, resolution.rev
+        )
+    except ChannelError as e:
+        raise LayerError(exits.CHANNEL_INVALID, str(e)) from e
+
+
+def _fetch_pointer(
+    source: Source, name: str, resolution: Resolution
+) -> str:
+    """Fetch and verify a clear signed pointer; returns the verified text"""
+    if not resolution.keyring:
+        raise LayerError(
+            exits.CHANNEL_UNVERIFIED,
+            f"{source.path(name)}: no keyring to verify the pointer"
+            " against; a pointer nothing verifies is the mirror's word for"
+            " itself. Pass --channel-keyring, or $KEEL_CHANNEL_KEYRING",
+        )
+    try:
+        with source.open(name) as fob:
+            data = fob.read()
+    except OSError as e:
+        raise LayerError(
+            exits.LAYER_UNAVAILABLE, f"{source.path(name)}: {e}"
+        ) from e
+    try:
+        verified = signature.verify_bytes(
+            source.path(name), data, resolution.keyring, resolution.signers
+        )
+    except SignatureError as e:
+        raise LayerError(exits.CHANNEL_UNVERIFIED, str(e)) from e
+    return verified.text
 
 
 def read_state(resolution: Resolution) -> channels.State | None:
@@ -469,8 +532,9 @@ def resolve(
 ) -> tuple[Places, channels.Channel | None, str | None]:
     """The layout to fetch from, the pointer followed and what to record"""
     if resolution.by_release:
+        found = fetch_revision(source, resolution)
         return (
-            Places(resolution.release, resolution.rev),
+            Places(resolution.release, resolution.rev, dict(found.layers)),
             None,
             f"{resolution.release}/{resolution.rev}",
         )

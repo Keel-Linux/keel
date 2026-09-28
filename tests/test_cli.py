@@ -28,6 +28,7 @@ from layers_helpers import (
 )
 
 from keel.layers import CACHE_ENV, LAYERS_ENV  # noqa: E402
+from keel.layers.verify import SIGNATURE_PRESENT  # noqa: E402
 
 import keel  # noqa: E402
 from keel import commands, exits  # noqa: E402
@@ -281,8 +282,7 @@ class TestVerify(CLITestCase):
               hash_text("lamp", self.fields["lamp"]["sha256"], signed=True))
         code, out, _ = self.verify()
         self.assertEqual(code, exits.SIGNATURE_UNVERIFIED)
-        self.assertIn("lamp: unverified: signature present, not verified"
-                      " (no trusted key configured)", out)
+        self.assertIn(f"lamp: unverified: {SIGNATURE_PRESENT}", out)
 
     def test_tarballs_dir_points_at_the_tarballs(self):
         tarballs = join(self.tmpdir, "tarballs")
@@ -329,10 +329,15 @@ class TestPullAndAssemble(CLITestCase):
             self.cache, "--non-interactive", *argv,
         )
 
+    def test_a_flat_pull_says_no_pointer_was_read_before_the_layers(self):
+        _, out, _ = self.pull()
+        self.assertTrue(out.startswith("flat layout:"), out)
+        self.assertIn("nothing here is signed for", out)
+
     def test_pull_reports_every_layer_and_the_bytes_transferred(self):
         code, out, _ = self.pull()
         self.assertEqual(code, exits.OK)
-        self.assertEqual(out.splitlines(), [
+        self.assertEqual(out.splitlines()[1:], [
             f"core: fetched ({self.fields['core']['size']} bytes)",
             f"lamp: fetched ({self.fields['lamp']['size']} bytes)",
             "layers: 2 resolved, 2 fetched, 0 cached,"

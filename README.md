@@ -123,8 +123,8 @@ Defined in one place, `keel/exits.py`, and reproduced here.
 | 14 | `DRIFT_FOUND` | `diff` found at least one declared field whose observed value differs. Drift wins over unobserved fields, so a report with both exits 14 |
 | 15 | `APPLY_NEEDS_ROOT` | The system phase (`--system`, `--system-only`) on the live system was run by a user other than root; nothing was written, not even the conf |
 | 16 | `APPLY_FAILED` | The system phase could not make at least one change; the output names it. The conf was written, where the run writes one, and every other change was made, so the run can be repeated |
-| 17 | `CHANNEL_INVALID` | A channel pointer, or the record of the one this instance follows, does not parse or fails validation |
-| 18 | `CHANNEL_UNVERIFIED` | A channel pointer is not signed by a key that may move a channel, or no keyring was given to check it against |
+| 17 | `CHANNEL_INVALID` | A channel pointer, or the record of the one this instance follows, does not parse or fails validation. Also a pointer signed in the future, one claiming more than 30 days of life, and a revision's archived pointer naming another revision |
+| 18 | `CHANNEL_UNVERIFIED` | A channel pointer is not signed by a key that may move a channel, or no keyring was given to check it against. A key that is revoked or expired is refused here: gpgv exits 0 for both and still prints `VALIDSIG`, so `GOODSIG` is what is required |
 | 19 | `CHANNEL_EXPIRED` | A channel pointer is past its expiry. A mirror that is stale, broken or hostile holds an appliance on an old release by not updating, so this is an error and never a warning |
 | 20 | `CHANNEL_ROLLBACK` | A channel pointer names an earlier revision than the one this instance is on; `--allow-rollback`, or naming the release and revision, is how going back is asked for |
 
@@ -139,6 +139,8 @@ Two rules that callers depend on:
   present, never as verified, until a trusted key exists;
 - a channel pointer past its expiry is an error and never a warning, because
   "nothing new" and "this mirror is holding you back" must not look the same;
+- every path that installs layers says whose signature it resolved through, or
+  says that it read no pointer at all;
 - `pull` never puts a tarball in the cache under a digest it does not
   have, and `assemble` never extracts a tarball it did not check;
 - `inspect` never reads a secret: every secret is written as a file

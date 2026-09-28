@@ -17,6 +17,7 @@ from unittest import mock
 from channel_helpers import channel_body, keys, tools_missing
 
 from keel.layers import signature
+from keel.layers.constants import VERIFIER  # noqa: F401
 from keel.layers.errors import SignatureError
 
 MISSING = tools_missing()
@@ -153,15 +154,89 @@ class TestRefusals(SignatureTestCase):
         self.assertIn("no gpgv", str(problem))
 
     def test_a_verifier_that_exits_well_without_a_validsig_is_refused(self):
+        """GOODSIG but no VALIDSIG: no fingerprint to hold anyone to"""
         path = self.signed()
-        completed = mock.Mock(returncode=0, stdout="[GNUPG:] NEWSIG\n",
-                              stderr="")
+        completed = mock.Mock(returncode=0, stderr="",
+                              stdout="[GNUPG:] GOODSIG DEADBEEF x\n")
         with mock.patch.object(
             signature.subprocess, "run", return_value=completed
         ):
             with open(join(self.tmpdir, "plain"), "w"):
                 problem = self.failing(path)
         self.assertIn("said nothing about a valid signature", str(problem))
+
+
+@unittest.skipIf(MISSING, f"{MISSING} is not installed")
+class TestRetiredKeys(SignatureTestCase):
+    """A revoked or an expired key is a refusal, whatever the exit status
+
+    gpgv exits 0 for both and still prints VALIDSIG; GOODSIG is the only
+    line it withholds. Measured on gpgv 2.4.7, and the reason revocation
+    is the one answer to the theft of an online key.
+    """
+
+    def written(self, text: str) -> str:
+        path = join(self.tmpdir, "stable")
+        with open(path, "w") as fob:
+            fob.write(text)
+        return path
+
+    def test_a_key_revoked_in_the_keyring_given_is_refused(self):
+        problem = self.failing(
+            self.written(self.keys.sign_revoked(self.body)),
+            keyring=self.keys.keyring_revoked,
+        )
+        self.assertIn("revoked or expired", str(problem))
+
+    def test_a_revoked_key_is_refused_even_when_it_is_the_pinned_signer(self):
+        problem = self.failing(
+            self.written(self.keys.sign_revoked(self.body)),
+            keyring=self.keys.keyring_revoked,
+            signers=(self.keys.revoked,),
+        )
+        self.assertIn("revoked or expired", str(problem))
+
+    def test_the_text_of_a_revoked_signature_is_never_returned(self):
+        problem = self.failing(
+            self.written(self.keys.sign_revoked(self.body)),
+            keyring=self.keys.keyring_revoked,
+        )
+        self.assertNotIn("release 2026-09-28", str(problem))
+
+    def test_an_expired_key_is_refused(self):
+        problem = self.failing(
+            self.written(self.keys.expired_signature),
+            keyring=self.keys.keyring_expired,
+        )
+        self.assertIn("revoked or expired", str(problem))
+
+    def test_a_verifier_that_prints_validsig_without_goodsig_is_refused(self):
+        """The general form, in case a future gpgv drops a line we name"""
+        path = self.signed()
+        status = (
+            "[GNUPG:] VALIDSIG " + "A" * 40 + " 2026-09-28 1790566273 0 4 0"
+            " 22 10 01 " + "A" * 40 + "\n"
+        )
+        completed = mock.Mock(returncode=0, stdout=status, stderr="")
+        with mock.patch.object(
+            signature.subprocess, "run", return_value=completed
+        ):
+            problem = self.failing(path)
+        self.assertIn("did not call the signature good", str(problem))
+
+
+@unittest.skipIf(MISSING, f"{MISSING} is not installed")
+class TestWeakDigest(SignatureTestCase):
+    def test_a_sha1_signature_is_refused(self):
+        path = join(self.tmpdir, "stable")
+        with open(path, "w") as fob:
+            fob.write(self.keys.clearsign(self.body, digest="SHA1"))
+        problem = self.failing(path)
+        self.assertIn("signature does not verify", str(problem))
+
+    def test_the_verifier_is_asked_to_treat_sha1_as_weak(self):
+        self.assertIn("--weak-digest", signature.VERIFIER)
+        self.assertIn("SHA1", signature.VERIFIER)
 
 
 @unittest.skipIf(MISSING, f"{MISSING} is not installed")

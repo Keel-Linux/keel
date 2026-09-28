@@ -21,6 +21,11 @@ import posixpath
 import re
 
 BLOB_DIR = "sha256"
+# The pointer a release revision keeps of itself: the very bytes that were
+# signed for it when a channel was moved to it, archived inside the
+# immutable revision directory. It is what a rollback verifies against,
+# because no channel pointer names an older revision any more.
+REVISION_POINTER = "revision"
 CHANNEL_STABLE = "stable"
 CHANNEL_TESTING = "testing"
 CHANNELS = (CHANNEL_STABLE, CHANNEL_TESTING)
@@ -42,6 +47,11 @@ def release_dir(release: str, rev: int | str) -> str:
 def manifest_path(release: str, rev: int | str, name: str) -> str:
     """The manifest of one layer of one release revision"""
     return posixpath.join(release_dir(release, rev), name + ".manifest")
+
+
+def revision_path(release: str, rev: int | str) -> str:
+    """The revision's own archived signed pointer"""
+    return posixpath.join(release_dir(release, rev), REVISION_POINTER)
 
 
 def flat_manifest_path(name: str) -> str:

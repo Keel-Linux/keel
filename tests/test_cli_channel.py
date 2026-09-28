@@ -15,7 +15,7 @@ from layers_helpers import write
 from keel import exits
 from keel.cli import main
 from keel.layers import channel as channels
-from keel.layers.constants import KEYRING_ENV, STATE_ENV
+from keel.layers.constants import KEYRING_ENV, SIGNER_ENV, STATE_ENV
 
 MISSING = tools_missing()
 
@@ -114,13 +114,24 @@ class TestPullByChannel(ChannelCLITestCase):
             )
         self.assertEqual(raised.exception.code, exits.USAGE)
 
-    def test_a_revision_named_by_hand_needs_no_keyring(self):
+    def test_a_revision_named_by_hand_is_verified_against_its_pointer(self):
         code, out, _ = self.run_cli(
             "pull", "lamp", "--source", self.source,
             "--cache-dir", self.cache, "--release", "2026-09-28", "--rev", "1",
+            "--channel-keyring", keys().keyring,
         )
         self.assertEqual(code, exits.OK)
         self.assertIn("named on the command line", out)
+        self.assertIn("verified against", out)
+
+    def test_a_revision_named_by_hand_without_a_keyring_is_refused(self):
+        code, _, err = self.run_cli(
+            "pull", "lamp", "--source", self.source,
+            "--cache-dir", self.cache, "--release", "2026-09-28", "--rev", "1",
+            "--channel-keyring", join(self.tmpdir, "absent.gpg"),
+        )
+        self.assertEqual(code, exits.CHANNEL_UNVERIFIED)
+        self.assertIn("absent.gpg", err)
 
     def test_allow_rollback_is_accepted_and_moves_the_state_back(self):
         build_mirror(self.source, release="2026-09-29", rev=1)
@@ -145,7 +156,8 @@ class TestPullByChannel(ChannelCLITestCase):
             "pull", "lamp", "--source", self.source, "--cache-dir", self.cache,
         )
         self.assertEqual(code, exits.OK)
-        self.assertNotIn("channel", out)
+        self.assertIn("flat layout", out)
+        self.assertIn("nothing here is signed for", out)
         self.assertFalse(exists(self.state))
 
 
@@ -234,3 +246,81 @@ def mock_env(values: dict):
                 del os.environ[key]
             else:
                 os.environ[key] = value
+
+
+class TestSignerAllowlist(ChannelCLITestCase):
+    """The net under --channel-signer, which a mutation run showed absent
+
+    Deleting the signers argument at either CLI call site used to leave
+    every test passing. These fail if it is dropped at pull, at inspect,
+    or in the one function that now reads it.
+    """
+
+    def test_pull_refuses_a_key_that_is_not_the_named_signer(self):
+        write(
+            join(self.source, "stable"),
+            keys().clearsign(
+                channel_body(digests=self.mirror["digests"]), keys().other
+            ),
+        )
+        code, _, err = self.run_cli(
+            "pull", "lamp", "--source", self.source,
+            "--cache-dir", self.cache, "--channel", "stable",
+            "--channel-keyring", keys().both,
+            "--channel-signer", keys().channel,
+            "--channel-state", self.state,
+        )
+        self.assertEqual(code, exits.CHANNEL_UNVERIFIED)
+        self.assertIn("not the key that may move a channel", err)
+
+    def test_pull_accepts_the_named_signer(self):
+        code, _, _ = self.pull("--channel-signer", keys().channel)
+        self.assertEqual(code, exits.OK)
+
+    def test_pull_takes_the_signer_from_the_environment(self):
+        write(
+            join(self.source, "stable"),
+            keys().clearsign(
+                channel_body(digests=self.mirror["digests"]), keys().other
+            ),
+        )
+        with mock_env({SIGNER_ENV: keys().channel}):
+            code, _, err = self.run_cli(
+                "pull", "lamp", "--source", self.source,
+                "--cache-dir", self.cache, "--channel", "stable",
+                "--channel-keyring", keys().both,
+                "--channel-state", self.state,
+            )
+        self.assertEqual(code, exits.CHANNEL_UNVERIFIED)
+        self.assertIn("not the key that may move a channel", err)
+
+    def test_a_flag_wins_over_the_environment(self):
+        with mock_env({SIGNER_ENV: keys().other}):
+            code, _, _ = self.pull("--channel-signer", keys().channel)
+        self.assertEqual(code, exits.OK)
+
+    def test_check_channel_refuses_a_key_that_is_not_the_named_signer(self):
+        self.pull()
+        write(
+            join(self.source, "stable"),
+            keys().clearsign(
+                channel_body(digests=self.mirror["digests"]), keys().other
+            ),
+        )
+        code, _, err = self.run_cli(
+            "inspect", "--root", self.root, "--spec", self.spec,
+            "--check-channel", "--channel-keyring", keys().both,
+            "--channel-signer", keys().channel,
+        )
+        self.assertEqual(code, exits.CHANNEL_UNVERIFIED)
+        self.assertIn("not the key that may move a channel", err)
+
+    def test_a_rollback_refuses_a_key_that_is_not_the_named_signer(self):
+        code, _, err = self.run_cli(
+            "pull", "lamp", "--source", self.source,
+            "--cache-dir", self.cache, "--release", "2026-09-28", "--rev", "1",
+            "--channel-keyring", keys().both,
+            "--channel-signer", keys().other,
+        )
+        self.assertEqual(code, exits.CHANNEL_UNVERIFIED)
+        self.assertIn("not the key that may move a channel", err)

@@ -18,10 +18,21 @@ measured rather than assumed:
   non zero exit. So the output file is read only after the exit status
   and the status lines have been accepted, and a refusal raises rather
   than returning text a caller might use.
+* **Its exit status does not mean the key is good, and neither does
+  `VALIDSIG`.** A signature by a revoked primary, by a revoked signing
+  subkey under a live primary, or by an expired key each give exit 0, a
+  `VALIDSIG` line and `Good signature from` on stderr. `GOODSIG` is the
+  one line gpgv withholds, substituting `REVKEYSIG` or `EXPKEYSIG`. This
+  module therefore requires `GOODSIG` and refuses outright on the
+  retirement lines, because revocation is the only answer to the theft of
+  the online key that signs a channel, and a verifier that accepts
+  `VALIDSIG` makes revocation do nothing.
 * **It reads a binary keyring only.** An ASCII armored keyring, which is
   the form this project publishes its keys in, gives `NO_PUBKEY` and
   exit 2. An armored keyring is therefore dearmored here, in memory,
   into a temporary file gpgv can read.
+* **It accepts SHA-1 unless told not to**, so `--weak-digest SHA1` is
+  passed.
 
 The accepted signers are a second gate, for the case of one keyring that
 holds several project keys: the key that may move a channel is not the
@@ -38,6 +49,8 @@ from dataclasses import dataclass
 from keel.layers.constants import (
     ARMOR_END,
     ARMOR_START,
+    GOODSIG_RE,
+    RETIRED_RE,
     VALIDSIG_RE,
     VERIFIER,
 )
@@ -57,13 +70,21 @@ def dearmor(data: bytes) -> bytes:
 
     Every armored block in the file is decoded and the results are
     concatenated, which is what a keyring of several exported keys looks
-    like. The CRC line is dropped; a corrupt body is caught by gpgv,
-    which is the only thing that can judge a key anyway.
+    like, and anything before the first armor header is kept as it is, so
+    a file holding binary keys followed by an armored one does not lose
+    the binary ones. The CRC line is dropped; a corrupt body is caught by
+    gpgv, which is the only thing that can judge a key anyway.
+
+    Nothing fetched ever reaches this function. Its input is only ever
+    the local path named by --channel-keyring or $KEEL_CHANNEL_KEYRING,
+    so a crafted armored blob is not a way in: an attacker who can write
+    the keyring has already won without it.
     """
     if ARMOR_START not in data:
         return data
-    out = b""
-    for block in data.split(ARMOR_START)[1:]:
+    blocks = data.split(ARMOR_START)
+    out = blocks[0]
+    for block in blocks[1:]:
         body = block.split(ARMOR_END)[0]
         lines = []
         for line in body.decode("ascii", errors="replace").splitlines():
@@ -126,6 +147,8 @@ def verify_bytes(
             fob.write(data)
         plain = os.path.join(work, "plain")
         status, problem = _run(ring, plain, document)
+        if problem is None:
+            problem = _status_problem(status)
         if problem is not None:
             raise SignatureError(f"{label}: {problem}")
         fingerprints = _fingerprints(status)
@@ -136,6 +159,30 @@ def verify_bytes(
         _check_signers(label, fingerprints, signers)
         with open(plain, encoding="utf-8") as fob:
             return Verified(fob.read(), fingerprints)
+
+
+def _status_problem(status: str) -> str | None:
+    """Why the status lines refuse the signature, or None
+
+    Checked before anything is read out of the verifier's output, and
+    before the fingerprints are looked at, because a retired key still
+    produces a VALIDSIG line naming itself.
+    """
+    retired = [
+        line for line in status.splitlines() if RETIRED_RE.match(line)
+    ]
+    if retired:
+        kind = RETIRED_RE.match(retired[0]).group(1)
+        return (
+            f"signed by a key that is revoked or expired ({kind}), which"
+            f" {VERIFIER[0]} reports with exit 0 and a VALIDSIG line"
+        )
+    if not any(GOODSIG_RE.match(line) for line in status.splitlines()):
+        return (
+            f"{VERIFIER[0]} did not call the signature good: no GOODSIG"
+            " line, so the key is not one this machine may believe"
+        )
+    return None
 
 
 def _run(ring: str, plain: str, path: str) -> tuple[str, str | None]:

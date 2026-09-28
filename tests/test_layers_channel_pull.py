@@ -105,14 +105,20 @@ class TestByChannel(ChannelPullTestCase):
         report = pull("lamp", self.source, self.cache)
         self.assertEqual([r.name for r in report.results], ["core", "lamp"])
         self.assertIsNone(report.channel)
-        self.assertIsNone(report.resolution_line())
+
+    def test_a_flat_pull_says_it_read_no_pointer(self):
+        """A pull that verified nothing must not look like one that did"""
+        report = pull("lamp", self.source, self.cache)
+        self.assertIn("flat layout", report.resolution_line())
+        self.assertIn("nothing here is signed for", report.resolution_line())
 
     def test_one_blob_serves_two_releases_and_is_fetched_once(self):
+        """The second pull names the *other* release, or it proves nothing"""
         build_mirror(self.source, release="2026-09-29", rev=1)
         first = self.pull()
         second = pull(
             "lamp", self.source, self.cache,
-            self.resolution(release="2026-09-29", rev=1, channel=None),
+            self.resolution(release="2026-09-28", rev=1, channel=None),
         )
         self.assertEqual([r.status for r in first.results],
                          ["fetched", "fetched"])
@@ -234,6 +240,33 @@ class TestWrongKey(ChannelPullTestCase):
         self.assertEqual(problem.code, exits.CHANNEL_UNVERIFIED)
         self.assertIn("no keyring", str(problem))
 
+    def test_a_pointer_signed_by_a_revoked_key_is_unverified(self):
+        """Revocation is the one answer to the theft of the online key
+
+        gpgv exits 0 for a revoked key and prints VALIDSIG, so this has to
+        be proven end to end and not only at the status-line level.
+        """
+        body = channel_body(digests=self.digests)
+        write(join(self.source, "stable"), keys().sign_revoked(body))
+        problem = self.failing(keyring=keys().keyring_revoked)
+        self.assertEqual(problem.code, exits.CHANNEL_UNVERIFIED)
+        self.assertIn("revoked or expired", str(problem))
+        self.assertFalse(exists(self.cached("core")))
+
+    def test_a_revoked_key_is_refused_even_when_pinned_as_the_signer(self):
+        body = channel_body(digests=self.digests)
+        write(join(self.source, "stable"), keys().sign_revoked(body))
+        problem = self.failing(
+            keyring=keys().keyring_revoked, signers=(keys().revoked,)
+        )
+        self.assertEqual(problem.code, exits.CHANNEL_UNVERIFIED)
+
+    def test_a_pointer_signed_by_an_expired_key_is_unverified(self):
+        write(join(self.source, "stable"), keys().expired_signature)
+        problem = self.failing(keyring=keys().keyring_expired)
+        self.assertEqual(problem.code, exits.CHANNEL_UNVERIFIED)
+        self.assertIn("revoked or expired", str(problem))
+
     def test_a_pointer_that_does_not_parse_is_a_channel_error(self):
         write_channel(self.source, "stable", "channel stable\n")
         problem = self.failing()
@@ -302,6 +335,9 @@ class TestDigestChain(ChannelPullTestCase):
         )
         problem = self.failing()
         self.assertEqual(problem.code, exits.LAYER_MISMATCH)
+        # Named, because the flat tarball fallback makes the download
+        # digest check produce the same code for a different reason.
+        self.assertIn("parent_sha256", str(problem))
 
 
 class TestRollback(ChannelPullTestCase):
@@ -336,10 +372,76 @@ class TestRollback(ChannelPullTestCase):
             channels.read_state(self.state).describe(), "stable 2026-09-28/1"
         )
 
-    def test_a_revision_asked_for_by_hand_needs_no_keyring(self):
+    def test_a_revision_asked_for_by_hand_is_verified_too(self):
+        """Rollback is the path used when the mirror is least trusted
+
+        It resolves through the revision's own archived pointer, so the
+        digest chain is the same as the channel path's. Only the expiry
+        is not enforced: an old revision is old on purpose.
+        """
         report = pull(
             "lamp", self.source, self.cache,
-            Resolution(release="2026-09-28", rev=1),
+            self.resolution(channel=None, release="2026-09-28", rev=1),
+        )
+        self.assertEqual([r.name for r in report.results], ["core", "lamp"])
+        self.assertIn("verified against", report.resolution_line())
+
+    def test_a_revision_asked_for_by_hand_needs_the_keyring(self):
+        problem = self.failing(
+            channel=None, release="2026-09-28", rev=1, keyring=None
+        )
+        self.assertEqual(problem.code, exits.CHANNEL_UNVERIFIED)
+
+    def test_a_revision_whose_pointer_is_absent_is_unavailable(self):
+        os.remove(
+            join(self.source, layout.revision_path("2026-09-28", 1))
+        )
+        problem = self.failing(channel=None, release="2026-09-28", rev=1)
+        self.assertEqual(problem.code, exits.LAYER_UNAVAILABLE)
+        self.assertIn(layout.REVISION_POINTER, str(problem))
+
+    def test_a_revision_pointer_signed_by_the_wrong_key_is_refused(self):
+        body = channel_body(digests=self.digests)
+        write(
+            join(self.source, layout.revision_path("2026-09-28", 1)),
+            keys().clearsign(body, keys().other),
+        )
+        problem = self.failing(channel=None, release="2026-09-28", rev=1)
+        self.assertEqual(problem.code, exits.CHANNEL_UNVERIFIED)
+
+    def test_a_revision_pointer_for_another_revision_is_refused(self):
+        body = channel_body(rev=9, digests=self.digests)
+        write(
+            join(self.source, layout.revision_path("2026-09-28", 1)),
+            keys().clearsign(body),
+        )
+        problem = self.failing(channel=None, release="2026-09-28", rev=1)
+        self.assertEqual(problem.code, exits.CHANNEL_INVALID)
+        self.assertIn("names 2026-09-28/9", str(problem))
+
+    def test_a_hostile_mirror_cannot_rewrite_a_manifest_on_the_rollback_path(
+        self,
+    ):
+        path = join(
+            self.source, layout.manifest_path("2026-09-28", 1, "core")
+        )
+        with open(path, encoding="utf-8") as fob:
+            text = fob.read()
+        write(path, text + "\n")
+        problem = self.failing(channel=None, release="2026-09-28", rev=1)
+        self.assertEqual(problem.code, exits.LAYER_MISMATCH)
+        self.assertFalse(exists(self.cached("core")))
+
+    def test_an_expired_revision_pointer_still_rolls_back(self):
+        """An old revision is old on purpose; only a channel must be fresh"""
+        signed = now() - timedelta(days=400)
+        build_mirror(
+            self.source, release="2026-09-28", rev=1, signed_at=signed,
+            expires_at=signed + timedelta(days=7),
+        )
+        report = pull(
+            "lamp", self.source, self.cache,
+            self.resolution(channel=None, release="2026-09-28", rev=1),
         )
         self.assertEqual([r.name for r in report.results], ["core", "lamp"])
 
@@ -348,7 +450,7 @@ class TestRollback(ChannelPullTestCase):
     ):
         pull(
             "lamp", self.source, self.cache,
-            Resolution(release="2026-09-28", rev=1, state=self.state),
+            self.resolution(channel=None, release="2026-09-28", rev=1),
         )
         self.assertIsNone(channels.read_state(self.state))
 
@@ -389,3 +491,62 @@ class TestResolution(unittest.TestCase):
         with self.assertRaises(ValueError) as raised:
             Resolution(channel="nightly")
         self.assertIn("stable, testing", str(raised.exception))
+
+
+@unittest.skipIf(MISSING, f"{MISSING} is not installed")
+class TestHashFile(ChannelPullTestCase):
+    """The one file on the mirror that nothing authenticates"""
+
+    def hash_at(self, name: str, digest: str) -> str:
+        path = join(self.source, self.fields[name]["tarball"] + ".hash")
+        write(path, f"{digest}  {self.fields[name]['tarball']}\n")
+        return path
+
+    def cached_hash(self, name: str) -> str:
+        return self.cached(name, ".tar.zst.hash")
+
+    def test_a_truthful_hash_file_is_copied(self):
+        self.hash_at("core", self.fields["core"]["sha256"])
+        self.pull()
+        self.assertTrue(exists(self.cached_hash("core")))
+
+    def test_a_hash_file_that_disagrees_with_the_manifest_is_not_stored(self):
+        """A mirror must not get to pick keel verify's exit code"""
+        self.hash_at("core", "b" * 64)
+        self.pull()
+        self.assertFalse(exists(self.cached_hash("core")))
+
+    def test_a_hash_file_with_no_digest_line_is_still_copied(self):
+        path = join(self.source, self.fields["core"]["tarball"] + ".hash")
+        write(path, "prose with no digest in it\n")
+        self.pull()
+        self.assertTrue(exists(self.cached_hash("core")))
+
+    def test_a_hash_file_is_read_with_a_bound(self):
+        path = join(self.source, self.fields["core"]["tarball"] + ".hash")
+        write(path, "x" * (2 << 16))
+        self.pull()
+        self.assertLessEqual(
+            os.path.getsize(self.cached_hash("core")), 1 << 16
+        )
+
+
+class TestFutureChannel(ChannelPullTestCase):
+    def test_a_pointer_signed_in_the_future_is_refused(self):
+        signed = now() + timedelta(days=3)
+        self.rewrite_channel(
+            signed_at=signed, expires_at=signed + timedelta(days=7)
+        )
+        problem = self.failing()
+        self.assertEqual(problem.code, exits.CHANNEL_INVALID)
+        self.assertIn("from the future", str(problem))
+        self.assertFalse(exists(self.cached("core")))
+
+    def test_a_pointer_claiming_a_decade_of_life_is_refused(self):
+        signed = now()
+        self.rewrite_channel(
+            signed_at=signed, expires_at=signed + timedelta(days=3650)
+        )
+        problem = self.failing()
+        self.assertEqual(problem.code, exits.CHANNEL_INVALID)
+        self.assertIn("permanent freeze", str(problem))

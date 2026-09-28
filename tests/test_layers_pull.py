@@ -23,6 +23,7 @@ from keel import exits
 from keel.layers import LayerError, PullReport, PullResult, pull, verify_layers
 from keel.layers.cache import Cache
 from keel.layers.pull import STATUS_CACHED, STATUS_FETCHED
+from keel.layers.verify import SIGNATURE_PRESENT
 from keel.layers.source import Source
 
 # The package exports the pull function under the module's name, so the
@@ -303,10 +304,8 @@ class TestHttpSource(PullTestCase):
         self.assertEqual(report.count(STATUS_FETCHED), 2)
         verified = verify_layers(self.cache)
         self.assertEqual([r.line() for r in verified.results], [
-            ("core: unverified: signature present, not verified (no trusted"
-             " key configured)"),
-            ("lamp: unverified: signature present, not verified (no trusted"
-             " key configured)"),
+            f"core: unverified: {SIGNATURE_PRESENT}",
+            f"lamp: unverified: {SIGNATURE_PRESENT}",
         ])
         self.assertEqual(verified.code, exits.SIGNATURE_UNVERIFIED)
 
