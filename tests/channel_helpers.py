@@ -167,13 +167,12 @@ class Keys:
 
     def _generate_expired(self, uid: str) -> str:
         """A key made in the past with a short life, so it is expired now"""
-        real, _, email = uid.partition(" <")
         self._gpg(
             "--faked-system-time", PAST, "--passphrase", "",
             "--pinentry-mode", "loopback", "--quick-generate-key", uid,
             "ed25519", "cert", "30d",
         )
-        fpr = self.fingerprint(email.rstrip(">"))
+        fpr = self.fingerprint(uid)
         self._gpg(
             "--faked-system-time", PAST, "--passphrase", "",
             "--pinentry-mode", "loopback", "--quick-add-key", fpr,
@@ -200,7 +199,10 @@ class Keys:
         return self.fingerprint(uid)
 
     def fingerprint(self, uid: str) -> str:
-        out = self._gpg("--with-colons", "--list-keys", uid).stdout
+        # "=" is gpg's exact-match prefix. Without it a user id is a
+        # substring search, so a key added later whose uid contains this
+        # one would silently be returned instead.
+        out = self._gpg("--with-colons", "--list-keys", "=" + uid).stdout
         for line in out.splitlines():
             parts = line.split(":")
             if parts[0] == "fpr":

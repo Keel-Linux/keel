@@ -284,3 +284,19 @@ class TestDearmor(unittest.TestCase):
         with self.assertRaises(SignatureError) as raised:
             signature.dearmor(armored)
         self.assertIn("cannot be decoded", str(raised.exception))
+
+    def test_armor_that_is_not_a_public_key_block_says_which_it_is(self):
+        armored = (
+            b"-----BEGIN PGP PRIVATE KEY BLOCK-----\n\nAAAA\n"
+            b"-----END PGP PRIVATE KEY BLOCK-----\n"
+        )
+        with self.assertRaises(SignatureError) as raised:
+            signature.dearmor(armored)
+        self.assertIn("PRIVATE KEY BLOCK", str(raised.exception))
+
+    def test_binary_keys_before_an_armored_block_are_kept(self):
+        with open(keys().keyring, "rb") as fob:
+            binary = fob.read()
+        with open(keys().keyring_armored, "rb") as fob:
+            armored = fob.read()
+        self.assertEqual(signature.dearmor(binary + armored), binary * 2)

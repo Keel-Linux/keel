@@ -50,6 +50,7 @@ from keel.layers.constants import (
     ARMOR_END,
     ARMOR_START,
     GOODSIG_RE,
+    OTHER_ARMOR_RE,
     RETIRED_RE,
     VALIDSIG_RE,
     VERIFIER,
@@ -81,6 +82,13 @@ def dearmor(data: bytes) -> bytes:
     the keyring has already won without it.
     """
     if ARMOR_START not in data:
+        if OTHER_ARMOR_RE.search(data):
+            found = OTHER_ARMOR_RE.search(data).group(0).decode("ascii")
+            raise SignatureError(
+                f"the keyring is armored as {found!r}, which is not a"
+                " public key block. gpgv would answer NO_PUBKEY, the same"
+                " thing it says for a wrong key"
+            )
         return data
     blocks = data.split(ARMOR_START)
     out = blocks[0]

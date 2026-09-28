@@ -112,6 +112,11 @@ RETIRED_RE = re.compile(
 )
 ARMOR_START = b"-----BEGIN PGP PUBLIC KEY BLOCK-----"
 ARMOR_END = b"-----END PGP PUBLIC KEY BLOCK-----"
+# Any other OpenPGP armor, so a keyring that is really a private key or a
+# signature is named as such. Passed through raw it would reach gpgv and
+# come back as NO_PUBKEY, which is what a wrong key and an unreadable
+# keyring also say.
+OTHER_ARMOR_RE = re.compile(rb"-----BEGIN PGP [A-Z ]+-----")
 VALIDSIG_RE = re.compile(
     r"^\[GNUPG:\] VALIDSIG (?P<signer>[0-9A-Fa-f]{40})"
     r"(?:\s+\S+){8}\s+(?P<primary>[0-9A-Fa-f]{40})\s*$"
