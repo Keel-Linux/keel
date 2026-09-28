@@ -27,6 +27,7 @@ CHANNEL_UID = "Keel Test Channel Key <channel@example.invalid>"
 OTHER_UID = "Keel Test Other Key <other@example.invalid>"
 REVOKED_UID = "Keel Test Revoked Key <revoked@example.invalid>"
 EXPIRED_UID = "Keel Test Expired Key <expired@example.invalid>"
+SUBKEY_UID = "Keel Test Revoked Subkey <subkey@example.invalid>"
 
 # When the expired key was made and signed. Far enough back that its
 # thirty day life is long over, whatever day the suite runs on.
@@ -109,6 +110,17 @@ class Keys:
         self._revoke(self.revoked)
         self.keyring_revoked = join(self.home, "revoked-keyring.gpg")
         self.export(self.keyring_revoked, self.revoked)
+        # A live primary with a revoked signing subkey: the shape
+        # apt/keys/keel-archive-keyring.asc already has, and the one where
+        # pinning the primary as the accepted signer still matches, because
+        # VALIDSIG's last field is the primary fingerprint.
+        self.subkey_primary = self._generate(SUBKEY_UID)
+        self.subkey_signature = self.clearsign(
+            channel_body(), self.subkey_primary
+        )
+        self._revoke_subkey(self.subkey_primary)
+        self.keyring_subkey = join(self.home, "subkey-keyring.gpg")
+        self.export(self.keyring_subkey, self.subkey_primary)
         self.expired = self._generate_expired(EXPIRED_UID)
         self.expired_signature = self.clearsign(
             channel_body(), self.expired, at=PAST
@@ -137,6 +149,21 @@ class Keys:
                 )
             )
         self._gpg("--import", target)
+
+    def _revoke_subkey(self, fpr: str) -> None:
+        """Revoke the signing subkey, leaving the primary alone
+
+        --edit-key does take a command stream in batch mode, unlike
+        --gen-revoke, so this one needs no second home: the primary can
+        still certify, and it is only the subkey that stops signing.
+        """
+        subprocess.run(
+            ["gpg", "--batch", "--yes", "--quiet", "--homedir", self.home,
+             "--command-fd", "0", "--passphrase", "",
+             "--pinentry-mode", "loopback", "--edit-key", fpr],
+            input="key 1\nrevkey\ny\n0\n\ny\nsave\n",
+            capture_output=True, text=True, check=True,
+        )
 
     def _generate_expired(self, uid: str) -> str:
         """A key made in the past with a short life, so it is expired now"""

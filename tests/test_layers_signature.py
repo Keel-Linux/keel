@@ -210,6 +210,21 @@ class TestRetiredKeys(SignatureTestCase):
         )
         self.assertIn("revoked or expired", str(problem))
 
+    def test_a_revoked_signing_subkey_under_a_live_primary_is_refused(self):
+        """The shape apt/keys/keel-archive-keyring.asc already has
+
+        VALIDSIG's last field is the primary fingerprint, so pinning the
+        primary as the accepted signer matches a signature made by a
+        subkey of it that has since been revoked. The retirement refusal
+        is what stops one, not the allowlist.
+        """
+        problem = self.failing(
+            self.written(self.keys.subkey_signature),
+            keyring=self.keys.keyring_subkey,
+            signers=(self.keys.subkey_primary,),
+        )
+        self.assertIn("revoked or expired", str(problem))
+
     def test_a_verifier_that_prints_validsig_without_goodsig_is_refused(self):
         """The general form, in case a future gpgv drops a line we name"""
         path = self.signed()
