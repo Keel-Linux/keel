@@ -18,8 +18,13 @@ from keel.inspect import ROOT_DEFAULT, SECRETS_DIR_DEFAULT
 from keel.layers import (
     CACHE_DEFAULT,
     CACHE_ENV,
+    CHANNELS,
+    KEYRING_DEFAULT,
+    KEYRING_ENV,
     LAYERS_DEFAULT,
     LAYERS_ENV,
+    STATE_DEFAULT,
+    STATE_ENV,
 )
 from keel.spec import CONF_DEFAULT, CONF_ENV, SPEC_DEFAULT, SPEC_ENV
 
@@ -50,6 +55,14 @@ def layers_default() -> str:
 
 def cache_default() -> str:
     return os.environ.get(CACHE_ENV, CACHE_DEFAULT)
+
+
+def keyring_default() -> str:
+    return os.environ.get(KEYRING_ENV, KEYRING_DEFAULT)
+
+
+def state_default() -> str:
+    return os.environ.get(STATE_ENV, STATE_DEFAULT)
 
 
 def add_common_options(parser: argparse.ArgumentParser) -> None:
@@ -213,6 +226,67 @@ def add_pull_options(parser: argparse.ArgumentParser) -> None:
         " as http://[2001:db8::1]/layers, or a directory",
     )
     add_cache_option(parser)
+    parser.add_argument(
+        "--channel",
+        default=None,
+        choices=CHANNELS,
+        help="follow this channel pointer at the source; its signature and"
+        " its expiry are checked and an expired pointer is an error"
+        " (default: the flat layout, which follows no pointer)",
+    )
+    add_channel_options(parser)
+    parser.add_argument(
+        "--channel-state",
+        default=state_default(),
+        metavar="FILE",
+        help="where the channel and revision this instance follows is"
+        f" recorded (default: ${STATE_ENV} or {STATE_DEFAULT})",
+    )
+    parser.add_argument(
+        "--release",
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="an immutable release revision instead of a channel; with"
+        " --rev. This is how a rollback is asked for: the blobs of every"
+        " release are kept, so an earlier revision can always be pulled",
+    )
+    parser.add_argument(
+        "--rev",
+        default=None,
+        type=int,
+        metavar="N",
+        help="which revision of --release; revisions never overwrite each"
+        " other, so this names one set of bytes for good",
+    )
+    parser.add_argument(
+        "--allow-rollback",
+        action="store_true",
+        help="accept a channel pointer that names an earlier revision than"
+        " the one this instance is on. Without it such a pointer is an"
+        " error, because a mirror does not move an appliance backwards",
+    )
+
+
+def add_channel_options(parser: argparse.ArgumentParser) -> None:
+    """What a channel pointer is verified against, wherever one is read"""
+    parser.add_argument(
+        "--channel-keyring",
+        default=keyring_default(),
+        metavar="FILE",
+        help="the OpenPGP keyring a channel pointer is verified against,"
+        f" armored or binary (default: ${KEYRING_ENV} or"
+        f" {KEYRING_DEFAULT})",
+    )
+    parser.add_argument(
+        "--channel-signer",
+        action="append",
+        default=[],
+        dest="channel_signers",
+        metavar="FINGERPRINT",
+        help="only this key may move a channel, given as a full"
+        " fingerprint of the signing key or of its primary key; may be"
+        " repeated (default: any key in the keyring)",
+    )
 
 
 def add_assemble_options(parser: argparse.ArgumentParser) -> None:
@@ -301,6 +375,14 @@ def add_diff_options(parser: argparse.ArgumentParser) -> None:
 def add_inspect_options(parser: argparse.ArgumentParser) -> None:
     add_root_option(parser, "inspect")
     parser.add_argument(
+        "--check-channel",
+        action="store_true",
+        help="also ask the mirror this instance pulled from what its"
+        " channel now holds, and report whether newer revisions exist."
+        " Off by default: every other probe reads files only",
+    )
+    add_channel_options(parser)
+    parser.add_argument(
         "--output",
         default=None,
         metavar="FILE",
@@ -358,6 +440,14 @@ def main(argv: list[str] | None = None) -> int:
             "--destroy-local-database requires --system or --system-only:"
             " the database phase runs there"
         )
+    if args.command == "pull":
+        # Asked here so a combination that cannot resolve is a usage
+        # error before the mirror is touched, rather than a 404 for a
+        # path that was never going to exist.
+        try:
+            commands.resolution(args)
+        except ValueError as e:
+            parser.error(str(e))
     return handler(args)
 
 

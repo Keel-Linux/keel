@@ -12,6 +12,7 @@ import subprocess
 
 from keel.inspect import constants as paths
 from keel.inspect.app import probe_app, probe_appliance
+from keel.inspect.channel import probe_channel
 from keel.inspect.database import Installed, probe_database
 from keel.inspect.dbclient import READERS, Reader
 from keel.inspect.dbengines import ENGINES
@@ -110,9 +111,15 @@ def inspect_root(
     findings += found
     _add(spec, "locale", locale)
 
+    # The channel this instance follows is not part of the spec: it is
+    # not something an operator declares, it is what the machine was
+    # last pulled to. An appliance that follows none produces no line.
+    channel, found = probe_channel(tree.read(paths.CHANNEL_STATE))
+    findings += found
+
     return Inspection(
         tree.root, str(appliance or "unknown appliance"), spec,
-        tuple(findings),
+        tuple(findings), channel,
     )
 
 

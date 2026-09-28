@@ -17,7 +17,11 @@ jobs:
     with:
       threshold: 95
       package: keel
-      apt-packages: bats shellcheck
+      # gnupg and gpgv are what the channel tests sign and verify
+      # with. Named rather than assumed: without them those tests
+      # skip, and a skipped suite would pass the coverage gate on
+      # code nothing ran.
+      apt-packages: bats shellcheck gnupg gpgv
   # A change that ships must come with a changelog entry, or it cannot be
   # installed and never reaches an appliance. The rule and its tests are
   # bin/require-changelog of the .github repository. The check is

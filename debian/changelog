@@ -1,3 +1,34 @@
+keel (0.4.0) unstable; urgency=medium
+
+  * keel pull --channel stable|testing resolves a channel pointer to an
+    immutable release revision and its content addressed blobs, the
+    mirror layout of handbook decision 0016. The pointer is clear
+    signed and carries a timestamp and an expiry; its signature is
+    verified with gpgv against --channel-keyring, and --channel-signer
+    narrows that to the one key that may move a channel.
+  * An expired pointer is an error and not a warning. A mirror that is
+    stale, broken or hostile can hold an appliance on an old and
+    vulnerable release simply by not updating, and without a timestamp
+    inside the signature the client cannot tell that apart from
+    "nothing new". Exit 19, CHANNEL_EXPIRED.
+  * The digest chain is checked end to end: the signature covers the
+    sha256 of every manifest, and each manifest covers the sha256 of
+    its blob. A layer the pointer does not name is a mismatch.
+  * A pointer that names an earlier revision than the one the instance
+    is on is refused with exit 20, CHANNEL_ROLLBACK. Going back is what
+    --release with --rev is for, and it always works, because a blob is
+    never deleted.
+  * keel pull records the channel and revision it followed in
+    /var/lib/keel/channel, and keel inspect reports them. keel inspect
+    --check-channel also asks the mirror what that channel now holds and
+    says whether the instance is behind; it makes the only network
+    request inspect has, and only when asked.
+  * The flat layout is unchanged and is still what a pull that names no
+    channel reads, so every appliance published before the conversion
+    keeps working. Removing it is a separate, later change.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Mon, 28 Sep 2026 09:40:00 +0000
+
 keel (0.3.5) unstable; urgency=medium
 
   * keel database promote makes this replica a primary. Its own command

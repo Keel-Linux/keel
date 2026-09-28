@@ -28,6 +28,9 @@ DEFAULT_LOCALE = "etc/default/locale"
 PASSWD = "etc/passwd"
 GROUP = "etc/group"
 DATABASE_DIRS = ("etc/mysql", "etc/postgresql")
+# The record keel pull leaves of the channel and release revision this
+# instance follows; absent on an appliance that follows the flat layout.
+CHANNEL_STATE = "var/lib/keel/channel"
 # Where a DHCPv6 client writes its lease down, dhcpcd first, dhclient
 # second: the trace that tells a DHCPv6 address from a SLAAC one.
 DHCP6_LEASES = ("var/lib/dhcpcd/*.lease6", "var/lib/dhcp/dhclient6*.leases")

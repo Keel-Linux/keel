@@ -208,10 +208,92 @@ if report.code != exits.OK:
 `verify_layers()` never raises: an unreadable manifest or directory
 becomes a result with `status == "invalid"`.
 
+## Layouts a mirror serves
+
+Handbook decision 0016 made exactly one object in the mirror mutable,
+and it is a signed pointer. `keel pull` reads all three layouts, and the
+flat one it read before is still one of them.
+
+```
+layers/
+  sha256/<digest>                   a layer tarball, named by its content:
+                                    never overwritten, never deleted, shared
+                                    by every release that installs it
+  <release>/<rev>/<name>.manifest   one layer of one immutable release
+                                    revision, referring to a blob by digest
+  stable, testing                   the channel pointers: clear signed, with
+                                    a timestamp and an expiry
+  <name>.manifest, <name>.tar.zst   the flat layout, still served
+```
+
+The digest chain is what makes this worth the trouble, and it is
+complete only when a channel is followed: the signature covers the
+pointer, the pointer carries the sha256 of every manifest, and each
+manifest carries the sha256 of its blob. Nothing along it is taken on
+the mirror's word.
+
+### The channel pointer
+
+```
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+channel stable
+release 2026-09-28
+rev 1
+signed_at 2026-09-28T04:11:09Z
+expires_at 2026-10-05T04:11:09Z
+layer core 5f3a...
+layer lamp 9c1b...
+-----BEGIN PGP SIGNATURE-----
+...
+```
+
+| Key | Checked as | Meaning |
+| --- | --- | --- |
+| `channel` | `stable` or `testing`, and the name it was fetched under | Which channel this is; a pointer served as `stable` that says `testing` is refused |
+| `release` | `YYYY-MM-DD` | The release revision it names |
+| `rev` | a whole number above zero | Which revision of that release; revisions never overwrite each other |
+| `signed_at` | `YYYY-MM-DDTHH:MM:SSZ` | When it was signed |
+| `expires_at` | the same, and after `signed_at` | When the client stops believing it |
+| `layer` | a layer name and 64 lowercase hex digits, at least once, never twice for one layer | The sha256 of that layer's manifest in the release revision |
+
+The pointer is one file and not a file beside a detached signature,
+because two files are two mutable objects and a mirror could skew them
+against each other.
+
+**An expired pointer is an error, never a warning.** Without it, a
+mirror that is stale, broken or hostile holds an appliance on an old and
+vulnerable release simply by not updating, and the client cannot tell
+that apart from "nothing new". The check is `now >= expires_at`, so the
+moment of expiry is already expired.
+
+The keyring is `--channel-keyring`, by default `$KEEL_CHANNEL_KEYRING`
+or `/usr/share/keyrings/keel-channel-keyring.gpg`. `gpgv` verifies, the
+same program apt verifies `InRelease` with, so nothing new is installed
+on an appliance for this. Two of its properties are load bearing and
+were measured, not assumed:
+
+* it **writes the plain text of a document whose signature it refused**,
+  so `keel.layers.signature` reads that output only after the exit
+  status and a `VALIDSIG` line have been accepted;
+* it **reads a binary keyring only**, and an armored one gives
+  `NO_PUBKEY`. An armored keyring is accepted here and dearmored in
+  memory, because `.asc` is the form this project publishes keys in.
+
+`--channel-signer FINGERPRINT`, repeatable, narrows it further: only
+that key may move a channel, whatever else the keyring holds. The
+fingerprint may be the signing key's or its primary key's, so a subkey
+rotation needs no change on the appliances.
+
 ## What `keel pull` fetches
 
 ```
-keel pull LAYER --source URL-or-DIR [--cache-dir DIR] [--non-interactive]
+keel pull LAYER --source URL-or-DIR [--cache-dir DIR]
+          [--channel stable|testing] [--channel-keyring FILE]
+          [--channel-signer FINGERPRINT] [--channel-state FILE]
+          [--release YYYY-MM-DD --rev N] [--allow-rollback]
+          [--non-interactive]
 ```
 
 `LAYER` is the top of the chain: the name of a layer as the source knows
@@ -245,10 +327,48 @@ The command:
    layer too, so `keel verify --layers-dir CACHE` reports the signature
    state the source publishes. A source without one is not an error.
 
-A source may keep a tarball under either name: `<name>-<sha256>.tar.zst`
-(what a layer host serves, decision 0005) or the `tarball` name in the
-manifest (`lamp.tar.zst`, what `bt-layer` writes). Both are tried, in
-that order.
+A source may keep a tarball under any of three names, tried in this
+order: `sha256/<digest>`, the blob of decision 0016, when a release
+revision was resolved; `<name>-<sha256>.tar.zst`, what a layer host
+serves; and the `tarball` name in the manifest (`lamp.tar.zst`, what
+`bt-layer` writes). A mirror part way through the conversion therefore
+serves both kinds of client.
+
+### Following a channel
+
+`--channel stable` fetches the pointer, verifies it, refuses it when it
+has expired, and resolves `<release>/<rev>/<name>.manifest` for every
+layer of the chain. Each manifest's bytes must hash to what the pointer
+signed for that layer; a layer the pointer does not name is a mismatch,
+because nothing signed then says which manifest it should have.
+
+What was resolved is printed above the layer lines:
+
+```
+# keel pull lamp --source https://mirror.keellinux.org/layers --channel stable
+channel stable: release 2026-09-28/1, signed 2026-09-28T04:11:09Z, expires 2026-10-05T04:11:09Z
+core: cached (326418793 bytes)
+lamp: fetched (79807121 bytes)
+layers: 2 resolved, 1 fetched, 1 cached, 79807121 bytes transferred
+```
+
+The channel and revision are then recorded in `--channel-state`, by
+default `$KEEL_CHANNEL_STATE` or `/var/lib/keel/channel`, which is what
+`keel inspect` reads.
+
+### Rollback
+
+`--release 2026-09-28 --rev 1` names an immutable revision and follows
+no pointer. That is how a rollback is asked for, and it always works,
+because a blob is never deleted: every revision that was ever published
+can still be assembled. Given `--channel` as well, the state records
+that the instance is on that revision of that channel, so `keel inspect`
+says it is behind, which after a deliberate rollback is the truth.
+
+A pointer that names an earlier revision than the one this instance is
+on is refused with `CHANNEL_ROLLBACK`. A mirror does not move an
+appliance backwards; an operator does, with `--allow-rollback` or by
+naming the revision.
 
 Output, one line per layer on stdout, then a summary:
 
@@ -368,6 +488,10 @@ privileges beyond writing the cache.
 | 6 | `MANIFEST_INVALID` | A manifest at the source, on disk or in the cache does not validate, or names another layer than the one asked for or filed under |
 | 7 | `LAYER_MISMATCH` | A parent's sha256 differs from the child's `parent_sha256`, the chain loops, a download's size or sha256 differs from the manifest, a cached manifest is filed under another sha256 than it records, or a cached tarball no longer matches at assembly time |
 | 10 | `LAYER_UNAVAILABLE` | A manifest or tarball is not at the source or the transfer failed, the cache cannot be written, or `assemble` finds a layer of the chain missing from the cache |
+| 17 | `CHANNEL_INVALID` | A channel pointer, or the record of the one this instance follows, does not parse or fails validation |
+| 18 | `CHANNEL_UNVERIFIED` | A channel pointer is not signed by a key that may move a channel, or no keyring was given to check it against |
+| 19 | `CHANNEL_EXPIRED` | A channel pointer is past `expires_at`: the mirror is stale, broken or holding this instance back |
+| 20 | `CHANNEL_ROLLBACK` | A channel pointer names an earlier revision than the one this instance is on |
 | 11 | `ASSEMBLE_NEEDS_ROOT` | `assemble` was run by a user other than root |
 | 12 | `ASSEMBLE_FAILED` | The rootfs is not empty or cannot be created, a member name would escape it, or tar or zstd exited non zero (a template path that cannot be written is reported here, after the rootfs is complete) |
 
