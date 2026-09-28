@@ -220,13 +220,13 @@ class Places:
         signed = self.digests.get(name)
         if signed is None:
             return (
-                f"the channel does not name layer {name!r}, so nothing"
-                " signed says which manifest it should have"
+                f"the signed pointer does not name layer {name!r}, so"
+                " nothing signed says which manifest it should have"
             )
         found = hashlib.sha256(text.encode("utf-8")).hexdigest()
         if found != signed:
             return (
-                f"manifest sha256 {found}, the channel says {signed}"
+                f"manifest sha256 {found}, the signed pointer says {signed}"
             )
         return None
 

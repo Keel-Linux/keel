@@ -289,7 +289,7 @@ class TestDigestChain(ChannelPullTestCase):
         )
         problem = self.failing()
         self.assertEqual(problem.code, exits.LAYER_MISMATCH)
-        self.assertIn("the channel does not name", str(problem))
+        self.assertIn("the signed pointer does not name", str(problem))
 
     def test_a_manifest_whose_bytes_changed_is_a_mismatch(self):
         path = self.manifest_path("core")
@@ -298,7 +298,7 @@ class TestDigestChain(ChannelPullTestCase):
         write(path, text + "\n")
         problem = self.failing()
         self.assertEqual(problem.code, exits.LAYER_MISMATCH)
-        self.assertIn("the channel says", str(problem))
+        self.assertIn("the signed pointer says", str(problem))
 
     def test_a_blob_that_is_not_what_the_manifest_records_is_a_mismatch(self):
         blob = join(
