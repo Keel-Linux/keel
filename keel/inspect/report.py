@@ -10,6 +10,7 @@ records the placeholder and what the operator has to provide.
 from dataclasses import dataclass
 
 from keel.inspect.constants import REQUIRED
+from keel.layers.channel import State
 
 INFERRED = "inferred"
 NOT_INFERRED = "not inferred"
@@ -61,7 +62,7 @@ class Inspection:
     appliance: str
     spec: dict
     findings: tuple[Finding, ...]
-    channel: object | None = None
+    channel: State | None = None
 
     @property
     def missing_required(self) -> tuple[str, ...]:
