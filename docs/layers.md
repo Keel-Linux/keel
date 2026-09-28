@@ -269,10 +269,12 @@ that apart from "nothing new". The check is `now >= expires_at`, so the
 moment of expiry is already expired.
 
 The keyring is `--channel-keyring`, by default `$KEEL_CHANNEL_KEYRING`
-or `/usr/share/keyrings/keel-channel-keyring.gpg`. `gpgv` verifies, the
-same program apt verifies `InRelease` with, so nothing new is installed
-on an appliance for this. Two of its properties are load bearing and
-were measured, not assumed:
+or `/usr/share/keyrings/keel-channel-keyring.gpg`. `gpgv` verifies,
+because it refuses to do anything but verify: it cannot be talked into
+importing a key, consulting a trust database or asking an agent. The
+`keel` package depends on it and does not assume it, since on Debian 13
+apt verifies with `sqv` and `gpgv` is a package of its own. Two of its
+properties are load bearing and were measured, not assumed:
 
 * it **writes the plain text of a document whose signature it refused**,
   so `keel.layers.signature` reads that output only after the exit

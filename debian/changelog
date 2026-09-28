@@ -5,7 +5,9 @@ keel (0.4.0) unstable; urgency=medium
     mirror layout of handbook decision 0016. The pointer is clear
     signed and carries a timestamp and an expiry; its signature is
     verified with gpgv against --channel-keyring, and --channel-signer
-    narrows that to the one key that may move a channel.
+    narrows that to the one key that may move a channel. The package now
+    depends on gpgv: on Debian 13 apt verifies with sqv, so gpgv is a
+    package of its own and its presence has to be declared.
   * An expired pointer is an error and not a warning. A mirror that is
     stale, broken or hostile can hold an appliance on an old and
     vulnerable release simply by not updating, and without a timestamp

@@ -1,10 +1,16 @@
 # Copyright (c) 2026 KeelLinux maintainers
 """Verify a clear signed file against a keyring, and return nothing else
 
-`gpgv` is the verifier, because it is what apt verifies `InRelease` with
-and is therefore on every appliance, and because it refuses to do
-anything but verify. Two of its properties decide the shape of this
-module, and both were measured rather than assumed:
+`gpgv` is the verifier, because it refuses to do anything but verify: it
+cannot be talked into importing a key, consulting a trust database or
+asking an agent for anything. It is **not** assumed to be present. On
+Debian 13 apt verifies with `sqv` and `gpgv` is a package of its own, so
+the keel package depends on it rather than trusting that apt dragged it
+in. A machine without it gets a refusal naming the program, never a
+verification that quietly did not happen.
+
+Two of its properties decide the shape of this module, and both were
+measured rather than assumed:
 
 * **It writes the plain text of a document whose signature it refused.**
   `gpgv --output` produced the body of a tampered pointer and of one
