@@ -190,15 +190,17 @@ tls:
   acme:
     enabled: true
     challenge: http-01
+    agree_tos: true
     domains:
       - blog.example.org
 ```
 
 | Field | State | Notes |
 | --- | --- | --- |
-| `tls.acme.enabled` | accepted | `true` or `false`; absent counts as false. When true, `apply` warns that this version does not request a certificate and points at confconsole. When false, the fields below it are kept in the file and `keel diff` does not compare them ([docs/diff.md](diff.md)), so an operator prepares a certificate configuration before turning it on |
-| `tls.acme.challenge` | accepted | `http-01` or `dns-01` |
-| `tls.acme.domains` | accepted | A list of domain names, each validated |
+| `tls.acme.enabled` | system | `true` or `false`; absent counts as false for `diff`. `true`: `apply --system` requests a certificate for the domains when the one in use does not carry them (docs/apply.md). `false`, stated, over a certificate a CA issued: `apply --system` goes back to a self-signed one. Absent: `apply` leaves the certificate as it is. When false, the fields below it are kept in the file and `keel diff` does not compare them ([docs/diff.md](diff.md)), so an operator prepares a certificate configuration before turning it on |
+| `tls.acme.challenge` | system | `http-01` or `dns-01`. `apply` refuses to request with `dns-01`, which needs a DNS provider and credentials the spec has no field for yet |
+| `tls.acme.domains` | system | A list of domain names, each validated |
+| `tls.acme.agree_tos` | system | `true` accepts the Let's Encrypt terms of service, which registering an account does. Needed only on a machine with no account yet; `keel diff` never compares it |
 
 ## secrets
 

@@ -11,6 +11,7 @@ import shutil
 import socket
 import subprocess
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from keel.inspect import constants as paths
 from keel.inspect.accounts import home_of, passwd_entries
@@ -20,6 +21,9 @@ from keel.system.dbstate import DatabaseState, observe_database
 LOCALE_GEN = "etc/locale.gen"
 MAILNAME = "etc/mailname"
 POSTFIX_MAIN = "etc/postfix/main.cf"
+# a registered Let's Encrypt account; its key is never read
+ACME_ACCOUNTS = "var/lib/dehydrated/accounts/*/registration_info.json"
+ACME_WRAPPER = "usr/lib/confconsole/plugins.d/Lets_Encrypt/dehydrated-wrapper"
 KEYS_UNDER_HOME = ".ssh/authorized_keys"
 LOCALE_LIST = ("locale", "-a")
 COMMANDS = (
@@ -49,6 +53,11 @@ class SystemState:
     mailname: File | None = None
     postfix_main: File | None = None
     kernel_hostname: str | None = None
+    tls_cert: File | None = None
+    acme_domains: File | None = None
+    acme_account: bool = False
+    acme_wrapper: bool = False
+    now: datetime | None = None
 
 
 def observe(root: str, doc: dict) -> SystemState:
@@ -83,6 +92,11 @@ def observe(root: str, doc: dict) -> SystemState:
         mailname=tree.read(MAILNAME),
         postfix_main=tree.read(POSTFIX_MAIN),
         kernel_hostname=socket.gethostname() if live else None,
+        tls_cert=tree.read(paths.TLS_CERT),
+        acme_domains=tree.read(paths.DEHYDRATED_DOMAINS),
+        acme_account=bool(tree.glob(ACME_ACCOUNTS)),
+        acme_wrapper=tree.exists(ACME_WRAPPER),
+        now=datetime.now(timezone.utc),
     )
 
 

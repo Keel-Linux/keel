@@ -672,7 +672,12 @@ class TestRoundTrip(ApplySystemTestCase):
 
         code, out, _ = self.apply()
         self.assertEqual(code, exits.OK, out)
-        self.assertIn("apply --system: 11 change(s), 0 failed", out)
+        self.assertIn("apply --system: 12 change(s), 0 failed", out)
+        self.assertIn("tls.acme: certificate not requested: not the live"
+                      " system", out)
+        self.assertEqual(self.read("etc/dehydrated/confconsole.domains.txt")
+                         .splitlines()[-1],
+                         "blog.example.org www.blog.example.org")
         self.assertEqual(self.read("etc/hosts"),
                          "2001:db8:1::10 blog.example.org blog\n")
 

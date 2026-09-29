@@ -234,6 +234,20 @@ class TestCompare(unittest.TestCase):
         )
         self.assertEqual(result.code, exits.OK)
 
+    def test_consent_to_the_terms_is_never_compared(self):
+        declared = {"tls": {"acme": {"enabled": True, "agree_tos": True,
+                                     "domains": ["blog.example.org"]}}}
+        observed = {"tls": {"acme": {"enabled": True,
+                                     "domains": ["blog.example.org"]}}}
+        result = compare(declared, inspection(
+            observed,
+            inferred("tls.acme.enabled", "true", "/etc/ssl/private/cert.pem"),
+        ))
+        field = by_field(result)["tls.acme.agree_tos"]
+        self.assertEqual(field.status, NOT_COMPARED)
+        self.assertIn("keeps no record of it", field.line())
+        self.assertEqual(result.code, exits.OK)
+
     def test_the_switch_itself_drifts_when_the_machine_turned_it_on(self):
         declared = {"tls": {"acme": {"enabled": False,
                                      "domains": ["blog.example.org"]}}}

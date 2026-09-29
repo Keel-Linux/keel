@@ -79,14 +79,14 @@ def unsupported(doc: dict, system: bool = False) -> list[str]:
             " read by keel inspect and compared by keel diff; no"
             " application is reconfigured by this version"
         )
+    if system:
+        return messages
     acme = (doc.get("tls") or {}).get("acme") or {}
     if acme.get("enabled"):
         messages.append(
-            "tls.acme: certificates are not requested by this version;"
-            " use confconsole to get one"
+            "tls.acme: the certificate is requested by the system phase"
+            " (--system, --system-only) only, not in this run"
         )
-    if system:
-        return messages
     if (doc.get("instance") or {}).get("fqdn"):
         messages.append(
             "instance.fqdn: the /etc/hosts entry is written by the system"

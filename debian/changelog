@@ -1,3 +1,22 @@
+keel (0.8.0) unstable; urgency=medium
+
+  * spec apply --system converges tls.acme on a running machine. With
+    enabled true it writes the domains and, on the live system, runs
+    confconsole's dehydrated-wrapper, only when the certificate in use is
+    self-signed, does not cover a domain or is within 30 days of its end,
+    decided from the certificate as inspect reads it. With enabled false,
+    stated, over a certificate a CA issued, it goes back to a self-signed
+    one, disables the renewal job and restarts the services that read it.
+    Third field of keel#35.
+  * tls.acme.agree_tos: registering a Let's Encrypt account accepts its
+    terms of service, and apply does so only when the spec says true; a
+    machine with an account already needs no consent. diff never compares
+    the field. dns-01 is refused: the spec has no provider credentials.
+  * apply without the system phase warns that tls.acme waits for it, and
+    no longer that certificates are not requested at all.
+
+ -- Marcos Mendez <mendez.foto@gmail.com>  Tue, 29 Sep 2026 09:15:38 +0000
+
 keel (0.7.0) unstable; urgency=medium
 
   * inspect reports tls.acme.enabled from the certificate in use, not from

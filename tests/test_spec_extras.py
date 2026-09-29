@@ -130,11 +130,15 @@ class TestLocale(unittest.TestCase):
         self.assertIn("locale:", found[0])
         self.assertEqual(spec.unsupported(doc(LOCALE), system=True), [])
 
-    def test_system_keeps_the_acme_warning(self):
+    def test_the_system_phase_takes_acme_on_so_it_warns_nothing(self):
         text = "version: 1\ntls:\n  acme:\n    enabled: true\nlocale: {}\n"
-        found = spec.unsupported(doc(text), system=True)
-        self.assertEqual(len(found), 1)
-        self.assertIn("tls.acme", found[0])
+        self.assertEqual(spec.unsupported(doc(text), system=True), [])
+
+    def test_without_the_system_phase_acme_is_said_to_wait_for_it(self):
+        text = "version: 1\ntls:\n  acme:\n    enabled: true\n"
+        [found] = spec.unsupported(doc(text))
+        self.assertIn("tls.acme", found)
+        self.assertIn("--system", found)
 
     def test_empty_sections_warn_nothing(self):
         self.assertEqual(spec.unsupported(doc("version: 1\nusers: {}\n"
