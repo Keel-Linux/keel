@@ -675,6 +675,34 @@ class TestDeferCertificate(ApplySystemTestCase):
         self.assertEqual(seen, {"defer": True})
 
 
+class TestHubRegistration(ApplySystemTestCase):
+    """hub.api_key: skip against a machine registered with the TurnKey Hub"""
+
+    declare = TestBootThenDiff.declare
+    diff = TestBootThenDiff.diff
+    field = TestBootThenDiff.field
+
+    def setUp(self):
+        super().setUp()
+        self.machine = join(self.tmpdir, "machine")
+        shutil.copytree(TURNKEY, self.machine)
+
+    def test_skip_is_same_only_without_a_registration(self):
+        self.declare()
+        self.assertEqual(self.field(self.diff()[1], "hub.api_key")["status"],
+                         "same")
+        registry = join(self.machine, "var", "lib", "tklbam")
+        os.makedirs(registry)
+        with open(join(registry, "sub_apikey"), "w") as fob:
+            fob.write("HUBKEY-7f3a9\n")
+        code, report = self.diff()
+        hub = self.field(report, "hub.api_key")
+        self.assertEqual(hub["status"], "unknown")
+        self.assertIn("registered with the TurnKey Hub", hub["reason"])
+        self.assertNotIn("HUBKEY-7f3a9", json.dumps(report))
+        self.assertEqual(code, exits.INSPECT_INCOMPLETE)
+
+
 class TestRoundTrip(ApplySystemTestCase):
     """inspect a tree, apply --system into a fresh tree, inspect, diff"""
 
