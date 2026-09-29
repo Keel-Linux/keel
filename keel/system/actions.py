@@ -38,6 +38,21 @@ class WriteFile:
 
 
 @dataclass(frozen=True)
+class RemoveFile:
+    """Remove `path` (relative to the root): a file keel wrote, and only that
+
+    The planner decides it is keel's before planning this, as the monitor
+    does from the header of monit's file; nothing else is ever removed.
+    """
+
+    path: str
+    summary: str
+
+    def describe(self) -> str:
+        return self.summary
+
+
+@dataclass(frozen=True)
 class MakeDir:
     path: str
     mode: int
@@ -136,7 +151,8 @@ class Refuse:
         return self.summary
 
 
-Change = Run | RunSql | WriteFile | MakeDir | Symlink | SwitchNetwork
+Change = (Run | RunSql | WriteFile | RemoveFile | MakeDir | Symlink
+          | SwitchNetwork)
 Action = Change | Note | Refuse
 
 

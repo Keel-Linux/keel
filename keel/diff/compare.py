@@ -31,7 +31,7 @@ from keel.spec.origins import canonical as canonical_origin
 
 OBSERVED_SECTIONS = (
     "instance", "network", "tls", "security", "hub", "users", "locale",
-    "database",
+    "database", "monitor",
 )
 NOT_COMPARED_REASONS = {
     "secrets": "values are never read, on either side",
@@ -53,7 +53,18 @@ SECRET_PREFIXES = (
 # A feature the spec turns off with one field. Its other fields stay in
 # the file, ready for the day the switch is turned on, and are not
 # compared meanwhile: nothing on the machine is supposed to match them.
-DISABLED_FEATURES = {"tls.acme": "enabled"}
+DISABLED_FEATURES = {"tls.acme": "enabled", "monitor": "enabled"}
+# Fields diff does not compare and never repeats: the channels of the
+# monitor (decision 0021), whose URLs can be credentials. apply writes
+# them to /etc/keel/monitor.json, root only, for keel notify.
+READ_FROM_SPEC = {
+    "monitor.notify":
+        "the channels are not compared: a webhook or topic URL can be a"
+        " credential, and apply writes them for keel notify to"
+        " /etc/keel/monitor.json, root only",
+}
+# Thresholds, compared as numbers, so 2 and 2.0 are one value
+NUMERIC_PREFIXES = ("monitor.checks.",)
 KEYWORD_FIELDS = (
     "security.alerts", "security.updates_at_first_boot", "hub.api_key",
 )
@@ -155,7 +166,9 @@ def compare_section(
     found = dict(flatten(section, observed or {}))
     skipped = not_compared(section, wanted)
     fields = [
-        FieldDiff(path, NOT_COMPARED, value, found.get(path), skipped[path])
+        FieldDiff(path, NOT_COMPARED,
+                  None if withheld(path) else value, found.get(path),
+                  skipped[path])
         if path in skipped
         else compare_field(path, value, found.get(path), unknowns)
         for path, value in wanted.items()
@@ -175,10 +188,20 @@ def not_compared(section: str, wanted: dict[str, object]) -> dict[str, str]:
         for path, reason in (FIRST_BOOT_FIELDS | CONSENT_FIELDS).items()
         if path in wanted
     }
+    skipped.update({
+        path: reason for field, reason in READ_FROM_SPEC.items()
+        for path in wanted if _under(path, field)
+    })
     skipped.update(disabled(section, wanted))
     skipped.update(other_role(wanted))
     skipped.update(secret_references(wanted))
     return skipped
+
+
+def withheld(path: str) -> bool:
+    """A declared value diff never repeats, even in its JSON: a webhook
+    or ntfy topic URL is a credential of its own"""
+    return any(_under(path, field) for field in READ_FROM_SPEC)
 
 
 def other_role(wanted: dict[str, object]) -> dict[str, str]:
@@ -233,7 +256,7 @@ def disabled(section: str, wanted: dict[str, object]) -> dict[str, str]:
     """
     off: dict[str, str] = {}
     for feature, switch in DISABLED_FEATURES.items():
-        if not feature.startswith(f"{section}."):
+        if feature != section and not feature.startswith(f"{section}."):
             continue
         key = f"{feature}.{switch}"
         if wanted.get(key):
@@ -326,12 +349,21 @@ def normalize(path: str, value: object) -> object:
         return _address(text, ipaddress.ip_interface)
     if leaf in HOST_LEAVES:
         return _address(text, ipaddress.ip_address)
+    if path.startswith(NUMERIC_PREFIXES):
+        return _number(text)
     return text
 
 
 def _address(text: str, parse) -> str:
     try:
         return str(parse(text))
+    except ValueError:
+        return text
+
+
+def _number(text: str) -> str:
+    try:
+        return repr(float(text))
     except ValueError:
         return text
 

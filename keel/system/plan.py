@@ -6,6 +6,7 @@ from keel.system.database import plan_database
 from keel.system.hostname import plan_hostname
 from keel.system.hosts import plan_hosts
 from keel.system.locale import plan_locale
+from keel.system.monitor import plan_monitor
 from keel.system.network import DEFAULT_WINDOW, plan_network
 from keel.system.security import plan_security
 from keel.system.state import SystemState
@@ -18,13 +19,15 @@ def plan(
     defer_certificate: bool = False, network_window: int = DEFAULT_WINDOW,
     skip_network: bool = False,
 ) -> Plan:
-    """Steps: instance, users, locale, security, tls, database, network
+    """Steps: instance, users, locale, security, tls, database, monitor,
+    network
 
-    The database last because it is the only phase that restarts a
-    service and the only one that can lose data, so everything cheap and
-    reversible is already done when it is reached. `confirmed` is the
-    operator saying, in this invocation, that becoming a replica may
-    destroy what this server holds; nothing else in keel sets it.
+    The database after the cheap fields because it is the only phase
+    that restarts a database server and the only one that can lose data,
+    so everything cheap and reversible is already done when it is
+    reached. `confirmed` is the operator saying, in this invocation, that
+    becoming a replica may destroy what this server holds; nothing else
+    in keel sets it.
 
     The network after everything, because it is the one step that can
     cut off the session running apply (decision 0018): whatever else the
@@ -39,6 +42,8 @@ def plan(
     steps += plan_security(doc.get("security") or {}, state)
     steps += plan_tls(doc.get("tls") or {}, state, defer_certificate)
     steps += plan_database(doc, state.database, confirmed)
+    steps += plan_monitor(doc.get("monitor"), doc, state.monitor,
+                          state.live, state.available)
     steps += plan_network(doc.get("network") or {}, state.network,
                           state.live, state.available, network_window,
                           skip_network)

@@ -13,6 +13,8 @@ from keel import exits, layers, spec
 from keel import diff as drift
 from keel import inspect as inspection
 from keel import system
+from keel.monitor import channelfile
+from keel.monitor import notify as notifier
 from keel.network import confirm as netconfirm
 from keel.network import live, session, switch
 
@@ -239,6 +241,48 @@ def network_revert(args) -> int:
     else:
         error(line)
     return exits.OK if worked else exits.APPLY_FAILED
+
+
+def notify(args) -> int:
+    """Tell the operator about one monit alert, on every declared channel
+
+    What keel.conf's exec lines run (decision 0021). It reads no spec:
+    the channels come from the settings apply wrote as root
+    (keel.monitor.channelfile), refused unless root owns them and nobody
+    else can write them. A token that cannot be read fails its own
+    channel and not the others. When no channel takes the message, it is
+    logged to syslog at user.crit and mailed to root, and the exit code
+    is NOTIFY_FAILED, which is all monit could do anything with.
+    """
+    event = notifier.event_from(
+        args.level, args.check, args.path or args.iface, args.threshold,
+        dict(os.environ), args.direction,
+    )
+    try:
+        settings, reason = channelfile.load(args.settings), ""
+    except spec.SpecError as e:
+        settings, reason = {}, str(e)
+    message = notifier.compose(
+        event, str(settings.get("host") or notifier.hostname()),
+        str(settings.get("address") or ""), settings.get("details") is True,
+        notifier.run_probe,
+    )
+    deliveries = notifier.send(settings, message, args.level)
+    for delivery in deliveries:
+        if delivery.problem is None:
+            print(delivery.line())
+        else:
+            error(delivery.line())
+    if any(delivery.problem is None for delivery in deliveries):
+        return exits.OK
+    reason = reason or ("every channel failed" if deliveries
+                        else f"{args.settings} declares no channel")
+    took = notifier.last_resort(message, reason)
+    if took:
+        error(f"notify: {reason}; told {' and '.join(took)} instead")
+    else:
+        error(f"notify: {reason}; syslog and root's mailbox failed too")
+    return exits.NOTIFY_FAILED
 
 
 def database_promote(args) -> int:

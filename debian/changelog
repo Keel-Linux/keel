@@ -1,3 +1,43 @@
+keel (0.10.0) unstable; urgency=medium
+
+  * A monitor section of the spec, handbook decision 0021 (keel#43):
+    thresholds for the disks, inodes, memory, swap, CPU, load per core
+    and declared network interfaces, and the channels to tell: email to
+    security.alerts' address, Telegram, ntfy and a Slack compatible
+    webhook. Defaults as decided: disk 80/90, inodes 90, memory 85 for 5
+    minutes, swap 50 for 5, CPU 90 for 10, load 2 per core for 10.
+    Enabled without a working channel is a validation error, and so is
+    email while security.alerts is skip; URLs are https, or a secret
+    file holding one, and are never repeated in a message; tokens are
+    secret files.
+  * apply --system writes /etc/monit/conf.d/keel.conf, mode 0600: one
+    check per filesystem that holds data (no pseudo, network or FUSE
+    filesystem), warn and critical as separate services, a reminder and
+    a recovery on every test, each throughput direction its own. The
+    cycle is monit's, read from monitrc and its includes and never set,
+    and a for_minutes monit cannot hold in 64 of those cycles is
+    refused. On the live system monit -t and a reload, only when the
+    file changed; refused when monit is not installed, since keel
+    installs no package, and when a keel.conf keel did not write is
+    there. Turned off, the files keel wrote are removed.
+  * apply --system writes /etc/keel/monitor.json, mode 0600: the
+    channels resolved from the spec, token files by path, which is all
+    keel notify reads. An unusable token file is a note, not a failure.
+  * keel notify, which keel.conf runs: one message, with what to do, to
+    every channel in /etc/keel/monitor.json, never the spec, refused
+    unless root owns it and nobody else can use it, as secret files are.
+    Standard library HTTPS with verification, no redirect followed, no
+    token in argv, output or a URL it prints. details: false leaves the
+    directory and process lists out; one du per filesystem at a time.
+    When no channel takes it, syslog at user.crit and root's mailbox,
+    and exit code 22, NOTIFY_FAILED.
+  * inspect reads the monitor section back from keel.conf at monit's
+    cycle, and diff compares it; the channels are neither compared nor
+    repeated, JSON included.
+  * Suggests: monit.
+
+ -- Marcos Mendez <mendez.foto@gmail.com>  Tue, 29 Sep 2026 21:51:25 +0000
+
 keel (0.9.0) unstable; urgency=medium
 
   * apply --system converges network.*, the last field of keel#35, as

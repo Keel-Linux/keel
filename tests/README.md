@@ -37,6 +37,14 @@ spec apply --system` tests converge temporary trees through `--root`, with
 `useradd` and `usermod` replaced at the subprocess boundary and root stood
 in by patching `os.geteuid` (docs/apply.md, Tests).
 
+The monitor tests (decision 0021) send `keel notify`'s channels to an
+HTTPS server on `[::1]`, with a certificate `openssl` makes for `::1` in a
+temporary directory each run, so no certificate is committed and nothing
+leaves the machine. When a monit binary is on `PATH`, or named by
+`KEEL_MONIT` (`apt-get download monit` and `dpkg-deb -x` give one without
+installing it), `tests/test_monitor_render.py` also hands the rendered
+file to `monit -t`; without one those two tests skip.
+
 The one shell file the package ships, the firstboot hook
 `firstboot.d/10keel-system`, is tested with bats in `tests/hook.bats`, with
 `keel` replaced by a script on `PATH` that records its arguments and

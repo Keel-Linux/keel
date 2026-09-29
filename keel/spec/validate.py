@@ -31,6 +31,7 @@ from keel.spec.fields import (
 )
 from keel.spec.validate_database import validate_database
 from keel.spec.validate_extras import validate_locale, validate_users
+from keel.spec.validate_monitor import validate_monitor
 from keel.spec.validate_network import validate_network
 from keel.spec.validate_secret import validate_secret
 
@@ -69,6 +70,9 @@ def validate(doc: dict, *, check_secret_files: bool = True) -> list[str]:
     errors.extend(
         validate_database(doc.get("database"), check_secret_files)
     )
+    errors.extend(validate_monitor(
+        doc.get("monitor"), doc.get("security"), check_secret_files
+    ))
     return errors
 
 

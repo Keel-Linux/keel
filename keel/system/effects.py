@@ -16,6 +16,7 @@ from keel.inspect.tree import Tree
 from keel.system.actions import (
     Change,
     MakeDir,
+    RemoveFile,
     Run,
     RunSql,
     Symlink,
@@ -40,6 +41,9 @@ class Effects:
                 return self.run(action.argv, action.statements)
             if isinstance(action, WriteFile):
                 return self.write(action)
+            if isinstance(action, RemoveFile):
+                os.remove(self.tree.path(action.path))
+                return None
             if isinstance(action, MakeDir):
                 return self.make_dir(action)
             if isinstance(action, SwitchNetwork):

@@ -24,6 +24,8 @@ Depends:
  openssl,
  ${python3:Depends},
  ${misc:Depends},
+Suggests:
+ monit,
 Description: Declarative management of one appliance instance
  Keel describes one appliance instance in a single file and applies it
  idempotently. It is compatible with TurnKey Linux appliances: the spec is

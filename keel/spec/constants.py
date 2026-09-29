@@ -29,6 +29,7 @@ TOP_LEVEL_KEYS = (
     "users",
     "locale",
     "database",
+    "monitor",
 )
 SECRET_VARS = {
     "root_password": "ROOT_PASS",
