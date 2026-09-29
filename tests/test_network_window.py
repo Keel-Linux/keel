@@ -136,10 +136,11 @@ class TestChange(RootCase):
                 mock.patch.object(marker, "uptime", return_value=50.0):
             self.assertIsNone(switch.change(self.root, pending(), NEW, run))
         self.assertEqual(run.names(), [
-            "systemctl", "systemd-run", "ifdown", "ip address flush",
-            "ip link set", "ifup", "systemctl", "systemd-run",
+            "systemctl", "systemctl", "systemd-run", "ifdown",
+            "ip address flush", "ip link set", "ifup",
+            "systemctl", "systemctl", "systemd-run",
         ])
-        safety, window = run.calls[1], run.calls[7]
+        safety, window = run.calls[2], run.calls[9]
         self.assertIn("--unit=keel-network-window-safety", safety)
         self.assertIn("--on-active=180s", safety)
         self.assertIn("--unit=keel-network-window", window)
@@ -178,18 +179,17 @@ class TestChange(RootCase):
         self.assertEqual(self.current(), OLD)
 
     def test_a_rollback_that_cannot_write_keeps_the_marker_and_timer(self):
-        real = marker.write_private
-        writes = []
+        real = switch.stage
+        calls = []
 
-        def second_write_fails(root, relative, text):
-            if relative == INTERFACES:
-                writes.append(text)
-                if len(writes) == 2:
-                    raise OSError(28, "No space left")
+        def second_stage_fails(root, relative, text):
+            calls.append(text)
+            if len(calls) == 2:
+                return None, "cannot write /etc/network/interfaces: full"
             return real(root, relative, text)
 
-        with mock.patch.object(marker, "write_private",
-                               side_effect=second_write_fails):
+        with mock.patch.object(switch, "stage",
+                               side_effect=second_stage_fails):
             problem = switch.change(self.root, pending(), NEW,
                                     Recorder(fail={"ifup": 1}))
         self.assertIn("the revert timer will try again", problem)
@@ -248,13 +248,37 @@ class TestChange(RootCase):
             problem = switch.change(self.root, pending(), NEW, Recorder())
         self.assertIn("cannot read", problem)
 
-    def test_an_unwritable_file_is_the_problem(self):
-        with mock.patch.object(marker, "write_private",
-                               side_effect=OSError(30, "Read-only")):
-            written, problem = switch.bounce(self.root, "eth0", INTERFACES,
-                                             NEW, Recorder())
+    def read_only(self):
+        directory = join(self.root, "etc", "network")
+        os.chmod(directory, 0o555)
+        self.addCleanup(os.chmod, directory, 0o755)
+
+    def test_an_unwritable_file_leaves_the_interface_untouched(self):
+        self.read_only()
+        run = Recorder()
+        written, problem = switch.bounce(self.root, "eth0", INTERFACES, NEW,
+                                         run)
         self.assertFalse(written)
         self.assertIn("cannot write /etc/network/interfaces", problem)
+        self.assertEqual(run.calls, [])
+        self.assertEqual(self.current(), OLD)
+
+    def test_a_failed_rename_still_brings_the_interface_up(self):
+        run = Recorder()
+        with mock.patch.object(switch.os, "replace",
+                               side_effect=OSError(5, "I/O error")):
+            written, problem = switch.bounce(self.root, "eth0", INTERFACES,
+                                             NEW, run)
+        self.assertFalse(written)
+        self.assertEqual(run.names()[-1], "ifup")
+        self.assertEqual(self.current(), OLD)
+
+    def test_the_file_keeps_mode_0644_whatever_the_umask(self):
+        old = os.umask(0o077)
+        self.addCleanup(os.umask, old)
+        self.assertIsNone(switch.put_file(self.root, INTERFACES, NEW))
+        mode = os.stat(join(self.root, INTERFACES)).st_mode & 0o777
+        self.assertEqual(mode, 0o644)
 
 
 class TestRevert(RootCase):
@@ -292,7 +316,9 @@ class TestRevert(RootCase):
         marker.save(self.root, OLD)
         marker.write_private(self.root, marker.PENDING, "garbage")
         self.write(NEW)
-        worked, line = switch.revert(self.root, Recorder())
+        run = Recorder()
+        worked, line = switch.revert(self.root, run)
+        self.assertEqual(run.calls, [STOP])
         self.assertTrue(worked)
         self.assertIn("no interface was restarted", line)
         self.assertEqual(self.current(), OLD)
@@ -315,8 +341,8 @@ class TestRevert(RootCase):
 
     def test_a_revert_that_cannot_write_keeps_the_marker(self):
         self.prepared()
-        with mock.patch.object(marker, "write_private",
-                               side_effect=OSError(30, "Read-only")):
+        with mock.patch.object(switch, "stage", return_value=(
+                None, "cannot write /etc/network/interfaces: read-only")):
             worked, line = switch.revert(self.root, Recorder())
         self.assertFalse(worked)
         self.assertIn("cannot restore", line)
@@ -330,8 +356,8 @@ class TestRevert(RootCase):
 
     def test_a_boot_restore_that_cannot_write_is_a_failure(self):
         self.prepared()
-        with mock.patch.object(marker, "write_private",
-                               side_effect=OSError(30, "Read-only")):
+        with mock.patch.object(switch, "stage", return_value=(
+                None, "cannot write /etc/network/interfaces: read-only")):
             worked, line = switch.revert(self.root, Recorder(), boot=True)
         self.assertFalse(worked)
         self.assertIn("cannot restore", line)
@@ -446,7 +472,7 @@ class TestConfirm(RootCase):
         self.assertIn("cannot be read", lines[0])
         marker.write(self.root, pending())
         (confirmed, lines), _ = self.confirm(ssh())
-        self.assertIn("still being applied", lines[0])
+        self.assertIn("could not be dated", lines[0])
         self.prepared()
         (confirmed, lines), _ = self.confirm(ssh(), probes(boot="b2"))
         self.assertIn("before the last boot", lines[0])

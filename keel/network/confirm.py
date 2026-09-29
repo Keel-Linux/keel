@@ -59,7 +59,11 @@ def not_ready(pending: marker.Pending | None, boot_id: str | None) -> (
         return ("the pending change cannot be read; keel network revert"
                 " restores the saved file")
     if pending.changed_at is None:
-        return "the change is still being applied; try again in a moment"
+        # the lock is held, so no change is running: this one was never
+        # dated (the uptime could not be read after ifup), and reverts
+        return ("the change could not be dated when the interface came up,"
+                " so it cannot be confirmed; it reverts when its window"
+                " ends, or now with keel network revert")
     if pending.boot_id != boot_id:
         return ("the change was made before the last boot and should"
                 " have been reverted by it; keel network revert restores"

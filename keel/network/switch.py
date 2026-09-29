@@ -9,9 +9,11 @@ neither leaves an address or a DHCP client of the other behind:
    interface ifupdown-ng does not think is up has nothing to stop;
 2. flush the addresses, since an IPv4 address survives a link going
    down, then set the link down, as 01ipconfig does; a failure here is
-   reported but does not stop the file being written, because a revert
-   that stopped here would leave the bad file in place;
-3. write the new file;
+   reported but does not stop the file being put in place, because a
+   revert that stopped here would leave the bad file there;
+3. put the new file in place: it was written, with its mode, and synced
+   beside the old one before step 1, so a full or read-only /etc is found
+   out before the interface is touched, and this step is a rename;
 4. `ifup` the interface (ifupdown-ng has no `ifreload`).
 
 Two transient timers run the revert, both armed before step 1, so a run
@@ -52,7 +54,12 @@ def revert_command() -> tuple[str, ...]:
 
 
 def arm(unit: str, seconds: int, run: Runner) -> str | None:
-    """Arm one revert timer; a leftover of an earlier run is reset first"""
+    """Arm one revert timer; a leftover of an earlier run is cleared first
+
+    An elapsed transient timer stays loaded, and systemd refuses a new
+    one under a loaded name, so it is stopped as well as reset.
+    """
+    run(("systemctl", "stop", f"{unit}.timer"))
     run(("systemctl", "reset-failed", f"{unit}.timer", f"{unit}.service"))
     return run((
         "systemd-run", f"--unit={unit}", f"--on-active={seconds}s",
@@ -67,10 +74,36 @@ def disarm(run: Runner) -> None:
     run(("systemctl", "stop", *(f"{unit}.timer" for unit in UNITS)))
 
 
-def put_file(root: str, relative: str, text: str) -> str | None:
+FILE_MODE = 0o644
+
+
+def stage(root: str, relative: str, text: str) -> tuple[str | None, str | None]:
+    """Write `text` beside the file, synced; (its path, or the problem)"""
+    target = marker.path(root, relative)
+    staged = target + ".keel-new"
     try:
-        marker.write_private(root, relative, text)
-        os.chmod(marker.path(root, relative), 0o644)
+        fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, FILE_MODE)
+        with os.fdopen(fd, "w") as fob:
+            os.fchmod(fob.fileno(), FILE_MODE)
+            fob.write(text)
+            fob.flush()
+            os.fsync(fob.fileno())
+    except OSError as e:
+        return None, f"cannot write /{relative}: {e.strerror or e}"
+    return staged, None
+
+
+def put_file(root: str, relative: str, text: str) -> str | None:
+    """Stage and rename: the file is either the old one or the new one"""
+    staged, problem = stage(root, relative, text)
+    if problem:
+        return problem
+    return rename(staged, root, relative)
+
+
+def rename(staged: str, root: str, relative: str) -> str | None:
+    try:
+        os.replace(staged, marker.path(root, relative))
     except OSError as e:
         return f"cannot write /{relative}: {e.strerror or e}"
     return None
@@ -78,12 +111,21 @@ def put_file(root: str, relative: str, text: str) -> str | None:
 
 def bounce(root: str, iface: str, relative: str, text: str,
            run: Runner) -> tuple[bool, str | None]:
-    """Down, flush, write `text`, up: (whether the file was written, problem)"""
+    """Down, flush, put `text` in place, up: (whether it is in place, problem)
+
+    A file that cannot even be staged leaves the interface untouched. One
+    that stages but cannot be renamed (rare: the same directory) still
+    gets `ifup`, on the file that is there, rather than a dead interface.
+    """
+    staged, problem = stage(root, relative, text)
+    if problem:
+        return False, problem
     run(("ifdown", iface))
     problems = [run(("ip", "address", "flush", "dev", iface))]
     run(("ip", "link", "set", iface, "down"))
-    problem = put_file(root, relative, text)
+    problem = rename(staged, root, relative)
     if problem:
+        run(("ifup", iface))
         return False, problem
     problems.append(run(("ifup", iface)))
     found = [one for one in problems if one]
@@ -191,6 +233,7 @@ def revert(root: str, run: Runner, boot: bool = False) -> tuple[bool, str]:
             marker.clear(root)
             if boot:
                 return True, f"restored /{relative} before networking starts"
+            disarm(run)
             return True, (f"restored /{relative}; the pending change could"
                           " not be read, so no interface was restarted")
         written, problem = bounce(root, pending.iface, relative, text, run)
