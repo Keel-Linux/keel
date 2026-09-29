@@ -317,7 +317,7 @@ rather than assumed:
   revoke it, and a verifier that accepts `VALIDSIG` makes revocation do
   nothing;
 * it **reads a binary keyring only**, and an armored one gives
-  `NO_PUBKEY` — the same message as a wrong key. An armored keyring is
+  `NO_PUBKEY`, the same message as a wrong key. An armored keyring is
   accepted here and dearmored in memory;
 * it **accepts SHA-1** unless told otherwise, so `--weak-digest SHA1` is
   passed and a SHA-1 pointer is refused.
@@ -326,7 +326,7 @@ rather than assumed:
 a space separated list, narrows it further: only that key may move a
 channel, whatever else the keyring holds. The fingerprint may be the
 signing key's or its primary key's, so a subkey rotation needs no change
-on the appliances — but that also means pinning a primary accepts a
+on the appliances, but that also means pinning a primary accepts a
 revoked subkey of it, which is why the retirement refusal above is what
 actually stops one. With neither set, any key in the keyring is accepted,
 so a keyring holding the channel key alone is the other way to get the
@@ -388,7 +388,7 @@ layer of the chain. Each manifest's bytes must hash to what the pointer
 signed for that layer; a layer the pointer does not name is a mismatch,
 because nothing signed then says which manifest it should have.
 
-What was resolved is printed above the layer lines, always — a pull that
+What was resolved is printed above the layer lines, always: a pull that
 verified nothing says so, because otherwise it prints exactly what a
 verified one prints:
 
@@ -414,16 +414,18 @@ default `$KEEL_CHANNEL_STATE` or `/var/lib/keel/channel`, which is what
 
 ### Rollback
 
-`--release 2026-09-28 --rev 1` names an immutable revision. It always
-works, because a blob is never deleted: every revision that was ever
-published can still be assembled.
+`--release 2026-09-28 --rev 1` names an immutable revision. It works for
+every revision a channel has ever named, because a blob is never deleted:
+every revision that was ever published can still be assembled.
 
 **It is verified, and by the same chain.** A rollback is the operation an
 operator performs after something has already gone wrong, against the
 mirror they have the least reason to trust, so it is not the path that
-skips the signature. Each revision keeps a copy of the pointer that was
-signed for it when a channel was last moved to it, at
-`layers/<release>/<rev>/revision`. `--release/--rev` fetches that,
+skips the signature. Each revision keeps a copy of the first pointer that
+was signed for it, written once by the publisher when it installs a channel
+naming that revision (Keel-Linux/apt, `mirror_channel_script`), at
+`layers/<release>/<rev>/revision`. A revision no channel ever named has
+none, and is refused with exit 10. `--release/--rev` fetches that,
 verifies it exactly as a channel pointer is verified, requires it to name
 the revision it is filed under, and takes the manifest digests from it. A
 mirror with no `revision` file gets exit 10; one with a rewritten manifest

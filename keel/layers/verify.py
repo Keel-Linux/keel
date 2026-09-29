@@ -11,8 +11,8 @@ parent_sha256 equal to the parent's recorded sha256, and a
 `<tarball>.hash` file, when present, must name the same sha256.
 
 A signature inside the hash file is detected and reported, never
-verified. There is a trusted key now — the channel keyring `keel pull`
-verifies a pointer against — but it is not what a `.hash` file is signed
+verified. There is a trusted key now (the channel keyring `keel pull`
+verifies a pointer against), but it is not what a `.hash` file is signed
 with, and this command is given no keyring. So it still claims nothing
 about a `.hash` signature, and says which check was not made rather than
 which key does not exist.
