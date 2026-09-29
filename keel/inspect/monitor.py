@@ -36,8 +36,9 @@ from keel.monitor.render import MINUTES_COMMENT
 from keel.monitor.settings import DEBIAN_CYCLE, cycles, mbit, minutes, number
 
 KEEL_HEADER = "# written by keel"
-DAEMON_RE = re.compile(r"^set\s+daemon\s+(\d+)")
-INCLUDE_RE = re.compile(r"^include\s+(\S+)")
+# monit's keywords are case insensitive: SET DAEMON 30 is a cycle too
+DAEMON_RE = re.compile(r"^set\s+daemon\s+(\d+)", re.IGNORECASE)
+INCLUDE_RE = re.compile(r"^include\s+(\S+)", re.IGNORECASE)
 # monitrc includes conf.d, whose files could include more; not deeper
 MAX_INCLUDE_DEPTH = 3
 SERVICE_RE = re.compile(

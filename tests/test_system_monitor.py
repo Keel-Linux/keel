@@ -40,11 +40,13 @@ NO_SETTINGS = File("/r/etc/keel/monitor.json", problem="not present")
 
 
 def state(current: File = ABSENT, mountinfo: str | None = MOUNTINFO,
-          settings: File = NO_SETTINGS, problems=()) -> MonitorState:
+          settings: File = NO_SETTINGS, problems=(),
+          settings_problem: str | None = None) -> MonitorState:
     table = (File("/r/proc/self/mountinfo", mountinfo) if mountinfo
              is not None else File("/r/proc/self/mountinfo",
                                    problem="not present"))
-    return MonitorState(current, table, CYCLE, settings, tuple(problems))
+    return MonitorState(current, table, CYCLE, settings, tuple(problems),
+                        settings_problem)
 
 
 def actions(monitor=ON, doc=None, live=False, available=frozenset(),
@@ -115,6 +117,17 @@ class TestEnabled(unittest.TestCase):
         self.assertFalse([a for a in found if not isinstance(a, Note)])
         self.assertTrue(found[-1].describe().startswith(
             "unchanged (/etc/monit/conf.d/keel.conf, 2 filesystem(s)"))
+
+    def test_settings_notify_would_refuse_are_rewritten_as_root(self):
+        first = writes(actions())
+        found = actions(
+            current=File("/r/x", first[MONIT_CONF].content),
+            settings=File("/r/y", first[SETTINGS].content),
+            settings_problem="/r/y: secret file mode must be 0600 or"
+            " stricter", live=True, available=LIVE)
+        rewrite = writes(found)[SETTINGS]
+        self.assertEqual((rewrite.mode, rewrite.owner), (0o600, "root"))
+        self.assertIn("which keel notify refuses", rewrite.describe())
 
     def test_new_channels_rewrite_the_settings_and_do_not_reload(self):
         first = writes(actions())
@@ -243,6 +256,18 @@ class TestState(unittest.TestCase):
                       found.secret_problems[0])
         self.write("etc/monit/monitrc", "set daemon 30\n")
         self.assertEqual(observe_monitor(self.root, doc).cycle.seconds, 30)
+        # monit's keywords are case insensitive, and so is the reading
+        self.write("etc/monit/monitrc", "SET DAEMON 45\n")
+        self.assertEqual(observe_monitor(self.root, doc).cycle.seconds, 45)
+
+    def test_settings_with_a_loose_mode_are_a_problem(self):
+        doc = {"version": 1, "monitor": {"enabled": True, "notify": {
+            "webhook": {"url": "https://hooks.example.org/x"}}}}
+        self.write("etc/keel/monitor.json", "{}\n", 0o644)
+        found = observe_monitor(self.root, doc)
+        self.assertIn("mode must be 0600", found.settings_problem)
+        os.chmod(join(self.root, "etc/keel/monitor.json"), 0o600)
+        self.assertIsNone(observe_monitor(self.root, doc).settings_problem)
 
     def test_the_whole_plan_writes_no_spec_path(self):
         steps = plan(DOC, observe(self.root, DOC)).steps

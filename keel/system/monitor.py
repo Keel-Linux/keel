@@ -80,10 +80,14 @@ def plan_monitor(monitor: dict | None, doc: dict,
     summary = (f"{watched(mounts, checks)}; monit's cycle is"
                f" {cycle.seconds} s ({cycle.source})")
     actions: list[Action] = list(notes)
-    if state.settings.text != settings:
+    if state.settings.text != settings or state.settings_problem:
+        reason = (f" ({state.settings_problem}, which keel notify refuses)"
+                  if state.settings.text == settings else "")
+        # an existing file keeps its owner through a rewrite, so on the
+        # live system the owner is set too, or a chown behind apply stays
         actions.append(WriteFile(
-            SETTINGS, settings, MODE, None,
-            f"write /{SETTINGS}: the channels keel notify uses"))
+            SETTINGS, settings, MODE, "root" if live else None,
+            f"write /{SETTINGS}: the channels keel notify uses{reason}"))
     if state.current.text != content:
         actions.append(WriteFile(MONIT_CONF, content, MODE, None,
                                  f"write /{MONIT_CONF}: {summary}"))

@@ -644,10 +644,13 @@ class TestEmail(unittest.TestCase):
             with open(sendmail, "w") as fob:
                 fob.write('#!/bin/sh\ncat > "$0.out"\n')
             os.chmod(sendmail, 0o700)
-            notify.last_resort(message, "every channel failed", sendmail,
-                               lambda argv, **kwargs: ran.append(argv))
+            took = notify.last_resort(
+                message, "every channel failed", sendmail,
+                lambda argv, **kwargs: ran.append(argv)
+                or subprocess.CompletedProcess(argv, 0))
             with open(f"{sendmail}.out") as fob:
                 mail = fob.read()
+        self.assertEqual(took, ["syslog (user.crit)", "root's mailbox"])
         self.assertEqual(ran, [[
             "logger", "-p", "user.crit", "-t", "keel-notify",
             "[critical] blog: disk /: blog: / is full (no channel: every"
@@ -658,8 +661,9 @@ class TestEmail(unittest.TestCase):
     def test_a_last_resort_that_cannot_run_is_quiet(self):
         def missing(argv, **kwargs):
             raise OSError(2, "No such file or directory")
-        notify.last_resort(notify.Message("t", "", {}), "x",
-                           "/nonexistent/sendmail", missing)
+        self.assertEqual(notify.last_resort(
+            notify.Message("t", "", {}), "x", "/nonexistent/sendmail",
+            missing), [])
 
 
 class TestChannelFile(unittest.TestCase):
@@ -749,12 +753,15 @@ class TestCommand(ChannelTestCase):
         and the last resort is recorded instead of reaching syslog"""
         environ = dict(os.environ, SSL_CERT_FILE=self.cert, **MONIT_ENV)
         self.resorts = []
+        self.took = getattr(self, "took", ["syslog (user.crit)",
+                                           "root's mailbox"])
         with mock.patch.dict(os.environ, environ, clear=True), \
                 mock.patch.object(channels, "TELEGRAM_API",
                                   f"{self.server.url}/fail"), \
                 mock.patch.object(notify, "LOCK_DIR", self.tmp), \
                 mock.patch.object(notify, "last_resort", side_effect=(
-                    lambda message, reason: self.resorts.append(reason))):
+                    lambda message, reason: self.resorts.append(reason)
+                    or self.took)):
             return run_cli("notify", "--settings", settings, "--level",
                            "critical", "--check", "disk", "--path",
                            self.tmp, "--threshold", "90", *extra)
@@ -797,6 +804,14 @@ class TestCommand(ChannelTestCase):
                       " (user.crit) and root's mailbox instead", err)
         self.assertEqual(self.resorts, ["every channel failed"])
         self.assertNotIn(TOKEN, out + err)
+
+    def test_a_last_resort_that_failed_too_is_said(self):
+        self.took = []
+        path = self.write_settings(self.doc(
+            webhook={"url": f"{self.server.url}/fail"}))
+        code, _, err = self.notify(path)
+        self.assertEqual(code, exits.NOTIFY_FAILED)
+        self.assertIn("syslog and root's mailbox failed too", err)
 
     def test_settings_that_cannot_be_used_are_the_last_resort(self):
         absent = join(self.tmp, "absent.json")

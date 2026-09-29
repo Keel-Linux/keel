@@ -26,6 +26,9 @@ class MonitorState:
     cycle: Cycle
     settings: File
     secret_problems: tuple[str, ...] = ()
+    # why keel notify would refuse the settings as they are on disk (a
+    # mode or an owner changed behind apply), so apply rewrites them
+    settings_problem: str | None = None
 
 
 def observe_monitor(root: str, doc: dict) -> MonitorState | None:
@@ -43,5 +46,8 @@ def observe_monitor(root: str, doc: dict) -> MonitorState | None:
             problem = secret_file_error(tree.path(path.lstrip("/")))
             if problem:
                 problems.append(problem)
+    settings_problem = (secret_file_error(tree.path(paths.MONITOR_SETTINGS))
+                        if settings.readable else None)
     return MonitorState(current, tree.read(paths.MOUNTINFO),
-                        monit_cycle(tree), settings, tuple(problems))
+                        monit_cycle(tree), settings, tuple(problems),
+                        settings_problem)

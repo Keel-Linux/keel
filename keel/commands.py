@@ -277,9 +277,11 @@ def notify(args) -> int:
         return exits.OK
     reason = reason or ("every channel failed" if deliveries
                         else f"{args.settings} declares no channel")
-    error(f"notify: {reason}; told syslog (user.crit) and root's mailbox"
-          " instead")
-    notifier.last_resort(message, reason)
+    took = notifier.last_resort(message, reason)
+    if took:
+        error(f"notify: {reason}; told {' and '.join(took)} instead")
+    else:
+        error(f"notify: {reason}; syslog and root's mailbox failed too")
     return exits.NOTIFY_FAILED
 
 

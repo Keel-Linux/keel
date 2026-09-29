@@ -160,7 +160,8 @@ def measuring(target: str, lock_dir: str) -> Iterator[bool]:
     """
     path = os.path.join(lock_dir, f"keel-notify-du-{slug(target)}.lock")
     try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT, 0o600)
+        # /run/lock is world writable: never follow a link planted there
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     except OSError:
         yield True
         return
@@ -281,21 +282,28 @@ def masked(text: str, secrets: list[str]) -> str:
 
 def last_resort(message: Message, reason: str,
                 sendmail: str = channels.SENDMAIL,
-                run: Callable = subprocess.run) -> None:
+                run: Callable = subprocess.run) -> list[str]:
     """syslog at user.crit and root's mailbox, when no channel took it
 
     Both best effort and both on the machine: a journal survives a full
     disk better than a mail queue, and root's mailbox is where an
-    operator who logs in looks. Neither carries a token or a URL.
+    operator who logs in looks. Neither carries a token or a URL. Returns
+    which of the two took the message, so the caller says only that.
     """
+    took = []
     first = message.text.splitlines()[0] if message.text else ""
     with contextlib.suppress(OSError, subprocess.TimeoutExpired):
-        run([*LOGGER, f"{message.title}: {first} (no channel: {reason})"],
-            capture_output=True, timeout=COMMAND_TIMEOUT, check=False)
+        out = run([*LOGGER, f"{message.title}: {first} (no channel:"
+                   f" {reason})"],
+                  capture_output=True, timeout=COMMAND_TIMEOUT, check=False)
+        if out.returncode == 0:
+            took.append("syslog (user.crit)")
     with contextlib.suppress(channels.ChannelError):
         channels.email("root", message.title,
                        f"{message.text}\n\nNo channel took this: {reason}",
                        sendmail)
+        took.append("root's mailbox")
+    return took
 
 
 def hostname() -> str:
