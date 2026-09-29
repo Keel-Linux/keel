@@ -51,7 +51,9 @@ def address_step(address: str, state: SystemState) -> Step:
             " alias cannot be converged"
         ),))
     actions: list[Action] = []
-    if root_alias(aliases) != address:
+    # diff compares the field case insensitively (keel.diff.compare), so a
+    # difference of case alone is not one to write
+    if (root_alias(aliases) or "").lower() != address.lower():
         actions.append(WriteFile(
             ALIASES, with_root_alias(aliases, address), ETC_MODE, None,
             f"write /{ALIASES} with root: {address}",

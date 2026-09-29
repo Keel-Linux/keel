@@ -74,6 +74,16 @@ class TestPlanSecurityAlerts(unittest.TestCase):
         [step] = plan(EMAIL, found)
         self.assertEqual(step.actions, (Note(f"unchanged ({EMAIL})"),))
 
+    def test_an_address_differing_only_in_case_is_unchanged(self):
+        """diff compares the field case insensitively, so apply must too"""
+        found = state(
+            aliases=File("/x/etc/aliases", "root:    admin@example.org\n"),
+            cron_apt_config=File("/x/etc/cron-apt/config",
+                                 'MAILON="output"\nMAILTO="root"\n'),
+        )
+        self.assertEqual(plan("Admin@Example.ORG", found)[0].actions,
+                         (Note("unchanged (Admin@Example.ORG)"),))
+
     def test_another_address_replaces_the_root_alias_and_keeps_the_rest(self):
         found = state(aliases=File(
             "/x/etc/aliases",

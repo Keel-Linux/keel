@@ -564,6 +564,19 @@ class TestSecurityAlertsDayTwo(ApplySystemTestCase):
         self.assertEqual(self.field(report, "security.alerts")["status"],
                          "same")
 
+    def test_a_stale_conf_on_the_machine_does_not_hold_the_field_in_drift(self):
+        """The review's case: SEC_ALERTS left in the conf, the alias converged"""
+        self.declare()
+        with open(join(self.machine, "etc", "inithooks.conf"), "w") as fob:
+            fob.write("export SEC_ALERTS=old@elsewhere.example\n")
+
+        self.assertEqual(run_cli("spec", "apply", "--spec", self.spec,
+                                 "--conf", self.conf, "--system-only",
+                                 "--root", self.machine)[0], exits.OK)
+        code, report = self.diff()
+        self.assertEqual(self.field(report, "security.alerts")["status"],
+                         "same")
+
     def test_a_second_run_changes_nothing(self):
         self.declare()
         run = ("spec", "apply", "--spec", self.spec, "--conf", self.conf,

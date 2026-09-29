@@ -59,20 +59,29 @@ def probe_security(
 def _alerts(
     variables: dict[str, str], conf: File, aliases: File, cron_apt: File
 ) -> tuple[str | None, str]:
+    """The machine's own trace first, the first boot input only without one
+
+    SEC_ALERTS in inithooks.conf is what the first boot was told; the
+    root alias is what the machine does. A conf that 98finalize did not
+    blank can be stale, and apply --system converges the alias (keel#35),
+    so preferring the conf would report drift that apply cannot correct.
+    """
+    if aliases.readable:
+        alias = root_alias(aliases)
+        if alias and "@" in alias:
+            return alias, f"{aliases.path}, root alias"
+        if cron_apt.assignments().get("MAILON", "").lower() == "never":
+            return SKIP, f"{cron_apt.path} sets MAILON=never"
+        return SKIP, f"{aliases.path} has no external root alias"
+
     declared = variables.get("SEC_ALERTS")
     if declared:
         return declared.lower() if declared.upper() == "SKIP" else declared, \
             conf.path
 
-    alias = root_alias(aliases)
-    if alias and "@" in alias:
-        return alias, f"{aliases.path}, root alias"
-
     mailon = cron_apt.assignments().get("MAILON", "").lower()
     if mailon == "never":
         return SKIP, f"{cron_apt.path} sets MAILON=never"
-    if aliases.readable:
-        return SKIP, f"{aliases.path} has no external root alias"
     return None, (
         f"{aliases.path} {aliases.problem}; {cron_apt.path}"
         f" {cron_apt.problem or 'does not set MAILON=never'}"

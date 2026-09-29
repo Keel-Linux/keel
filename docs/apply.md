@@ -442,6 +442,17 @@ on a name the appliance does not yet carry. It asks for `--system-only`
 because the conf phase has already run at position 00 and must not run
 again: see above for what a second run would do to a generated password.
 
+`security.alerts` is converged here too, which is earlier than the
+upstream `85secalerts` hook that used to be the only writer. The two agree
+and the order is harmless: hook 10 writes the root alias and the cron-apt
+mail settings from the description, and hook 85 reads the same address
+from the conf phase's `SEC_ALERTS` and replaces the `root:` line in place
+with the same value (its `sed` is idempotent). What hook 85 adds and this
+phase never does is register the address with the TurnKey Hub; cutting
+that call out of the hook is the Hub decoupling of brief section 5.6, not
+part of this converge. A description that declares `skip` makes hook 85
+exit at once, and hook 10 has already left no external alias.
+
 The package that owns the `keel` command owns the hook that runs it, so
 inithooks keeps no dependency on keel, and an image without keel simply has
 no hook there.
