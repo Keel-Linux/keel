@@ -1,0 +1,24 @@
+# Restore a network change nobody confirmed, before the network starts.
+#
+# keel spec apply --system arms a transient timer that reverts an
+# unconfirmed network change (handbook decision 0018); a transient timer
+# does not survive a reboot, so a machine rebooted inside the window would
+# come back on the file that may have cut it off. This unit runs only
+# while the change's marker exists, and `keel network revert --boot` puts
+# the saved file back without starting any interface.
+[Unit]
+Description=Revert an unconfirmed network change made by keel
+DefaultDependencies=no
+RequiresMountsFor=/var/lib/keel
+After=local-fs.target
+Wants=network-pre.target
+Before=network-pre.target networking.service shutdown.target
+Conflicts=shutdown.target
+ConditionPathExists=/var/lib/keel/network/pending.json
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/keel network revert --boot
+
+[Install]
+WantedBy=multi-user.target

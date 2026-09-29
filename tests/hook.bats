@@ -67,7 +67,7 @@ log() {
     fake_keel 0 "apply --system-only: 1 change(s), 0 failed"
     run "$HOOK"
     [ "$status" -eq 0 ]
-    [ "$(cat "$TMP/keel.argv")" = "spec apply --system-only --defer-certificate --spec $PRIMARY" ]
+    [ "$(cat "$TMP/keel.argv")" = "spec apply --system-only --defer-certificate --skip-network --spec $PRIMARY" ]
     log | grep -q "INFO: \[10keel-system\] apply --system-only: 1 change"
 }
 
@@ -76,7 +76,7 @@ log() {
     fake_keel 0 "apply --system-only: 0 change(s), 0 failed"
     run "$HOOK"
     [ "$status" -eq 0 ]
-    [ "$(cat "$TMP/keel.argv")" = "spec apply --system-only --defer-certificate --spec $LEGACY" ]
+    [ "$(cat "$TMP/keel.argv")" = "spec apply --system-only --defer-certificate --skip-network --spec $LEGACY" ]
 }
 
 @test "the first path wins when both are there" {
@@ -85,7 +85,7 @@ log() {
     fake_keel 0 "apply --system-only: 1 change(s), 0 failed"
     run "$HOOK"
     [ "$status" -eq 0 ]
-    [ "$(cat "$TMP/keel.argv")" = "spec apply --system-only --defer-certificate --spec $PRIMARY" ]
+    [ "$(cat "$TMP/keel.argv")" = "spec apply --system-only --defer-certificate --skip-network --spec $PRIMARY" ]
 }
 
 @test "INITHOOKS_DECL names the description outright" {
@@ -95,7 +95,7 @@ log() {
     fake_keel 0 "apply --system-only: 1 change(s), 0 failed"
     INITHOOKS_DECL="$named" run "$HOOK"
     [ "$status" -eq 0 ]
-    [ "$(cat "$TMP/keel.argv")" = "spec apply --system-only --defer-certificate --spec $named" ]
+    [ "$(cat "$TMP/keel.argv")" = "spec apply --system-only --defer-certificate --skip-network --spec $named" ]
 }
 
 @test "INITHOOKS_DECL naming a file that is not there is a no-op" {
@@ -138,7 +138,7 @@ log() {
     rm -f "$INITHOOKS_LOGFILE"
     run "$HOOK"
     [ "$status" -eq 0 ]
-    [ "$(cat "$TMP/keel.argv")" = "spec apply --system-only --defer-certificate --spec $PRIMARY" ]
+    [ "$(cat "$TMP/keel.argv")" = "spec apply --system-only --defer-certificate --skip-network --spec $PRIMARY" ]
 }
 
 @test "an absent inithooks default file does not stop the hook" {

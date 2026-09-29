@@ -26,6 +26,7 @@ CHANNEL_INVALID = 17
 CHANNEL_UNVERIFIED = 18
 CHANNEL_EXPIRED = 19
 CHANNEL_ROLLBACK = 20
+NETWORK_NOT_CONFIRMED = 21
 
 DESCRIPTIONS = {
     OK: "success, including the no-op cases",
@@ -59,4 +60,6 @@ DESCRIPTIONS = {
     " stale, broken or holding this instance back",
     CHANNEL_ROLLBACK: "a channel pointer names an earlier revision than the"
     " one this instance is on",
+    NETWORK_NOT_CONFIRMED: "keel network confirm refused: nothing waiting,"
+    " or not run over the new configuration",
 }

@@ -18,6 +18,7 @@ from keel.inspect import constants as paths
 from keel.inspect.accounts import home_of, passwd_entries
 from keel.inspect.tree import File, Tree
 from keel.system.dbstate import DatabaseState, observe_database
+from keel.system.netstate import NetworkState, observe_network
 
 LOCALE_GEN = "etc/locale.gen"
 MAILNAME = "etc/mailname"
@@ -49,7 +50,8 @@ KEYS_UNDER_HOME = ".ssh/authorized_keys"
 LOCALE_LIST = ("locale", "-a")
 COMMANDS = (
     "useradd", "usermod", "timedatectl", "locale-gen", "localedef", "newaliases",
-    "hostnamectl", "hostname", "systemctl",
+    "hostnamectl", "hostname", "systemctl", "ifup", "ifdown", "ip",
+    "systemd-run",
 )
 
 
@@ -80,6 +82,7 @@ class SystemState:
     acme_wrapper: bool = False
     now: datetime | None = None
     service_units: frozenset[str] = frozenset()
+    network: NetworkState | None = None
 
 
 def observe(root: str, doc: dict) -> SystemState:
@@ -123,6 +126,7 @@ def observe(root: str, doc: dict) -> SystemState:
             unit for unit in TLS_SERVICES
             if any(tree.exists(f"{d}/{unit}") for d in SERVICE_UNIT_DIRS)
         ),
+        network=observe_network(root, doc),
     )
 
 

@@ -19,8 +19,10 @@ from keel.system.actions import (
     Run,
     RunSql,
     Symlink,
+    SwitchNetwork,
     WriteFile,
 )
+from keel.network import marker, switch
 
 NOT_RUNNABLE = 127
 
@@ -40,6 +42,8 @@ class Effects:
                 return self.write(action)
             if isinstance(action, MakeDir):
                 return self.make_dir(action)
+            if isinstance(action, SwitchNetwork):
+                return self.switch_network(action)
             return self.symlink(action)
         except OSError as e:
             return f"{e.strerror or e}"
@@ -76,6 +80,16 @@ class Effects:
             fob.write(action.content)
         os.chmod(path, action.mode)
         return self.own(path, action.owner)
+
+    def switch_network(self, action: SwitchNetwork) -> str | None:
+        """keel.network.switch does the work; this is its only caller"""
+        pending = marker.Pending(
+            iface=action.iface, path=action.path, window=action.window,
+            addresses=action.addresses, gateways=action.gateways,
+            old_gateways=action.old_gateways,
+        )
+        return switch.change(self.tree.root, pending, action.content,
+                             self.run)
 
     def make_dir(self, action: MakeDir) -> str | None:
         path = self.tree.path(action.path)

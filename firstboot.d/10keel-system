@@ -20,6 +20,11 @@
 # 30rootpass had already set and shown the first one, leaving the appliance
 # with a password nothing knows.
 #
+# And with --skip-network: 01ipconfig has already written the interfaces
+# file from the same description, and a network change on a running machine
+# waits for a confirmation nobody is there to give at first boot, so it would
+# only revert (decision 0018).
+#
 # No failure here aborts the boot: an appliance that cannot converge a
 # field must still finish booting, and say what it could not do.
 
@@ -83,7 +88,7 @@ if ! command -v "$KEEL" >/dev/null; then
 fi
 
 status=0
-output=$("$KEEL" spec apply --system-only --defer-certificate --spec "$spec" 2>&1) || status=$?
+output=$("$KEEL" spec apply --system-only --defer-certificate --skip-network --spec "$spec" 2>&1) || status=$?
 
 while IFS= read -r line; do
     [[ -n "$line" ]] || continue

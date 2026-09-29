@@ -31,7 +31,8 @@ keel spec apply --system --root /mnt/rootfs
 
 With `--system`, after the conf, `apply` converges the parts of the spec
 that describe system state rather than hook input: `instance.hostname`,
-`instance.fqdn`, `users`, `locale`, `security.alerts` and `tls.acme`. With `--system-only` it converges them and does nothing
+`instance.fqdn`, `users`, `locale`, `security.alerts`, `tls.acme`,
+`database.server` and, last, `network`. With `--system-only` it converges them and does nothing
 else, for a machine whose conf phase has already run. Neither flag is on
 by default.
 
@@ -60,6 +61,8 @@ exactly as `inspect` is.
 | `--root DIR` | The filesystem phase 2 converges: `/` (the default, the live system) or a scratch tree. Phase 1 is not affected; the conf path is `--conf` |
 | `--defer-certificate` | With either flag: write `tls.acme` but ask no certificate authority for a certificate in this run. The first boot hook passes it. See "tls.acme" below |
 | `--destroy-local-database` | Confirm, for this run only, that making this node a replica may drop the databases this server holds. Without it apply refuses and changes nothing. See "database.server" below |
+| `--network-window SECONDS` | With either flag: how long a network change waits for `keel network confirm` before it reverts by itself; 120 by default, at least 30. See "network" below |
+| `--skip-network` | With either flag: leave the network alone in this run. The first boot hook passes it |
 
 `--destroy-local-database` with neither flag is a usage error as well:
 it confirms one decision of phase 2, so asking for it without phase 2 is
@@ -424,6 +427,89 @@ another machine. Replication without failover is not high availability,
 and when it is wanted the packaged answers are Galera for MariaDB and
 Patroni for PostgreSQL.
 
+**network** (`/etc/network/interfaces`; handbook decision 0018)
+
+The one field whose converge can cut off the operator running it, so it
+is the last step of the plan and, on the live system, never a plain
+write. The rules:
+
+- **A container's network is not converged.** With `managed_by: host`
+  the host writes the interfaces; the step says so and `keel diff` keeps
+  comparing. Declaring `managed_by: file` inside a container is refused
+  when there is something to change.
+- **Only drift changes anything.** The plan compares the declared section
+  with what `keel inspect` reads, exactly as `keel diff` does, so a file
+  that says the same thing in other words is left alone, and a field
+  inspect could not infer (SLAAC and DHCPv6 look alike in the file) does
+  not bounce an interface.
+- **One interface**, as `01ipconfig` configures one. A spec declaring
+  several, with drift, is refused, and so is one naming another interface
+  than the file configures: the old one would stay up with its addresses.
+- **What the spec leaves out stays.** A spec declaring IPv6 only keeps
+  the machine's IPv4 stanza, and one declaring no nameservers keeps the
+  file's, rather than the library's defaults replacing them.
+- **Nothing is bounced for a difference the file cannot hold.**
+  ifupdown writes nameservers only in a static stanza of their family, so
+  nameservers declared for a DHCP family are reported and left alone; and
+  a file that already says exactly what would be written is never
+  rewritten, whatever else differs.
+- **The file is inithooks' own.** It is rendered by the functions of
+  `/usr/lib/inithooks/lib/ipconfig.sh` that `01ipconfig` uses, from the
+  same variables, so a first boot and a day two write the same file for
+  the same spec. Without inithooks the step is refused.
+
+Under `--root DIR` the file is written and nothing else happens. On the
+live system the change is a sequence that reverts by itself:
+
+1. the current file is saved under `/var/lib/keel/network/` with a
+   pending marker, and a transient timer, `keel-network-window-safety`,
+   is armed for the window plus 60 seconds, the time `ifup` may spend
+   waiting for DHCP; no timer, no change;
+2. `ifdown` on the old file, the addresses flushed, the link set down,
+   the new file written, `ifup` on it. An `ifup` that fails puts the old
+   file back at once;
+3. once the interface is up, a second timer, `keel-network-window`, is
+   armed for the window itself, so the whole window is left to confirm in;
+4. the run ends. Within the window, from a **new** session:
+
+```
+$ ssh admin@2001:db8:1::20
+$ sudo keel network confirm
+confirmed from an SSH session
+the new gateway (fe80::2) was not tested: the route back to 2001:db8:1::99 does not use it
+the network change stays; the revert is cancelled
+```
+
+Without a confirmation a timer runs `keel network revert`, which
+takes the interface through the same sequence back onto the saved file.
+A reboot inside the window is covered too: `keel-network-revert.service`
+runs before networking while the marker exists and puts the saved file
+back. A change, a confirmation and a revert take the same lock, so a
+revert that has started finishes before a confirmation is looked at, and
+the confirmation then says there is nothing to confirm rather than
+reporting success on the old network.
+
+`keel network confirm` accepts only what shows that the new network
+works:
+
+| Run from | Accepted when |
+| --- | --- |
+| SSH | the session (its `sshd-session` process) started after the interface came up on the new file, arrived at an address the new file declares or the interface now holds, and came from another machine: `ssh` to the new address from the old session proves nothing |
+| A console (`tty1`, `ttyS0`, `hvc0`, `console`) | always: a person there has seen the machine |
+| A process attached from a container's host | always, as a console |
+| Anything else: a shell that survived the change in tmux, a service | refused |
+
+The session is read from the process tree, not from `SSH_CONNECTION`,
+which `sudo` resets. When the gateway changed, confirm says whether the
+route back to the client used it: a client on the same link reaches the
+machine without the gateway, and saying the gateway was tested would be
+false. A refusal exits 21 (`NETWORK_NOT_CONFIRMED`) and leaves the timer
+running.
+
+`keel network revert` gives up on a change by hand without waiting;
+`--boot` restores the file without touching the interface, for the boot
+unit. Both need root on the live system.
+
 ### Failures and exit codes
 
 A failed action, and a refusal, fail their field: the actions after it in
@@ -498,6 +584,9 @@ blog.yaml --root /tmp/scratch` then reports `instance.fqdn` and every
   first boot hook does: the Hub is one optional backend (brief section
   5.6), and a converge that ran on every apply would subscribe the machine
   to somebody else's service each time.
+- Converging a container's network from inside, more than one
+  interface, bridges, VLANs or interface names; or changing the network
+  on the live system without the revert armed first.
 - Touching the conf when a populated one exists, or anything at all with
   `--dry-run`.
 
@@ -513,7 +602,7 @@ into the conf every later hook reads. The system phase runs at
 01ipconfig        the address
 09hostname        /etc/hostname, and a sed over the old name in /etc/hosts
 10keel-system     the system phase: keel spec apply --system-only
-                  --defer-certificate
+                  --defer-certificate --skip-network
 15regen-sslcert   the certificate, on the name settled above
 29, 30 ...        the init fence, the root password
 ```
