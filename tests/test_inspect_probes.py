@@ -7,6 +7,8 @@ per branch: the value found, the file missing, the file malformed.
 """
 
 import unittest
+from datetime import datetime, timezone
+from os.path import abspath, dirname, join
 
 from helpers import spec  # noqa: F401
 
@@ -21,7 +23,7 @@ from keel.inspect.report import (
     inferred,
     missing,
 )
-from keel.inspect.tree import NOT_PRESENT, File
+from keel.inspect.tree import NOT_PRESENT, PERMISSION_DENIED, File
 
 ABSENT = File("/x/absent", problem=NOT_PRESENT)
 HOSTNAME_F = File("hostname -f", "blog.example.org\n")
@@ -424,6 +426,13 @@ class TestNetwork(unittest.TestCase):
                          "/x/absent not present")
 
 
+def cert_file(name: str) -> File:
+    path = join(dirname(abspath(__file__)), "fixtures", "certificates",
+                f"{name}.pem")
+    with open(path) as fob:
+        return File("/x/etc/ssl/private/cert.pem", fob.read())
+
+
 class TestTLS(unittest.TestCase):
     CONFIG = File("/x/etc/dehydrated/confconsole.config",
                   'CHALLENGETYPE="dns-01"\n')
@@ -431,49 +440,95 @@ class TestTLS(unittest.TestCase):
                    "# c\nblog.example.org www.blog.example.org\n"
                    "blog.example.org\n")
     PLAIN = File("/x/etc/dehydrated/domains.txt", "core.example.org\n")
+    NOW = datetime(2026, 9, 29, tzinfo=timezone.utc)
+
+    def probe(self, config, domain_files, present=True, cert=None):
+        return tls.probe_tls(config, domain_files, present,
+                             cert or cert_file("acme-blog"), self.NOW)
 
     def test_no_dehydrated_directory_means_acme_disabled(self):
-        section, findings = tls.probe_tls(ABSENT, [ABSENT], False)
+        section, findings = self.probe(ABSENT, [ABSENT], False)
         self.assertEqual(section, {"acme": {"enabled": False}})
         self.assertIn("not present", reason(findings, "tls.acme.enabled"))
 
     def test_no_domains_in_either_file_means_acme_disabled(self):
         empty = File("/x/etc/dehydrated/confconsole.domains.txt", "# none\n")
-        section, findings = tls.probe_tls(self.CONFIG, [empty, ABSENT], True)
+        section, findings = self.probe(self.CONFIG, [empty, ABSENT])
         self.assertEqual(section, {"acme": {"enabled": False}})
         self.assertIn("no domains in /x/etc/dehydrated/confconsole.domains.txt"
                       " or /x/absent", reason(findings, "tls.acme.enabled"))
 
     def test_confconsole_domains_and_challenge_are_read(self):
-        section, findings = tls.probe_tls(
-            self.CONFIG, [self.DOMAINS, self.PLAIN], True
-        )
+        section, findings = self.probe(self.CONFIG, [self.DOMAINS, self.PLAIN])
         self.assertEqual(section, {"acme": {
             "enabled": True, "challenge": "dns-01",
             "domains": ["blog.example.org", "www.blog.example.org"],
         }})
         self.assertEqual(reason(findings, "tls.acme.challenge"),
                          self.CONFIG.path)
+        self.assertIn("covers every configured domain",
+                      reason(findings, "tls.acme.enabled"))
 
     def test_plain_domains_file_and_default_challenge(self):
-        section, findings = tls.probe_tls(ABSENT, [ABSENT, self.PLAIN], True)
+        section, findings = self.probe(ABSENT, [ABSENT, self.PLAIN])
         self.assertEqual(section["acme"]["domains"], ["core.example.org"])
         self.assertEqual(section["acme"]["challenge"], "http-01")
         self.assertIn("not present, dehydrated defaults to http-01",
                       reason(findings, "tls.acme.challenge"))
 
     def test_config_without_challenge_type_says_so(self):
-        _, findings = tls.probe_tls(File("/x/c", "PROVIDER=x\n"),
-                                    [self.PLAIN], True)
+        _, findings = self.probe(File("/x/c", "PROVIDER=x\n"), [self.PLAIN])
         self.assertIn("sets no CHALLENGETYPE",
                       reason(findings, "tls.acme.challenge"))
 
     def test_unknown_challenge_type_is_left_out_and_reported(self):
         config = File("/x/c", "CHALLENGETYPE=tls-alpn-01\n")
-        section, findings = tls.probe_tls(config, [self.PLAIN], True)
+        section, findings = self.probe(config, [self.PLAIN])
         self.assertNotIn("challenge", section["acme"])
         self.assertEqual(statuses(findings, "tls.acme.challenge"),
                          [NOT_INFERRED])
+
+    def assert_configured_but_off(self, cert, *words):
+        section, findings = self.probe(self.CONFIG, [self.DOMAINS], cert=cert)
+        self.assertEqual(section["acme"]["enabled"], False)
+        self.assertEqual(section["acme"]["domains"],
+                         ["blog.example.org", "www.blog.example.org"])
+        self.assertEqual(section["acme"]["challenge"], "dns-01")
+        why = reason(findings, "tls.acme.enabled")
+        for word in words:
+            self.assertIn(word, why)
+
+    def test_domains_with_a_self_signed_certificate_are_not_acme(self):
+        self.assert_configured_but_off(cert_file("self-signed"),
+                                       "self-signed", "CN=blog")
+
+    def test_an_expired_certificate_is_not_acme(self):
+        self.assert_configured_but_off(cert_file("acme-expired"),
+                                       "expired", "2025-01-01")
+
+    def test_a_certificate_for_other_names_is_not_acme(self):
+        self.assert_configured_but_off(cert_file("acme-other"),
+                                       "does not cover",
+                                       "blog.example.org, www.blog.example.org")
+
+    def test_no_certificate_at_all_is_not_acme(self):
+        self.assert_configured_but_off(
+            File("/x/etc/ssl/private/cert.pem", problem=NOT_PRESENT),
+            "/x/etc/ssl/private/cert.pem", "not present")
+
+    def test_a_certificate_that_cannot_be_read_leaves_the_field_unknown(self):
+        unreadable = File("/x/etc/ssl/private/cert.pem",
+                          problem=PERMISSION_DENIED)
+        section, findings = self.probe(self.CONFIG, [self.DOMAINS],
+                                       cert=unreadable)
+        self.assertNotIn("enabled", section["acme"])
+        self.assertEqual(statuses(findings, "tls.acme.enabled"),
+                         [NOT_INFERRED])
+        garbage = File("/x/etc/ssl/private/cert.pem", "not pem\n")
+        section, findings = self.probe(self.CONFIG, [self.DOMAINS],
+                                       cert=garbage)
+        self.assertNotIn("enabled", section["acme"])
+        self.assertIn("no certificate", reason(findings, "tls.acme.enabled"))
 
 
 class TestAppliance(unittest.TestCase):

@@ -10,3 +10,9 @@ debian/keel/
 debian/*.debhelper.log
 debian/*.substvars
 .coverage
+
+# Public test certificates, committed on purpose and without their keys
+# (tests/fixtures/certificates/README.md); a global *.pem rule would
+# otherwise leave the tls.acme tests without their fixtures.
+!tests/fixtures/certificates/*.pem
+!tests/fixtures/inspect/turnkey/etc/ssl/private/cert.pem

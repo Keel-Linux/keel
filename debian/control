@@ -21,6 +21,7 @@ Depends:
  python3-yaml,
  zstd,
  gpgv,
+ openssl,
  ${python3:Depends},
  ${misc:Depends},
 Description: Declarative management of one appliance instance
