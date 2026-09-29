@@ -3,6 +3,7 @@
 
 from keel.system.actions import Plan
 from keel.system.database import plan_database
+from keel.system.hostname import plan_hostname
 from keel.system.hosts import plan_hosts
 from keel.system.locale import plan_locale
 from keel.system.security import plan_security
@@ -19,9 +20,10 @@ def plan(doc: dict, state: SystemState, confirmed: bool = False) -> Plan:
     operator saying, in this invocation, that becoming a replica may
     destroy what this server holds; nothing else in keel sets it.
     """
-    steps = plan_hosts(
-        doc.get("instance") or {}, doc.get("network") or {}, state
-    )
+    instance = doc.get("instance") or {}
+    # the rename first, and the fqdn step on the /etc/hosts it produces
+    steps, state = plan_hostname(instance, state)
+    steps += plan_hosts(instance, doc.get("network") or {}, state)
     steps += plan_users(doc.get("users") or {}, state)
     steps += plan_locale(doc.get("locale") or {}, state)
     steps += plan_security(doc.get("security") or {}, state)

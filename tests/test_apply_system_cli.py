@@ -90,6 +90,9 @@ class ApplySystemTestCase(unittest.TestCase):
         for name in ("passwd", "group"):
             with open(join(self.root, "etc", name), "w") as fob:
                 fob.write("")
+        # what 09hostname has written by the time the system phase runs
+        with open(join(self.root, "etc", "hostname"), "w") as fob:
+            fob.write("blog\n")
         self.spec = join(self.tmpdir, "instance.yaml")
         self.write_spec(SPEC)
 
@@ -167,7 +170,8 @@ class TestApplySystem(ApplySystemTestCase):
                       out)
         self.assertFalse(os.path.exists(self.conf))
         self.assertEqual(sorted(os.listdir(self.root)), ["etc"])
-        self.assertEqual(os.listdir(join(self.root, "etc")), ["group"])
+        self.assertEqual(sorted(os.listdir(join(self.root, "etc"))),
+                         ["group", "hostname"])
 
     def test_dry_run_needs_no_secret_files(self):
         self.write_spec(SPEC + "secrets:\n  root_password:\n"
@@ -332,14 +336,15 @@ class TestSystemOnly(ApplySystemTestCase):
         self.assertIn("apply --system-only: 10 change(s), 0 failed", out)
 
     def test_a_spec_declaring_nothing_this_phase_converges_is_a_no_op(self):
-        self.write_spec("version: 1\ninstance:\n  hostname: blog\n")
+        self.write_spec("version: 1\nsecurity:\n"
+                        "  updates_at_first_boot: force\n")
         code, out, err = self.only()
         self.assertEqual((code, err), (exits.OK, ""))
         self.assertIn("apply --system-only: nothing declared that this"
                       " phase converges", out)
         self.assertNotIn("change(s)", out)
         self.assertEqual(sorted(os.listdir(join(self.root, "etc"))),
-                         ["group", "passwd"])
+                         ["group", "hostname", "passwd"])
 
     def test_a_failed_action_names_the_flag_in_the_summary(self):
         def failing(argv, **kwargs):
@@ -363,7 +368,7 @@ class TestSystemOnly(ApplySystemTestCase):
         self.assertIn("instance.fqdn: would write /etc/hosts", out)
         self.assertIn("dry run: 10 change(s) planned, nothing written", out)
         self.assertEqual(sorted(os.listdir(join(self.root, "etc"))),
-                         ["group", "passwd"])
+                         ["group", "hostname", "passwd"])
 
     def test_the_live_system_refusal_names_the_flag_that_asked(self):
         with AS_USER:
@@ -585,6 +590,62 @@ class TestSecurityAlertsDayTwo(ApplySystemTestCase):
         code, out, _ = run_cli(*run)
         self.assertEqual(code, exits.OK)
         self.assertIn("security.alerts: unchanged (admin@example.org)", out)
+        self.assertIn("apply --system-only: 0 change(s), 0 failed", out)
+
+
+class TestRenameDayTwo(ApplySystemTestCase):
+    """instance.hostname on a running machine (keel#35): blog becomes news"""
+
+    declare = TestBootThenDiff.declare
+    diff = TestBootThenDiff.diff
+    field = TestBootThenDiff.field
+
+    def setUp(self):
+        super().setUp()
+        self.machine = join(self.tmpdir, "machine")
+        shutil.copytree(TURNKEY, self.machine)
+
+    def rename(self) -> None:
+        self.declare()
+        document = spec.load(self.spec)
+        document["instance"] = {"hostname": "news",
+                                "fqdn": "news.example.org"}
+        with open(self.spec, "w") as fob:
+            yaml.safe_dump(document, fob, sort_keys=False)
+
+    def apply_only(self) -> tuple[int, str, str]:
+        return run_cli("spec", "apply", "--spec", self.spec, "--conf",
+                       self.conf, "--system-only", "--root", self.machine)
+
+    def test_a_rename_is_drift_then_converged_and_diff_is_same(self):
+        self.rename()
+        code, report = self.diff()
+        self.assertEqual(code, exits.DRIFT_FOUND)
+        self.assertEqual(self.field(report, "instance.hostname")["status"],
+                         "drift")
+
+        code, out, err = self.apply_only()
+        self.assertEqual((code, err), (exits.OK, ""))
+        self.assertIn("instance.hostname: write /etc/hostname with news", out)
+        self.assertIn("turnkey-make-ssl-cert --default --force", out)
+        with open(join(self.machine, "etc", "hostname")) as fob:
+            self.assertEqual(fob.read(), "news\n")
+        with open(join(self.machine, "etc", "hosts")) as fob:
+            hosts = fob.read()
+        self.assertNotIn("blog", hosts)
+        self.assertIn("2001:db8:1::10 news.example.org news", hosts)
+
+        code, report = self.diff()
+        self.assertEqual(code, exits.OK, report["fields"])
+        for name in ("instance.hostname", "instance.fqdn"):
+            self.assertEqual(self.field(report, name)["status"], "same")
+
+    def test_a_second_run_changes_nothing(self):
+        self.rename()
+        self.assertEqual(self.apply_only()[0], exits.OK)
+        code, out, _ = self.apply_only()
+        self.assertEqual(code, exits.OK)
+        self.assertIn("instance.hostname: unchanged (news)", out)
         self.assertIn("apply --system-only: 0 change(s), 0 failed", out)
 
 class TestRoundTrip(ApplySystemTestCase):

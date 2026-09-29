@@ -56,6 +56,12 @@ def plan_hosts(
         f" before the entry, so hostname -f keeps answering {name};"
         f" edit that line by hand"
     ) for shadow in _shadowing(hosts, address, set(names))]
+    first_label = fqdn.split(".")[0]
+    if name != fqdn and name.lower() != first_label.lower():
+        kept.append(Note(
+            f"{fqdn} has {first_label} as its first label, not the hostname"
+            f" {name}; the entry names both, so check the spec"
+        ))
     entry = " ".join([address, *names])
     wanted = with_entry(hosts, address, entry, set(names))
     settled = _settled(hosts, fqdn, name, address, wanted)

@@ -1,3 +1,23 @@
+keel (0.6.0) unstable; urgency=medium
+
+  * spec apply --system renames a running machine to instance.hostname:
+    /etc/hostname, the old name as a whole token or first label in
+    /etc/hosts, /etc/mailname and postfix's main.cf, then hostnamectl and
+    a reload of postfix if it runs. Narrower than 09hostname's sed, which
+    also rewrote the name inside other words. The fqdn step plans on the
+    renamed /etc/hosts, so the two compose into one file. The self-signed
+    certificate is not remade; the run says how. Second field of keel#35.
+  * In postfix's main.cf only the values of myhostname and mydestination
+    are renamed, so a host called mail, smtp or relay cannot rewrite
+    $mail_name or smtpd_relay_restrictions; an underscore is part of a
+    name everywhere. A trailing dot is the same name, as diff reads it.
+    On the live system a kernel name that a failed hostnamectl left
+    behind is set again on the next run.
+  * The /etc/hosts step says when the fqdn's first label is not the
+    hostname.
+
+ -- Marcos Mendez <mendez.foto@gmail.com>  Tue, 29 Sep 2026 07:32:28 +0000
+
 keel (0.5.0) unstable; urgency=medium
 
   * spec apply --system converges security.alerts on a running machine:

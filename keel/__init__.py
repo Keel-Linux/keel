@@ -6,4 +6,4 @@ place where logic lives; the CLI (keel.cli) and confconsole are both
 clients of it.
 """
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"

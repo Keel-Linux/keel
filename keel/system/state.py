@@ -8,6 +8,7 @@ scratch tree has no locale archive of its own to ask.
 """
 
 import shutil
+import socket
 import subprocess
 from dataclasses import dataclass
 
@@ -17,10 +18,13 @@ from keel.inspect.tree import File, Tree
 from keel.system.dbstate import DatabaseState, observe_database
 
 LOCALE_GEN = "etc/locale.gen"
+MAILNAME = "etc/mailname"
+POSTFIX_MAIN = "etc/postfix/main.cf"
 KEYS_UNDER_HOME = ".ssh/authorized_keys"
 LOCALE_LIST = ("locale", "-a")
 COMMANDS = (
     "useradd", "usermod", "timedatectl", "locale-gen", "localedef", "newaliases",
+    "hostnamectl", "hostname", "systemctl",
 )
 
 
@@ -41,6 +45,10 @@ class SystemState:
     database: DatabaseState | None = None
     aliases: File | None = None
     cron_apt_config: File | None = None
+    hostname: File | None = None
+    mailname: File | None = None
+    postfix_main: File | None = None
+    kernel_hostname: str | None = None
 
 
 def observe(root: str, doc: dict) -> SystemState:
@@ -71,6 +79,10 @@ def observe(root: str, doc: dict) -> SystemState:
         database=observe_database(root, doc),
         aliases=tree.read(paths.ALIASES),
         cron_apt_config=tree.read(paths.CRON_APT_CONFIG),
+        hostname=tree.read(paths.HOSTNAME),
+        mailname=tree.read(MAILNAME),
+        postfix_main=tree.read(POSTFIX_MAIN),
+        kernel_hostname=socket.gethostname() if live else None,
     )
 
 
