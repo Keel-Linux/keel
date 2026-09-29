@@ -1,3 +1,18 @@
+keel (0.7.0) unstable; urgency=medium
+
+  * inspect reports tls.acme.enabled from the certificate in use, not from
+    the domains file: true only when /etc/ssl/private/cert.pem is not
+    self-signed, has not expired and covers every configured domain.
+    A machine with domains configured and a self-signed certificate was
+    reported enabled, so diff said same where no certificate had been
+    obtained. The certificate is read with openssl x509 on standard
+    input, so it works under --root and keel gains no Python dependency.
+    The domains and challenge are still reported, with enabled false.
+  * Depends on openssl, which inspect now runs.
+  * docs/inspect.md: the security.alerts row says what 0.5.0 changed.
+
+ -- Marcos Mendez <mendez.foto@gmail.com>  Tue, 29 Sep 2026 09:01:27 +0000
+
 keel (0.6.0) unstable; urgency=medium
 
   * spec apply --system renames a running machine to instance.hostname:

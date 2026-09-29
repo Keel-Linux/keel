@@ -9,6 +9,7 @@ pure probe functions.
 
 import os
 import subprocess
+from datetime import datetime, timezone
 
 from keel.inspect import constants as paths
 from keel.inspect.app import probe_app, probe_appliance
@@ -63,6 +64,8 @@ def inspect_root(
         [tree.read(paths.DEHYDRATED_DOMAINS),
          tree.read(paths.DEHYDRATED_DOMAINS_PLAIN)],
         tree.exists(paths.DEHYDRATED_DIR),
+        tree.read(paths.TLS_CERT),
+        datetime.now(timezone.utc),
     )
     findings += found
     _add(spec, "tls", tls)
