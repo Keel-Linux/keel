@@ -611,7 +611,7 @@ monitor:
 
 | Field | State | Notes |
 | --- | --- | --- |
-| `monitor.enabled` | system | `true` or `false`; absent is off. `apply --system` writes `/etc/monit/conf.d/keel.conf` when true and removes it, if keel wrote it, otherwise ([docs/apply.md](apply.md)). `true` without a working channel under `notify` is an error: a monitor with nobody to tell looks like one and is not |
+| `monitor.enabled` | system | `true` or `false`; absent is off. `apply --system` writes `/etc/monit/conf.d/keel.conf` and `/etc/keel/monitor.json` when true and removes them, if keel wrote them, otherwise ([docs/apply.md](apply.md)). `true` without a working channel under `notify` is an error: a monitor with nobody to tell looks like one and is not |
 | `monitor.checks.disk.warn`, `.critical` | system | Percent of the space used, above 0 and below 100, `warn` below `critical`. Default 80 and 90. Watched on every filesystem that holds data, as two separate checks |
 | `monitor.checks.inodes.critical` | system | Percent of the inodes used. Default 90 |
 | `monitor.checks.memory.warn`, `.for_minutes` | system | Default 85 percent for 5 minutes |
@@ -623,28 +623,33 @@ monitor:
 | `monitor.checks.network.<name>.for_minutes` | system | How long a condition of this interface holds before it is told, link included. Default 5 |
 | `monitor.notify.email` | system | `true` mails `security.alerts`' address through the local MTA. An error while `security.alerts` is `skip` or absent. Best effort: postfix needs disk to queue, so a full disk is what this channel cannot report |
 | `monitor.notify.telegram.chat_id`, `.token` | system | The Bot API's `sendMessage`. The chat id is a number (`-1001234567890`) or a channel name (`@keel_ops`); the token is a secret reference and must be a `file:` |
-| `monitor.notify.ntfy.url`, `.token` | system | One HTTPS POST to the topic URL; the token, optional, is sent as `Authorization: Bearer` and must be a `file:` |
-| `monitor.notify.webhook.url` | system | One HTTPS POST whose JSON body is Slack compatible, `{"text": ...}`, plus the fields `host`, `address`, `check`, `target`, `value`, `threshold`, `level`, `service` and `event`. Slack and Mattermost take it as it is; Discord at its webhook URL with `/slack` appended; Matrix through a bridge such as hookshot |
+| `monitor.notify.ntfy.url`, `.token` | system | One HTTPS POST to the topic URL, given as the URL or, since a public topic is its own credential, as a secret reference `{file: ...}` holding it; the token, optional, is sent as `Authorization: Bearer` and must be a `file:` |
+| `monitor.notify.webhook.url` | system | The URL, or a secret reference to a file holding it: a Slack or Discord webhook URL is a credential. One HTTPS POST whose JSON body is Slack compatible, `{"text": ...}`, plus the fields `host`, `address`, `check`, `target`, `direction`, `value`, `threshold`, `level`, `service` and `event`. Slack and Mattermost take it as it is; Discord at its webhook URL with `/slack` appended; Matrix through a bridge such as hookshot |
 | `monitor.notify.details` | system | `true` adds the three largest directories (disk, inodes) or processes (memory, swap, CPU, load) to the message. Default `false` |
 
 Every URL must be `https` and carry no user or password: a token is a
-secret reference of its own, never part of the spec. `for_minutes` is a
-whole number from 1 to 64: keel sets monit's cycle to 60 seconds, and
-monit holds a condition for at most 64 cycles, so a longer duration is
-refused rather than cut short.
+secret reference of its own, never part of the spec. No error message
+repeats a URL, since it may be a credential. `for_minutes` is a whole
+number of minutes. monit holds a condition for at most 64 cycles of the
+cycle the machine's monit runs at, which keel reads and never sets, so
+whether a duration fits is decided by `apply --system` on that machine,
+which refuses one that does not; validation only refuses more than 3840
+minutes, which no cycle of an hour or less could hold.
 
 **Privacy.** A message carries the host name, its first static address
 and, with `details: true`, the names and sizes of its largest directories
 or processes, to whichever service the section declares, Telegram's
 servers included. `details: false`, the default, leaves those lists out.
-The tokens are read from their files by `keel notify` when an alert fires;
-they are never written to monit's configuration, an argument vector or a
-line of output.
+`apply --system` writes the channels to `/etc/keel/monitor.json`, mode
+0600, with the paths of the token files and never their values; `keel
+notify` reads that file, never the spec, and reads the tokens from their
+files when an alert fires. They are never written to monit's
+configuration, an argument vector or a line of output.
 
 `keel diff` compares `enabled` and the checks, read back from monit's
-file, and never the channels, which stay in the spec and are read there
-when an alert fires ([docs/diff.md](diff.md)). Without `--system`, `apply`
-warns that the section was left alone.
+file, and never the channels: a URL can be a credential, so diff neither
+compares nor repeats them, not even in its JSON ([docs/diff.md](diff.md)).
+Without `--system`, `apply` warns that the section was left alone.
 
 ## Not in the spec yet
 

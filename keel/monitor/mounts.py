@@ -9,15 +9,17 @@ from the next apply. Left out, each for its reason:
   tmpfs, cgroup, the lxcfs files a container host provides);
 - read only images and media (squashfs, erofs, iso9660, udf), full by
   design, and overlays, whose space is another filesystem's;
-- network filesystems, whose space is another machine's to grow, and
-  whose server can stall the check;
+- network and FUSE filesystems, whose space is another machine's or
+  another program's, and whose stalled statvfs would stall monit's whole
+  cycle, every other check with it;
 - anything under /proc, /sys, /dev and /run, which is the kernel's, the
   runtime's or, in a container, the host's;
 - a bind mount of part of a filesystem, which is what a container host
   hands in for /etc/hostname and friends; btrfs is the exception,
   because a subvolume mounted as / shows the same way;
 - a second mount of a device already listed, so a filesystem is watched
-  once.
+  once; a mount whose path monit cannot take does not count as listed,
+  so the device is still watched at another of its mount points.
 """
 
 import re
@@ -34,9 +36,14 @@ PSEUDO = frozenset((
     "iso9660", "udf", "erofs", "cramfs", "romfs",
 ))
 REMOTE = frozenset((
-    "9p", "afs", "ceph", "cifs", "fuse.sshfs", "glusterfs", "nfs", "nfs4",
-    "smb3", "smbfs", "virtiofs",
+    "9p", "afs", "ceph", "cifs", "coda", "davfs", "fuse", "glusterfs",
+    "lustre", "ncpfs", "nfs", "nfs4", "ocfs2", "gfs2", "smb3", "smbfs",
+    "virtiofs",
 ))
+# every FUSE filesystem (sshfs, s3fs, rclone, lxcfs...): its data is a
+# program's, and a hung daemon hangs statvfs; fuseblk (ntfs-3g) is a
+# local disk and is kept
+FUSE_PREFIX = "fuse."
 RUNTIME = ("/proc", "/sys", "/dev", "/run")
 # What monit takes as an unquoted path, and its exec line and keel
 # notify's argv carry as one word: measured with monit 5.34's parser,
@@ -85,9 +92,10 @@ def real_filesystems(mountinfo: str) -> tuple[list[Mount], list[str]]:
     (a space, a quote) is named in the second list, so the plan says it
     is not watched rather than leaving it out in silence.
     """
-    mounts, unsafe, devices = [], [], set()
+    mounts, unsafe, devices = [], {}, set()
     for device, root, mount in parse(mountinfo):
-        if mount.fstype in PSEUDO or mount.fstype in REMOTE:
+        if mount.fstype in PSEUDO or mount.fstype in REMOTE \
+                or mount.fstype.startswith(FUSE_PREFIX):
             continue
         if any(under(mount.path, prefix) for prefix in RUNTIME):
             continue
@@ -95,9 +103,10 @@ def real_filesystems(mountinfo: str) -> tuple[list[Mount], list[str]]:
             continue
         if device in devices:
             continue
-        devices.add(device)
         if not SAFE_PATH.match(mount.path):
-            unsafe.append(mount.path)
+            unsafe.setdefault(device, mount.path)
             continue
+        devices.add(device)
         mounts.append(mount)
-    return mounts, unsafe
+    return mounts, [path for device, path in unsafe.items()
+                    if device not in devices]

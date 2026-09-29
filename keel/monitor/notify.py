@@ -4,32 +4,44 @@
 monit puts the event in the environment (MONIT_EVENT, MONIT_SERVICE,
 MONIT_DESCRIPTION); the level, the check and what it is about come from
 the argument vector keel.monitor.render wrote; the channels come from
-the spec. One message is built and sent to every declared channel, and
-a channel that fails does not stop the others.
+/etc/keel/monitor.json, which apply wrote as root (keel.monitor.
+channelfile), never from the spec. One message is built and sent to
+every channel there, and a channel that fails does not stop the others.
+When none takes it, the message goes to syslog at user.crit and to
+root's mailbox, the two places left on the machine itself.
 
-It writes nothing on its way: monit runs it as `python3 -B`, so not even
+It writes nothing of its own: monit runs it as `python3 -B`, so not even
 bytecode is written, the tokens are read from their secret files and
 never reach an argument vector or a line of output, and a line about a
-channel names the channel, never its URL.
+channel names the channel, never its URL. The one exception is an empty
+lock file under /run/lock, a tmpfs, so that two alerts do not measure
+the same filesystem at once.
 """
 
+import contextlib
+import fcntl
+import os
 import re
 import socket
 import ssl
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
 from keel.monitor import advice, channels
-from keel.spec.secretstore import resolve_secret
+from keel.monitor.render import slug
 from keel.spec.errors import SpecError
-from keel.spec.validate_monitor import alerts_address, working_channels
+from keel.spec.secretstore import read_secret_file
+from keel.spec.validate_monitor import url_problem
 
 LEVELS = ("warn", "critical", "recovery")
 CHECKS = ("disk", "inodes", "memory", "swap", "cpu", "load", "link",
           "throughput")
+DIRECTIONS = ("upload", "download")
 MASK = "[masked]"
 COMMAND_TIMEOUT = 5
+LOCK_DIR = "/run/lock"
+LOGGER = ("logger", "-p", "user.crit", "-t", "keel-notify")
 PERCENT_RE = re.compile(r"(\d+(?:\.\d+)?)%")
 OF_RE = re.compile(r"\bof (\d+(?:\.\d+)?)")
 WHAT = {
@@ -47,6 +59,7 @@ class Event:
     service: str
     event: str
     description: str
+    direction: str = ""
 
     @property
     def value(self) -> str:
@@ -75,22 +88,11 @@ class Delivery:
 
 
 def event_from(level: str, check: str, target: str, threshold: str,
-               environ: dict[str, str]) -> Event:
+               environ: dict[str, str], direction: str = "") -> Event:
     return Event(level, check, target, threshold,
                  environ.get("MONIT_SERVICE", ""),
                  environ.get("MONIT_EVENT", ""),
-                 environ.get("MONIT_DESCRIPTION", ""))
-
-
-def address_of(doc: dict) -> str:
-    """The first static address the spec declares, IPv6 first"""
-    interfaces = (doc.get("network") or {}).get("interfaces") or {}
-    for family in ("ipv6", "ipv4"):
-        for iface in interfaces.values():
-            declared = (iface or {}).get(family) or {}
-            if declared.get("method") == "static" and declared.get("address"):
-                return str(declared["address"]).split("/")[0]
-    return ""
+                 environ.get("MONIT_DESCRIPTION", ""), direction)
 
 
 def headline(event: Event) -> str:
@@ -107,9 +109,10 @@ def headline(event: Event) -> str:
             return f"the link of {event.target} is up again."
         return f"the link of {event.target} is down."
     if event.check == "throughput":
+        which = f"{event.target} {event.direction}".strip()
         if event.level == "recovery":
-            return f"{event.target} is back under {limit} Mbit/s."
-        return f"{event.target} carries more than {limit} Mbit/s."
+            return f"{which} is back under {limit} Mbit/s."
+        return f"{which} carries more than {limit} Mbit/s."
     what = WHAT[event.check]
     unit = "" if event.check == "load" else "%"
     if event.level == "recovery":
@@ -119,7 +122,7 @@ def headline(event: Event) -> str:
 
 
 def compose(event: Event, host: str, address: str, details: bool,
-            probe: advice.Probe) -> Message:
+            probe: advice.Probe, lock_dir: str = LOCK_DIR) -> Message:
     """The message: what happened, what to do, and, with details, where
 
     `details: false` leaves the directory and process lists out: they
@@ -132,23 +135,56 @@ def compose(event: Event, host: str, address: str, details: bool,
         lines += advice.steps(event.check, event.target, event.threshold,
                               probe)
         if details:
-            lines += detail_lines(event, probe)
+            lines += detail_lines(event, probe, lock_dir)
     if event.description:
         lines.append(f"monit: {event.description}")
     title = f"[{event.level}] {host}: {event.check}" + (
         f" {event.target}" if event.target else "")
     fields = {
         "host": host, "address": address, "check": event.check,
-        "target": event.target, "value": event.value,
-        "threshold": event.threshold, "level": event.level,
-        "service": event.service, "event": event.event,
+        "target": event.target, "direction": event.direction,
+        "value": event.value, "threshold": event.threshold,
+        "level": event.level, "service": event.service,
+        "event": event.event,
     }
     return Message(title, "\n".join(lines), fields)
 
 
-def detail_lines(event: Event, probe: advice.Probe) -> list[str]:
+@contextlib.contextmanager
+def measuring(target: str, lock_dir: str) -> Iterator[bool]:
+    """Whether this alert may measure `target` now: one du per filesystem
+
+    False while another alert holds the lock. A lock that cannot be made
+    at all (no /run/lock) does not stop the measure: there is nothing to
+    coordinate with.
+    """
+    path = os.path.join(lock_dir, f"keel-notify-du-{slug(target)}.lock")
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT, 0o600)
+    except OSError:
+        yield True
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        yield False
+        return
+    try:
+        yield True
+    finally:
+        os.close(fd)
+
+
+def detail_lines(event: Event, probe: advice.Probe, lock_dir: str) -> (
+    list[str]
+):
     if event.check in ("disk", "inodes"):
-        found = advice.largest_directories(event.target, probe)
+        with measuring(event.target, lock_dir) as free:
+            if not free:
+                return ["Largest directories: not measured, another alert"
+                        " is measuring this filesystem."]
+            found = advice.largest_directories(event.target, probe)
         return [f"Largest directories: {found}."] if found else []
     if event.check in ("memory", "swap", "cpu", "load"):
         found = advice.largest_processes(event.check, probe)
@@ -171,66 +207,95 @@ def run_probe(argv: tuple[str, ...]) -> str | None:
     return out.stdout if out.returncode == 0 or argv[0] == "du" else None
 
 
-Secret = Callable[[dict], str]
+Secret = Callable[[str], str]
 
 
-def send(doc: dict, message: Message, level: str,
+def url_of(channel: dict, secret: Secret) -> str:
+    """A channel's URL, from the file when it is a secret; checked again"""
+    if channel.get("url_file"):
+        path = str(channel["url_file"])
+        url = secret(path)
+        if url_problem(url):
+            raise channels.ChannelError(f"{path} does not hold an https URL")
+        return url
+    return str(channel["url"])
+
+
+def send(settings: dict, message: Message, level: str,
          context: ssl.SSLContext | None = None,
          telegram_api: str | None = None,
          sendmail: str = channels.SENDMAIL,
-         secret: Secret = resolve_secret) -> list[Delivery]:
-    """Every declared channel, one Delivery each, none stopping the others
+         secret: Secret = read_secret_file) -> list[Delivery]:
+    """Every channel of the settings, one Delivery each, none stopping
+    the others
 
-    A token that cannot be read fails its own channel. What a Delivery
-    says is masked of every token read on the way, whatever path the
-    words took to get there.
+    A token or URL file that cannot be read, or that anybody but root
+    could write, fails its own channel. What a Delivery says is masked of
+    every secret read on the way, whatever path the words took.
     """
-    monitor = doc.get("monitor") or {}
-    notify = monitor.get("notify") or {}
-    tokens: list[str] = []
+    read: list[str] = []
 
-    def token(spec: dict) -> str:
-        value = secret(spec)
-        tokens.append(value)
-        return value
+    def value(path: str) -> str:
+        found = secret(path)
+        read.append(found)
+        return found
 
-    senders: dict[str, Callable[[], None]] = {
-        "email": lambda: channels.email(
-            alerts_address(doc.get("security")) or "", message.title,
-            message.text, sendmail),
-        "telegram": lambda: channels.telegram(
-            str(notify["telegram"]["chat_id"]),
-            token(notify["telegram"]["token"]), message.text, context,
-            telegram_api or channels.TELEGRAM_API),
-        "ntfy": lambda: channels.ntfy(
-            str(notify["ntfy"]["url"]),
-            token(notify["ntfy"]["token"]) if notify["ntfy"].get("token")
+    senders: dict[str, Callable[[dict], None]] = {
+        "email": lambda _: channels.email(
+            str(settings["email"]), message.title, message.text, sendmail),
+        "telegram": lambda channel: channels.telegram(
+            str(channel["chat_id"]), value(str(channel["token_file"])),
+            message.text, context, telegram_api or channels.TELEGRAM_API),
+        "ntfy": lambda channel: channels.ntfy(
+            url_of(channel, value),
+            value(str(channel["token_file"])) if channel.get("token_file")
             else None, message.title, level, message.text, context),
-        "webhook": lambda: channels.webhook(
-            str(notify["webhook"]["url"]),
+        "webhook": lambda channel: channels.webhook(
+            url_of(channel, value),
             {"text": f"{message.title}\n{message.text}", **message.fields},
             context),
     }
     deliveries = []
-    for name in working_channels(notify, doc.get("security")):
+    for name, sender in senders.items():
+        channel = settings.get(name)
+        if not channel:
+            continue
         try:
-            senders[name]()
+            sender(channel if isinstance(channel, dict) else {})
             deliveries.append(Delivery(name))
-        except (channels.ChannelError, SpecError, OSError, ValueError,
-                KeyError, TypeError) as e:
-            # ValueError is also a token file that is not UTF-8; its text
-            # is replaced by its kind, since it quotes the bytes
-            if isinstance(e, ValueError | KeyError | TypeError):
-                e = channels.ChannelError(channels.reason(e))
-            deliveries.append(Delivery(name, masked(str(e), tokens)))
+        except (channels.ChannelError, SpecError, OSError) as e:
+            deliveries.append(Delivery(name, masked(str(e), read)))
+        except (ValueError, KeyError, TypeError) as e:
+            # also a token file that is not UTF-8: its text quotes the
+            # bytes, so only its kind is said
+            deliveries.append(Delivery(name, channels.reason(e)))
     return deliveries
 
 
-def masked(text: str, tokens: list[str]) -> str:
-    for value in tokens:
+def masked(text: str, secrets: list[str]) -> str:
+    for value in secrets:
         if value:
             text = text.replace(value, MASK)
     return text
+
+
+def last_resort(message: Message, reason: str,
+                sendmail: str = channels.SENDMAIL,
+                run: Callable = subprocess.run) -> None:
+    """syslog at user.crit and root's mailbox, when no channel took it
+
+    Both best effort and both on the machine: a journal survives a full
+    disk better than a mail queue, and root's mailbox is where an
+    operator who logs in looks. Neither carries a token or a URL.
+    """
+    first = message.text.splitlines()[0] if message.text else ""
+    with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+        run([*LOGGER, f"{message.title}: {first} (no channel: {reason})"],
+            capture_output=True, timeout=COMMAND_TIMEOUT, check=False)
+    with contextlib.suppress(channels.ChannelError):
+        channels.email("root", message.title,
+                       f"{message.text}\n\nNo channel took this: {reason}",
+                       sendmail)
 
 
 def hostname() -> str:

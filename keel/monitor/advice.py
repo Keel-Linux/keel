@@ -197,7 +197,13 @@ def steps(check: str, target: str, threshold: str, probe: Probe) -> (
 
 
 def largest_directories(path: str, probe: Probe) -> str | None:
-    """The TOP biggest directories DU_DEPTH down, or None, never slowly"""
+    """The TOP biggest directories DU_DEPTH down, or None, never slowly
+
+    du's sizes include what is below, so the largest entries are taken
+    in order and one that is inside, or holds, an entry already taken is
+    passed over: /var 22G, and then not /var/lib, which /var counts. A
+    directory with a large size of its own is listed as itself.
+    """
     out = probe(("du", "-x", "-k", f"--max-depth={DU_DEPTH}", path))
     if not out:
         return None
@@ -206,14 +212,20 @@ def largest_directories(path: str, probe: Probe) -> str | None:
         size, _, name = line.partition("\t")
         if name and size.isdigit() and name != path:
             sizes.append((int(size), name))
-    names = [name for _, name in sizes]
-    leaves = [(size, name) for size, name in sizes
-              if not any(other.startswith(f"{name.rstrip('/')}/")
-                         for other in names)]
-    top = sorted(leaves, key=lambda pair: (-pair[0], pair[1]))[:TOP]
+    top: list[tuple[int, str]] = []
+    for size, name in sorted(sizes, key=lambda pair: (-pair[0], pair[1])):
+        if len(top) == TOP:
+            break
+        if not any(nested(name, taken) or nested(taken, name)
+                   for _, taken in top):
+            top.append((size, name))
     if not top:
         return None
     return ", ".join(f"{name} {human(size)}" for size, name in top)
+
+
+def nested(inner: str, outer: str) -> bool:
+    return inner.startswith(f"{outer.rstrip('/')}/")
 
 
 def largest_processes(check: str, probe: Probe) -> str | None:

@@ -27,7 +27,7 @@ from helpers import spec  # noqa: F401
 
 from keel import exits
 from keel.cli import main
-from keel.monitor import advice, channels, notify
+from keel.monitor import advice, channelfile, channels, notify
 from keel.monitor.advice import Filesystem
 from keel.spec.errors import SpecError
 
@@ -217,13 +217,17 @@ class TestAdvice(unittest.TestCase):
         self.assertIn("more than 800 Mbit/s",
                       advice.steps("throughput", "eth0", "800", probe)[0])
 
-    def test_largest_directories_are_bounded_leaves(self):
+    def test_largest_directories_do_not_nest(self):
         du = ("18874368\t/var/lib/mysql\n19000000\t/var/lib\n"
               "4300000\t/var/log\n23500000\t/var\n100\t/etc\n"
-              "50\t/opt/x\n60\t/opt\n24000000\t/\n")
+              "50\t/opt/x\n6000000\t/opt\n24000000\t/\n")
         found = advice.largest_directories("/", probe_from({"du": du}))
-        self.assertEqual(found, "/var/lib/mysql 18G, /var/log 4.1G,"
-                         " /etc 100K")
+        self.assertEqual(found, "/var 22G, /opt 5.7G, /etc 100K")
+        found = advice.largest_directories("/", probe_from({"du": (
+            "18874368\t/var/lib/mysql\n4300000\t/var/log\n"
+            "9000000\t/home\n")}))
+        self.assertEqual(found, "/var/lib/mysql 18G, /home 8.6G,"
+                         " /var/log 4.1G")
         self.assertIsNone(advice.largest_directories("/", probe_from({})))
         self.assertIsNone(advice.largest_directories(
             "/", probe_from({"du": "24000000\t/\n"})))
@@ -257,14 +261,22 @@ class TestMessage(unittest.TestCase):
         "ps": "1258291 mariadbd\n",
     }
 
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
     def event(self, level="critical", check="disk", target="/",
               threshold="90", environ=None):
         return notify.event_from(level, check, target, threshold,
                                  MONIT_ENV if environ is None else environ)
 
+    def compose(self, event, host, address, details, probe):
+        return notify.compose(event, host, address, details, probe,
+                              self.tmp.name)
+
     def test_the_decision_example(self):
-        message = notify.compose(self.event(), "blog", "2001:db8:1::10",
-                                 True, probe_from(self.PROBE))
+        message = self.compose(self.event(), "blog", "2001:db8:1::10",
+                               True, probe_from(self.PROBE))
         self.assertEqual(message.text.splitlines()[:5], [
             "blog (2001:db8:1::10): / is 92.3% full (critical at 90%).",
             "Grow the disk on the host; the container sees the new size:",
@@ -276,20 +288,34 @@ class TestMessage(unittest.TestCase):
         self.assertEqual(message.title, "[critical] blog: disk /")
         self.assertEqual(message.fields, {
             "host": "blog", "address": "2001:db8:1::10", "check": "disk",
-            "target": "/", "value": "92.3", "threshold": "90",
-            "level": "critical", "service": "keel_disk_critical_root",
+            "target": "/", "direction": "", "value": "92.3",
+            "threshold": "90", "level": "critical",
+            "service": "keel_disk_critical_root",
             "event": "Resource limit matched",
         })
 
+    def test_one_measure_per_filesystem_at_a_time(self):
+        probe = probe_from(self.PROBE)
+        with notify.measuring("/", self.tmp.name) as free:
+            self.assertTrue(free)
+            message = self.compose(self.event(), "blog", "", True, probe)
+        self.assertIn("Largest directories: not measured, another alert is"
+                      " measuring this filesystem.", message.text)
+        self.assertNotIn("du", [argv[0] for argv in probe.ran])
+        message = self.compose(self.event(), "blog", "", True, probe)
+        self.assertIn("/var/lib/mysql 18G", message.text)
+        with notify.measuring("/", "/nonexistent/lock/dir") as free:
+            self.assertTrue(free)
+
     def test_details_false_leaves_the_directories_out(self):
         probe = probe_from(self.PROBE)
-        message = notify.compose(self.event(), "blog", "", False, probe)
+        message = self.compose(self.event(), "blog", "", False, probe)
         self.assertNotIn("Largest", message.text)
         self.assertNotIn("du", [argv[0] for argv in probe.ran])
         self.assertTrue(message.text.startswith("blog: / is"))
 
     def test_a_recovery_says_so_and_gives_no_advice(self):
-        message = notify.compose(
+        message = self.compose(
             self.event("recovery", environ={}), "blog", "", True,
             probe_from(self.PROBE))
         self.assertEqual(message.text, "blog: / is back under 90% full.")
@@ -307,8 +333,10 @@ class TestMessage(unittest.TestCase):
              "the link of eth0 is up again."),
             (("warn", "throughput", "eth0", "800"), {},
              "eth0 carries more than 800 Mbit/s."),
-            (("recovery", "throughput", "eth0", "800"), {},
-             "eth0 is back under 800 Mbit/s."),
+            (("warn", "throughput", "eth0", "800", "upload"), {},
+             "eth0 upload carries more than 800 Mbit/s."),
+            (("recovery", "throughput", "eth0", "800", "download"), {},
+             "eth0 download is back under 800 Mbit/s."),
             (("warn", "memory", "", "85"),
              {"MONIT_DESCRIPTION": "mem usage of 88.1% matches"},
              "memory is at 88.1% (warn at 85%)."),
@@ -321,35 +349,23 @@ class TestMessage(unittest.TestCase):
              "swap is back under 50%."),
         ]
         for args, environ, expected in cases:
-            event = notify.event_from(*args, environ)
+            level, check, target, threshold, *direction = args
+            event = notify.event_from(level, check, target, threshold,
+                                      environ, *direction)
             self.assertEqual(notify.headline(event), expected, args)
 
     def test_process_details_for_memory_and_none_for_the_network(self):
-        memory = notify.compose(self.event("warn", "memory", "", "85"),
-                                "blog", "", True, probe_from(self.PROBE))
+        memory = self.compose(self.event("warn", "memory", "", "85"),
+                              "blog", "", True, probe_from(self.PROBE))
         self.assertIn("Largest processes: mariadbd 1.2G.", memory.text)
-        link = notify.compose(self.event("critical", "link", "eth0", ""),
-                              "blog", "", True, probe_from({}))
+        link = self.compose(self.event("critical", "link", "eth0", ""),
+                            "blog", "", True, probe_from({}))
         self.assertNotIn("Largest", link.text)
-        empty = notify.compose(self.event("warn", "memory", "", "85"),
-                               "blog", "", True, probe_from({}))
+        empty = self.compose(self.event("warn", "memory", "", "85"),
+                             "blog", "", True, probe_from({}))
         self.assertNotIn("Largest", empty.text)
-        disk = notify.compose(self.event(), "blog", "", True,
-                              probe_from({}))
+        disk = self.compose(self.event(), "blog", "", True, probe_from({}))
         self.assertNotIn("Largest", disk.text)
-
-    def test_the_address_is_the_first_static_one_ipv6_first(self):
-        doc = {"network": {"interfaces": {
-            "eth0": {"ipv4": {"method": "static",
-                              "address": "192.0.2.10/24"},
-                     "ipv6": {"method": "auto"}},
-            "eth1": {"ipv6": {"method": "static",
-                              "address": "2001:db8:1::10/64"}},
-        }}}
-        self.assertEqual(notify.address_of(doc), "2001:db8:1::10")
-        del doc["network"]["interfaces"]["eth1"]
-        self.assertEqual(notify.address_of(doc), "192.0.2.10")
-        self.assertEqual(notify.address_of({}), "")
 
     def test_run_probe(self):
         self.assertEqual(notify.run_probe(("printf", "x")), "x")
@@ -396,8 +412,17 @@ class ChannelTestCase(unittest.TestCase):
         os.chmod(self.token_file, 0o600)
 
     def doc(self, **notify_section) -> dict:
-        return {"version": 1, "security": {"alerts": "admin@example.org"},
-                "monitor": {"enabled": True, "notify": notify_section}}
+        """What apply resolves into the settings notify reads"""
+        return channelfile.build({
+            "version": 1, "security": {"alerts": "admin@example.org"},
+            "monitor": {"enabled": True, "notify": notify_section}})
+
+    def secret(self, name: str, text: str) -> str:
+        path = join(self.tmp, name)
+        with open(path, "w") as fob:
+            fob.write(text)
+        os.chmod(path, 0o600)
+        return path
 
     def message(self) -> notify.Message:
         return notify.Message("[critical] blog: disk /", "blog: / is full",
@@ -539,8 +564,35 @@ class TestSend(ChannelTestCase):
             "telegram: failed: UnicodeDecodeError", "webhook: sent"])
 
     def test_no_channel_is_no_delivery(self):
-        self.assertEqual(notify.send({"version": 1}, self.message(), "warn"),
-                         [])
+        self.assertEqual(notify.send({}, self.message(), "warn"), [])
+
+    def test_a_url_in_a_secret_file_is_read_and_checked(self):
+        good = self.secret("hook", f"{self.server.url}/hook\n")
+        bad = self.secret("topic", "http://ntfy.example.org/open\n")
+        settings = self.doc(webhook={"url": {"file": good}},
+                            ntfy={"url": {"file": bad}})
+        found = notify.send(settings, self.message(), "warn", self.context)
+        self.assertEqual([d.line() for d in found], [
+            f"ntfy: failed: {bad} does not hold an https URL",
+            "webhook: sent"])
+        self.assertNotIn("ntfy.example.org", found[0].line())
+
+    def test_a_secret_file_others_can_write_is_refused(self):
+        loose = self.secret("loose", TOKEN)
+        os.chmod(loose, 0o620)
+        found = notify.send(self.doc(telegram={
+            "chat_id": "-1", "token": {"file": loose}}), self.message(),
+            "warn", self.context, self.server.url)
+        self.assertEqual(found[0].line(), f"telegram: failed: {loose}:"
+                         " secret file mode must be 0600 or stricter")
+        self.assertEqual(self.server.requests, [])
+
+    def test_a_malformed_channel_fails_alone(self):
+        found = notify.send({"webhook": {"url": f"{self.server.url}/hook"},
+                             "telegram": {"chat_id": "1"}},
+                            self.message(), "warn", self.context)
+        self.assertEqual([d.line() for d in found],
+                         ["telegram: failed: KeyError", "webhook: sent"])
 
     def test_the_token_never_shows_in_what_is_said(self):
         doc = self.doc(telegram={"chat_id": "-1",
@@ -578,11 +630,103 @@ class TestEmail(unittest.TestCase):
         self.assertIn("took longer than 30 s", str(caught.exception))
 
     def test_a_secret_error_is_a_failed_channel(self):
-        doc = {"monitor": {"notify": {"telegram": {
-            "chat_id": 1, "token": {"file": "/x"}}}}}
-        found = notify.send(doc, notify.Message("t", "x", {}), "warn",
+        settings = {"telegram": {"chat_id": "1", "token_file": "/x"}}
+        found = notify.send(settings, notify.Message("t", "x", {}), "warn",
                             secret=mock.Mock(side_effect=SpecError("gone")))
         self.assertEqual(found[0].line(), "telegram: failed: gone")
+
+    def test_the_last_resort_is_syslog_and_root_s_mailbox(self):
+        ran = []
+        message = notify.Message("[critical] blog: disk /",
+                                 "blog: / is full\nGrow it", {})
+        with tempfile.TemporaryDirectory() as tmp:
+            sendmail = join(tmp, "sendmail")
+            with open(sendmail, "w") as fob:
+                fob.write('#!/bin/sh\ncat > "$0.out"\n')
+            os.chmod(sendmail, 0o700)
+            notify.last_resort(message, "every channel failed", sendmail,
+                               lambda argv, **kwargs: ran.append(argv))
+            with open(f"{sendmail}.out") as fob:
+                mail = fob.read()
+        self.assertEqual(ran, [[
+            "logger", "-p", "user.crit", "-t", "keel-notify",
+            "[critical] blog: disk /: blog: / is full (no channel: every"
+            " channel failed)"]])
+        self.assertIn("To: root", mail)
+        self.assertIn("No channel took this: every channel failed", mail)
+
+    def test_a_last_resort_that_cannot_run_is_quiet(self):
+        def missing(argv, **kwargs):
+            raise OSError(2, "No such file or directory")
+        notify.last_resort(notify.Message("t", "", {}), "x",
+                           "/nonexistent/sendmail", missing)
+
+
+class TestChannelFile(unittest.TestCase):
+    DOC = {
+        "version": 1,
+        "instance": {"hostname": "blog"},
+        "security": {"alerts": "admin@example.org"},
+        "network": {"interfaces": {"eth0": {"ipv6": {
+            "method": "static", "address": "2001:db8:1::10/64"}}}},
+        "monitor": {"enabled": True, "notify": {
+            "email": True, "details": True,
+            "telegram": {"chat_id": -100, "token": {"file": "/s/t"}},
+            "ntfy": {"url": {"file": "/s/topic"}, "token": {"file": "/s/n"}},
+            "webhook": {"url": "https://hooks.example.org/k"}}},
+    }
+
+    def test_what_apply_writes_holds_paths_never_tokens(self):
+        self.assertEqual(channelfile.build(self.DOC), {
+            "written_by": channelfile.WRITTEN_BY,
+            "host": "blog", "address": "2001:db8:1::10", "details": True,
+            "email": "admin@example.org",
+            "telegram": {"chat_id": "-100", "token_file": "/s/t"},
+            "ntfy": {"url_file": "/s/topic", "token_file": "/s/n"},
+            "webhook": {"url": "https://hooks.example.org/k"},
+        })
+        self.assertEqual(channelfile.secret_paths(
+            channelfile.build(self.DOC)), ["/s/t", "/s/topic", "/s/n"])
+        self.assertTrue(channelfile.written_by_keel(
+            channelfile.render(self.DOC)))
+        self.assertFalse(channelfile.written_by_keel("not json"))
+        self.assertFalse(channelfile.written_by_keel(None))
+
+    def test_the_address_is_the_first_static_one_ipv6_first(self):
+        doc = {"network": {"interfaces": {
+            "eth0": {"ipv4": {"method": "static",
+                              "address": "192.0.2.10/24"},
+                     "ipv6": {"method": "auto"}},
+            "eth1": {"ipv6": {"method": "static",
+                              "address": "2001:db8:1::10/64"}},
+        }}}
+        self.assertEqual(channelfile.address_of(doc), "2001:db8:1::10")
+        del doc["network"]["interfaces"]["eth1"]
+        self.assertEqual(channelfile.address_of(doc), "192.0.2.10")
+        self.assertEqual(channelfile.address_of({}), "")
+
+    def test_load_refuses_what_it_cannot_trust(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = join(tmp, "monitor.json")
+            with self.assertRaises(SpecError) as caught:
+                channelfile.load(path)
+            self.assertIn("secret file not found", str(caught.exception))
+            for text, mode, words in (
+                (channelfile.render(self.DOC), 0o660, "mode must be 0600"),
+                ("{not json", 0o600, "not readable as keel's"),
+                ('{"host": "x"}', 0o600, "not keel's monitor settings"),
+                ("[1]", 0o600, "not keel's monitor settings"),
+            ):
+                with open(path, "w") as fob:
+                    fob.write(text)
+                os.chmod(path, mode)
+                with self.assertRaises(SpecError) as caught:
+                    channelfile.load(path)
+                self.assertIn(words, str(caught.exception))
+                self.assertNotIn("hooks.example.org", str(caught.exception))
+            with open(path, "w") as fob:
+                fob.write(channelfile.render(self.DOC))
+            self.assertEqual(channelfile.load(path)["host"], "blog")
 
 
 def run_cli(*argv: str) -> tuple[int, str, str]:
@@ -593,40 +737,46 @@ def run_cli(*argv: str) -> tuple[int, str, str]:
 
 
 class TestCommand(ChannelTestCase):
-    def write_spec(self, notify_section: str) -> str:
-        path = join(self.tmp, "instance.yaml")
+    def write_settings(self, settings: dict, mode: int = 0o600) -> str:
+        path = join(self.tmp, "monitor.json")
         with open(path, "w") as fob:
-            fob.write(
-                "version: 1\n"
-                "security:\n  alerts: admin@example.org\n"
-                "monitor:\n  enabled: true\n  notify:\n" + notify_section)
+            json.dump(settings, fob)
+        os.chmod(path, mode)
         return path
 
-    def notify(self, spec_path: str, *extra: str) -> tuple[int, str, str]:
-        """keel notify as monit runs it; Telegram is the local server too"""
+    def notify(self, settings: str, *extra: str) -> tuple[int, str, str]:
+        """keel notify as monit runs it; Telegram is the local server too,
+        and the last resort is recorded instead of reaching syslog"""
         environ = dict(os.environ, SSL_CERT_FILE=self.cert, **MONIT_ENV)
+        self.resorts = []
         with mock.patch.dict(os.environ, environ, clear=True), \
                 mock.patch.object(channels, "TELEGRAM_API",
-                                  f"{self.server.url}/fail"):
-            return run_cli("notify", "--spec", spec_path, "--level",
+                                  f"{self.server.url}/fail"), \
+                mock.patch.object(notify, "LOCK_DIR", self.tmp), \
+                mock.patch.object(notify, "last_resort", side_effect=(
+                    lambda message, reason: self.resorts.append(reason))):
+            return run_cli("notify", "--settings", settings, "--level",
                            "critical", "--check", "disk", "--path",
                            self.tmp, "--threshold", "90", *extra)
 
     def test_monit_s_event_reaches_every_channel(self):
-        path = self.write_spec(
-            f"    ntfy:\n      url: {self.server.url}/keel\n"
-            f"      token: {{file: {self.token_file}}}\n"
-            f"    webhook:\n      url: {self.server.url}/hook\n"
-            "    details: true\n")
+        path = self.write_settings(dict(self.doc(
+            ntfy={"url": f"{self.server.url}/keel",
+                  "token": {"file": self.token_file}},
+            webhook={"url": {"file": self.secret(
+                "hook", f"{self.server.url}/hook\n")}},
+            details=True), host="blog", address="2001:db8:1::10"))
         os.makedirs(join(self.tmp, "data"), exist_ok=True)
         with open(join(self.tmp, "data", "blob"), "w") as fob:
             fob.write("x" * 8192)
         code, out, err = self.notify(path)
         self.assertEqual((code, err), (exits.OK, ""))
         self.assertEqual(out, "ntfy: sent\nwebhook: sent\n")
+        self.assertEqual(self.resorts, [])
         ntfy_request, hook_request = self.server.requests
         text = ntfy_request[2].decode()
-        self.assertIn(f"{self.tmp} is 92.3% full (critical at 90%).", text)
+        self.assertIn(f"blog (2001:db8:1::10): {self.tmp} is 92.3% full"
+                      " (critical at 90%).", text)
         self.assertIn("monit: space usage 92.3% matches", text)
         self.assertIn("Largest directories", text)
         self.assertEqual(ntfy_request[1]["Authorization"], f"Bearer {TOKEN}")
@@ -634,36 +784,48 @@ class TestCommand(ChannelTestCase):
         self.assertEqual((hook["check"], hook["level"], hook["value"]),
                          ("disk", "critical", "92.3"))
 
-    def test_every_channel_failing_exits_22_and_hides_the_token(self):
-        path = self.write_spec(
-            "    telegram:\n      chat_id: '-1'\n"
-            f"      token: {{file: {self.token_file}}}\n"
-            f"    webhook:\n      url: {self.server.url}/fail\n")
+    def test_every_channel_failing_is_the_last_resort_and_22(self):
+        path = self.write_settings(self.doc(
+            telegram={"chat_id": "-1", "token": {"file": self.token_file}},
+            webhook={"url": f"{self.server.url}/fail"}))
         code, out, err = self.notify(path)
         self.assertEqual(code, exits.NOTIFY_FAILED)
         self.assertEqual(out, "")
         self.assertIn("Error: webhook: failed: answered HTTP 500", err)
         self.assertIn("Error: telegram: failed:", err)
+        self.assertIn("Error: notify: every channel failed; told syslog"
+                      " (user.crit) and root's mailbox instead", err)
+        self.assertEqual(self.resorts, ["every channel failed"])
         self.assertNotIn(TOKEN, out + err)
 
-    def test_no_spec_no_channel_and_a_bad_spec(self):
-        code, _, err = self.notify(join(self.tmp, "absent.yaml"))
+    def test_settings_that_cannot_be_used_are_the_last_resort(self):
+        absent = join(self.tmp, "absent.json")
+        code, _, err = self.notify(absent)
         self.assertEqual(code, exits.NOTIFY_FAILED)
-        self.assertIn("no channel to send to", err)
-        path = join(self.tmp, "plain.yaml")
-        with open(path, "w") as fob:
-            fob.write("version: 1\n")
-        code, _, err = self.notify(path)
+        self.assertIn(f"{absent}: secret file not found", err)
+        loose = self.write_settings(self.doc(webhook={
+            "url": f"{self.server.url}/hook"}), 0o620)
+        code, _, err = self.notify(loose)
         self.assertEqual(code, exits.NOTIFY_FAILED)
-        self.assertIn("declares no channel", err)
-        with open(path, "w") as fob:
-            fob.write("version: 2\n")
-        code, _, _ = self.notify(path)
-        self.assertEqual(code, exits.SPEC_INVALID)
+        self.assertIn("secret file mode must be 0600 or stricter", err)
+        self.assertEqual(self.server.requests, [])
+        empty = self.write_settings(self.doc())
+        code, _, err = self.notify(empty)
+        self.assertEqual(code, exits.NOTIFY_FAILED)
+        self.assertIn(f"{empty} declares no channel", err)
+        self.assertEqual(self.resorts, [f"{empty} declares no channel"])
+
+    def test_notify_takes_no_spec(self):
+        with self.assertRaises(SystemExit) as caught:
+            run_cli("notify", "--spec", "/tmp/instance.yaml", "--level",
+                    "warn", "--check", "disk")
+        self.assertEqual(caught.exception.code, exits.USAGE)
 
     def test_level_and_check_are_required_and_bounded(self):
         for argv in (("--level", "panic", "--check", "disk"),
-                     ("--level", "warn")):
+                     ("--level", "warn"),
+                     ("--level", "warn", "--check", "throughput",
+                      "--direction", "sideways")):
             with self.assertRaises(SystemExit) as caught:
                 run_cli("notify", *argv)
             self.assertEqual(caught.exception.code, exits.USAGE)

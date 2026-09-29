@@ -37,7 +37,7 @@ in [docs/apply.md](docs/apply.md).
 | `keel database promote` | Make this replica a primary: stop replicating and forget the primary it followed. Never something `apply` decides, and there is no failover in Keel, so only the operator knows the old primary should stop being one (decision 0013, docs/apply.md) |
 | `keel network confirm` | Keep the network change `apply --system` made; refused unless run from a session opened after it over the new configuration, or a console (decision 0018, docs/apply.md) |
 | `keel network revert` | Put back the interfaces file a pending network change replaced; what the revert timer runs. `--boot` restores the file only, for the boot unit |
-| `keel notify` | What monit runs when a check of the `monitor` section fails, lasts or recovers: sends one message, saying what happened and what to do, to every channel the section declares (email, Telegram, ntfy, a webhook), reading the tokens from their secret files and printing no URL (decision 0021, docs/apply.md) |
+| `keel notify` | What monit runs when a check of the `monitor` section fails, lasts or recovers: sends one message, saying what happened and what to do, to every channel the section declares (email, Telegram, ntfy, a webhook). It reads the channels from `/etc/keel/monitor.json`, which `apply --system` writes as root, never from the spec, reads the tokens from their secret files and prints no URL (decision 0021, docs/apply.md) |
 | `keel inspect` | Write a spec from the running machine, or from an offline root, and report every field with its source or why it was not inferred; secrets are never read (brief sections 5.2 and 7) |
 | `keel diff` | Report drift between the spec and the running machine, or an offline root, field by field, through the same collector `inspect` uses; secrets are never compared and their files need not exist, nothing is written (brief section 5.2) |
 | `keel verify` | Check the installed layers against their manifests, one line per layer (brief section 5.4; packages not implemented yet) |
@@ -131,7 +131,7 @@ Defined in one place, `keel/exits.py`, and reproduced here.
 | 19 | `CHANNEL_EXPIRED` | A channel pointer is past its expiry. A mirror that is stale, broken or hostile holds an appliance on an old release by not updating, so this is an error and never a warning |
 | 20 | `CHANNEL_ROLLBACK` | A channel pointer names an earlier revision than the one this instance is on; `--allow-rollback`, or naming the release and revision, is how going back is asked for |
 | 21 | `NETWORK_NOT_CONFIRMED` | `keel network confirm` refused: no change is waiting, or it was not run from a new session over the new configuration, or a console (docs/apply.md) |
-| 22 | `NOTIFY_FAILED` | `keel notify` reached no channel: the spec declares none, or every one failed. One channel that takes the message is success; the others' failures are printed |
+| 22 | `NOTIFY_FAILED` | `keel notify` reached no channel: `/etc/keel/monitor.json` is missing or refused, declares none, or every one failed; the message then went to syslog (user.crit) and root's mailbox. One channel that takes the message is success; the others' failures are printed |
 
 Two rules that callers depend on:
 
@@ -157,7 +157,7 @@ Two rules that callers depend on:
   there, because secrets are references and a machine that is only being
   compared may not hold them;
 - `apply --system` changes only what differs, deletes nothing but the
-  monit file it wrote itself when the monitor is turned off, and never
+  monitor files it wrote itself when the monitor is turned off, and never
   touches a password; a second run changes nothing, and `--dry-run`
   changes nothing at all ([docs/apply.md](docs/apply.md));
 - nothing keel writes for monit acts on an alert: it runs `keel notify`,

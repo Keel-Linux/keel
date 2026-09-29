@@ -7,18 +7,19 @@ check the section leaves out gets the default decided there, so
 has none: what is too much depends on the link, so an interface is
 watched only when it is declared.
 
-Minutes become monit cycles at the cycle keel sets in the file it
-writes. monit holds a condition for at most 64 cycles, so a duration
-longer than that is refused by validation rather than cut short.
+Minutes become monit cycles at the cycle monit already runs at: keel
+does not set it, since `set daemon` is global and would reset the
+operator's own cycle and start delay. monit holds a condition for at
+most 64 cycles, so a duration longer than that at the machine's cycle is
+refused by the plan rather than cut short.
 """
 
-# The cycle keel.conf sets with `set daemon`: one check a minute, so a
-# for_minutes is that many cycles.
-CYCLE_SECONDS = 60
+# What Debian's monitrc sets, and what is assumed when nothing sets one
+DEBIAN_CYCLE = 120
 # monit refuses `for N cycles` above this ("must be between 1 and 64").
 MAX_CYCLES = 64
-# How often a condition that lasts is told again: once an hour.
-REMIND_CYCLES = 60
+# How often a condition that lasts is told again: about once an hour
+REMIND_SECONDS = 3600
 DEFAULTS: dict[str, dict] = {
     "disk": {"warn": 80, "critical": 90},
     "inodes": {"critical": 90},
@@ -51,14 +52,34 @@ def effective(monitor: dict) -> dict:
     return found
 
 
-def cycles(minutes: int) -> int:
-    """How many cycles of CYCLE_SECONDS make `minutes`, at least one"""
-    return max(1, -(-int(minutes) * 60 // CYCLE_SECONDS))
+def cycles(minutes: int, cycle: int) -> int:
+    """How many cycles of `cycle` seconds cover `minutes`, at least one"""
+    return max(1, -(-int(minutes) * 60 // cycle))
 
 
-def minutes(count: int, cycle: int = CYCLE_SECONDS) -> float:
+def reminder(cycle: int) -> int:
+    """The cycles between two reminders, at least one"""
+    return max(1, round(REMIND_SECONDS / cycle))
+
+
+def minutes(count: int, cycle: int) -> float:
     """The duration `count` cycles of `cycle` seconds hold a condition"""
     return count * cycle / 60
+
+
+def too_long(checks: dict, cycle: int) -> list[str]:
+    """Every for_minutes that monit could not hold at this cycle"""
+    found = [(f"monitor.checks.{name}.for_minutes", check["for_minutes"])
+             for name, check in checks.items()
+             if name != "network" and "for_minutes" in check]
+    found += [(f"monitor.checks.network.{iface}.for_minutes",
+               check["for_minutes"])
+              for iface, check in checks["network"].items()]
+    return [
+        f"{key}: {value} minutes is {cycles(value, cycle)} cycles of"
+        f" {cycle} s, and monit holds a condition for at most {MAX_CYCLES}"
+        for key, value in found if cycles(value, cycle) > MAX_CYCLES
+    ]
 
 
 def bytes_per_second(mbit: float) -> int:

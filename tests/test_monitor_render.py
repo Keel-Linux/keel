@@ -3,10 +3,11 @@
 
 The renderer is pure, so every rule of decision 0021 is checked on its
 output: warn and critical as two services, a reminder and a recovery on
-every test, Mbit/s as bytes per second, minutes as cycles. The walk warn,
-critical, warn, ok is played against the rendered file the way monit
-plays it, one state per service. When a monit binary is at hand (on PATH,
-or named by KEEL_MONIT), the rendered file is also given to `monit -t`.
+every test, Mbit/s as bytes per second, minutes as cycles of the cycle
+monit already runs at. The walk warn, critical, warn, ok is played
+against the rendered file the way monit plays it, one state per service.
+When a monit binary is at hand (on PATH, or named by KEEL_MONIT), the
+rendered file is also given to `monit -t`.
 """
 
 import os
@@ -15,26 +16,28 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from os.path import join
 
 from helpers import spec  # noqa: F401
 
 from keel.diff.compare import normalize
 from keel.inspect.monitor import (
-    DEBIAN_CYCLE,
     NOTIFY_REASON,
-    daemon_cycle,
+    Cycle,
+    monit_cycle,
     probe_monitor,
     read_services,
 )
 from keel.inspect.report import INFERRED, NOT_INFERRED
-from keel.inspect.tree import File
+from keel.inspect.tree import File, Tree
 from keel.monitor import settings
 from keel.monitor.mounts import Mount, parse, real_filesystems, unescape
 from keel.monitor.render import filesystem_names, render, slug
 from keel.monitor.settings import effective
 
-NOTIFY = ("/usr/bin/python3", "-B", "-m", "keel", "notify", "--spec",
-          "/etc/keel/instance.yaml")
+NOTIFY = ("/usr/bin/python3", "-B", "-m", "keel", "notify")
+MINUTE = Cycle(60, "set daemon 60 in /etc/monit/monitrc")
+DEBIAN = Cycle(120, "set daemon 120 in /etc/monit/monitrc")
 # a Proxmox container on LVM thin storage, as its mountinfo reads, with a
 # mount point, lxcfs and the host's bind mounts
 CONTAINER = """\
@@ -54,6 +57,8 @@ CONTAINER = """\
 1073 1060 8:49 / /srv/web+data=1~x rw,relatime - xfs /dev/sdd1 rw
 1074 1060 8:50 / /srv/user@host rw,relatime - xfs /dev/sdd2 rw
 1075 1060 8:51 / /srv/a:b rw,relatime - xfs /dev/sdd3 rw
+1076 1060 0:80 / /mnt/s3 rw - fuse.s3fs s3fs rw
+1077 1060 0:81 / /mnt/dav rw - davfs https://dav.example.org rw
 """
 BTRFS = """\
 28 1 0:26 /@ / rw,relatime - btrfs /dev/vda2 rw,subvol=/@
@@ -64,9 +69,11 @@ malformed line without the separator
 """
 
 
-def rendered(checks: dict | None = None, mounts=None) -> str:
+def rendered(checks: dict | None = None, mounts=None, cycle: int = 60) -> (
+    str
+):
     return render(effective({"checks": checks or {}}),
-                  mounts or [Mount("/", "ext4", "/dev/sda1")], NOTIFY)
+                  mounts or [Mount("/", "ext4", "/dev/sda1")], NOTIFY, cycle)
 
 
 def blocks(text: str) -> dict[str, str]:
@@ -87,15 +94,25 @@ class TestMounts(unittest.TestCase):
         self.assertEqual(unsafe, ["/media/My Disk", "/srv/user@host",
                                   "/srv/a:b"])
 
-    def test_every_pseudo_and_remote_type_is_left_out(self):
+    def test_every_pseudo_remote_and_fuse_type_is_left_out(self):
         lines = "".join(
             f"{n} 1 0:{n} / /data{n} rw - {fstype} src rw\n"
             for n, fstype in enumerate(sorted(
                 ("proc", "sysfs", "tmpfs", "devtmpfs", "cgroup", "cgroup2",
                  "overlay", "squashfs", "fuse.lxcfs", "nfs", "cifs",
-                 "iso9660", "erofs")))
+                 "iso9660", "erofs", "fuse.sshfs", "fuse.rclone", "davfs",
+                 "9p", "ceph", "glusterfs")))
         )
         self.assertEqual(real_filesystems(lines), ([], []))
+        self.assertEqual(len(real_filesystems(
+            "1 0 8:1 / /win rw - fuseblk /dev/sda1 rw\n")[0]), 1)
+
+    def test_a_device_skipped_for_its_name_is_watched_at_another(self):
+        mounts, unsafe = real_filesystems(
+            "1 0 8:1 / /my\\040disk rw - ext4 /dev/sdb1 rw\n"
+            "2 0 8:1 / /srv/disk rw - ext4 /dev/sdb1 rw\n")
+        self.assertEqual([m.path for m in mounts], ["/srv/disk"])
+        self.assertEqual(unsafe, [])
 
     def test_btrfs_subvolumes_count_once_and_the_root_is_kept(self):
         mounts, _ = real_filesystems(BTRFS)
@@ -135,11 +152,24 @@ class TestSettings(unittest.TestCase):
         self.assertEqual(settings.bytes_per_second(0.5), 62_500)
         self.assertEqual(settings.mbit(100_000_000), 800.0)
 
-    def test_minutes_and_cycles(self):
-        self.assertEqual(settings.cycles(5), 5)
-        self.assertEqual(settings.cycles(64), settings.MAX_CYCLES)
-        self.assertEqual(settings.minutes(5), 5)
-        self.assertEqual(settings.minutes(5, 120), 10)
+    def test_minutes_and_cycles_at_the_machine_s_cycle(self):
+        self.assertEqual(settings.cycles(5, 60), 5)
+        self.assertEqual(settings.cycles(5, 120), 3)
+        self.assertEqual(settings.cycles(1, 120), 1)
+        self.assertEqual(settings.cycles(64, 60), settings.MAX_CYCLES)
+        self.assertEqual(settings.minutes(3, 120), 6)
+        self.assertEqual(settings.reminder(120), 30)
+        self.assertEqual(settings.reminder(7200), 1)
+
+    def test_too_long_is_counted_at_the_machine_s_cycle(self):
+        checks = effective({"checks": {
+            "cpu": {"for_minutes": 65},
+            "network": {"eth0": {"link": True, "for_minutes": 200}}}})
+        self.assertEqual(settings.too_long(checks, 120), [
+            "monitor.checks.network.eth0.for_minutes: 200 minutes is 100"
+            " cycles of 120 s, and monit holds a condition for at most 64"])
+        self.assertEqual(len(settings.too_long(checks, 60)), 2)
+        self.assertEqual(settings.too_long(effective({}), 30), [])
 
     def test_number(self):
         self.assertEqual(settings.number(2.0), "2")
@@ -148,10 +178,10 @@ class TestSettings(unittest.TestCase):
 
 
 class TestRender(unittest.TestCase):
-    def test_the_file_is_keel_s_and_sets_the_cycle(self):
+    def test_the_file_is_keel_s_and_never_sets_the_cycle(self):
         text = rendered()
         self.assertTrue(text.startswith("# written by keel"))
-        self.assertIn("\nset daemon 60\n", text)
+        self.assertNotIn("set daemon", text)
 
     def test_warn_and_critical_are_two_services(self):
         found = blocks(rendered())
@@ -172,37 +202,40 @@ class TestRender(unittest.TestCase):
 
     def test_every_test_has_a_reminder_and_a_recovery(self):
         text = rendered({"network": {"eth0": {"link": True,
-                                              "max_mbit": 800}}})
+                                              "max_mbit": 800}}}, cycle=120)
         tests = re.findall(r"^    if ", text, re.M)
         self.assertEqual(len(tests), 10)
-        self.assertEqual(text.count("repeat every 60 cycles"), 10)
+        self.assertEqual(text.count("repeat every 30 cycles"), 10)
         self.assertEqual(text.count("else if succeeded then exec"), 10)
         self.assertEqual(text.count("--level recovery"), 10)
 
-    def test_the_exec_line_is_keel_notify_and_carries_no_secret(self):
+    def test_the_exec_line_is_keel_notify_with_no_spec_and_no_secret(self):
         found = blocks(rendered())["keel_disk_critical_root"]
         self.assertIn(
-            'then exec "/usr/bin/python3 -B -m keel notify --spec'
-            ' /etc/keel/instance.yaml --level critical --check disk --path /'
-            ' --threshold 90"', found)
+            'then exec "/usr/bin/python3 -B -m keel notify --level critical'
+            ' --check disk --path / --threshold 90"', found)
         self.assertIn(
             'else if succeeded then exec "/usr/bin/python3 -B -m keel notify'
-            ' --spec /etc/keel/instance.yaml --level recovery --check disk'
-            ' --path / --threshold 90"', found)
+            ' --level recovery --check disk --path / --threshold 90"', found)
+        self.assertNotIn("--spec", rendered())
 
-    def test_system_checks_hold_for_their_minutes(self):
+    def test_system_checks_hold_for_their_minutes_at_the_cycle(self):
         found = blocks(rendered({"load_per_core": {"warn": 1.5,
                                                    "for_minutes": 3}}))
-        self.assertIn("if memory usage > 85% for 5 cycles then exec",
-                      found["keel_memory"])
+        self.assertIn("    # for_minutes: 5\n    if memory usage > 85% for"
+                      " 5 cycles then exec", found["keel_memory"])
         self.assertIn("if swap usage > 50% for 5 cycles", found["keel_swap"])
         self.assertIn("if cpu usage > 90% for 10 cycles", found["keel_cpu"])
         self.assertIn("if loadavg (1min) per core > 1.5 for 3 cycles",
                       found["keel_load"])
         self.assertIn("--check load --threshold 1.5", found["keel_load"])
+        slow = blocks(rendered(cycle=120))
+        self.assertIn("if memory usage > 85% for 3 cycles",
+                      slow["keel_memory"])
+        self.assertIn("if cpu usage > 90% for 5 cycles", slow["keel_cpu"])
 
-    def test_one_minute_is_one_cycle_and_needs_no_for(self):
-        found = blocks(rendered({"memory": {"for_minutes": 1}}))
+    def test_one_cycle_needs_no_for(self):
+        found = blocks(rendered({"memory": {"for_minutes": 1}}, cycle=120))
         self.assertIn("if memory usage > 85% then exec", found["keel_memory"])
 
     def test_network_only_when_declared_in_bytes_per_second(self):
@@ -218,11 +251,18 @@ class TestRender(unittest.TestCase):
         self.assertIn("--level critical --check link --iface eth0\"", eth0)
         self.assertIn("if upload > 100000000 B/s for 3 cycles", eth0)
         self.assertIn("if download > 100000000 B/s for 3 cycles", eth0)
-        self.assertIn("--check throughput --iface eth0 --threshold 800",
-                      eth0)
         vlan = found["keel_network_br0_10"]
         self.assertNotIn("link", vlan.split("\n", 1)[1])
         self.assertIn("if upload > 12500000 B/s for 5 cycles", vlan)
+
+    def test_each_direction_is_told_its_own_recovery(self):
+        eth0 = blocks(rendered({"network": {"eth0": {"max_mbit": 800}}}))[
+            "keel_network_eth0"]
+        for direction in ("upload", "download"):
+            self.assertIn(
+                f'else if succeeded then exec "/usr/bin/python3 -B -m keel'
+                f' notify --level recovery --check throughput --iface eth0'
+                f' --direction {direction} --threshold 800"', eth0)
 
     def test_one_block_per_filesystem_with_distinct_names(self):
         mounts = [Mount("/", "ext4", "a"), Mount("/var-lib", "ext4", "b"),
@@ -279,13 +319,53 @@ class TestWarnCriticalWarnOk(unittest.TestCase):
         ])
 
 
+class TestCycle(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = self.tmp.name
+        os.makedirs(join(self.root, "etc", "monit", "conf.d"))
+        os.makedirs(join(self.root, "etc", "monit", "conf-enabled"))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write(self, relative: str, text: str) -> None:
+        with open(join(self.root, relative), "w") as fob:
+            fob.write(text)
+
+    def test_the_last_set_daemon_monit_reads_wins_includes_in_place(self):
+        self.write("etc/monit/monitrc",
+                   "set daemon 120 with start delay 240\n"
+                   "include /etc/monit/conf.d/*\n"
+                   "include /etc/monit/conf-enabled/*\n")
+        self.write("etc/monit/conf.d/a", "set daemon 30\n")
+        self.write("etc/monit/conf.d/b", "# set daemon 5\ncheck system x\n")
+        found = monit_cycle(Tree(self.root))
+        self.assertEqual(found.seconds, 30)
+        self.assertTrue(found.source.startswith("set daemon 30 in "))
+        self.write("etc/monit/conf-enabled/z", "set daemon 90\n")
+        self.assertEqual(monit_cycle(Tree(self.root)).seconds, 90)
+
+    def test_no_set_daemon_is_debian_s(self):
+        found = monit_cycle(Tree(self.root))
+        self.assertEqual(found.seconds, settings.DEBIAN_CYCLE)
+        self.assertIn("Debian's 120 s assumed", found.source)
+
+    def test_includes_stop_at_a_depth(self):
+        self.write("etc/monit/monitrc", "include /etc/monit/conf.d/*\n")
+        self.write("etc/monit/conf.d/loop",
+                   "set daemon 45\ninclude /etc/monit/conf.d/*\n")
+        self.assertEqual(monit_cycle(Tree(self.root)).seconds, 45)
+
+
 class TestReadBack(unittest.TestCase):
     def conf(self, text: str) -> File:
         return File("/etc/monit/conf.d/keel.conf", text)
 
     def test_absent_is_off(self):
         section, findings = probe_monitor(File("/x/keel.conf",
-                                               problem="not present"))
+                                               problem="not present"),
+                                          MINUTE)
         self.assertEqual(section, {"enabled": False})
         self.assertEqual(findings[0].line(),
                          "monitor.enabled: false (from /x/keel.conf not"
@@ -293,12 +373,13 @@ class TestReadBack(unittest.TestCase):
 
     def test_unreadable_is_not_inferred(self):
         section, findings = probe_monitor(File(
-            "/x/keel.conf", problem="permission denied (root only)"))
+            "/x/keel.conf", problem="permission denied (root only)"), MINUTE)
         self.assertIsNone(section)
         self.assertEqual(findings[0].status, NOT_INFERRED)
 
     def test_a_file_keel_did_not_write_says_nothing(self):
-        section, findings = probe_monitor(self.conf("check system x\n"))
+        section, findings = probe_monitor(self.conf("check system x\n"),
+                                          MINUTE)
         self.assertIsNone(section)
         self.assertIn("not written by keel", findings[0].source)
 
@@ -311,42 +392,45 @@ class TestReadBack(unittest.TestCase):
                                          "for_minutes": 2},
                                 "eth1": {"max_mbit": 100}}}
         mounts = [Mount("/", "ext4", "a"), Mount("/srv", "xfs", "b")]
-        section, findings = probe_monitor(
-            self.conf(rendered(declared, mounts)))
-        self.assertEqual(section, {"enabled": True, "checks": {
-            "disk": {"warn": 70, "critical": 85},
-            "inodes": {"critical": 95},
-            "memory": {"warn": 80, "for_minutes": 3},
-            "swap": {"warn": 50, "for_minutes": 5},
-            "cpu": {"warn": 90, "for_minutes": 10},
-            "load_per_core": {"warn": 1.5, "for_minutes": 10},
-            "network": {
-                "eth0": {"link": True, "max_mbit": 800, "for_minutes": 2},
-                "eth1": {"link": False, "max_mbit": 100, "for_minutes": 5},
-            },
-        }})
+        for cycle in (MINUTE, DEBIAN, Cycle(45, "x")):
+            section, findings = probe_monitor(
+                self.conf(rendered(declared, mounts, cycle.seconds)), cycle)
+            self.assertEqual(section, {"enabled": True, "checks": {
+                "disk": {"warn": 70, "critical": 85},
+                "inodes": {"critical": 95},
+                "memory": {"warn": 80, "for_minutes": 3},
+                "swap": {"warn": 50, "for_minutes": 5},
+                "cpu": {"warn": 90, "for_minutes": 10},
+                "load_per_core": {"warn": 1.5, "for_minutes": 10},
+                "network": {
+                    "eth0": {"link": True, "max_mbit": 800,
+                             "for_minutes": 2},
+                    "eth1": {"link": False, "max_mbit": 100,
+                             "for_minutes": 5},
+                },
+            }}, cycle)
         self.assertEqual(findings[-1].field, "monitor.notify")
         self.assertEqual(findings[-1].source, NOTIFY_REASON)
         self.assertTrue(all(f.status == INFERRED for f in findings[:-1]))
+
+    def test_minutes_the_cycles_no_longer_give_are_the_cycles_duration(self):
+        text = rendered({"memory": {"for_minutes": 5}})
+        section, _ = probe_monitor(self.conf(text), DEBIAN)
+        self.assertEqual(section["checks"]["memory"]["for_minutes"], 10)
+        section, _ = probe_monitor(self.conf(text.replace(
+            "    # for_minutes: 5\n    if memory", "    if memory")), MINUTE)
+        self.assertEqual(section["checks"]["memory"]["for_minutes"], 5)
 
     def test_filesystems_with_different_thresholds_are_not_inferred(self):
         text = rendered() + (
             "\ncheck filesystem keel_disk_warn_srv with path /srv\n"
             "    if space usage > 75% then exec \"x\"\n")
-        section, findings = probe_monitor(self.conf(text))
+        section, findings = probe_monitor(self.conf(text), MINUTE)
         self.assertNotIn("warn", section["checks"]["disk"])
         found = [f for f in findings
                  if f.field == "monitor.checks.disk.warn"][0]
         self.assertEqual(found.status, NOT_INFERRED)
         self.assertIn("different thresholds (75, 80)", found.source)
-
-    def test_the_cycle_is_monit_s_last_or_debian_s(self):
-        self.assertEqual(daemon_cycle("set daemon 30\nset daemon 90\n"), 90)
-        self.assertEqual(daemon_cycle("check system x\n"), DEBIAN_CYCLE)
-        text = rendered({"memory": {"for_minutes": 4}}).replace(
-            "set daemon 60", "set daemon 120")
-        section, _ = probe_monitor(self.conf(text))
-        self.assertEqual(section["checks"]["memory"]["for_minutes"], 8)
 
     def test_lines_outside_a_service_are_ignored(self):
         self.assertEqual(read_services("if space usage > 5%\n"), [])
@@ -354,7 +438,7 @@ class TestReadBack(unittest.TestCase):
     def test_a_file_without_filesystems_has_no_disk_thresholds(self):
         text = "\n".join(line for line in rendered().split("\n\n")
                          if "check filesystem" not in line)
-        section, _ = probe_monitor(self.conf(text))
+        section, _ = probe_monitor(self.conf(text), MINUTE)
         self.assertNotIn("disk", section["checks"])
         self.assertIn("memory", section["checks"])
 
@@ -374,19 +458,23 @@ def monit_binary() -> str | None:
 class TestRealMonit(unittest.TestCase):
     """The rendered file, given to monit itself: its parser is the judge"""
 
-    def check(self, text: str) -> subprocess.CompletedProcess:
+    def check(self, text: str, extra: str = "") -> (
+        subprocess.CompletedProcess
+    ):
         with tempfile.TemporaryDirectory() as tmp:
             conf = os.path.join(tmp, "keel.conf")
             control = os.path.join(tmp, "monitrc")
             with open(conf, "w") as fob:
                 fob.write(text)
             with open(control, "w") as fob:
-                fob.write(f"set daemon 120\nset idfile {tmp}/id\n"
+                fob.write(f"set daemon 120 with start delay 240\n"
+                          f"set idfile {tmp}/id\n"
                           f"set statefile {tmp}/state\ninclude {conf}\n")
             os.chmod(conf, 0o600)
             os.chmod(control, 0o600)
-            return subprocess.run([monit_binary(), "-t", "-c", control],
-                                  capture_output=True, text=True)
+            return subprocess.run(
+                [monit_binary(), "-t", "-c", control, *extra.split()],
+                capture_output=True, text=True)
 
     def test_the_rendered_file_is_valid_monit(self):
         mounts, _ = real_filesystems(CONTAINER)
@@ -395,11 +483,16 @@ class TestRealMonit(unittest.TestCase):
             "network": {"lo": {"link": True, "max_mbit": 800,
                                "for_minutes": 3},
                         "br0.10": {"link": True},
-                        "wg-ovl_0": {"max_mbit": 0.5}}}, mounts))
+                        "wg-ovl_0": {"max_mbit": 0.5}}}, mounts, 60))
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         self.assertIn("Control file syntax OK", out.stdout + out.stderr)
 
-    def test_monit_refuses_65_cycles_as_validation_does(self):
+    def test_the_operator_s_cycle_and_start_delay_are_left_alone(self):
+        out = self.check(rendered(cycle=120), "-v")
+        self.assertIn("Poll time          = 120 seconds with start delay"
+                      " 240 seconds", out.stdout + out.stderr)
+
+    def test_monit_refuses_65_cycles_as_the_plan_does(self):
         out = self.check(rendered().replace("for 10 cycles",
                                             "for 65 cycles"))
         self.assertNotEqual(out.returncode, 0)

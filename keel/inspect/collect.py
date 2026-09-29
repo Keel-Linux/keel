@@ -20,7 +20,7 @@ from keel.inspect.dbengines import ENGINES
 from keel.inspect.hostname import probe_hostname
 from keel.inspect.ipv6 import Runtime
 from keel.inspect.locale import probe_locale
-from keel.inspect.monitor import probe_monitor
+from keel.inspect.monitor import monit_cycle, probe_monitor
 from keel.inspect.network import probe_network
 from keel.inspect.report import Finding, Inspection
 from keel.inspect.secrets import probe_hub, probe_secrets
@@ -115,7 +115,8 @@ def inspect_root(
     findings += found
     _add(spec, "locale", locale)
 
-    monitor, found = probe_monitor(tree.read(paths.MONIT_CONF))
+    monitor, found = probe_monitor(tree.read(paths.MONIT_CONF),
+                                   monit_cycle(tree))
     findings += found
     _add(spec, "monitor", monitor)
 

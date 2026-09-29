@@ -117,7 +117,7 @@ it:
 | `first_login_wizard`, `preseed` | Render time switches with no trace on the running machine |
 | `tls.acme.agree_tos` | Consent the spec gives apply to register a Let's Encrypt account; the machine keeps a record of the account, not of the consent |
 | `security.updates_at_first_boot` | A first boot input: the `95secupdates` hook installs the pending security updates once and leaves nothing behind, and the cron-apt schedule the machine does show is shipped with the image whichever value was used. inspect writes the field from that schedule so the spec it produces is applicable, and says in the report that it is a proxy ([docs/inspect.md](inspect.md)) |
-| `monitor.notify` | The channels stay in the spec: monit's file only runs `keel notify`, which reads them from the spec when an alert fires, so the machine keeps no copy to compare. `monitor.enabled` and the checks are compared, read back from `/etc/monit/conf.d/keel.conf`; like `tls.acme`, the checks are not compared while `monitor.enabled` is false or absent |
+| `monitor.notify` | The channels: a webhook or ntfy topic URL can be a credential, so diff neither compares them nor repeats their values, not even as `declared` in its JSON. apply writes them to `/etc/keel/monitor.json`, root only, for `keel notify`. `monitor.enabled` and the checks are compared, read back from `/etc/monit/conf.d/keel.conf` at the cycle monit runs at; like `tls.acme`, the checks are not compared while `monitor.enabled` is false or absent |
 
 `version` is a property of the file, not of the machine, and is not
 listed.

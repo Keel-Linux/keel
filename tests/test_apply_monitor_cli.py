@@ -9,6 +9,7 @@ checks follow the filesystems it lists.
 
 import contextlib
 import io
+import json
 import os
 import stat
 import tempfile
@@ -21,6 +22,7 @@ from keel import exits
 from keel.cli import main
 
 MONIT_CONF = join("etc", "monit", "conf.d", "keel.conf")
+SETTINGS = join("etc", "keel", "monitor.json")
 SPEC = """\
 version: 1
 security:
@@ -37,6 +39,8 @@ monitor:
     telegram:
       chat_id: "-1001234567890"
       token: {{file: /etc/keel/secrets/telegram_token}}
+    webhook:
+      url: https://hooks.example.org/services/T00/B00/secretpath
 """
 MOUNTINFO = (
     "22 1 8:1 / / rw,relatime - ext4 /dev/sda1 rw\n"
@@ -62,6 +66,10 @@ class TestApplyThenDiff(unittest.TestCase):
             open(join(self.root, "etc", name), "w").close()
         with open(join(self.root, "proc", "self", "mountinfo"), "w") as fob:
             fob.write(MOUNTINFO)
+        # the operator's cycle, which keel reads and never sets
+        os.makedirs(join(self.root, "etc", "monit"))
+        with open(join(self.root, "etc", "monit", "monitrc"), "w") as fob:
+            fob.write("set daemon 60 with start delay 30\n")
         self.spec = join(self.tmp.name, "instance.yaml")
         self.write_spec("true")
 
@@ -82,19 +90,33 @@ class TestApplyThenDiff(unittest.TestCase):
     def test_apply_diff_off_and_diff_again(self):
         code, out, err = self.apply()
         self.assertEqual((code, err), (exits.OK, ""))
+        monitrc = join(self.root, "etc", "monit", "monitrc")
         self.assertIn(
             "monitor: write /etc/monit/conf.d/keel.conf: 2 filesystem(s)"
-            " (/, /srv), memory, swap, cpu, load, eth0 (mode 0600): done",
-            out)
+            " (/, /srv), memory, swap, cpu, load, eth0; monit's cycle is"
+            f" 60 s (set daemon 60 in {monitrc}) (mode 0600): done", out)
+        self.assertIn("monitor: write /etc/keel/monitor.json: the channels"
+                      " keel notify uses (mode 0600): done", out)
+        self.assertIn(f"monitor: {self.root}/etc/keel/secrets/telegram_token:"
+                      " secret file not found: that channel fails until it"
+                      " is fixed", out)
         self.assertIn("monitor: monit not reloaded: not the live system", out)
+        self.assertNotIn("secretpath", out)
         path = join(self.root, MONIT_CONF)
-        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+        settings = join(self.root, SETTINGS)
+        for written in (path, settings):
+            self.assertEqual(stat.S_IMODE(os.stat(written).st_mode), 0o600)
         with open(path) as fob:
             text = fob.read()
         self.assertIn("check filesystem keel_disk_warn_srv with path /srv",
                       text)
-        self.assertIn("--spec /etc/keel/instance.yaml", text)
-        self.assertNotIn("SECRET", text)
+        self.assertNotIn("--spec", text)
+        self.assertNotIn("set daemon", text)
+        self.assertNotIn("secretpath", text)
+        with open(settings) as fob:
+            channels = json.load(fob)
+        self.assertEqual(channels["telegram"]["token_file"],
+                         "/etc/keel/secrets/telegram_token")
 
         code, out, _ = self.apply()
         self.assertEqual(code, exits.OK)
@@ -112,10 +134,16 @@ class TestApplyThenDiff(unittest.TestCase):
             "monitor.checks.network.eth0.max_mbit: same (800)",
             "monitor.checks.disk.critical: not declared (observed 90)",
             "monitor.notify.telegram.token.file: not compared (the channels"
-            " stay in the spec: keel notify reads them there when an alert"
-            " fires, and monit's file only runs it)",
+            " are not compared: a webhook or topic URL can be a credential,"
+            " and apply writes them for keel notify to"
+            " /etc/keel/monitor.json, root only)",
         ):
             self.assertIn(line, out.splitlines())
+        self.assertNotIn("secretpath", out)
+        code, out, _ = run_cli("diff", "--spec", self.spec, "--root",
+                               self.root, "--format", "json")
+        self.assertEqual(code, exits.OK)
+        self.assertNotIn("secretpath", out)
 
         self.write_spec("false")
         code, out, _ = self.apply()
@@ -123,6 +151,7 @@ class TestApplyThenDiff(unittest.TestCase):
         self.assertIn("monitor: remove /etc/monit/conf.d/keel.conf, which"
                       " keel wrote: the monitor is off in the spec: done", out)
         self.assertFalse(os.path.exists(path))
+        self.assertFalse(os.path.exists(settings))
         code, out, _ = self.diff()
         self.assertEqual(code, exits.OK)
         self.assertIn("monitor.enabled: same (false)", out.splitlines())

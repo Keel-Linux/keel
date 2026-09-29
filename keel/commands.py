@@ -13,6 +13,7 @@ from keel import exits, layers, spec
 from keel import diff as drift
 from keel import inspect as inspection
 from keel import system
+from keel.monitor import channelfile
 from keel.monitor import notify as notifier
 from keel.network import confirm as netconfirm
 from keel.network import live, session, switch
@@ -141,7 +142,6 @@ def spec_apply(args) -> int:
         getattr(args, "defer_certificate", False),
         getattr(args, "network_window", system.DEFAULT_WINDOW),
         getattr(args, "skip_network", False),
-        os.path.abspath(args.spec),
     )
 
 
@@ -177,7 +177,6 @@ def apply_system(
     doc: dict, root: str, dry_run: bool, label: str = "apply --system",
     confirmed: bool = False, defer_certificate: bool = False,
     network_window: int = system.DEFAULT_WINDOW, skip_network: bool = False,
-    spec_path: str = spec.SPEC_DEFAULT,
 ) -> int:
     """Observe, plan, then carry out or only print; one line per action
 
@@ -188,13 +187,10 @@ def apply_system(
     `confirmed` is --destroy-local-database, and it reaches exactly one
     decision: whether becoming a replica may drop the databases this
     server holds. Nothing else in keel passes it, so a first boot cannot.
-
-    `spec_path` is the spec this run read, which monit's alerts have
-    keel notify read again for the channels.
     """
     state = system.observe(root, doc)
     plan = system.plan(doc, state, confirmed, defer_certificate,
-                       network_window, skip_network, spec_path)
+                       network_window, skip_network)
     if not plan.steps:
         print(f"{label}: nothing declared that this phase converges")
         return exits.OK
@@ -250,37 +246,41 @@ def network_revert(args) -> int:
 def notify(args) -> int:
     """Tell the operator about one monit alert, on every declared channel
 
-    What keel.conf's exec lines run (decision 0021). The spec is read
-    without requiring its secret files, so a token that cannot be read
-    fails its own channel and not the others. The exit code is non zero
-    only when no channel took the message, which is all monit could do
-    anything with.
+    What keel.conf's exec lines run (decision 0021). It reads no spec:
+    the channels come from the settings apply wrote as root
+    (keel.monitor.channelfile), refused unless root owns them and nobody
+    else can write them. A token that cannot be read fails its own
+    channel and not the others. When no channel takes the message, it is
+    logged to syslog at user.crit and mailed to root, and the exit code
+    is NOTIFY_FAILED, which is all monit could do anything with.
     """
-    doc, code = read_spec(args.spec, check_secret_files=False)
-    if doc is None:
-        error("notify: no spec was read, so there is no channel to send to")
-        return code if code != exits.OK else exits.NOTIFY_FAILED
     event = notifier.event_from(
         args.level, args.check, args.path or args.iface, args.threshold,
-        dict(os.environ),
+        dict(os.environ), args.direction,
     )
-    settings = (doc.get("monitor") or {}).get("notify") or {}
+    try:
+        settings, reason = channelfile.load(args.settings), ""
+    except spec.SpecError as e:
+        settings, reason = {}, str(e)
     message = notifier.compose(
-        event, notifier.hostname(), notifier.address_of(doc),
-        settings.get("details") is True, notifier.run_probe,
+        event, str(settings.get("host") or notifier.hostname()),
+        str(settings.get("address") or ""), settings.get("details") is True,
+        notifier.run_probe,
     )
-    deliveries = notifier.send(doc, message, args.level)
-    if not deliveries:
-        error("notify: the spec's monitor section declares no channel")
-        return exits.NOTIFY_FAILED
+    deliveries = notifier.send(settings, message, args.level)
     for delivery in deliveries:
         if delivery.problem is None:
             print(delivery.line())
         else:
             error(delivery.line())
-    if all(delivery.problem for delivery in deliveries):
-        return exits.NOTIFY_FAILED
-    return exits.OK
+    if any(delivery.problem is None for delivery in deliveries):
+        return exits.OK
+    reason = reason or ("every channel failed" if deliveries
+                        else f"{args.settings} declares no channel")
+    error(f"notify: {reason}; told syslog (user.crit) and root's mailbox"
+          " instead")
+    notifier.last_resort(message, reason)
+    return exits.NOTIFY_FAILED
 
 
 def database_promote(args) -> int:

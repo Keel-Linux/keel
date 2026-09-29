@@ -171,10 +171,11 @@ class TestChannels(unittest.TestCase):
 
     def test_urls_must_be_https_with_a_host_and_no_credentials(self):
         cases = {
-            None: "required, an https URL",
-            "": "required, an https URL",
-            "http://ntfy.example.org/keel": "must be an https URL",
-            "https:///keel": "must be an https URL",
+            None: "required, an https URL or a secret reference",
+            "": "must be an https URL",
+            5: "must be an https URL",
+            "http://ntfy.example.org/keel": "not an https URL with a host",
+            "https:///keel": "not an https URL with a host",
             "https://ntfy.example.org/a b": "must not contain spaces",
             "https://[2001:db8::1/keel": "not a URL",
             "https://hooks.example.org:https/keel": "not a URL",
@@ -185,6 +186,8 @@ class TestChannels(unittest.TestCase):
             found = check({"notify": {"webhook": {"url": url}}})
             self.assertEqual(len(found), 1, url)
             self.assertIn(message, found[0])
+            if url:
+                self.assertNotIn(str(url), found[0])
         self.assertEqual(check({"notify": {"webhook": {
             "url": "https://[2001:db8::1]:8443/keel"}}}), [])
         self.assertEqual(check({"notify": {"webhook": []}}),
@@ -192,6 +195,21 @@ class TestChannels(unittest.TestCase):
         self.assertIn("monitor.notify.webhook.token: unknown key", check(
             {"notify": {"webhook": {"url": "https://a.example",
                                     "token": {"file": "/x"}}}}))
+
+    def test_a_url_can_be_a_secret_file_and_is_never_generated(self):
+        self.assertEqual(check({"enabled": True, "notify": {
+            "webhook": {"url": {"file": "/etc/keel/secrets/hook"}},
+            "ntfy": {"url": {"file": "/etc/keel/secrets/topic"}}}}), [])
+        self.assertEqual(check({"notify": {"webhook": {
+            "url": {"generate": True}}}}), [
+            "monitor.notify.webhook.url: a token is issued by the service,"
+            " so it is a file reference; a generated value is one nobody"
+            " else knows"])
+        found = check({"notify": {"ntfy": {"url": {
+            "file": "/nonexistent/topic"}}}}, files=True)
+        self.assertEqual(found, ["monitor.notify.ntfy.url:"
+                                 " /nonexistent/topic: secret file not"
+                                 " found"])
 
 
 class TestChecks(unittest.TestCase):
@@ -236,12 +254,14 @@ class TestChecks(unittest.TestCase):
                           " critical (70)"])
         self.assertEqual(check({"checks": {"disk": {"critical": 95}}}), [])
 
-    def test_for_minutes_fits_monit_64_cycles(self):
-        self.assertEqual(check({"checks": {"cpu": {"for_minutes": 64}}}), [])
-        self.assertEqual(check({"checks": {"cpu": {"for_minutes": 65}}}), [
-            "monitor.checks.cpu.for_minutes: at most 64: monit holds a"
-            " condition for at most 64 cycles, and keel sets a cycle of"
-            " 60 s"])
+    def test_for_minutes_is_left_to_the_machine_s_cycle_within_a_bound(self):
+        self.assertEqual(check({"checks": {"cpu": {"for_minutes": 65}}}), [])
+        self.assertEqual(check({"checks": {"cpu": {"for_minutes": 3840}}}),
+                         [])
+        self.assertEqual(check({"checks": {"cpu": {"for_minutes": 3841}}}), [
+            "monitor.checks.cpu.for_minutes: at most 3840: monit holds a"
+            " condition for at most 64 cycles, which is 3840 minutes even at"
+            " a cycle of 3600 s"])
         for value in (0, 2.5, "5", False):
             self.assertEqual(
                 check({"checks": {"cpu": {"for_minutes": value}}}),
@@ -260,7 +280,7 @@ class TestNetwork(unittest.TestCase):
     def test_network_errors(self):
         found = check({"checks": {"network": {
             "a very long interface": {"link": True},
-            "eth0": {"link": "up", "max_mbit": -1, "for_minutes": 99,
+            "eth0": {"link": "up", "max_mbit": -1, "for_minutes": 0,
                      "saturation": 90},
             "eth1": {},
             "eth2": "watch",
@@ -271,9 +291,8 @@ class TestNetwork(unittest.TestCase):
             "monitor.checks.network.eth0.saturation: unknown key",
             "monitor.checks.network.eth0.link: must be true or false",
             "monitor.checks.network.eth0.max_mbit: must be a number above 0",
-            "monitor.checks.network.eth0.for_minutes: at most 64: monit"
-            " holds a condition for at most 64 cycles, and keel sets a cycle"
-            " of 60 s",
+            "monitor.checks.network.eth0.for_minutes: must be a whole number"
+            " of minutes, at least 1",
             "monitor.checks.network.eth1: nothing to watch; declare link:"
             " true, max_mbit, or both",
             "monitor.checks.network.eth2: must be a mapping",
@@ -311,7 +330,7 @@ class TestEveryErrorAtOnce(unittest.TestCase):
             "version": 1,
             "security": {"alerts": "skip"},
             "monitor": {"enabled": True,
-                        "checks": {"cpu": {"for_minutes": 100}},
+                        "checks": {"cpu": {"for_minutes": 0}},
                         "notify": {"email": True,
                                    "ntfy": {"url": "http://x"}}},
         })

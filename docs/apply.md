@@ -427,53 +427,78 @@ another machine. Replication without failover is not high availability,
 and when it is wanted the packaged answers are Galera for MariaDB and
 Patroni for PostgreSQL.
 
-**monitor** (`/etc/monit/conf.d/keel.conf`; handbook decision 0021)
+**monitor** (`/etc/monit/conf.d/keel.conf`, `/etc/keel/monitor.json`;
+handbook decision 0021)
 
-monit watches, keel tells. The section is rendered into one file that
-monit includes, mode 0600 (the replicated set of decision 0020 will put
-monit's HTTP credentials there) and owned by root, as apply runs:
+monit watches, keel tells. The section is rendered into two files, both
+mode 0600 and owned by root, as apply runs:
+
+- `/etc/monit/conf.d/keel.conf`, the checks monit includes (the replicated
+  set of decision 0020 will put monit's HTTP credentials there);
+- `/etc/keel/monitor.json`, everything `keel notify` reads: the channels
+  resolved from the spec (a literal URL or the path of the secret file
+  holding it, a chat id), the paths of the token files and never a token,
+  the alerts address, `details`, and the host's name and first static
+  address. `keel notify` never reads the spec (see below).
 
 | Declared | Observed | Action |
 | --- | --- | --- |
-| `enabled: true` | the file already says what would be written | none: `unchanged (/etc/monit/conf.d/keel.conf, ...)` |
-| `enabled: true` | anything else | the file written; on the live system `monit -t`, then `systemctl try-reload-or-restart monit.service` |
-| `enabled: false`, or no section | a file keel wrote (its first line says so) | the file removed, then the same check and reload |
-| `enabled: false`, or no section | no file, or one keel did not write | none |
+| `enabled: true` | both files already say what would be written | none: `unchanged (/etc/monit/conf.d/keel.conf, ...)` |
+| `enabled: true` | anything else | the files that differ written; when keel.conf changed, on the live system `monit -t`, then `systemctl try-reload-or-restart monit.service` |
+| `enabled: true` | a keel.conf keel did not write (its first line does not say so) | refused: it is not overwritten |
+| `enabled: false`, or no section | files keel wrote | both removed, then the same check and reload |
+| `enabled: false`, or no section | no file, or ones keel did not write | none |
+
+A token or URL file the channels name that is missing, or readable or
+writable by others, is a line in the plan, `...: secret file not found:
+that channel fails until it is fixed`, and not a failure: `--system-only`
+does not require the secret files, and the other channels still work.
 
 What the file holds, and why:
 
 - **One check per filesystem that holds data**, listed from
   `/proc/self/mountinfo` at apply time, since monit has no wildcard: a
   filesystem mounted later is watched from the next apply. Left out:
-  pseudo filesystems (proc, sysfs, tmpfs, devtmpfs, cgroup, the lxcfs
-  files a container host provides), overlays and squashfs images, network
-  filesystems, anything under `/proc`, `/sys`, `/dev` and `/run`, a bind
-  mount of part of a filesystem (how a container host hands in
-  `/etc/hostname`), and a second mount of the same device. A mount point
-  whose name monit's exec line cannot carry, a space for instance, is
-  named in the plan as not watched. Under `--root DIR` the tree's own
-  mount table is read, which is usually absent: then `/` alone is watched
-  and the plan says so.
+  pseudo filesystems (proc, sysfs, tmpfs, devtmpfs, cgroup), overlays,
+  read only images and media (squashfs, erofs, iso9660, udf), network
+  filesystems (nfs, cifs, ceph, 9p, davfs and the like) and every FUSE
+  filesystem (sshfs, s3fs, the lxcfs files a container host provides),
+  whose space is another machine's or program's and whose stalled
+  `statvfs` would stall monit's whole cycle; anything under `/proc`,
+  `/sys`, `/dev` and `/run`; a bind mount of part of a filesystem (how a
+  container host hands in `/etc/hostname`); and a second mount of the
+  same device. A mount point monit cannot take as a path (a space, `@`,
+  `:`, `,` or `%` in it, measured with monit 5.34's parser) is named in
+  the plan as not watched, unless the device is watched at another of its
+  mount points. Under `--root DIR` the tree's own mount table is read,
+  which is usually absent: then `/` alone is watched and the plan says so.
 - **Warn and critical are separate services** (`keel_disk_warn_root`,
   `keel_disk_critical_root`), and so are inodes, memory, swap, CPU and
   load: tests in one monit service share its one resource event, so going
   from critical back to warn would report a recovery that did not happen.
-- **`set daemon 60`**, a cycle of one minute, so `for_minutes` is that
-  many cycles. monit reads `set daemon` wherever it stands and the last
-  one wins; Debian's `monitrc` includes `conf.d` after its own `set
-  daemon 120`, so this is the cycle of every check on the machine, the
-  operator's included, unless a file included later (`conf-enabled/`)
-  sets another. `keel inspect` reads the cycle the file sets.
+- **The cycle is monit's, never set.** `set daemon` is global: one in
+  this file would reset the cycle and the start delay of every check on
+  the machine, the operator's included. So apply reads it as monit does,
+  from `/etc/monit/monitrc` and the files it includes, in order, the last
+  `set daemon N` winning, and Debian's 120 seconds when none is found.
+  `for_minutes` becomes `for N cycles` with N the minutes rounded up to
+  whole cycles, and a duration monit cannot hold, more than 64 cycles at
+  that cycle, refuses the field, naming the check, the cycle and where it
+  was read. The plan line says which cycle was used. The minutes the spec
+  declared are kept in a comment above each test (`# for_minutes: 5`),
+  which `keel inspect` gives back while the cycles still agree with them,
+  since 5 minutes at 120 seconds is 3 cycles, which is 6 minutes.
 - **Network rates in bytes per second**, monit's unit: `max_mbit: 800` is
   `upload > 100000000 B/s` and the same for download. Written in bytes,
-  so monit's binary `MB` never enters into it.
-- **Every test runs `keel notify`**, with `repeat every 60 cycles` for a
-  reminder each hour while the condition lasts and `else if succeeded then
-  exec` for the recovery, because monit runs `exec` once when a test
-  fails. The line is `/usr/bin/python3 -B -m keel notify --spec PATH
-  --level warn --check disk --path / --threshold 80`: the spec apply read,
-  on the live system, or `/etc/keel/instance.yaml` under `--root`. No
-  token is in the file.
+  so monit's binary `MB` never enters into it. Each direction tells
+  `keel notify` which one it is (`--direction upload`), its recovery
+  included, so a download recovering is never reported as the upload.
+- **Every test runs `keel notify`**, with `repeat every N cycles` for a
+  reminder about once an hour while the condition lasts and `else if
+  succeeded then exec` for the recovery, because monit runs `exec` once
+  when a test fails. The line is `/usr/bin/python3 -B -m keel notify
+  --level warn --check disk --path / --threshold 80`: no spec, no URL and
+  no token.
 
 monit must be installed for the live step. Without it the field is
 refused, `monit is not installed, and keel installs no package: install it
@@ -485,11 +510,27 @@ stays stopped: `try-reload-or-restart` acts on a running service only.
 #### keel notify
 
 What monit runs. It reads the event from monit's environment
-(`MONIT_EVENT`, `MONIT_SERVICE`, `MONIT_DESCRIPTION`), the level and the
-check from its arguments, and the channels from the spec, and sends one
-message to every channel `monitor.notify` declares. A channel that fails
-does not stop the others; the exit code is 22 (`NOTIFY_FAILED`) only when
-none took the message, or none is declared.
+(`MONIT_EVENT`, `MONIT_SERVICE`, `MONIT_DESCRIPTION`), the level, the check
+and what it is about from its arguments, and the channels from
+`/etc/keel/monitor.json` (`--settings` names another file), and sends one
+message to every channel there. A channel that fails does not stop the
+others.
+
+It never reads the spec. It runs as root at every alert, so a spec it
+read would decide where root sends things: a spec that moved, was
+deleted, sat in a temporary path or failed validation for a field that
+has nothing to do with alerts would silence every alert, and a spec a
+user owns could later point a token file at `/etc/keel/secrets/
+root_password` and the URL at a server of theirs. The settings file is
+written by apply as root and refused unless root owns it and nobody else
+can read or write it, and every token or URL file it names is refused the
+same way: the rule of every secret file (docs/spec.md).
+
+When no channel takes the message (the settings file missing or refused,
+no channel in it, every channel failing), the message goes to syslog
+(`logger -p user.crit -t keel-notify`) and to root's mailbox
+(`/usr/sbin/sendmail root`), the two places left on the machine itself,
+and the exit code is 22 (`NOTIFY_FAILED`).
 
 ```
 blog (2001:db8:1::10): / is 92.3% full (critical at 90%).
@@ -510,14 +551,21 @@ and device, and `lvs` and `pvs` for LVM. ext4 on a partition gets
 for `/` and `<mpN of PATH>` for a mount point. Memory, swap, CPU and load
 name `pct set` or `qm set`; a link down and a throughput over the limit
 name what to look at. With `details: true` the three largest directories
-(`du -x --max-depth=2`, at most 20 seconds) or processes (`ps`) are added.
-Nothing is run that changes anything.
+or processes (`ps`) are added. The directories come from `du -x
+--max-depth=2`, at most 20 seconds, taken largest first and never one
+inside another already listed, so a directory is listed with its own size
+when it is the large one; one alert measures a filesystem at a time (a
+lock under `/run/lock`), and the others say it is being measured. Nothing
+is run that changes anything.
 
-It writes nothing: it runs as `python3 -B`, reads the tokens from their
-secret files, and names a channel, never its URL, in what it prints. The
-Telegram token is part of the request path, so no URL appears in an error
-either. HTTPS is verified against the system's certificate authorities,
-every request has a timeout, and only the standard library is used.
+It writes nothing but that empty lock file on a tmpfs: it runs as
+`python3 -B`, reads the tokens from their secret files, and names a
+channel, never its URL, in what it prints. The Telegram token is part of
+the request path, so no URL appears in an error either, and a redirect is
+reported, never followed, since following it would carry the
+`Authorization` header to another host. HTTPS is verified against the
+system's certificate authorities, every request has a timeout, and only
+the standard library is used.
 
 **network** (`/etc/network/interfaces`; handbook decision 0018)
 
@@ -680,7 +728,8 @@ blog.yaml --root /tmp/scratch` then reports `instance.fqdn` and every
   it only runs `keel notify`, so nothing grows a disk, restarts a service
   or kills a process behind the operator's back. Growing a disk is the
   operator's act on the host, and the message says how.
-- Exposing monit's web interface, or writing a token into monit's file.
+- Exposing monit's web interface, writing a token into monit's file or
+  the notify settings, or setting monit's cycle.
 - Converging a container's network from inside, more than one
   interface, bridges, VLANs or interface names; or changing the network
   on the live system without the revert armed first.

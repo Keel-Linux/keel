@@ -8,8 +8,9 @@ nobody to tell is worse than none: it looks like one.
 - `email: true` needs `security.alerts` to be an address, since that is
   where the mail goes; `skip`, or no alerts at all, leaves nowhere.
 
-Durations are checked against monit's own limit at the cycle keel sets:
-a condition is held for at most 64 cycles.
+monit holds a condition for at most 64 cycles, and the cycle is the
+machine's, so whether a duration fits is decided by the plan, which reads
+it; validation only refuses what could fit no machine.
 """
 
 import math
@@ -20,12 +21,10 @@ from urllib.parse import urlsplit
 from keel.monitor.render import slug
 from keel.monitor.settings import (
     CHECKS,
-    CYCLE_SECONDS,
     DEFAULTS,
     MAX_CYCLES,
     NETWORK_KEYS,
     NOTIFY_KEYS,
-    cycles,
 )
 from keel.spec.fields import email_error, mapping_error
 from keel.spec.validate_secret import validate_secret
@@ -35,6 +34,10 @@ from keel.spec.validate_secret import validate_secret
 IFACE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,15}$")
 CHAT_ID_RE = re.compile(r"^(-?[0-9]+|@[A-Za-z0-9_]{5,})$")
 PERCENT_KEYS = ("warn", "critical")
+# A cycle of an hour is already a monitor that looks once an hour; 64 of
+# them is the longest duration any machine could hold.
+LONGEST_CYCLE = 3600
+LONGEST_MINUTES = MAX_CYCLES * LONGEST_CYCLE // 60
 NO_CHANNEL = (
     "monitor.enabled: true needs a working channel in monitor.notify"
     " (email, telegram, ntfy or webhook): a monitor with nobody to tell"
@@ -197,15 +200,19 @@ def _positive_errors(key: str, value: Any) -> list[str]:
 
 
 def _minutes_errors(key: str, value: Any) -> list[str]:
+    """A whole number of minutes that monit could hold at some cycle
+
+    Whether it fits monit's 64 cycles depends on the cycle of the machine
+    it is applied to, so the plan checks that; here it is bounded by the
+    longest cycle keel accepts reading, which no machine exceeds.
+    """
     if not isinstance(value, int) or isinstance(value, bool) or value < 1:
         return [f"{key}: must be a whole number of minutes, at least 1"]
-    if cycles(value) > MAX_CYCLES:
-        longest = MAX_CYCLES * CYCLE_SECONDS // 60
-        return [
-            f"{key}: at most {longest}: monit holds a condition for at most"
-            f" {MAX_CYCLES} cycles, and keel sets a cycle of"
-            f" {CYCLE_SECONDS} s"
-        ]
+    if value > LONGEST_MINUTES:
+        return [f"{key}: at most {LONGEST_MINUTES}: monit holds a condition"
+                f" for at most {MAX_CYCLES} cycles, which is"
+                f" {LONGEST_MINUTES} minutes even at a cycle of"
+                f" {LONGEST_CYCLE} s"]
     return []
 
 
@@ -233,7 +240,8 @@ def _validate_notify(
     errors.extend(_validate_telegram(notify.get("telegram"),
                                      check_secret_files))
     errors.extend(_validate_ntfy(notify.get("ntfy"), check_secret_files))
-    errors.extend(_validate_webhook(notify.get("webhook")))
+    errors.extend(_validate_webhook(notify.get("webhook"),
+                                    check_secret_files))
     return errors
 
 
@@ -275,20 +283,21 @@ def _validate_ntfy(ntfy: Any, check_secret_files: bool) -> list[str]:
         return [error] if error else []
 
     errors = _unknown(key, ntfy, ("url", "token"))
-    errors.extend(_url_errors(f"{key}.url", ntfy.get("url")))
+    errors.extend(_url_errors(f"{key}.url", ntfy.get("url"),
+                              check_secret_files))
     if "token" in ntfy:
         errors.extend(_token_errors(f"{key}.token", ntfy["token"],
                                     check_secret_files))
     return errors
 
 
-def _validate_webhook(webhook: Any) -> list[str]:
+def _validate_webhook(webhook: Any, check_secret_files: bool) -> list[str]:
     key = "monitor.notify.webhook"
     error = mapping_error(key, webhook)
     if error or webhook is None:
         return [error] if error else []
     return _unknown(key, webhook, ("url",)) + _url_errors(
-        f"{key}.url", webhook.get("url"))
+        f"{key}.url", webhook.get("url"), check_secret_files)
 
 
 def _unknown(key: str, mapping: dict, known: tuple[str, ...]) -> list[str]:
@@ -296,27 +305,42 @@ def _unknown(key: str, mapping: dict, known: tuple[str, ...]) -> list[str]:
             if field not in known]
 
 
-def _url_errors(key: str, url: Any) -> list[str]:
-    """An https URL with a host, and no credentials in it
+def _url_errors(key: str, url: Any, check_secret_files: bool) -> list[str]:
+    """A literal https URL, or a secret reference to a file holding one
+
+    A Slack or Discord webhook URL, and a public ntfy topic, is itself
+    the credential, so it may live in a secret file like a token. No
+    message ever repeats the value: a validation error is printed.
+    """
+    if url is None:
+        return [f"{key}: required, an https URL or a secret reference"]
+    if isinstance(url, dict):
+        return _token_errors(key, url, check_secret_files)
+    problem = url_problem(url)
+    return [f"{key}: {problem}"] if problem else []
+
+
+def url_problem(url: Any) -> str | None:
+    """Why a value is not an https URL keel posts to, never quoting it
 
     Plain http would carry the message, and any token in the request,
     in the clear. A user and password in the URL would put a secret in
-    the spec, which holds references only.
+    the spec, which holds references only. keel notify asks the same of
+    a URL it reads from a secret file.
     """
     if not isinstance(url, str) or not url.strip():
-        return [f"{key}: required, an https URL"]
+        return "must be an https URL"
     if any(char.isspace() for char in url):
-        return [f"{key}: must not contain spaces"]
+        return "must not contain spaces"
     try:
         parts = urlsplit(url)
         # a port that is not a number raises here, not at alert time
         host, _ = parts.hostname, parts.port
     except ValueError:
-        return [f"{key}: not a URL ({url})"]
+        return "not a URL"
     if parts.scheme != "https" or not host:
-        return [f"{key}: must be an https URL, such as"
-                " https://ntfy.example.org/keel"]
+        return "not an https URL with a host"
     if parts.username is not None or parts.password is not None:
-        return [f"{key}: must not carry credentials; a token is a secret"
-                " reference of its own"]
-    return []
+        return ("must not carry credentials; a token is a secret reference"
+                " of its own")
+    return None

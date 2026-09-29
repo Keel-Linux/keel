@@ -54,13 +54,14 @@ SECRET_PREFIXES = (
 # the file, ready for the day the switch is turned on, and are not
 # compared meanwhile: nothing on the machine is supposed to match them.
 DISABLED_FEATURES = {"tls.acme": "enabled", "monitor": "enabled"}
-# Fields the machine keeps no copy of because they are read from the spec
-# itself when they are needed: monit runs keel notify, which reads the
-# channels from the spec when an alert fires (decision 0021).
+# Fields diff does not compare and never repeats: the channels of the
+# monitor (decision 0021), whose URLs can be credentials. apply writes
+# them to /etc/keel/monitor.json, root only, for keel notify.
 READ_FROM_SPEC = {
     "monitor.notify":
-        "the channels stay in the spec: keel notify reads them there when"
-        " an alert fires, and monit's file only runs it",
+        "the channels are not compared: a webhook or topic URL can be a"
+        " credential, and apply writes them for keel notify to"
+        " /etc/keel/monitor.json, root only",
 }
 # Thresholds, compared as numbers, so 2 and 2.0 are one value
 NUMERIC_PREFIXES = ("monitor.checks.",)
@@ -165,7 +166,9 @@ def compare_section(
     found = dict(flatten(section, observed or {}))
     skipped = not_compared(section, wanted)
     fields = [
-        FieldDiff(path, NOT_COMPARED, value, found.get(path), skipped[path])
+        FieldDiff(path, NOT_COMPARED,
+                  None if withheld(path) else value, found.get(path),
+                  skipped[path])
         if path in skipped
         else compare_field(path, value, found.get(path), unknowns)
         for path, value in wanted.items()
@@ -193,6 +196,12 @@ def not_compared(section: str, wanted: dict[str, object]) -> dict[str, str]:
     skipped.update(other_role(wanted))
     skipped.update(secret_references(wanted))
     return skipped
+
+
+def withheld(path: str) -> bool:
+    """A declared value diff never repeats, even in its JSON: a webhook
+    or ntfy topic URL is a credential of its own"""
+    return any(_under(path, field) for field in READ_FROM_SPEC)
 
 
 def other_role(wanted: dict[str, object]) -> dict[str, str]:
