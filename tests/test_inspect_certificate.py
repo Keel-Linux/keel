@@ -83,6 +83,11 @@ class TestReadCertificate(unittest.TestCase):
         cert, problem = read_certificate("")
         self.assertIsNone(cert)
 
+    def test_a_truncated_file_is_no_certificate(self):
+        cert, problem = read_certificate(pem("acme-blog").split("-----END")[0])
+        self.assertIsNone(cert)
+        self.assertIn("no certificate", problem)
+
     def test_a_certificate_openssl_cannot_parse_is_a_problem(self):
         broken = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"
         cert, problem = read_certificate(broken)
