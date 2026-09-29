@@ -28,9 +28,11 @@ from keel.layers import (
     STATE_ENV,
 )
 from keel.spec import CONF_DEFAULT, CONF_ENV, SPEC_DEFAULT, SPEC_ENV
+from keel.system import DEFAULT_WINDOW
 
 
 DIFF_FORMATS = ("text", "json")
+MIN_WINDOW = 30
 
 
 class Parser(argparse.ArgumentParser):
@@ -148,6 +150,34 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_root_option(promote_parser, "promote")
     promote_parser.set_defaults(handler=commands.database_promote)
+
+    network_parser = subparsers.add_parser(
+        "network", help="a network change apply made, waiting to be kept"
+    )
+    network_actions = network_parser.add_subparsers(
+        dest="action", metavar="ACTION"
+    )
+    confirm_parser = network_actions.add_parser(
+        "confirm",
+        help="keep the network change apply made; refused unless run from a"
+        " session opened after the change over the new configuration, or"
+        " from a console (decision 0018)",
+    )
+    add_root_option(confirm_parser, "confirm the change of")
+    confirm_parser.set_defaults(handler=commands.network_confirm)
+    revert_parser = network_actions.add_parser(
+        "revert",
+        help="put back the interfaces file a pending change replaced; what"
+        " the revert timer runs, and a way to give up without waiting",
+    )
+    revert_parser.add_argument(
+        "--boot",
+        action="store_true",
+        help="restore the file only, without restarting the interface; for"
+        " the boot unit, which runs before networking",
+    )
+    add_root_option(revert_parser, "revert the change of")
+    revert_parser.set_defaults(handler=commands.network_revert)
 
     inspect_parser = _add_command(
         subparsers, "inspect",
@@ -376,7 +406,36 @@ def add_apply_options(parser: argparse.ArgumentParser) -> None:
         " boot hook passes it, since DNS rarely points at a machine that is"
         " still booting (docs/apply.md)",
     )
+    parser.add_argument(
+        "--network-window",
+        type=window_seconds,
+        default=DEFAULT_WINDOW,
+        metavar="SECONDS",
+        help="with --system or --system-only: how long a network change"
+        " waits for keel network confirm before it reverts (default:"
+        " %(default)s)",
+    )
+    parser.add_argument(
+        "--skip-network",
+        action="store_true",
+        help="with --system or --system-only: leave the network alone in"
+        " this run; the first boot hook passes it, since 01ipconfig has"
+        " already written the file and nobody is there to confirm",
+    )
     add_root_option(parser, "converge with --system")
+
+
+def window_seconds(text: str) -> int:
+    """A confirmation window long enough to open a new session in"""
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number of seconds: {text}")
+    if value < MIN_WINDOW:
+        raise argparse.ArgumentTypeError(
+            f"at least {MIN_WINDOW} seconds, to open a new session in"
+        )
+    return value
 
 
 def add_diff_options(parser: argparse.ArgumentParser) -> None:
@@ -457,6 +516,11 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(
             "--defer-certificate requires --system or --system-only:"
             " the certificate is requested there"
+        )
+    if getattr(args, "skip_network", False) and not system:
+        parser.error(
+            "--skip-network requires --system or --system-only:"
+            " the network is converged there"
         )
     if getattr(args, "destroy_local_database", False) and not system:
         parser.error(

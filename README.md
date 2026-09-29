@@ -35,6 +35,8 @@ in [docs/apply.md](docs/apply.md).
 | `keel spec render` | Print the conf that `apply` would write, with every secret masked |
 | `keel spec apply` | Write the conf, leaving an existing non empty conf untouched; with `--system`, also converge the fully qualified name, users (accounts, authorized keys), timezone and locale, only where they differ, never touching a password (brief section 4, principle 1); with `--system-only`, that state alone; the system phase also puts a MariaDB server in the role `database.server` declares, refusing to replace a database that holds data unless `--destroy-local-database` says so |
 | `keel database promote` | Make this replica a primary: stop replicating and forget the primary it followed. Never something `apply` decides, and there is no failover in Keel, so only the operator knows the old primary should stop being one (decision 0013, docs/apply.md) |
+| `keel network confirm` | Keep the network change `apply --system` made; refused unless run from a session opened after it over the new configuration, or a console (decision 0018, docs/apply.md) |
+| `keel network revert` | Put back the interfaces file a pending network change replaced; what the revert timer runs. `--boot` restores the file only, for the boot unit |
 | `keel inspect` | Write a spec from the running machine, or from an offline root, and report every field with its source or why it was not inferred; secrets are never read (brief sections 5.2 and 7) |
 | `keel diff` | Report drift between the spec and the running machine, or an offline root, field by field, through the same collector `inspect` uses; secrets are never compared and their files need not exist, nothing is written (brief section 5.2) |
 | `keel verify` | Check the installed layers against their manifests, one line per layer (brief section 5.4; packages not implemented yet) |
@@ -59,7 +61,7 @@ Every command accepts the same three options, so a caller never has to branch:
 
 | Option | Meaning |
 | --- | --- |
-| `--system` | After the conf, converge the system state the spec declares: the fully qualified name in `/etc/hosts`, users with their authorized keys, timezone, locale. Root on the live system. Off by default |
+| `--system` | After the conf, converge the system state the spec declares: the name, users with their authorized keys, timezone, locale, alerts, the ACME certificate, the database role and, last, the network, which reverts by itself unless `keel network confirm` arrives over the new configuration. Root on the live system. Off by default |
 | `--system-only` | That system state and nothing else: the conf is neither read nor written and no secret is resolved, so a generated password the hooks already applied is never regenerated ([docs/apply.md](docs/apply.md)) |
 | `--dry-run` | With `--system` or `--system-only`: print the plan and change nothing, not even the conf; reads no secret and needs no root |
 | `--root DIR` | The filesystem `--system` converges: `/` (the default, the live system) or a scratch tree. The conf path stays `--conf` |
@@ -127,6 +129,7 @@ Defined in one place, `keel/exits.py`, and reproduced here.
 | 18 | `CHANNEL_UNVERIFIED` | A channel pointer is not signed by a key that may move a channel, or no keyring was given to check it against. A key that is revoked or expired is refused here: gpgv exits 0 for both and still prints `VALIDSIG`, so `GOODSIG` is what is required |
 | 19 | `CHANNEL_EXPIRED` | A channel pointer is past its expiry. A mirror that is stale, broken or hostile holds an appliance on an old release by not updating, so this is an error and never a warning |
 | 20 | `CHANNEL_ROLLBACK` | A channel pointer names an earlier revision than the one this instance is on; `--allow-rollback`, or naming the release and revision, is how going back is asked for |
+| 21 | `NETWORK_NOT_CONFIRMED` | `keel network confirm` refused: no change is waiting, or it was not run from a new session over the new configuration, or a console (docs/apply.md) |
 
 Two rules that callers depend on:
 

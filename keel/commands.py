@@ -13,6 +13,8 @@ from keel import exits, layers, spec
 from keel import diff as drift
 from keel import inspect as inspection
 from keel import system
+from keel.network import confirm as netconfirm
+from keel.network import live, session, switch
 
 
 def warn(message: str) -> None:
@@ -136,6 +138,8 @@ def spec_apply(args) -> int:
         doc, root, dry_run, phase_label(system_only),
         getattr(args, "destroy_local_database", False),
         getattr(args, "defer_certificate", False),
+        getattr(args, "network_window", system.DEFAULT_WINDOW),
+        getattr(args, "skip_network", False),
     )
 
 
@@ -170,6 +174,7 @@ def apply_conf(args, doc: dict, with_system: bool) -> int:
 def apply_system(
     doc: dict, root: str, dry_run: bool, label: str = "apply --system",
     confirmed: bool = False, defer_certificate: bool = False,
+    network_window: int = system.DEFAULT_WINDOW, skip_network: bool = False,
 ) -> int:
     """Observe, plan, then carry out or only print; one line per action
 
@@ -182,7 +187,8 @@ def apply_system(
     server holds. Nothing else in keel passes it, so a first boot cannot.
     """
     state = system.observe(root, doc)
-    plan = system.plan(doc, state, confirmed, defer_certificate)
+    plan = system.plan(doc, state, confirmed, defer_certificate,
+                       network_window, skip_network)
     if not plan.steps:
         print(f"{label}: nothing declared that this phase converges")
         return exits.OK
@@ -191,6 +197,48 @@ def apply_system(
         print(line)
     print(outcome.summary())
     return exits.APPLY_FAILED if outcome.failed else exits.OK
+
+
+def network_confirm(args) -> int:
+    """Keep a pending network change; only over the new configuration
+
+    Decision 0018: the proof that the machine is reachable on the network
+    it was just given is a session that could only have been opened on
+    it, and a shell that survived the change is not one.
+    """
+    root = getattr(args, "root", inspection.ROOT_DEFAULT)
+    refusal = system.needs_root(root, "network confirm")
+    if refusal:
+        error(refusal)
+        return exits.APPLY_NEEDS_ROOT
+    origin = session.origin("/proc", os.getpid(), live.sockets)
+    confirmed, lines = netconfirm.confirm(root, origin, live.probes(),
+                                          live.run)
+    for line in lines:
+        if confirmed:
+            print(line)
+        else:
+            error(line)
+    return exits.OK if confirmed else exits.NETWORK_NOT_CONFIRMED
+
+
+def network_revert(args) -> int:
+    """Put back the interfaces file a pending change replaced
+
+    What the revert timer runs, and the boot unit with --boot; by hand it
+    is the way to give up on a change without waiting for the window.
+    """
+    root = getattr(args, "root", inspection.ROOT_DEFAULT)
+    refusal = system.needs_root(root, "network revert")
+    if refusal:
+        error(refusal)
+        return exits.APPLY_NEEDS_ROOT
+    worked, line = switch.revert(root, live.run, getattr(args, "boot", False))
+    if worked:
+        print(line)
+    else:
+        error(line)
+    return exits.OK if worked else exits.APPLY_FAILED
 
 
 def database_promote(args) -> int:

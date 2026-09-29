@@ -1,3 +1,22 @@
+keel (0.9.0) unstable; urgency=medium
+
+  * apply --system converges network.*, the last field of keel#35, as
+    handbook decision 0018 designs it. The interfaces file is rendered by
+    inithooks' own lib/ipconfig.sh, and only a field keel diff reports as
+    drift changes it. On the live system the change reverts by itself
+    after --network-window seconds (default 120) unless `keel network
+    confirm` is run from a session opened after it over the new
+    configuration, or from a console. A container's network, owned by
+    its host, is compared and never converged from inside.
+  * keel network confirm and keel network revert; exit code 21,
+    NETWORK_NOT_CONFIRMED.
+  * keel-network-revert.service restores an unconfirmed change at boot,
+    before networking, since the revert timer does not survive a reboot.
+  * The first boot hook passes --skip-network: 01ipconfig has written the
+    file, and nobody is there to confirm.
+
+ -- Marcos Mendez <mendez.foto@gmail.com>  Tue, 29 Sep 2026 19:53:42 +0000
+
 keel (0.8.1) unstable; urgency=medium
 
   * inspect answers hub.api_key skip only when the machine is not

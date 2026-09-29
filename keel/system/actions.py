@@ -82,6 +82,34 @@ class RunSql:
 
 
 @dataclass(frozen=True)
+class SwitchNetwork:
+    """Bring an interface up on a new file, reverting unless confirmed
+
+    Carried out by keel.network.switch (decision 0018): the old file is
+    saved and a revert armed before anything is touched, and the change
+    stays only if `keel network confirm` arrives over the new
+    configuration within `window` seconds. `addresses` are the static
+    addresses the new file declares, `gateways` its gateways and
+    `old_gateways` those it replaces, which confirm checks against.
+    """
+
+    iface: str
+    path: str
+    content: str
+    window: int
+    addresses: tuple[str, ...]
+    gateways: tuple[str, ...]
+    old_gateways: tuple[str, ...]
+
+    def describe(self) -> str:
+        return (
+            f"bring {self.iface} up on a new /{self.path}; it reverts in"
+            f" {self.window} s unless `keel network confirm` is run from a"
+            " new session over the new configuration"
+        )
+
+
+@dataclass(frozen=True)
 class Note:
     """Nothing to do for this field, and why: unchanged, or not possible"""
 
@@ -108,7 +136,7 @@ class Refuse:
         return self.summary
 
 
-Change = Run | RunSql | WriteFile | MakeDir | Symlink
+Change = Run | RunSql | WriteFile | MakeDir | Symlink | SwitchNetwork
 Action = Change | Note | Refuse
 
 

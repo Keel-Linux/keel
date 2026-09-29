@@ -1,0 +1,156 @@
+# Copyright (c) 2026 KeelLinux maintainers
+"""The pending change and its lock, under /var/lib/keel/network
+
+A change saves the file it replaces and writes `pending.json` before it
+touches the interface. Whoever holds the lock may change, confirm or
+revert; the other two wait for it and then find the marker gone or still
+there. So a revert that has started finishes before a confirmation is
+looked at, and the confirmation then finds nothing to confirm instead of
+reporting success on the old network.
+
+The marker records, once the interface is up on the new file, the boot
+it happened in and the time since that boot. A session's age is compared
+with that, a clock that does not jump when the wall clock is set.
+"""
+
+import fcntl
+import json
+import os
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass, replace
+
+DIR = "var/lib/keel/network"
+LOCK = f"{DIR}/lock"
+PENDING = f"{DIR}/pending.json"
+SAVED = f"{DIR}/saved"
+DIR_MODE = 0o700
+FILE_MODE = 0o600
+BOOT_ID = "proc/sys/kernel/random/boot_id"
+UPTIME = "proc/uptime"
+
+
+@dataclass(frozen=True)
+class Pending:
+    """A change waiting for its confirmation
+
+    `path` is the file the change replaced, relative to the root, and
+    SAVED holds what it said before. `addresses` are the static addresses
+    the new file declares; `gateways` the new gateways and `old_gateways`
+    the ones they replaced, so confirm can say whether it tested them.
+    `changed_at` is None until the interface is up on the new file.
+    """
+
+    iface: str
+    path: str
+    window: int
+    addresses: tuple[str, ...] = ()
+    gateways: tuple[str, ...] = ()
+    old_gateways: tuple[str, ...] = ()
+    boot_id: str | None = None
+    changed_at: float | None = None
+
+    def up(self, boot_id: str, uptime: float) -> "Pending":
+        return replace(self, boot_id=boot_id, changed_at=uptime)
+
+
+def path(root: str, relative: str) -> str:
+    return os.path.join(root, relative)
+
+
+@contextmanager
+def locked(root: str) -> Iterator[None]:
+    """Hold the one lock a change, a confirmation and a revert share"""
+    os.makedirs(path(root, DIR), mode=DIR_MODE, exist_ok=True)
+    fd = os.open(path(root, LOCK), os.O_RDWR | os.O_CREAT, FILE_MODE)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def read(root: str) -> Pending | None:
+    """The pending change, or None; a marker that cannot be parsed is None
+
+    An unreadable marker is not a change anyone can confirm, and the
+    saved file next to it is what `revert` restores either way.
+    """
+    try:
+        with open(path(root, PENDING)) as fob:
+            data = json.load(fob)
+    except (OSError, ValueError):
+        return None
+    try:
+        return Pending(
+            iface=str(data["iface"]),
+            path=str(data["path"]),
+            window=int(data["window"]),
+            addresses=tuple(data.get("addresses") or ()),
+            gateways=tuple(data.get("gateways") or ()),
+            old_gateways=tuple(data.get("old_gateways") or ()),
+            boot_id=data.get("boot_id"),
+            changed_at=data.get("changed_at"),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def exists(root: str) -> bool:
+    """Whether a change is pending, parsed or not"""
+    return os.path.exists(path(root, PENDING))
+
+
+def write(root: str, pending: Pending) -> None:
+    write_private(root, PENDING, json.dumps(asdict(pending), indent=2) + "\n")
+
+
+def save(root: str, text: str) -> None:
+    """Keep the file the change replaces"""
+    write_private(root, SAVED, text)
+
+
+def saved(root: str) -> str | None:
+    try:
+        with open(path(root, SAVED)) as fob:
+            return fob.read()
+    except OSError:
+        return None
+
+
+def clear(root: str) -> None:
+    """Remove the marker and the saved file: confirmed, or reverted"""
+    for relative in (PENDING, SAVED):
+        try:
+            os.remove(path(root, relative))
+        except FileNotFoundError:
+            pass
+
+
+def write_private(root: str, relative: str, text: str) -> None:
+    """Write through a temporary file, so a crash leaves the old or the new"""
+    target = path(root, relative)
+    os.makedirs(os.path.dirname(target), mode=DIR_MODE, exist_ok=True)
+    temporary = target + ".new"
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, FILE_MODE)
+    with os.fdopen(fd, "w") as fob:
+        fob.write(text)
+        fob.flush()
+        os.fsync(fob.fileno())
+    os.replace(temporary, target)
+
+
+def boot_id(proc_root: str = "/") -> str | None:
+    try:
+        with open(path(proc_root, BOOT_ID)) as fob:
+            return fob.read().strip() or None
+    except OSError:
+        return None
+
+
+def uptime(proc_root: str = "/") -> float | None:
+    try:
+        with open(path(proc_root, UPTIME)) as fob:
+            return float(fob.read().split()[0])
+    except (OSError, ValueError, IndexError):
+        return None
