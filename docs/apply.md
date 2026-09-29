@@ -30,8 +30,8 @@ keel spec apply --system --root /mnt/rootfs
 ```
 
 With `--system`, after the conf, `apply` converges the parts of the spec
-that describe system state rather than hook input: `instance.fqdn`, `users`,
-`locale` and `security.alerts`. With `--system-only` it converges them and does nothing
+that describe system state rather than hook input: `instance.hostname`,
+`instance.fqdn`, `users`, `locale` and `security.alerts`. With `--system-only` it converges them and does nothing
 else, for a machine whose conf phase has already run. Neither flag is on
 by default.
 
@@ -127,6 +127,30 @@ apply --system-only: nothing declared that this phase converges
 Only what differs from the observed state is planned, so a second run
 finds nothing to do. Every action prints one line, `field: action: done`,
 and a dry run prints `field: would action`.
+
+**instance.hostname** (`/etc/hostname`, and the files that carry the name)
+
+`09hostname` sets the name once, at first boot. On a running machine a
+declared name that differs from the first word of `/etc/hostname`
+(compared case insensitively, as `diff` compares it) is converged:
+
+- `/etc/hostname` is written with the new name;
+- in `/etc/hosts`, `/etc/mailname` and `/etc/postfix/main.cf` the old name
+  is replaced as a whole token or as the first label of a dotted name
+  (`blog`, `blog.example.org`), and never inside another word (`weblog`,
+  `backup-blog`), unlike the hook's `sed` over the bare string; a file
+  that does not carry the name is not written;
+- on the live system, `hostnamectl set-hostname`, or `hostname` without
+  it, and `systemctl try-reload-or-restart postfix.service` when postfix's
+  configuration or the mail name changed, which reloads it only if it is
+  running.
+
+The renamed `/etc/hosts` is what the `instance.fqdn` step below plans on,
+so a spec that renames `blog` to `news` and declares `news.example.org`
+ends with one file and no line for the old name. A file among those four
+that exists but cannot be read refuses the whole rename, because it may
+carry the old name. The self-signed certificate keeps the name it was
+made for, and the run says so with the command that replaces it.
 
 **instance.fqdn** (`/etc/hosts`)
 
@@ -401,9 +425,12 @@ blog.yaml --root /tmp/scratch` then reports `instance.fqdn` and every
   A key not in the spec disappears from `authorized_keys` only because the
   file is rewritten as declared.
 - Creating groups, or anything about a user beyond shell, groups and keys.
-- The hostname itself: `/etc/hostname` is `09hostname`'s, from the
-  `HOSTNAME` variable phase 1 writes. This phase only adds the fully
-  qualified name to `/etc/hosts`.
+- Renaming the machine anywhere but `/etc/hostname`, `/etc/hosts`,
+  `/etc/mailname` and postfix's `main.cf`: the SSH public key comments
+  and the motd that `09hostname` also edits are labels, not
+  configuration. Nor making a new self-signed certificate for the new
+  name, which replaces the key and restarts the web servers; the run
+  says how.
 - Generating a locale for a tree other than the live system.
 - Installing a package. A description that declares a database server on
   a machine with none is a refusal, not an installation.

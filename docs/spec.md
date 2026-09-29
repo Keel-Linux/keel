@@ -58,7 +58,7 @@ instance:
 
 | Field | State | Conf variable | Notes |
 | --- | --- | --- | --- |
-| `instance.hostname` | read | `HOSTNAME` | A domain name. A path, a port or an empty label is an error |
+| `instance.hostname` | read, system | `HOSTNAME` | A domain name. A path, a port or an empty label is an error. `apply --system` renames a running machine to it ([docs/apply.md](apply.md)) |
 | `instance.fqdn` | read, system | `FQDN` | Same validation as `hostname`. `apply --system` also writes the `/etc/hosts` entry that makes `hostname -f` answer it, which no upstream hook writes ([docs/apply.md](apply.md)); without `--system`, `apply` warns that it was not written |
 
 ## network
