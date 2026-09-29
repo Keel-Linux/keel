@@ -27,6 +27,8 @@ from keel.layers import (
     STATE_DEFAULT,
     STATE_ENV,
 )
+from keel.monitor.notify import CHECKS as NOTIFY_CHECKS
+from keel.monitor.notify import LEVELS as NOTIFY_LEVELS
 from keel.spec import CONF_DEFAULT, CONF_ENV, SPEC_DEFAULT, SPEC_ENV
 from keel.system import DEFAULT_WINDOW
 
@@ -178,6 +180,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_root_option(revert_parser, "revert the change of")
     revert_parser.set_defaults(handler=commands.network_revert)
+
+    notify_parser = _add_command(
+        subparsers, "notify",
+        "tell the operator about a monit alert on every channel the"
+        " spec's monitor section declares, with what to do; what the file"
+        " keel writes for monit runs (decision 0021)",
+        commands.notify,
+    )
+    add_notify_options(notify_parser)
 
     inspect_parser = _add_command(
         subparsers, "inspect",
@@ -436,6 +447,35 @@ def window_seconds(text: str) -> int:
             f"at least {MIN_WINDOW} seconds, to open a new session in"
         )
     return value
+
+
+def add_notify_options(parser: argparse.ArgumentParser) -> None:
+    """What monit's exec line says; the event itself is in the environment
+
+    No token is ever an option: they are read from the secret files the
+    spec names, so none reaches an argument vector.
+    """
+    parser.add_argument(
+        "--level", required=True, choices=NOTIFY_LEVELS,
+        help="warn or critical when a test fails and while it lasts,"
+        " recovery when it succeeds again",
+    )
+    parser.add_argument(
+        "--check", required=True, choices=NOTIFY_CHECKS,
+        help="which test of the monitor section this is about",
+    )
+    parser.add_argument(
+        "--path", default="", metavar="DIR",
+        help="the mount point, for disk and inodes",
+    )
+    parser.add_argument(
+        "--iface", default="", metavar="NAME",
+        help="the interface, for link and throughput",
+    )
+    parser.add_argument(
+        "--threshold", default="", metavar="N",
+        help="the threshold the test holds, as the spec declares it",
+    )
 
 
 def add_diff_options(parser: argparse.ArgumentParser) -> None:

@@ -369,6 +369,7 @@ class TestCompareAgainstFixture(unittest.TestCase):
             "users.root.shell",
             "users.admin.shell",
             "users.admin.groups",
+            "monitor.enabled",
         ])
         self.assertEqual(result.code, exits.OK)
 

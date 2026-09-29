@@ -150,6 +150,7 @@ class TestCollector(unittest.TestCase):
                 "file": "/etc/keel/secrets/root_password"}},
             "security": {"updates_at_first_boot": "skip"},
             "hub": {"api_key": "skip"},
+            "monitor": {"enabled": False},
         })
 
     def test_hostname_f_runs_only_on_the_live_root(self):

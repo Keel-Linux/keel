@@ -27,9 +27,10 @@ declarative front end without any hook changing.
 If the conf file already holds something other than whitespace, `apply` leaves
 it alone, warns, and exits 0. The spec never overwrites a preseed.
 
-With `--system`, `apply` then converges the `users` and `locale` sections
-and `security.alerts` against the system itself (accounts, authorized keys,
-timezone, language, where alerts are mailed),
+With `--system`, `apply` then converges the `users`, `locale` and `monitor`
+sections and `security.alerts` against the system itself (accounts,
+authorized keys, timezone, language, where alerts are mailed, what monit
+watches),
 only where they differ, and never touches a password. That phase, its flags
 and what it never does are in [docs/apply.md](apply.md).
 
@@ -44,8 +45,8 @@ version: 1
 | `version` | read | Must be `1`. Absent or different is an error |
 
 The other top level keys are `instance`, `network`, `tls`, `secrets`, `app`,
-`hub`, `security`, `first_login_wizard`, `preseed`, `users`, `locale` and
-`database`, each optional and each a mapping except `first_login_wizard`. A file with `version: 1` and nothing else is valid and renders to an
+`hub`, `security`, `first_login_wizard`, `preseed`, `users`, `locale`,
+`database` and `monitor`, each optional and each a mapping except `first_login_wizard`. A file with `version: 1` and nothing else is valid and renders to an
 empty conf.
 
 ## instance
@@ -574,6 +575,76 @@ otherwise would mislead whoever creates the file:
 | redis | `masterauth` on the replica: the value of `requirepass`, or the password of the ACL user allowed to replicate. Redis has no database account, so there is no user to name unless an ACL user exists | `requirepass`, or the password of an ACL user |
 
 No value is ever read by `inspect` or compared by `diff`, on any engine.
+
+## monitor
+
+A resource monitor that tells the operator what to do (handbook decision
+0021): monit watches the disks, the memory, the CPU and the declared
+network interfaces, and every alert runs `keel notify`, which sends the
+message to the channels declared here. The operator writes thresholds,
+not monit syntax.
+
+```yaml
+monitor:
+  enabled: true
+  checks:
+    disk: {warn: 80, critical: 90}       # percent used
+    inodes: {critical: 90}
+    memory: {warn: 85, for_minutes: 5}
+    swap: {warn: 50, for_minutes: 5}
+    cpu: {warn: 90, for_minutes: 10}
+    load_per_core: {warn: 2.0, for_minutes: 10}
+    network:
+      eth0: {link: true, max_mbit: 800, for_minutes: 5}
+  notify:
+    email: true                          # security.alerts' address
+    telegram:
+      chat_id: "-1001234567890"
+      token: {file: /etc/keel/secrets/telegram_token}
+    ntfy:
+      url: https://ntfy.example.org/keel-blog
+      token: {file: /etc/keel/secrets/ntfy_token}
+    webhook:
+      url: https://hooks.example.org/keel
+    details: true                        # directory sizes in the message
+```
+
+| Field | State | Notes |
+| --- | --- | --- |
+| `monitor.enabled` | system | `true` or `false`; absent is off. `apply --system` writes `/etc/monit/conf.d/keel.conf` when true and removes it, if keel wrote it, otherwise ([docs/apply.md](apply.md)). `true` without a working channel under `notify` is an error: a monitor with nobody to tell looks like one and is not |
+| `monitor.checks.disk.warn`, `.critical` | system | Percent of the space used, above 0 and below 100, `warn` below `critical`. Default 80 and 90. Watched on every filesystem that holds data, as two separate checks |
+| `monitor.checks.inodes.critical` | system | Percent of the inodes used. Default 90 |
+| `monitor.checks.memory.warn`, `.for_minutes` | system | Default 85 percent for 5 minutes |
+| `monitor.checks.swap.warn`, `.for_minutes` | system | Default 50 percent for 5 minutes |
+| `monitor.checks.cpu.warn`, `.for_minutes` | system | Default 90 percent for 10 minutes |
+| `monitor.checks.load_per_core.warn`, `.for_minutes` | system | The one minute load average divided by the number of cores, a number above 0. Default 2 for 10 minutes |
+| `monitor.checks.network.<name>.link` | system | `true` watches that the link is up. No interface is watched unless declared |
+| `monitor.checks.network.<name>.max_mbit` | system | Throughput in Mbit/s, each direction; no default, because what is too much depends on the link |
+| `monitor.checks.network.<name>.for_minutes` | system | How long a condition of this interface holds before it is told, link included. Default 5 |
+| `monitor.notify.email` | system | `true` mails `security.alerts`' address through the local MTA. An error while `security.alerts` is `skip` or absent. Best effort: postfix needs disk to queue, so a full disk is what this channel cannot report |
+| `monitor.notify.telegram.chat_id`, `.token` | system | The Bot API's `sendMessage`. The chat id is a number (`-1001234567890`) or a channel name (`@keel_ops`); the token is a secret reference and must be a `file:` |
+| `monitor.notify.ntfy.url`, `.token` | system | One HTTPS POST to the topic URL; the token, optional, is sent as `Authorization: Bearer` and must be a `file:` |
+| `monitor.notify.webhook.url` | system | One HTTPS POST whose JSON body is Slack compatible, `{"text": ...}`, plus the fields `host`, `address`, `check`, `target`, `value`, `threshold`, `level`, `service` and `event`. Slack and Mattermost take it as it is; Discord at its webhook URL with `/slack` appended; Matrix through a bridge such as hookshot |
+| `monitor.notify.details` | system | `true` adds the three largest directories (disk, inodes) or processes (memory, swap, CPU, load) to the message. Default `false` |
+
+Every URL must be `https` and carry no user or password: a token is a
+secret reference of its own, never part of the spec. `for_minutes` is a
+whole number from 1 to 64: keel sets monit's cycle to 60 seconds, and
+monit holds a condition for at most 64 cycles, so a longer duration is
+refused rather than cut short.
+
+**Privacy.** A message carries the host name, its first static address
+and, with `details: true`, the names and sizes of its largest directories
+or processes, to whichever service the section declares, Telegram's
+servers included. `details: false`, the default, leaves those lists out.
+The tokens are read from their files by `keel notify` when an alert fires;
+they are never written to monit's configuration, an argument vector or a
+line of output.
+
+`keel diff` compares `enabled` and the checks, read back from monit's
+file, and never the channels, which stay in the spec and are read there
+when an alert fires ([docs/diff.md](diff.md)). Without `--system`, `apply`
+warns that the section was left alone.
 
 ## Not in the spec yet
 

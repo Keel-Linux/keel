@@ -1,3 +1,31 @@
+keel (0.10.0) unstable; urgency=medium
+
+  * A monitor section of the spec, handbook decision 0021 (keel#43):
+    thresholds for the disks, inodes, memory, swap, CPU, load per core
+    and declared network interfaces, and the channels to tell: email to
+    security.alerts' address, Telegram, ntfy and a Slack compatible
+    webhook. Defaults as decided: disk 80/90, inodes 90, memory 85 for 5
+    minutes, swap 50 for 5, CPU 90 for 10, load 2 per core for 10.
+    Enabled without a working channel is a validation error, and so is
+    email while security.alerts is skip; URLs are https, tokens are
+    secret files, for_minutes fits monit's 64 cycles.
+  * apply --system writes /etc/monit/conf.d/keel.conf, mode 0600: one
+    check per filesystem that holds data, warn and critical as separate
+    services, a reminder and a recovery on every test, a cycle of 60 s.
+    On the live system monit -t and a reload, only when the file
+    changed; refused when monit is not installed, since keel installs no
+    package. Turned off, the file keel wrote is removed.
+  * keel notify, which the file runs: one message, with what to do, to
+    every declared channel; standard library HTTPS with verification,
+    no token in argv, output or a URL it prints, nothing written.
+    details: false leaves the directory and process lists out. Exit code
+    22, NOTIFY_FAILED, when no channel took the message.
+  * inspect reads the monitor section back from keel.conf, and diff
+    compares it; the channels stay in the spec and are not compared.
+  * Suggests: monit.
+
+ -- Marcos Mendez <mendez.foto@gmail.com>  Tue, 29 Sep 2026 21:14:46 +0000
+
 keel (0.9.0) unstable; urgency=medium
 
   * apply --system converges network.*, the last field of keel#35, as

@@ -32,7 +32,7 @@ keel spec apply --system --root /mnt/rootfs
 With `--system`, after the conf, `apply` converges the parts of the spec
 that describe system state rather than hook input: `instance.hostname`,
 `instance.fqdn`, `users`, `locale`, `security.alerts`, `tls.acme`,
-`database.server` and, last, `network`. With `--system-only` it converges them and does nothing
+`database.server`, `monitor` and, last, `network`. With `--system-only` it converges them and does nothing
 else, for a machine whose conf phase has already run. Neither flag is on
 by default.
 
@@ -427,6 +427,98 @@ another machine. Replication without failover is not high availability,
 and when it is wanted the packaged answers are Galera for MariaDB and
 Patroni for PostgreSQL.
 
+**monitor** (`/etc/monit/conf.d/keel.conf`; handbook decision 0021)
+
+monit watches, keel tells. The section is rendered into one file that
+monit includes, mode 0600 (the replicated set of decision 0020 will put
+monit's HTTP credentials there) and owned by root, as apply runs:
+
+| Declared | Observed | Action |
+| --- | --- | --- |
+| `enabled: true` | the file already says what would be written | none: `unchanged (/etc/monit/conf.d/keel.conf, ...)` |
+| `enabled: true` | anything else | the file written; on the live system `monit -t`, then `systemctl try-reload-or-restart monit.service` |
+| `enabled: false`, or no section | a file keel wrote (its first line says so) | the file removed, then the same check and reload |
+| `enabled: false`, or no section | no file, or one keel did not write | none |
+
+What the file holds, and why:
+
+- **One check per filesystem that holds data**, listed from
+  `/proc/self/mountinfo` at apply time, since monit has no wildcard: a
+  filesystem mounted later is watched from the next apply. Left out:
+  pseudo filesystems (proc, sysfs, tmpfs, devtmpfs, cgroup, the lxcfs
+  files a container host provides), overlays and squashfs images, network
+  filesystems, anything under `/proc`, `/sys`, `/dev` and `/run`, a bind
+  mount of part of a filesystem (how a container host hands in
+  `/etc/hostname`), and a second mount of the same device. A mount point
+  whose name monit's exec line cannot carry, a space for instance, is
+  named in the plan as not watched. Under `--root DIR` the tree's own
+  mount table is read, which is usually absent: then `/` alone is watched
+  and the plan says so.
+- **Warn and critical are separate services** (`keel_disk_warn_root`,
+  `keel_disk_critical_root`), and so are inodes, memory, swap, CPU and
+  load: tests in one monit service share its one resource event, so going
+  from critical back to warn would report a recovery that did not happen.
+- **`set daemon 60`**, a cycle of one minute, so `for_minutes` is that
+  many cycles. monit reads `set daemon` wherever it stands and the last
+  one wins; Debian's `monitrc` includes `conf.d` after its own `set
+  daemon 120`, so this is the cycle of every check on the machine, the
+  operator's included, unless a file included later (`conf-enabled/`)
+  sets another. `keel inspect` reads the cycle the file sets.
+- **Network rates in bytes per second**, monit's unit: `max_mbit: 800` is
+  `upload > 100000000 B/s` and the same for download. Written in bytes,
+  so monit's binary `MB` never enters into it.
+- **Every test runs `keel notify`**, with `repeat every 60 cycles` for a
+  reminder each hour while the condition lasts and `else if succeeded then
+  exec` for the recovery, because monit runs `exec` once when a test
+  fails. The line is `/usr/bin/python3 -B -m keel notify --spec PATH
+  --level warn --check disk --path / --threshold 80`: the spec apply read,
+  on the live system, or `/etc/keel/instance.yaml` under `--root`. No
+  token is in the file.
+
+monit must be installed for the live step. Without it the field is
+refused, `monit is not installed, and keel installs no package: install it
+(apt install monit) and run apply again`, and nothing is written. A file
+monit refuses fails `monit -t`, the reload after it is skipped, and the
+running daemon keeps the configuration it had. A monit that is stopped
+stays stopped: `try-reload-or-restart` acts on a running service only.
+
+#### keel notify
+
+What monit runs. It reads the event from monit's environment
+(`MONIT_EVENT`, `MONIT_SERVICE`, `MONIT_DESCRIPTION`), the level and the
+check from its arguments, and the channels from the spec, and sends one
+message to every channel `monitor.notify` declares. A channel that fails
+does not stop the others; the exit code is 22 (`NOTIFY_FAILED`) only when
+none took the message, or none is declared.
+
+```
+blog (2001:db8:1::10): / is 92.3% full (critical at 90%).
+Grow the disk on the host; the container sees the new size:
+  host (for example Proxmox, container): pct resize <vmid> rootfs +10G
+  here: nothing more
+Largest directories: /var/lib/mysql 18G, /var/log 4.1G.
+monit: space usage 92.3% matches resource limit [space usage > 90.0%]
+```
+
+The machine cannot know its VMID, its disk's name on the host, or that
+the host is Proxmox, so the host command carries placeholders and names
+Proxmox only as an example. The steps inside the machine are chosen from
+what it can see: `systemd-detect-virt`, `findmnt` for the filesystem's type
+and device, and `lvs` and `pvs` for LVM. ext4 on a partition gets
+`growpart` then `resize2fs`, XFS `xfs_growfs`, LVM `pvresize` then
+`lvextend -r`, a container nothing more, with its volume named `rootfs`
+for `/` and `<mpN of PATH>` for a mount point. Memory, swap, CPU and load
+name `pct set` or `qm set`; a link down and a throughput over the limit
+name what to look at. With `details: true` the three largest directories
+(`du -x --max-depth=2`, at most 20 seconds) or processes (`ps`) are added.
+Nothing is run that changes anything.
+
+It writes nothing: it runs as `python3 -B`, reads the tokens from their
+secret files, and names a channel, never its URL, in what it prints. The
+Telegram token is part of the request path, so no URL appears in an error
+either. HTTPS is verified against the system's certificate authorities,
+every request has a timeout, and only the standard library is used.
+
 **network** (`/etc/network/interfaces`; handbook decision 0018)
 
 The one field whose converge can cut off the operator running it, so it
@@ -584,6 +676,11 @@ blog.yaml --root /tmp/scratch` then reports `instance.fqdn` and every
   first boot hook does: the Hub is one optional backend (brief section
   5.6), and a converge that ran on every apply would subscribe the machine
   to somebody else's service each time.
+- Installing monit, or acting on what it finds: the file keel writes for
+  it only runs `keel notify`, so nothing grows a disk, restarts a service
+  or kills a process behind the operator's back. Growing a disk is the
+  operator's act on the host, and the message says how.
+- Exposing monit's web interface, or writing a token into monit's file.
 - Converging a container's network from inside, more than one
   interface, bridges, VLANs or interface names; or changing the network
   on the live system without the revert armed first.
@@ -686,3 +783,13 @@ subprocess boundary by a fake that edits the scratch tree's passwd and
 group files as the real commands would under `--root`; everything else is
 written for real under a temporary root and read back by `keel inspect`
 and `keel diff`. No test needs root or touches `/`.
+
+The monitor has its own files. `tests/test_monitor_render.py` checks the
+mount filter, the rendered file and its reading back, and walks warn,
+critical, warn, ok on one filesystem the way monit plays it, one state per
+service; when a monit binary is on `PATH` or named by `KEEL_MONIT`, it also
+gives the rendered file to `monit -t`. `tests/test_system_monitor.py`
+covers the planner, `tests/test_apply_monitor_cli.py` the round trip
+through `keel diff`, and `tests/test_monitor_notify.py` sends every channel
+to an HTTPS server on `[::1]` with a certificate made for the run, and
+checks that no token reaches what `keel notify` prints.

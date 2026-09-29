@@ -18,6 +18,7 @@ from keel.inspect import constants as paths
 from keel.inspect.accounts import home_of, passwd_entries
 from keel.inspect.tree import File, Tree
 from keel.system.dbstate import DatabaseState, observe_database
+from keel.system.monstate import MonitorState, observe_monitor
 from keel.system.netstate import NetworkState, observe_network
 
 LOCALE_GEN = "etc/locale.gen"
@@ -51,7 +52,7 @@ LOCALE_LIST = ("locale", "-a")
 COMMANDS = (
     "useradd", "usermod", "timedatectl", "locale-gen", "localedef", "newaliases",
     "hostnamectl", "hostname", "systemctl", "ifup", "ifdown", "ip",
-    "systemd-run",
+    "systemd-run", "monit",
 )
 
 
@@ -83,6 +84,7 @@ class SystemState:
     now: datetime | None = None
     service_units: frozenset[str] = frozenset()
     network: NetworkState | None = None
+    monitor: MonitorState | None = None
 
 
 def observe(root: str, doc: dict) -> SystemState:
@@ -127,6 +129,7 @@ def observe(root: str, doc: dict) -> SystemState:
             if any(tree.exists(f"{d}/{unit}") for d in SERVICE_UNIT_DIRS)
         ),
         network=observe_network(root, doc),
+        monitor=observe_monitor(root, doc),
     )
 
 

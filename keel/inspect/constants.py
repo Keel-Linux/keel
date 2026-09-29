@@ -32,6 +32,10 @@ DEFAULT_LOCALE = "etc/default/locale"
 PASSWD = "etc/passwd"
 GROUP = "etc/group"
 DATABASE_DIRS = ("etc/mysql", "etc/postgresql")
+# The one monit file keel writes (decision 0021), and where the mounts a
+# check per filesystem is written for are listed.
+MONIT_CONF = "etc/monit/conf.d/keel.conf"
+MOUNTINFO = "proc/self/mountinfo"
 # The record keel pull leaves of the channel and release revision this
 # instance follows; absent on an appliance that follows the flat layout.
 CHANNEL_STATE = "var/lib/keel/channel"

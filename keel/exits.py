@@ -27,6 +27,7 @@ CHANNEL_UNVERIFIED = 18
 CHANNEL_EXPIRED = 19
 CHANNEL_ROLLBACK = 20
 NETWORK_NOT_CONFIRMED = 21
+NOTIFY_FAILED = 22
 
 DESCRIPTIONS = {
     OK: "success, including the no-op cases",
@@ -62,4 +63,6 @@ DESCRIPTIONS = {
     " one this instance is on",
     NETWORK_NOT_CONFIRMED: "keel network confirm refused: nothing waiting,"
     " or not run over the new configuration",
+    NOTIFY_FAILED: "keel notify reached no channel: none declared, or every"
+    " one failed",
 }

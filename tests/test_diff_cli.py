@@ -75,7 +75,7 @@ class TestDiffCommand(DiffTestCase):
                       " (observed dhcp)", lines)
         self.assertEqual(
             lines[-1],
-            "diff: 7 same, 0 drift, 0 unknown, 17 not declared,"
+            "diff: 7 same, 0 drift, 0 unknown, 18 not declared,"
             " 1 not compared; no drift",
         )
 

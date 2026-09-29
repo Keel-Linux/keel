@@ -84,7 +84,7 @@ diff: 12 same, 1 drift, 0 unknown, 1 not declared, 2 not compared; drift found
 ## What is compared, and against what
 
 The sections inspect observes are compared: `instance`, `network`, `tls`,
-`security`, `hub`, `users`, `locale` and `database`. Each is flattened to the dotted
+`security`, `hub`, `users`, `locale`, `database` and `monitor`. Each is flattened to the dotted
 leaf paths the inspect report uses, so `network.interfaces.eth0.ipv6`
 becomes one line per `method`, `address` and `gateway`, and a list
 (`network.nameservers`, `tls.acme.domains`, `users.<name>.authorized_keys`)
@@ -104,7 +104,8 @@ Normalisation, so that spelling is not drift: keywords (`security.alerts`,
 `tls.acme.domains`) compare case insensitively and without a trailing dot;
 addresses, gateways and nameservers compare in canonical form
 (`2001:DB8:0001::10/64` equals `2001:db8:1::10/64`); booleans compare as
-booleans. Everything else compares as a stripped string.
+booleans; the thresholds under `monitor.checks` compare as numbers, so
+`2.0` equals `2`. Everything else compares as a stripped string.
 
 Not compared, each with its reason in the output when the spec declares
 it:
@@ -116,6 +117,7 @@ it:
 | `first_login_wizard`, `preseed` | Render time switches with no trace on the running machine |
 | `tls.acme.agree_tos` | Consent the spec gives apply to register a Let's Encrypt account; the machine keeps a record of the account, not of the consent |
 | `security.updates_at_first_boot` | A first boot input: the `95secupdates` hook installs the pending security updates once and leaves nothing behind, and the cron-apt schedule the machine does show is shipped with the image whichever value was used. inspect writes the field from that schedule so the spec it produces is applicable, and says in the report that it is a proxy ([docs/inspect.md](inspect.md)) |
+| `monitor.notify` | The channels stay in the spec: monit's file only runs `keel notify`, which reads them from the spec when an alert fires, so the machine keeps no copy to compare. `monitor.enabled` and the checks are compared, read back from `/etc/monit/conf.d/keel.conf`; like `tls.acme`, the checks are not compared while `monitor.enabled` is false or absent |
 
 `version` is a property of the file, not of the machine, and is not
 listed.

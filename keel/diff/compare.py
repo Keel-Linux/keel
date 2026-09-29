@@ -31,7 +31,7 @@ from keel.spec.origins import canonical as canonical_origin
 
 OBSERVED_SECTIONS = (
     "instance", "network", "tls", "security", "hub", "users", "locale",
-    "database",
+    "database", "monitor",
 )
 NOT_COMPARED_REASONS = {
     "secrets": "values are never read, on either side",
@@ -53,7 +53,17 @@ SECRET_PREFIXES = (
 # A feature the spec turns off with one field. Its other fields stay in
 # the file, ready for the day the switch is turned on, and are not
 # compared meanwhile: nothing on the machine is supposed to match them.
-DISABLED_FEATURES = {"tls.acme": "enabled"}
+DISABLED_FEATURES = {"tls.acme": "enabled", "monitor": "enabled"}
+# Fields the machine keeps no copy of because they are read from the spec
+# itself when they are needed: monit runs keel notify, which reads the
+# channels from the spec when an alert fires (decision 0021).
+READ_FROM_SPEC = {
+    "monitor.notify":
+        "the channels stay in the spec: keel notify reads them there when"
+        " an alert fires, and monit's file only runs it",
+}
+# Thresholds, compared as numbers, so 2 and 2.0 are one value
+NUMERIC_PREFIXES = ("monitor.checks.",)
 KEYWORD_FIELDS = (
     "security.alerts", "security.updates_at_first_boot", "hub.api_key",
 )
@@ -175,6 +185,10 @@ def not_compared(section: str, wanted: dict[str, object]) -> dict[str, str]:
         for path, reason in (FIRST_BOOT_FIELDS | CONSENT_FIELDS).items()
         if path in wanted
     }
+    skipped.update({
+        path: reason for field, reason in READ_FROM_SPEC.items()
+        for path in wanted if _under(path, field)
+    })
     skipped.update(disabled(section, wanted))
     skipped.update(other_role(wanted))
     skipped.update(secret_references(wanted))
@@ -233,7 +247,7 @@ def disabled(section: str, wanted: dict[str, object]) -> dict[str, str]:
     """
     off: dict[str, str] = {}
     for feature, switch in DISABLED_FEATURES.items():
-        if not feature.startswith(f"{section}."):
+        if feature != section and not feature.startswith(f"{section}."):
             continue
         key = f"{feature}.{switch}"
         if wanted.get(key):
@@ -326,12 +340,21 @@ def normalize(path: str, value: object) -> object:
         return _address(text, ipaddress.ip_interface)
     if leaf in HOST_LEAVES:
         return _address(text, ipaddress.ip_address)
+    if path.startswith(NUMERIC_PREFIXES):
+        return _number(text)
     return text
 
 
 def _address(text: str, parse) -> str:
     try:
         return str(parse(text))
+    except ValueError:
+        return text
+
+
+def _number(text: str) -> str:
+    try:
+        return repr(float(text))
     except ValueError:
         return text
 

@@ -102,4 +102,9 @@ def unsupported(doc: dict, system: bool = False) -> list[str]:
             "locale: the timezone and language are applied by the system"
             " phase (--system, --system-only) only, not in this run"
         )
+    if (doc.get("monitor") or {}).get("enabled"):
+        messages.append(
+            "monitor: monit's configuration is written by the system phase"
+            " (--system, --system-only) only, not in this run"
+        )
     return messages
