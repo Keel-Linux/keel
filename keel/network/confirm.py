@@ -79,7 +79,15 @@ def not_proof(pending: marker.Pending, origin: session.Origin,
                 " to the new address and confirm from there")
     if origin.local is None:
         return f"refused: {origin.detail}"
-    allowed = pending.addresses or tuple(probes.addresses(pending.iface))
+    held = tuple(probes.addresses(pending.iface))
+    if origin.peer and (ipaddress.ip_address(origin.peer).is_loopback
+                        or same_address(origin.peer, held)):
+        return ("refused: this session comes from the machine itself (an"
+                " ssh from the old session), which says nothing about"
+                " reaching it from outside")
+    # the static addresses the file declares, and what DHCP or SLAAC gave
+    # the interface since, for a family the file leaves dynamic
+    allowed = tuple(dict.fromkeys(pending.addresses + held))
     if not same_address(origin.local, allowed):
         return (f"refused: this session arrived at {origin.local}, which is"
                 f" not an address of the new configuration"

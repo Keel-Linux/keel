@@ -8,23 +8,38 @@ neither leaves an address or a DHCP client of the other behind:
    and withdraws its resolvconf entries; a failure here is not fatal, an
    interface ifupdown-ng does not think is up has nothing to stop;
 2. flush the addresses, since an IPv4 address survives a link going
-   down, then set the link down, as 01ipconfig does;
+   down, then set the link down, as 01ipconfig does; a failure here is
+   reported but does not stop the file being written, because a revert
+   that stopped here would leave the bad file in place;
 3. write the new file;
 4. `ifup` the interface (ifupdown-ng has no `ifreload`).
 
-The revert timer is a transient systemd unit armed before step 1, so a
-run that dies half way still reverts; the unit shipped in the package
-(debian/keel.keel-network-revert.service) covers a reboot inside the
-window, since a transient timer does not survive one.
+Two transient timers run the revert, both armed before step 1, so a run
+that dies half way still reverts:
+
+- the safety timer, for the window plus the time `ifup` may take (a DHCP
+  wait), armed first;
+- the window timer, armed once the interface is up, for the window
+  itself, so the operator gets the whole window to confirm in.
+
+Their names differ from the unit the package ships
+(keel-network-revert.service, which covers a reboot inside the window):
+systemd refuses a transient unit whose name has a unit file.
 """
 
 import os
+import signal
 import sys
 from collections.abc import Callable
 
 from keel.network import marker
 
-UNIT = "keel-network-revert"
+WINDOW_UNIT = "keel-network-window"
+SAFETY_UNIT = "keel-network-window-safety"
+UNITS = (WINDOW_UNIT, SAFETY_UNIT)
+# how long ifup may take on top of the window: ifupdown-ng waits for a
+# DHCP lease, and the safety timer must not fire before the window starts
+UP_ALLOWANCE = 60
 INTERFACES = "etc/network/interfaces"
 
 # A command runner: argv in, None on success or what went wrong
@@ -32,15 +47,15 @@ Runner = Callable[[tuple[str, ...]], str | None]
 
 
 def revert_command() -> tuple[str, ...]:
-    """What the timer runs: this interpreter, so no PATH is involved"""
+    """What the timers run: this interpreter, so no PATH is involved"""
     return (sys.executable, "-m", "keel", "network", "revert")
 
 
-def arm(window: int, run: Runner) -> str | None:
-    """Arm the revert; a leftover unit of an earlier run is reset first"""
-    run(("systemctl", "reset-failed", f"{UNIT}.timer", f"{UNIT}.service"))
+def arm(unit: str, seconds: int, run: Runner) -> str | None:
+    """Arm one revert timer; a leftover of an earlier run is reset first"""
+    run(("systemctl", "reset-failed", f"{unit}.timer", f"{unit}.service"))
     return run((
-        "systemd-run", f"--unit={UNIT}", f"--on-active={window}s",
+        "systemd-run", f"--unit={unit}", f"--on-active={seconds}s",
         "--timer-property=AccuracySec=1s",
         "--description=keel: revert an unconfirmed network change",
         *revert_command(),
@@ -48,24 +63,31 @@ def arm(window: int, run: Runner) -> str | None:
 
 
 def disarm(run: Runner) -> None:
-    """Stop the timer; one that already fired or never existed is fine"""
-    run(("systemctl", "stop", f"{UNIT}.timer"))
+    """Stop both timers; one that fired or never existed is fine"""
+    run(("systemctl", "stop", *(f"{unit}.timer" for unit in UNITS)))
 
 
-def bounce(root: str, iface: str, relative: str, text: str,
-           run: Runner) -> str | None:
-    """Down on the file in place, flush, write `text`, up on it"""
-    run(("ifdown", iface))
-    problem = run(("ip", "address", "flush", "dev", iface))
-    if problem:
-        return problem
-    run(("ip", "link", "set", iface, "down"))
+def put_file(root: str, relative: str, text: str) -> str | None:
     try:
         marker.write_private(root, relative, text)
         os.chmod(marker.path(root, relative), 0o644)
     except OSError as e:
         return f"cannot write /{relative}: {e.strerror or e}"
-    return run(("ifup", iface))
+    return None
+
+
+def bounce(root: str, iface: str, relative: str, text: str,
+           run: Runner) -> tuple[bool, str | None]:
+    """Down, flush, write `text`, up: (whether the file was written, problem)"""
+    run(("ifdown", iface))
+    problems = [run(("ip", "address", "flush", "dev", iface))]
+    run(("ip", "link", "set", iface, "down"))
+    problem = put_file(root, relative, text)
+    if problem:
+        return False, problem
+    problems.append(run(("ifup", iface)))
+    found = [one for one in problems if one]
+    return True, "; ".join(found) or None
 
 
 def read_current(root: str, relative: str) -> str:
@@ -80,9 +102,23 @@ def change(root: str, pending: marker.Pending, text: str,
            run: Runner) -> str | None:
     """Change the network under the window; None when it is up and waiting
 
-    An `ifup` that fails on the new file reverts at once instead of
-    leaving the machine without a network for the rest of the window.
+    A hangup is ignored while it runs: the operator's session dying as the
+    interface moves is expected, and dying half way would leave a change
+    nobody can confirm.
     """
+    previous = signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    try:
+        return changed(root, pending, text, run)
+    finally:
+        signal.signal(signal.SIGHUP, previous)
+
+
+def changed(root: str, pending: marker.Pending, text: str,
+            run: Runner) -> str | None:
+    boot_id = marker.boot_id()
+    if boot_id is None or marker.uptime() is None:
+        return ("cannot read the boot id or the uptime under /proc, which"
+                " date the change for its confirmation; nothing changed")
     with marker.locked(root):
         if marker.exists(root):
             return ("a network change is already waiting for its"
@@ -93,21 +129,40 @@ def change(root: str, pending: marker.Pending, text: str,
             return f"cannot read /{pending.path}: {e.strerror or e}"
         marker.save(root, current)
         marker.write(root, pending)
-        problem = arm(pending.window, run)
+        problem = arm(SAFETY_UNIT, pending.window + UP_ALLOWANCE, run)
         if problem:
             marker.clear(root)
             return f"revert timer not armed, nothing changed: {problem}"
-        problem = bounce(root, pending.iface, pending.path, text, run)
-        if problem:
-            back = bounce(root, pending.iface, pending.path, current, run)
-            marker.clear(root)
-            disarm(run)
-            outcome = ("reverted to the previous file" if back is None
-                       else f"and the revert failed too: {back}")
-            return f"{problem}; {outcome}"
-        marker.write(root, pending.up(marker.boot_id() or "",
-                                      marker.uptime() or 0.0))
-    return None
+        written, problem = bounce(root, pending.iface, pending.path, text,
+                                  run)
+        if written and problem is None:
+            up_at = marker.uptime()
+            if up_at is not None:
+                # left undated, the change cannot be confirmed and reverts
+                marker.write(root, pending.up(boot_id, up_at))
+            # if this one fails, the safety timer still reverts, later
+            arm(WINDOW_UNIT, pending.window, run)
+            return None
+        return rolled_back(root, pending, current, problem, run)
+
+
+def rolled_back(root: str, pending: marker.Pending, current: str,
+                problem: str | None, run: Runner) -> str:
+    """The new file did not come up: put the old one back at once
+
+    The marker and the timers stay unless the old file is on disk again,
+    so the timer, or the boot unit, still has something to restore.
+    """
+    written, back = bounce(root, pending.iface, pending.path, current, run)
+    if not written:
+        return (f"{problem}; putting the previous file back failed too"
+                f" ({back}); the revert timer will try again")
+    marker.clear(root)
+    disarm(run)
+    if back:
+        return (f"{problem}; the previous file is back, but bringing the"
+                f" interface up on it failed: {back}")
+    return f"{problem}; reverted to the previous file"
 
 
 def revert(root: str, run: Runner, boot: bool = False) -> tuple[bool, str]:
@@ -115,8 +170,9 @@ def revert(root: str, run: Runner, boot: bool = False) -> tuple[bool, str]:
 
     At boot the network is not up yet, so the file is restored and the
     interface left to networking.service; otherwise it is bounced onto
-    the restored file. Either way the marker goes, and a second revert
-    finds nothing to do.
+    the restored file. The marker goes only once the saved file is back
+    on disk, so a revert that could not write it can be run again, and
+    the boot unit still finds it.
     """
     with marker.locked(root):
         if not marker.exists(root):
@@ -129,17 +185,17 @@ def revert(root: str, run: Runner, boot: bool = False) -> tuple[bool, str]:
             return False, (f"the saved copy of /{relative} is missing;"
                            " nothing was restored")
         if boot or pending is None:
-            try:
-                marker.write_private(root, relative, text)
-                os.chmod(marker.path(root, relative), 0o644)
-            except OSError as e:
-                return False, f"cannot restore /{relative}: {e.strerror or e}"
+            problem = put_file(root, relative, text)
+            if problem:
+                return False, f"cannot restore: {problem}"
             marker.clear(root)
             if boot:
                 return True, f"restored /{relative} before networking starts"
             return True, (f"restored /{relative}; the pending change could"
                           " not be read, so no interface was restarted")
-        problem = bounce(root, pending.iface, relative, text, run)
+        written, problem = bounce(root, pending.iface, relative, text, run)
+        if not written:
+            return False, f"cannot restore: {problem}"
         marker.clear(root)
         disarm(run)
         if problem:

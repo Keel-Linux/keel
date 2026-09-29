@@ -9,6 +9,7 @@ new file written, up on it, with the revert armed before any of it.
 import json
 import os
 import shutil
+import signal
 import tempfile
 import threading
 import time
@@ -25,6 +26,8 @@ from keel.network.confirm import Probes
 OLD = "iface eth0 inet6 static\n    address 2001:db8:1::10/64\n"
 NEW = "iface eth0 inet6 static\n    address 2001:db8:1::20/64\n"
 INTERFACES = "etc/network/interfaces"
+STOP = ("systemctl", "stop", "keel-network-window.timer",
+        "keel-network-window-safety.timer")
 
 
 class Recorder:
@@ -134,11 +137,14 @@ class TestChange(RootCase):
             self.assertIsNone(switch.change(self.root, pending(), NEW, run))
         self.assertEqual(run.names(), [
             "systemctl", "systemd-run", "ifdown", "ip address flush",
-            "ip link set", "ifup",
+            "ip link set", "ifup", "systemctl", "systemd-run",
         ])
-        armed = run.calls[1]
-        self.assertIn("--on-active=120s", armed)
-        self.assertEqual(armed[-3:], ("keel", "network", "revert"))
+        safety, window = run.calls[1], run.calls[7]
+        self.assertIn("--unit=keel-network-window-safety", safety)
+        self.assertIn("--on-active=180s", safety)
+        self.assertIn("--unit=keel-network-window", window)
+        self.assertIn("--on-active=120s", window)
+        self.assertEqual(window[-3:], ("keel", "network", "revert"))
         self.assertEqual(self.current(), NEW)
         self.assertEqual(marker.saved(self.root), OLD)
         found = marker.read(self.root)
@@ -163,15 +169,63 @@ class TestChange(RootCase):
         self.assertIn("ifup failed; reverted to the previous file", problem)
         self.assertEqual(self.current(), OLD)
         self.assertFalse(marker.exists(self.root))
-        self.assertEqual(run.calls[-1], ("systemctl", "stop",
-                                         "keel-network-revert.timer"))
+        self.assertEqual(run.calls[-1], STOP)
 
-    def test_both_directions_failing_is_said(self):
+    def test_the_old_file_back_but_down_is_said(self):
         run = Recorder(fail={"ifup": 2})
         problem = switch.change(self.root, pending(), NEW, run)
-        self.assertIn("the revert failed too", problem)
+        self.assertIn("the previous file is back, but bringing", problem)
+        self.assertEqual(self.current(), OLD)
 
-    def test_a_flush_that_fails_stops_before_the_write(self):
+    def test_a_rollback_that_cannot_write_keeps_the_marker_and_timer(self):
+        real = marker.write_private
+        writes = []
+
+        def second_write_fails(root, relative, text):
+            if relative == INTERFACES:
+                writes.append(text)
+                if len(writes) == 2:
+                    raise OSError(28, "No space left")
+            return real(root, relative, text)
+
+        with mock.patch.object(marker, "write_private",
+                               side_effect=second_write_fails):
+            problem = switch.change(self.root, pending(), NEW,
+                                    Recorder(fail={"ifup": 1}))
+        self.assertIn("the revert timer will try again", problem)
+        self.assertTrue(marker.exists(self.root))
+        self.assertEqual(marker.saved(self.root), OLD)
+
+    def test_an_unreadable_uptime_changes_nothing(self):
+        run = Recorder()
+        with mock.patch.object(marker, "uptime", return_value=None):
+            problem = switch.change(self.root, pending(), NEW, run)
+        self.assertIn("nothing changed", problem)
+        self.assertEqual((run.calls, self.current()), ([], OLD))
+
+    def test_uptime_lost_after_ifup_leaves_the_change_undated(self):
+        with mock.patch.object(marker, "uptime", side_effect=[1.0, None]):
+            self.assertIsNone(switch.change(self.root, pending(), NEW,
+                                            Recorder()))
+        self.assertIsNone(marker.read(self.root).changed_at)
+
+    def test_a_hangup_is_ignored_while_the_interface_moves(self):
+        seen = []
+
+        def run(argv):
+            seen.append(signal.getsignal(signal.SIGHUP))
+            return None
+
+        before = signal.getsignal(signal.SIGHUP)
+        switch.change(self.root, pending(), NEW, run)
+        self.assertEqual(set(seen), {signal.SIG_IGN})
+        self.assertEqual(signal.getsignal(signal.SIGHUP), before)
+
+    def test_the_transient_units_never_take_the_shipped_unit_name(self):
+        shipped = "keel-network-revert"
+        self.assertNotIn(shipped, switch.UNITS)
+
+    def test_a_flush_that_fails_on_the_way_in_rolls_back(self):
         run = Recorder(fail={"ip address flush": 1})
         problem = switch.change(self.root, pending(), NEW, run)
         self.assertIn("ip failed", problem)
@@ -197,8 +251,9 @@ class TestChange(RootCase):
     def test_an_unwritable_file_is_the_problem(self):
         with mock.patch.object(marker, "write_private",
                                side_effect=OSError(30, "Read-only")):
-            problem = switch.bounce(self.root, "eth0", INTERFACES, NEW,
-                                    Recorder())
+            written, problem = switch.bounce(self.root, "eth0", INTERFACES,
+                                             NEW, Recorder())
+        self.assertFalse(written)
         self.assertIn("cannot write /etc/network/interfaces", problem)
 
 
@@ -249,6 +304,24 @@ class TestRevert(RootCase):
         self.assertIn("saved copy", line)
         self.assertFalse(marker.exists(self.root))
 
+    def test_a_flush_that_fails_still_restores_the_file(self):
+        self.prepared()
+        worked, line = switch.revert(self.root,
+                                     Recorder(fail={"ip address flush": 1}))
+        self.assertFalse(worked)
+        self.assertIn("restored /etc/network/interfaces, but ip failed", line)
+        self.assertEqual(self.current(), OLD)
+        self.assertFalse(marker.exists(self.root))
+
+    def test_a_revert_that_cannot_write_keeps_the_marker(self):
+        self.prepared()
+        with mock.patch.object(marker, "write_private",
+                               side_effect=OSError(30, "Read-only")):
+            worked, line = switch.revert(self.root, Recorder())
+        self.assertFalse(worked)
+        self.assertIn("cannot restore", line)
+        self.assertTrue(marker.exists(self.root))
+
     def test_ifup_failing_on_the_restored_file_is_said(self):
         self.prepared()
         worked, line = switch.revert(self.root, Recorder(fail={"ifup": 1}))
@@ -291,8 +364,7 @@ class TestConfirm(RootCase):
         self.assertTrue(confirmed)
         self.assertIn("goes through the new gateway fe80::2", lines[1])
         self.assertFalse(marker.exists(self.root))
-        self.assertEqual(run.calls, [("systemctl", "stop",
-                                      "keel-network-revert.timer")])
+        self.assertEqual(run.calls, [STOP])
 
     def test_an_on_link_confirmation_says_the_gateway_was_not_tested(self):
         self.prepared()
@@ -324,6 +396,21 @@ class TestConfirm(RootCase):
         (confirmed, _), _ = self.confirm(
             ssh(local="192.0.2.99"), probes(addresses=["192.0.2.99"]))
         self.assertTrue(confirmed)
+
+    def test_a_dynamic_family_beside_a_static_one_confirms(self):
+        self.prepared()
+        (confirmed, _), _ = self.confirm(
+            ssh(local="192.0.2.99"), probes(addresses=["2001:db8:1::20",
+                                                       "192.0.2.99"]))
+        self.assertTrue(confirmed)
+
+    def test_a_session_from_the_machine_itself_is_refused(self):
+        for peer in ("::1", "2001:db8:1::20"):
+            self.prepared()
+            (confirmed, lines), _ = self.confirm(
+                ssh(peer=peer), probes(addresses=["2001:db8:1::20"]))
+            self.assertFalse(confirmed)
+            self.assertIn("comes from the machine itself", lines[0])
 
     def test_a_session_whose_socket_was_not_found_is_refused(self):
         self.prepared()

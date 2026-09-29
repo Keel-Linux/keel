@@ -443,7 +443,16 @@ write. The rules:
   inspect could not infer (SLAAC and DHCPv6 look alike in the file) does
   not bounce an interface.
 - **One interface**, as `01ipconfig` configures one. A spec declaring
-  several, with drift, is refused.
+  several, with drift, is refused, and so is one naming another interface
+  than the file configures: the old one would stay up with its addresses.
+- **What the spec leaves out stays.** A spec declaring IPv6 only keeps
+  the machine's IPv4 stanza, and one declaring no nameservers keeps the
+  file's, rather than the library's defaults replacing them.
+- **Nothing is bounced for a difference the file cannot hold.**
+  ifupdown writes nameservers only in a static stanza of their family, so
+  nameservers declared for a DHCP family are reported and left alone; and
+  a file that already says exactly what would be written is never
+  rewritten, whatever else differs.
 - **The file is inithooks' own.** It is rendered by the functions of
   `/usr/lib/inithooks/lib/ipconfig.sh` that `01ipconfig` uses, from the
   same variables, so a first boot and a day two write the same file for
@@ -453,12 +462,15 @@ Under `--root DIR` the file is written and nothing else happens. On the
 live system the change is a sequence that reverts by itself:
 
 1. the current file is saved under `/var/lib/keel/network/` with a
-   pending marker, and a transient timer, `keel-network-revert.timer`, is
-   armed for `--network-window` seconds; no timer, no change;
+   pending marker, and a transient timer, `keel-network-window-safety`,
+   is armed for the window plus 60 seconds, the time `ifup` may spend
+   waiting for DHCP; no timer, no change;
 2. `ifdown` on the old file, the addresses flushed, the link set down,
-   the new file written, `ifup` on it. An `ifup` that fails reverts at
-   once;
-3. the run ends. Within the window, from a **new** session:
+   the new file written, `ifup` on it. An `ifup` that fails puts the old
+   file back at once;
+3. once the interface is up, a second timer, `keel-network-window`, is
+   armed for the window itself, so the whole window is left to confirm in;
+4. the run ends. Within the window, from a **new** session:
 
 ```
 $ ssh admin@2001:db8:1::20
@@ -468,7 +480,7 @@ the new gateway (fe80::2) was not tested: the route back to 2001:db8:1::99 does 
 the network change stays; the revert is cancelled
 ```
 
-Without a confirmation the timer runs `keel network revert`, which
+Without a confirmation a timer runs `keel network revert`, which
 takes the interface through the same sequence back onto the saved file.
 A reboot inside the window is covered too: `keel-network-revert.service`
 runs before networking while the marker exists and puts the saved file
@@ -482,7 +494,7 @@ works:
 
 | Run from | Accepted when |
 | --- | --- |
-| SSH | the session (its `sshd-session` process) started after the interface came up on the new file, and arrived at an address of the new configuration, or one the interface now holds when the address is dynamic |
+| SSH | the session (its `sshd-session` process) started after the interface came up on the new file, arrived at an address the new file declares or the interface now holds, and came from another machine: `ssh` to the new address from the old session proves nothing |
 | A console (`tty1`, `ttyS0`, `hvc0`, `console`) | always: a person there has seen the machine |
 | A process attached from a container's host | always, as a console |
 | Anything else: a shell that survived the change in tmux, a service | refused |

@@ -30,6 +30,7 @@ class NetworkState:
     owner: str
     pending: bool
     rendered: Rendered | None
+    current: str | None = None
 
 
 def observe_network(root: str, doc: dict) -> NetworkState | None:
@@ -56,10 +57,31 @@ def observe_network(root: str, doc: dict) -> NetworkState | None:
         iface = str(next(iter(interfaces)))
         rendered = render(
             tree.path(LIBRARY), iface, hostname(tree, doc),
-            network_env({**network, "managed_by": "file"}),
+            network_env(completed(network, observed or {}, iface)),
         )
     return NetworkState(observed, unknowns, in_container, owner,
-                        os.path.exists(tree.path(marker.PENDING)), rendered)
+                        os.path.exists(tree.path(marker.PENDING)), rendered,
+                        tree.read(paths.INTERFACES).text)
+
+
+def completed(network: dict, observed: dict, iface: str) -> dict:
+    """The declared section, with what it leaves out taken from the machine
+
+    A spec that declares IPv6 only means IPv4 stays as the machine has it
+    (decision 0018), but the library renders an absent family as DHCP, as
+    01ipconfig does at first boot. So a family the spec does not declare,
+    and the nameservers when it declares none, are filled in from what
+    inspect read, and the file keeps them.
+    """
+    declared = dict((network.get("interfaces") or {}).get(iface) or {})
+    found = ((observed.get("interfaces") or {}).get(iface)) or {}
+    for family in ("ipv4", "ipv6"):
+        kept = found.get(family) or {}
+        if family not in declared and kept.get("method"):
+            declared[family] = kept
+    nameservers = network.get("nameservers") or observed.get("nameservers")
+    return {"managed_by": "file", "interfaces": {iface: declared},
+            "nameservers": nameservers or []}
 
 
 def hostname(tree: Tree, doc: dict) -> str:

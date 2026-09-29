@@ -144,6 +144,33 @@ class TestPlan(unittest.TestCase):
         self.assertIsInstance(found[-1], Refuse)
         self.assertIn("2 interfaces declared", found[-1].describe())
 
+    def test_a_file_that_already_says_it_is_not_bounced(self):
+        found = actions(plan_network(STATIC, state(
+            current="# the new file\n"), True, ALL))
+        self.assertEqual(len(found), 1)
+        self.assertIn("already says", found[0].describe())
+
+    def test_nameservers_the_file_cannot_hold_do_not_loop(self):
+        declared = dict(OBSERVED, nameservers=["2001:db8:1::99"])
+        found = actions(plan_network(declared, state(
+            rendered=Rendered(text="iface eth0 inet6 dhcp\n")), True, ALL))
+        self.assertEqual(len(found), 1)
+        self.assertIn("cannot hold them", found[0].describe())
+
+    def test_nameservers_the_file_can_hold_are_converged(self):
+        declared = dict(OBSERVED, nameservers=["2001:db8:1::99"])
+        found = actions(plan_network(declared, state(rendered=Rendered(
+            text="    dns-nameservers 2001:db8:1::99\n")), True, ALL))
+        self.assertIsInstance(found[-1], SwitchNetwork)
+
+    def test_moving_to_another_interface_is_refused(self):
+        moved = dict(STATIC, interfaces={"ens18": STATIC["interfaces"]
+                                         ["eth0"]})
+        found = actions(plan_network(moved, state(), True, ALL))
+        self.assertIsInstance(found[-1], Refuse)
+        self.assertIn("ens18 is declared and the file configures eth0",
+                      found[-1].describe())
+
     def test_addresses_and_gateways_helpers(self):
         self.assertEqual(static_addresses({"ipv6": {"method": "dhcp"}}), ())
         self.assertEqual(observed_gateways(None), ())
@@ -236,6 +263,20 @@ class TestObserve(unittest.TestCase):
         self.assertEqual(
             found.observed["interfaces"]["eth0"]["ipv6"]["address"],
             "2001:db8:1::10/64")
+
+    def test_an_undeclared_family_stays_as_the_machine_has_it(self):
+        with open(join(self.root, "etc", "network", "interfaces"), "w") as f:
+            f.write("auto eth0\niface eth0 inet static\n"
+                    "    address 192.0.2.5\n    netmask 255.255.255.0\n"
+                    "iface eth0 inet6 static\n"
+                    "    address 2001:db8:1::10/64\n")
+        ipv6_only = {"managed_by": "file", "interfaces": {"eth0": {
+            "ipv6": STATIC["interfaces"]["eth0"]["ipv6"]}}}
+        found = observe_network(self.root, {"network": ipv6_only})
+        self.assertIn("iface eth0 inet static\n", found.rendered.text)
+        self.assertIn("address 192.0.2.5\n", found.rendered.text)
+        self.assertIn("address 2001:db8:1::20/64", found.rendered.text)
+        self.assertEqual(found.current.count("192.0.2.5"), 1)
 
     def test_the_declared_hostname_wins(self):
         found = observe_network(self.root, {
