@@ -49,6 +49,33 @@ class TestReadCertificate(unittest.TestCase):
         self.assertIsNone(problem)
         self.assertEqual(cert.names[0], "blog.example.org")
 
+    def test_a_leaf_that_shares_its_ca_name_is_not_self_signed(self):
+        """Same subject and issuer, but signed by another key (review of #38)"""
+        cert, _ = read_certificate(pem("same-dn-leaf"))
+        self.assertEqual(cert.subject, cert.issuer)
+        self.assertFalse(cert.self_signed)
+
+    def test_a_chain_with_the_ca_first_is_read_from_its_leaf(self):
+        cert, problem = read_certificate(pem("chain-ca-first"))
+        self.assertIsNone(problem)
+        self.assertFalse(cert.self_signed)
+        self.assertEqual(cert.names,
+                         ("blog.example.org", "www.blog.example.org"))
+
+    def test_a_lone_self_signed_ca_certificate_is_still_read(self):
+        """openssl req -x509, as TurnKey makes its own, marks it CA:TRUE"""
+        cert, _ = read_certificate(pem("self-signed"))
+        self.assertTrue(cert.self_signed)
+
+    def test_openssl_that_does_not_answer_is_a_problem(self):
+        with mock.patch.object(
+            certificate.subprocess, "run",
+            side_effect=certificate.subprocess.TimeoutExpired("openssl", 10),
+        ):
+            cert, problem = read_certificate(pem("acme-blog"))
+        self.assertIsNone(cert)
+        self.assertIn("did not answer", problem)
+
     def test_text_without_a_certificate_is_a_problem(self):
         cert, problem = read_certificate(KEY)
         self.assertIsNone(cert)
