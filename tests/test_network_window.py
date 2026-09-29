@@ -183,8 +183,10 @@ class TestChange(RootCase):
         calls = []
 
         def second_stage_fails(root, relative, text):
+            # the first call is the check before the marker, the second
+            # the change itself, the third the rollback
             calls.append(text)
-            if len(calls) == 2:
+            if len(calls) == 3:
                 return None, "cannot write /etc/network/interfaces: full"
             return real(root, relative, text)
 
