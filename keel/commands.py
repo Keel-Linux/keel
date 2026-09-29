@@ -135,6 +135,7 @@ def spec_apply(args) -> int:
     return apply_system(
         doc, root, dry_run, phase_label(system_only),
         getattr(args, "destroy_local_database", False),
+        getattr(args, "defer_certificate", False),
     )
 
 
@@ -168,7 +169,7 @@ def apply_conf(args, doc: dict, with_system: bool) -> int:
 
 def apply_system(
     doc: dict, root: str, dry_run: bool, label: str = "apply --system",
-    confirmed: bool = False,
+    confirmed: bool = False, defer_certificate: bool = False,
 ) -> int:
     """Observe, plan, then carry out or only print; one line per action
 
@@ -181,7 +182,7 @@ def apply_system(
     server holds. Nothing else in keel passes it, so a first boot cannot.
     """
     state = system.observe(root, doc)
-    plan = system.plan(doc, state, confirmed)
+    plan = system.plan(doc, state, confirmed, defer_certificate)
     if not plan.steps:
         print(f"{label}: nothing declared that this phase converges")
         return exits.OK

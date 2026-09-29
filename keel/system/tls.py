@@ -33,7 +33,7 @@ from datetime import timedelta
 
 from keel.inspect.certificate import Certificate, covers, read_certificate
 from keel.system.actions import Action, Note, Refuse, Run, Step, WriteFile
-from keel.system.state import SystemState
+from keel.system.state import TLS_SERVICES, SystemState
 
 FIELD = "tls.acme"
 DOMAINS = "etc/dehydrated/confconsole.domains.txt"
@@ -42,16 +42,22 @@ WRAPPER = "/usr/lib/confconsole/plugins.d/Lets_Encrypt/dehydrated-wrapper"
 ETC_MODE = 0o644
 RENEW_WITHIN = timedelta(days=30)
 HEADER = "# written by keel apply --system"
-# the services 15regen-sslcert restarts, and webmin, which reads the same pair
-SERVICES = ("nginx.service", "apache2.service", "lighttpd.service",
-            "tomcat10.service", "tomcat11.service", "webmin.service")
+DEFERRED = ("certificate request deferred: this run asks no outside"
+            " service; the next apply --system requests it")
 
 
-def plan_tls(tls: dict, state: SystemState) -> list[Step]:
+def plan_tls(tls: dict, state: SystemState, defer: bool = False) -> list[Step]:
+    """`defer` is the first boot's: write what is declared, request nothing
+
+    At first boot DNS rarely points at the machine yet, and a golden image
+    cloned with its domain would spend Let's Encrypt's failed validation
+    limit on every copy. Turning ACME off asks no outside service, so it
+    is not deferred.
+    """
     acme = tls.get("acme") or {}
     enabled = acme.get("enabled")
     if enabled is True:
-        return [request_step(acme, state)]
+        return [request_step(acme, state, defer)]
     if enabled is False:
         return [off_step(state)]
     return []
@@ -65,7 +71,7 @@ def in_use(state: SystemState) -> Certificate | None:
     return found
 
 
-def request_step(acme: dict, state: SystemState) -> Step:
+def request_step(acme: dict, state: SystemState, defer: bool) -> Step:
     domains = [str(d) for d in acme.get("domains") or []]
     if not domains:
         return Step(FIELD, (Refuse(
@@ -89,6 +95,8 @@ def request_step(acme: dict, state: SystemState) -> Step:
     if not state.live:
         return Step(FIELD, (*actions, Note(
             "certificate not requested: not the live system")))
+    if defer:
+        return Step(FIELD, (*actions, Note(DEFERRED)))
     refusal = why_not(acme, challenge, state)
     if refusal is not None:
         return Step(FIELD, (*actions, Refuse(refusal)))
@@ -130,10 +138,16 @@ def off_step(state: SystemState) -> Step:
         return Step(FIELD, (Note(
             "a CA issued certificate is in use; not replaced: not the live"
             " system"),))
+    # only the units this machine has: try-restart exits 5 when one of the
+    # list does not exist, which would fail a step that did its work
+    units = tuple(u for u in TLS_SERVICES if u in state.service_units)
+    restart: Action = Run(
+        ("systemctl", "try-restart", *units),
+        "restart the services that read it, where they run",
+    ) if units else Note("no web server or Webmin unit to restart")
     return Step(FIELD, (
         Run(("chmod", "a-x", f"/{CRON}"), "disable the renewal job"),
         Run(("turnkey-make-ssl-cert", "--default", "--force"),
             "make a self-signed certificate for this machine"),
-        Run(("systemctl", "try-restart", *SERVICES),
-            "restart the services that read it, where they run"),
+        restart,
     ))

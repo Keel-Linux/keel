@@ -58,6 +58,7 @@ exactly as `inspect` is.
 | `--system-only` | Run phase 2 and not phase 1: the conf is neither read nor written and no secret is resolved. Root on the live system |
 | `--dry-run` | With either flag: print the plan and change nothing, not even the conf. Reads no secret, so the secret files need not exist. Needs no root |
 | `--root DIR` | The filesystem phase 2 converges: `/` (the default, the live system) or a scratch tree. Phase 1 is not affected; the conf path is `--conf` |
+| `--defer-certificate` | With either flag: write `tls.acme` but ask no certificate authority for a certificate in this run. The first boot hook passes it. See "tls.acme" below |
 | `--destroy-local-database` | Confirm, for this run only, that making this node a replica may drop the databases this server holds. Without it apply refuses and changes nothing. See "database.server" below |
 
 `--destroy-local-database` with neither flag is a usage error as well:
@@ -274,7 +275,7 @@ made from the certificate in use, read as `inspect` reads it
 | --- | --- | --- |
 | `enabled: true` | a certificate a CA issued, covering every domain, more than 30 days from its end | none: `unchanged (domains, valid until ...)` |
 | `enabled: true` | self-signed, not covering a domain, or within 30 days of its end | the domains file written when it differs; on the live system, confconsole's `dehydrated-wrapper --log-info --challenge http-01`, with `--register` when no account exists |
-| `enabled: false` | a certificate a CA issued | on the live system: the renewal job disabled (`chmod a-x /etc/cron.daily/confconsole-dehydrated`), `turnkey-make-ssl-cert --default --force`, and `systemctl try-restart` of the web servers and Webmin |
+| `enabled: false` | a certificate a CA issued | on the live system: the renewal job disabled (`chmod a-x /etc/cron.daily/confconsole-dehydrated`), `turnkey-make-ssl-cert --default --force`, and `systemctl try-restart` of those of nginx, apache2, lighttpd, tomcat10, tomcat11 and Webmin whose unit the machine has (a missing unit makes `try-restart` exit 5) |
 | `enabled: false` | self-signed | none: `unchanged (off)` |
 | absent | anything | none |
 
@@ -282,6 +283,19 @@ The wrapper answers the challenge, installs the certificate where every
 service reads it, keeps the previous one as `.bak` and installs the
 renewal job. Let's Encrypt is asked only when the certificate in use needs
 it, never on every run, which its rate limits require.
+
+An account is looked for with the CA the dehydrated config names (`CA=`,
+`letsencrypt` when unset, under `BASEDIR`), at the directory dehydrated
+0.7.2 names after it, so an account left from another CA, staging for
+instance, is not taken as consent for this one.
+
+With `--defer-certificate` the domains file is written and nothing is
+requested: `certificate request deferred`. The first boot hook passes it.
+At first boot DNS rarely points at the machine yet, and a golden image
+cloned with its domain would spend Let's Encrypt's limit on failed
+validations with every copy; the next `apply --system`, run when the
+name resolves, requests it. Turning ACME off asks no outside service and
+is not deferred.
 
 Refused, with the reason, and the run fails: `dns-01` (a DNS provider and
 its credentials have no field in the spec yet), no Let's Encrypt account
@@ -499,6 +513,7 @@ into the conf every later hook reads. The system phase runs at
 01ipconfig        the address
 09hostname        /etc/hostname, and a sed over the old name in /etc/hosts
 10keel-system     the system phase: keel spec apply --system-only
+                  --defer-certificate
 15regen-sslcert   the certificate, on the name settled above
 29, 30 ...        the init fence, the root password
 ```

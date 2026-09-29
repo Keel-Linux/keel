@@ -40,6 +40,7 @@ def state(**overrides) -> SystemState:
         key_files={}, timezone=ABSENT, localtime_target=None,
         default_locale=ABSENT, locale_gen=ABSENT, generated=None,
         available=frozenset(("turnkey-make-ssl-cert", "systemctl", "chmod")),
+        service_units=frozenset(("nginx.service", "webmin.service")),
         tls_cert=cert("self-signed"), acme_domains=ABSENT,
         acme_account=False, acme_wrapper=True, now=NOW,
     )
@@ -143,6 +144,27 @@ class TestRequest(unittest.TestCase):
                              for a in actions(plan_tls(acme(), found))))
 
 
+class TestDeferred(unittest.TestCase):
+    """The first boot: DNS rarely points at a machine that is still booting,
+    and a golden image cloned with its domain would spend Let's Encrypt's
+    failed validation limit on every copy (review of #39)"""
+
+    def test_a_deferred_run_writes_the_domains_and_asks_nothing(self):
+        steps = plan_tls(acme(agree_tos=True), state(), defer=True)
+        self.assertEqual(runs(steps), [])
+        self.assertFalse(any(isinstance(a, Refuse) for a in actions(steps)))
+        self.assertTrue(any(isinstance(a, WriteFile) for a in actions(steps)))
+        [note] = [a for a in actions(steps) if isinstance(a, Note)]
+        self.assertIn("deferred", note.summary)
+        self.assertIn("apply --system", note.summary)
+
+    def test_a_deferred_run_still_turns_acme_off(self):
+        found = state(tls_cert=cert("acme-blog"))
+        steps = plan_tls({"acme": {"enabled": False}}, found, defer=True)
+        self.assertIn(("turnkey-make-ssl-cert", "--default", "--force"),
+                      runs(steps))
+
+
 class TestTurnOff(unittest.TestCase):
     def test_false_over_an_issued_certificate_goes_back_to_self_signed(self):
         found = state(tls_cert=cert("acme-blog"),
@@ -151,10 +173,17 @@ class TestTurnOff(unittest.TestCase):
         self.assertEqual(runs(steps), [
             ("chmod", "a-x", f"/{CRON}"),
             ("turnkey-make-ssl-cert", "--default", "--force"),
-            ("systemctl", "try-restart", "nginx.service", "apache2.service",
-             "lighttpd.service", "tomcat10.service", "tomcat11.service",
-             "webmin.service"),
+            ("systemctl", "try-restart", "nginx.service", "webmin.service"),
         ])
+
+    def test_only_the_services_this_machine_has_are_restarted(self):
+        """systemctl try-restart exits 5 when one unit of the list is missing
+        (review of #39), which would fail a turn off that succeeded"""
+        found = state(tls_cert=cert("acme-blog"), service_units=frozenset())
+        steps = plan_tls({"acme": {"enabled": False}}, found)
+        self.assertFalse(any(argv[0] == "systemctl" for argv in runs(steps)))
+        self.assertTrue(any("no web server" in a.summary
+                            for a in actions(steps) if isinstance(a, Note)))
 
     def test_false_over_a_self_signed_certificate_is_unchanged(self):
         steps = plan_tls({"acme": {"enabled": False}}, state())

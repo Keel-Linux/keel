@@ -14,6 +14,14 @@ keel (0.8.0) unstable; urgency=medium
     the field. dns-01 is refused: the spec has no provider credentials.
   * apply without the system phase warns that tls.acme waits for it, and
     no longer that certificates are not requested at all.
+  * --defer-certificate writes tls.acme and requests nothing; the
+    10keel-system hook passes it, since DNS rarely points at a machine
+    still at its first boot and a cloned image would spend Let's
+    Encrypt's failed validation limit on every copy.
+  * An account counts only for the CA the dehydrated config names, at the
+    directory dehydrated 0.7.2 derives from it; the old v01 account is
+    reused for Let's Encrypt as dehydrated does. Giving the certificate
+    back restarts only the units the machine has.
 
  -- Marcos Mendez <mendez.foto@gmail.com>  Tue, 29 Sep 2026 09:15:38 +0000
 
