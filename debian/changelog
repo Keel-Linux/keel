@@ -1,3 +1,21 @@
+keel (0.5.0) unstable; urgency=medium
+
+  * spec apply --system converges security.alerts on a running machine:
+    the root alias in /etc/aliases and MAILON/MAILTO in the cron-apt
+    config, the two traces the 85secalerts hook writes once at first boot,
+    read through the same reader inspect uses, so a converged machine
+    diffs same. skip removes an external root alias and nothing else. The
+    address is never registered with hub.turnkeylinux.org (brief 5.6).
+    The first field of keel#35, day two for every field diff compares.
+  * inspect reads security.alerts from the machine's root alias whenever
+    /etc/aliases can be read, and from SEC_ALERTS in inithooks.conf only
+    when it cannot: a conf that 98finalize left behind is first boot
+    input, and preferring it held the field in drift apply could not fix.
+  * An email address in the spec must be the whole value: a trailing
+    newline passed validation, because the pattern was anchored with $.
+
+ -- Marcos Mendez <mendez.foto@gmail.com>  Tue, 29 Sep 2026 07:15:57 +0000
+
 keel (0.4.0) unstable; urgency=medium
 
   * keel pull --channel stable|testing resolves a channel pointer to an

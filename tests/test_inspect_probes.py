@@ -546,15 +546,32 @@ class TestSecurity(unittest.TestCase):
               install=ABSENT, auto=ABSENT):
         return security.probe_security(conf, aliases, config, install, auto)
 
-    def test_inithooks_conf_wins_when_readable(self):
+    def test_the_machine_alias_wins_over_a_stale_conf(self):
+        """A conf is first boot input; the alias is what the machine does
+
+        apply --system converges the alias (keel#35), so reading a conf
+        that 98finalize left behind would report drift apply can never
+        correct.
+        """
         conf = File("/x/c", "SEC_ALERTS=SKIP\nSEC_UPDATES=FORCE\n")
-        section, _ = self.probe(conf=conf, aliases=self.ALIASES)
-        self.assertEqual(section, {"alerts": "skip",
+        section, findings = self.probe(conf=conf, aliases=self.ALIASES)
+        self.assertEqual(section, {"alerts": "admin@example.org",
                                    "updates_at_first_boot": "force"})
+        self.assertIn("root alias", reason(findings, "security.alerts"))
+        conf = File("/x/c", "SEC_ALERTS=old@example.org\n")
+        section, _ = self.probe(conf=conf, aliases=File(
+            "/x/etc/aliases", "postmaster:    root\n"))
+        self.assertEqual(section["alerts"], "skip")
+
+    def test_the_conf_answers_when_the_aliases_file_cannot_be_read(self):
         conf = File("/x/c", "SEC_ALERTS=ops@example.org\nSEC_UPDATES=maybe\n")
-        section, _ = self.probe(conf=conf, install=self.INSTALL)
+        section, findings = self.probe(conf=conf, install=self.INSTALL)
         self.assertEqual(section, {"alerts": "ops@example.org",
                                    "updates_at_first_boot": "force"})
+        self.assertEqual(reason(findings, "security.alerts"), "/x/c")
+        conf = File("/x/c", "SEC_ALERTS=SKIP\n")
+        section, _ = self.probe(conf=conf)
+        self.assertEqual(section["alerts"], "skip")
 
     def test_root_alias_and_cron_apt_install_action(self):
         section, findings = self.probe(aliases=self.ALIASES,
@@ -576,6 +593,12 @@ class TestSecurity(unittest.TestCase):
         self.assertEqual(section["alerts"], "skip")
         self.assertIn("no external root alias",
                       reason(findings, "security.alerts"))
+
+    def test_mail_never_means_skip_without_an_aliases_file(self):
+        never = File("/x/etc/cron-apt/config", 'MAILON="never"\n')
+        section, findings = self.probe(config=never)
+        self.assertEqual(section["alerts"], "skip")
+        self.assertIn("MAILON=never", reason(findings, "security.alerts"))
 
     def test_no_evidence_leaves_alerts_missing(self):
         section, findings = self.probe()

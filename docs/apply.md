@@ -30,8 +30,8 @@ keel spec apply --system --root /mnt/rootfs
 ```
 
 With `--system`, after the conf, `apply` converges the parts of the spec
-that describe system state rather than hook input: `instance.fqdn`, `users`
-and `locale`. With `--system-only` it converges them and does nothing
+that describe system state rather than hook input: `instance.fqdn`, `users`,
+`locale` and `security.alerts`. With `--system-only` it converges them and does nothing
 else, for a machine whose conf phase has already run. Neither flag is on
 by default.
 
@@ -205,6 +205,28 @@ otherwise `localedef -i SOURCE -c -f CHARSET NAME`. `C`, `POSIX` and
 `C.UTF-8` are built in and never generated. Under `--root DIR` the file is
 written and the line says `not generated: not the live system`, since a
 scratch tree has no locale archive of its own.
+
+**security.alerts** (`/etc/aliases`, `/etc/cron-apt/config`)
+
+The first boot hook `85secalerts` writes this field once. On a running
+machine the same two traces are converged, read through the reader
+`inspect` uses (`keel.inspect.security.root_alias`), so a converged
+machine diffs `same`:
+
+| Declared | Observed | Action |
+| --- | --- | --- |
+| an address | the root alias is that address, cron-apt has `MAILON="output"` and `MAILTO="root"` | none: `unchanged (address)` |
+| an address | another root alias, or none | `/etc/aliases` rewritten with the one `root:` line replaced or appended, the other lines kept; then `newaliases` on the live system |
+| an address | cron-apt mails otherwise | `/etc/cron-apt/config` gets `MAILON="output"` and `MAILTO="root"`, replaced in place, comments kept |
+| `skip` | a root alias to an external address | that line removed, then `newaliases`; cron-apt is left alone, as the hook leaves it for `skip` |
+| `skip` | no root alias, or a local one | none: `unchanged (skip)` |
+
+Under `--root DIR` the line says `aliases database not rebuilt: not the
+live system`; on a live system without `newaliases` it says so too. A
+machine without cron-apt gets the alias only, and the line says so. An
+`/etc/aliases` that exists but cannot be read is refused, since rewriting
+it would drop what the run could not see. `updates_at_first_boot` has no
+trace on the machine and is not converged ([docs/spec.md](spec.md)).
 
 **database.server** (MariaDB)
 
@@ -390,6 +412,10 @@ blog.yaml --root /tmp/scratch` then reports `instance.fqdn` and every
   wrong one.
 - Anything at all to `database.client`: where an application reaches a
   database is the application's own configuration.
+- Registering an alerts address with hub.turnkeylinux.org, which the
+  first boot hook does: the Hub is one optional backend (brief section
+  5.6), and a converge that ran on every apply would subscribe the machine
+  to somebody else's service each time.
 - Touching the conf when a populated one exists, or anything at all with
   `--dry-run`.
 
@@ -415,6 +441,17 @@ entry; later than 29 and the certificate and the init fence would be made
 on a name the appliance does not yet carry. It asks for `--system-only`
 because the conf phase has already run at position 00 and must not run
 again: see above for what a second run would do to a generated password.
+
+`security.alerts` is converged here too, which is earlier than the
+upstream `85secalerts` hook that used to be the only writer. The two agree
+and the order is harmless: hook 10 writes the root alias and the cron-apt
+mail settings from the description, and hook 85 reads the same address
+from the conf phase's `SEC_ALERTS` and replaces the `root:` line in place
+with the same value (its `sed` is idempotent). What hook 85 adds and this
+phase never does is register the address with the TurnKey Hub; cutting
+that call out of the hook is the Hub decoupling of brief section 5.6, not
+part of this converge. A description that declares `skip` makes hook 85
+exit at once, and hook 10 has already left no external alias.
 
 The package that owns the `keel` command owns the hook that runs it, so
 inithooks keeps no dependency on keel, and an image without keel simply has

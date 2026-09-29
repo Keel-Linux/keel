@@ -28,7 +28,8 @@ If the conf file already holds something other than whitespace, `apply` leaves
 it alone, warns, and exits 0. The spec never overwrites a preseed.
 
 With `--system`, `apply` then converges the `users` and `locale` sections
-against the system itself (accounts, authorized keys, timezone, language),
+and `security.alerts` against the system itself (accounts, authorized keys,
+timezone, language, where alerts are mailed),
 only where they differ, and never touches a password. That phase, its flags
 and what it never does are in [docs/apply.md](apply.md).
 
@@ -301,7 +302,7 @@ security:
 
 | Field | State | Conf variable | Notes |
 | --- | --- | --- | --- |
-| `security.alerts` | read | `SEC_ALERTS` | An email address, or `skip` |
+| `security.alerts` | read, system | `SEC_ALERTS` | An email address, or `skip`; converged on a running machine by `apply --system` ([docs/apply.md](apply.md)) |
 | `security.updates_at_first_boot` | read | `SEC_UPDATES` | `skip` or `force`. Renamed from `security.updates`, which is still accepted with a warning |
 
 `skip` and `force` are upper cased on the way out, because the hooks compare

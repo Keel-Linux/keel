@@ -47,7 +47,7 @@ def domain_error(key: str, value: Any) -> str | None:
 
 
 def email_error(key: str, value: Any) -> str | None:
-    if not EMAIL_RE.match(str(value)):
+    if not EMAIL_RE.fullmatch(str(value)):
         return f"{key}: must be an email address"
     return None
 

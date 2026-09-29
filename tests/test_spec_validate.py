@@ -229,6 +229,21 @@ class TestApp(unittest.TestCase):
             "app.email: must be an email address",
         )
 
+    def test_rejects_an_email_with_a_trailing_newline(self):
+        """A value written into /etc/aliases must be one line, all of it
+
+        A YAML block scalar ends with a newline, and a pattern anchored
+        with $ matches before it.
+        """
+        messages(
+            'version: 1\nsecurity:\n  alerts: "admin@example.org\\n"\n',
+            "security.alerts: must be 'skip' or an email address",
+        )
+        messages(
+            'version: 1\napp:\n  email: "admin@example.org\\n"\n',
+            "app.email: must be an email address",
+        )
+
     def test_rejects_options_that_are_not_a_mapping(self):
         messages(
             "version: 1\napp:\n  options: [a, b]\n",
