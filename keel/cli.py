@@ -368,6 +368,14 @@ def add_apply_options(parser: argparse.ArgumentParser) -> None:
         " Without it apply refuses and changes nothing, which is what a"
         " first boot gets (docs/apply.md)",
     )
+    parser.add_argument(
+        "--defer-certificate",
+        action="store_true",
+        help="with --system or --system-only: write tls.acme but ask no"
+        " certificate authority for a certificate in this run; the first"
+        " boot hook passes it, since DNS rarely points at a machine that is"
+        " still booting (docs/apply.md)",
+    )
     add_root_option(parser, "converge with --system")
 
 
@@ -445,6 +453,11 @@ def main(argv: list[str] | None = None) -> int:
     ) or args.command == "database"
     if getattr(args, "dry_run", False) and not system:
         parser.error("--dry-run requires --system or --system-only")
+    if getattr(args, "defer_certificate", False) and not system:
+        parser.error(
+            "--defer-certificate requires --system or --system-only:"
+            " the certificate is requested there"
+        )
     if getattr(args, "destroy_local_database", False) and not system:
         parser.error(
             "--destroy-local-database requires --system or --system-only:"

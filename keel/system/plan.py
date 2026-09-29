@@ -8,11 +8,15 @@ from keel.system.hosts import plan_hosts
 from keel.system.locale import plan_locale
 from keel.system.security import plan_security
 from keel.system.state import SystemState
+from keel.system.tls import plan_tls
 from keel.system.users import plan_users
 
 
-def plan(doc: dict, state: SystemState, confirmed: bool = False) -> Plan:
-    """Steps in spec order: instance, users, locale, security, database
+def plan(
+    doc: dict, state: SystemState, confirmed: bool = False,
+    defer_certificate: bool = False,
+) -> Plan:
+    """Steps: instance, users, locale, security, tls, then the database
 
     The database last because it is the only phase that restarts a
     service and the only one that can lose data, so everything cheap and
@@ -27,5 +31,6 @@ def plan(doc: dict, state: SystemState, confirmed: bool = False) -> Plan:
     steps += plan_users(doc.get("users") or {}, state)
     steps += plan_locale(doc.get("locale") or {}, state)
     steps += plan_security(doc.get("security") or {}, state)
+    steps += plan_tls(doc.get("tls") or {}, state, defer_certificate)
     steps += plan_database(doc, state.database, confirmed)
     return Plan(tuple(steps))

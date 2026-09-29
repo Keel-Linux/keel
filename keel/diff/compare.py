@@ -64,6 +64,12 @@ FIRST_BOOT_FIELDS = {
         " updates once, and the appliance's update schedule, which is what"
         " the machine shows, is the same whichever value was used",
 }
+# Consent the spec gives apply, which the machine keeps no record of.
+CONSENT_FIELDS = {
+    "tls.acme.agree_tos":
+        "consent for apply to register a Let's Encrypt account; the machine"
+        " keeps no record of it, only of the account",
+}
 DOMAIN_LEAVES = ("hostname", "fqdn", "domains")
 ADDRESS_LEAVES = ("address",)
 HOST_LEAVES = ("gateway", "nameservers", "host", "listen")
@@ -165,7 +171,8 @@ def compare_section(
 def not_compared(section: str, wanted: dict[str, object]) -> dict[str, str]:
     """Every declared path of this section that diff deliberately skips"""
     skipped = {
-        path: reason for path, reason in FIRST_BOOT_FIELDS.items()
+        path: reason
+        for path, reason in (FIRST_BOOT_FIELDS | CONSENT_FIELDS).items()
         if path in wanted
     }
     skipped.update(disabled(section, wanted))

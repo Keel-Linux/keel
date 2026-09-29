@@ -351,6 +351,13 @@ class TestTLS(unittest.TestCase):
         )
         self.assertEqual(errors(self.acme("    enabled: false\n")), [])
 
+    def test_agree_tos_is_a_boolean(self):
+        messages(
+            self.acme("    agree_tos: 'yes'\n"),
+            "tls.acme.agree_tos: must be true or false",
+        )
+        self.assertEqual(errors(self.acme("    agree_tos: true\n")), [])
+
     def test_rejects_unknown_challenge(self):
         messages(
             self.acme("    challenge: tls-alpn-01\n"),

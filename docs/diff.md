@@ -114,6 +114,7 @@ it:
 | `secrets` | Values are never read, on either side. A `hub.api_key` given as a secret reference is not compared for the same reason |
 | `app` | `inithooks.conf` is root only and consumed at first boot, so `app` values leave no trace to compare against; inspect's `app.domain` falls back to the fqdn, which would be a false drift |
 | `first_login_wizard`, `preseed` | Render time switches with no trace on the running machine |
+| `tls.acme.agree_tos` | Consent the spec gives apply to register a Let's Encrypt account; the machine keeps a record of the account, not of the consent |
 | `security.updates_at_first_boot` | A first boot input: the `95secupdates` hook installs the pending security updates once and leaves nothing behind, and the cron-apt schedule the machine does show is shipped with the image whichever value was used. inspect writes the field from that schedule so the spec it produces is applicable, and says in the report that it is a proxy ([docs/inspect.md](inspect.md)) |
 
 `version` is a property of the file, not of the machine, and is not

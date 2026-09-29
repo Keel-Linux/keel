@@ -24,7 +24,7 @@ import yaml
 
 from helpers import spec
 
-from keel import commands, exits
+from keel import commands, exits, system
 from keel.cli import main
 from keel.system import effects
 
@@ -648,6 +648,33 @@ class TestRenameDayTwo(ApplySystemTestCase):
         self.assertIn("instance.hostname: unchanged (news)", out)
         self.assertIn("apply --system-only: 0 change(s), 0 failed", out)
 
+class TestDeferCertificate(ApplySystemTestCase):
+    """--defer-certificate, which the first boot hook passes (review of #39)"""
+
+    def test_it_needs_the_system_phase(self):
+        with self.assertRaises(SystemExit) as raised:
+            run_cli("spec", "apply", "--spec", self.spec, "--conf", self.conf,
+                    "--defer-certificate")
+        self.assertEqual(raised.exception.code, exits.USAGE)
+
+    def test_it_reaches_the_plan(self):
+        seen = {}
+        real = system.plan
+
+        def spy(doc, state, confirmed=False, defer_certificate=False):
+            seen["defer"] = defer_certificate
+            return real(doc, state, confirmed, defer_certificate)
+
+        with mock.patch.object(system, "plan", side_effect=spy), \
+                mock.patch.object(effects.subprocess, "run",
+                                  side_effect=fake_shadow_tools):
+            code, _, _ = run_cli("spec", "apply", "--spec", self.spec,
+                                 "--conf", self.conf, "--system-only",
+                                 "--defer-certificate", "--root", self.root)
+        self.assertEqual(code, exits.OK)
+        self.assertEqual(seen, {"defer": True})
+
+
 class TestRoundTrip(ApplySystemTestCase):
     """inspect a tree, apply --system into a fresh tree, inspect, diff"""
 
@@ -672,7 +699,12 @@ class TestRoundTrip(ApplySystemTestCase):
 
         code, out, _ = self.apply()
         self.assertEqual(code, exits.OK, out)
-        self.assertIn("apply --system: 11 change(s), 0 failed", out)
+        self.assertIn("apply --system: 12 change(s), 0 failed", out)
+        self.assertIn("tls.acme: certificate not requested: not the live"
+                      " system", out)
+        self.assertEqual(self.read("etc/dehydrated/confconsole.domains.txt")
+                         .splitlines()[-1],
+                         "blog.example.org www.blog.example.org")
         self.assertEqual(self.read("etc/hosts"),
                          "2001:db8:1::10 blog.example.org blog\n")
 

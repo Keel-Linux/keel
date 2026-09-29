@@ -12,7 +12,9 @@
 # the keel command owns the hook that runs it, so inithooks keeps no
 # dependency on keel, and an image without keel has no hook here.
 #
-# Asks for the system phase alone (keel spec apply --system-only). Running
+# Asks for the system phase alone (keel spec apply --system-only), with
+# --defer-certificate: DNS rarely points at a machine that is still booting,
+# so tls.acme is written and its certificate left to the next apply. Running
 # the conf phase a second time in one boot would resolve the secrets again,
 # and a secret declared generate: true would get a fresh value after
 # 30rootpass had already set and shown the first one, leaving the appliance
@@ -81,7 +83,7 @@ if ! command -v "$KEEL" >/dev/null; then
 fi
 
 status=0
-output=$("$KEEL" spec apply --system-only --spec "$spec" 2>&1) || status=$?
+output=$("$KEEL" spec apply --system-only --defer-certificate --spec "$spec" 2>&1) || status=$?
 
 while IFS= read -r line; do
     [[ -n "$line" ]] || continue
