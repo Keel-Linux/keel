@@ -105,6 +105,10 @@ def rename(staged: str, root: str, relative: str) -> str | None:
     try:
         os.replace(staged, marker.path(root, relative))
     except OSError as e:
+        try:
+            os.remove(staged)
+        except OSError:
+            pass
         return f"cannot write /{relative}: {e.strerror or e}"
     return None
 
@@ -169,6 +173,12 @@ def changed(root: str, pending: marker.Pending, text: str,
             current = read_current(root, pending.path)
         except OSError as e:
             return f"cannot read /{pending.path}: {e.strerror or e}"
+        # a file that cannot even be staged is found out before a marker
+        # or a timer exists, so nothing is left waiting on a change that
+        # never started
+        _, problem = stage(root, pending.path, text)
+        if problem:
+            return f"{problem}; nothing changed"
         marker.save(root, current)
         marker.write(root, pending)
         problem = arm(SAFETY_UNIT, pending.window + UP_ALLOWANCE, run)

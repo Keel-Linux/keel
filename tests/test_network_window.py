@@ -263,6 +263,14 @@ class TestChange(RootCase):
         self.assertEqual(run.calls, [])
         self.assertEqual(self.current(), OLD)
 
+    def test_a_change_that_cannot_stage_leaves_nothing_waiting(self):
+        self.read_only()
+        run = Recorder()
+        problem = switch.change(self.root, pending(), NEW, run)
+        self.assertIn("nothing changed", problem)
+        self.assertEqual(run.calls, [])
+        self.assertFalse(marker.exists(self.root))
+
     def test_a_failed_rename_still_brings_the_interface_up(self):
         run = Recorder()
         with mock.patch.object(switch.os, "replace",
