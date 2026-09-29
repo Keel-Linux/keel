@@ -19,7 +19,9 @@ from keel.system.dbstate import DatabaseState, observe_database
 LOCALE_GEN = "etc/locale.gen"
 KEYS_UNDER_HOME = ".ssh/authorized_keys"
 LOCALE_LIST = ("locale", "-a")
-COMMANDS = ("useradd", "usermod", "timedatectl", "locale-gen", "localedef")
+COMMANDS = (
+    "useradd", "usermod", "timedatectl", "locale-gen", "localedef", "newaliases",
+)
 
 
 @dataclass(frozen=True)
@@ -37,6 +39,8 @@ class SystemState:
     generated: tuple[str, ...] | None
     available: frozenset[str]
     database: DatabaseState | None = None
+    aliases: File | None = None
+    cron_apt_config: File | None = None
 
 
 def observe(root: str, doc: dict) -> SystemState:
@@ -65,6 +69,8 @@ def observe(root: str, doc: dict) -> SystemState:
             name for name in COMMANDS if shutil.which(name)
         ) if live else frozenset(),
         database=observe_database(root, doc),
+        aliases=tree.read(paths.ALIASES),
+        cron_apt_config=tree.read(paths.CRON_APT_CONFIG),
     )
 
 

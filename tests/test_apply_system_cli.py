@@ -516,6 +516,64 @@ class TestBootThenDiff(ApplySystemTestCase):
         self.assertEqual(fqdn["observed"], "blog.elsewhere.example")
 
 
+
+class TestSecurityAlertsDayTwo(ApplySystemTestCase):
+    """security.alerts on a running machine (keel#35)
+
+    The first boot hook wrote the traces once; after that, a machine whose
+    alias was changed behind the spec is drift, the system phase puts the
+    declared address back, and diff reads it as same.
+    """
+
+    declare = TestBootThenDiff.declare
+    diff = TestBootThenDiff.diff
+    field = TestBootThenDiff.field
+
+    def setUp(self):
+        super().setUp()
+        self.machine = join(self.tmpdir, "machine")
+        shutil.copytree(TURNKEY, self.machine)
+        with open(join(self.machine, "etc", "hosts"), "w") as fob:
+            fob.write("::1 localhost ip6-localhost\n"
+                      "2001:db8:1::10 blog.example.org blog\n")
+
+    def test_an_alias_changed_behind_the_spec_is_drift_then_converged(self):
+        self.declare()
+        with open(join(self.machine, "etc", "aliases"), "w") as fob:
+            fob.write("postmaster:    root\nroot:    someone@elsewhere.example\n")
+
+        code, report = self.diff()
+        self.assertEqual(code, exits.DRIFT_FOUND)
+        alerts = self.field(report, "security.alerts")
+        self.assertEqual(alerts["status"], "drift")
+        self.assertEqual(alerts["observed"], "someone@elsewhere.example")
+
+        code, out, err = run_cli("spec", "apply", "--spec", self.spec,
+                                 "--conf", self.conf, "--system-only",
+                                 "--root", self.machine)
+        self.assertEqual((code, err), (exits.OK, ""))
+        self.assertIn("security.alerts: write /etc/aliases with root:"
+                      " admin@example.org", out)
+        self.assertIn("aliases database not rebuilt: not the live system", out)
+        with open(join(self.machine, "etc", "aliases")) as fob:
+            self.assertEqual(fob.read(),
+                             "postmaster:    root\nroot:    admin@example.org\n")
+
+        code, report = self.diff()
+        self.assertEqual(code, exits.OK, report["fields"])
+        self.assertEqual(self.field(report, "security.alerts")["status"],
+                         "same")
+
+    def test_a_second_run_changes_nothing(self):
+        self.declare()
+        run = ("spec", "apply", "--spec", self.spec, "--conf", self.conf,
+               "--system-only", "--root", self.machine)
+        self.assertEqual(run_cli(*run)[0], exits.OK)
+        code, out, _ = run_cli(*run)
+        self.assertEqual(code, exits.OK)
+        self.assertIn("security.alerts: unchanged (admin@example.org)", out)
+        self.assertIn("apply --system-only: 0 change(s), 0 failed", out)
+
 class TestRoundTrip(ApplySystemTestCase):
     """inspect a tree, apply --system into a fresh tree, inspect, diff"""
 
@@ -529,7 +587,7 @@ class TestRoundTrip(ApplySystemTestCase):
                 fob.write("provided-by-the-operator\n")
             os.chmod(path, 0o600)
 
-    def test_users_locale_and_the_fqdn_show_no_drift_after_apply(self):
+    def test_users_locale_alerts_and_the_fqdn_show_no_drift_after_apply(self):
         code, _, _ = run_cli("inspect", "--root", TURNKEY, "--output",
                              self.spec, "--secrets-dir", self.secrets)
         self.assertEqual(code, exits.OK)
@@ -540,7 +598,7 @@ class TestRoundTrip(ApplySystemTestCase):
 
         code, out, _ = self.apply()
         self.assertEqual(code, exits.OK, out)
-        self.assertIn("apply --system: 10 change(s), 0 failed", out)
+        self.assertIn("apply --system: 11 change(s), 0 failed", out)
         self.assertEqual(self.read("etc/hosts"),
                          "2001:db8:1::10 blog.example.org blog\n")
 
@@ -549,12 +607,15 @@ class TestRoundTrip(ApplySystemTestCase):
         fields = {
             field["field"]: field["status"]
             for field in json.loads(out)["fields"]
-            if field["field"].split(".")[0] in ("users", "locale", "instance")
+            if field["field"].split(".")[0]
+            in ("users", "locale", "instance")
+            or field["field"] == "security.alerts"
         }
         self.assertEqual(set(fields.values()), {"same"}, fields)
         self.assertEqual(sorted(fields), [
             "instance.fqdn", "instance.hostname",
-            "locale.lang", "locale.timezone", "users.admin.authorized_keys",
+            "locale.lang", "locale.timezone", "security.alerts",
+            "users.admin.authorized_keys",
             "users.admin.groups", "users.admin.shell",
             "users.root.authorized_keys", "users.root.shell",
         ])

@@ -64,9 +64,9 @@ def _alerts(
         return declared.lower() if declared.upper() == "SKIP" else declared, \
             conf.path
 
-    root_alias = _root_alias(aliases)
-    if root_alias and "@" in root_alias:
-        return root_alias, f"{aliases.path}, root alias"
+    alias = root_alias(aliases)
+    if alias and "@" in alias:
+        return alias, f"{aliases.path}, root alias"
 
     mailon = cron_apt.assignments().get("MAILON", "").lower()
     if mailon == "never":
@@ -79,7 +79,7 @@ def _alerts(
     )
 
 
-def _root_alias(aliases: File) -> str | None:
+def root_alias(aliases: File) -> str | None:
     for line in aliases.lines():
         key, sep, value = line.partition(":")
         if sep and key.strip() == "root":
