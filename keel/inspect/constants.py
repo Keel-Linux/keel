@@ -14,6 +14,9 @@ DEHYDRATED_DIR = "etc/dehydrated"
 DEHYDRATED_CONFIG = "etc/dehydrated/confconsole.config"
 DEHYDRATED_DOMAINS = "etc/dehydrated/confconsole.domains.txt"
 TLS_CERT = "etc/ssl/private/cert.pem"
+# tklbam's record of a Hub registration; only its presence is asked, and
+# at the default registry, not one TKLBAM_REGISTRY moved for a test
+TKLBAM_HUB_REGISTRATION = "var/lib/tklbam/sub_apikey"
 DEHYDRATED_DOMAINS_PLAIN = "etc/dehydrated/domains.txt"
 TURNKEY_VERSION = "etc/turnkey_version"
 INITHOOKS_CONF = "etc/inithooks.conf"

@@ -62,7 +62,7 @@ means running as root would have read it.
 | `users.<name>.groups` | `/etc/group` | The groups whose member list names the user, in file order; left out when there are none. Only the public columns of either file are read, never `/etc/shadow` |
 | `locale.timezone` | `/etc/timezone`, else the `/etc/localtime` symlink | The zone name after `zoneinfo/` in the link target, so an offline tree works without following the link |
 | `locale.lang` | `/etc/default/locale` | `LANG` only |
-| `hub.api_key` | nothing | Always `skip`: keys are never read, and the Hub is being decoupled (brief section 5.6) |
+| `hub.api_key` | whether `/var/lib/tklbam/sub_apikey` exists (an `lstat`, the file is never opened), at the default registry and not one `TKLBAM_REGISTRY` moved | `skip` when the machine has no Hub registration. A machine registered with the TurnKey Hub leaves the field not inferred: keys are never read, so a key cannot be told from `skip`, and answering `skip` anyway made `diff` call it the same as one that never registered (brief section 5.6) |
 | `database.server.*` | the server itself, over its own client: `mariadb`, `psql`, `redis-cli`, plus `ss -lntH` for the listen addresses | Only on the live root, and only when the engine's server binary is installed. What is asked of each engine, and what the answers mean, is in "The database section" below |
 | `database.client.*` | the application's own configuration: `wp-config.php`, NodeBB's `config.json` | The one place the fact lives. No password is read from any of them |
 

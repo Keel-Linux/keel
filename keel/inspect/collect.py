@@ -90,7 +90,7 @@ def inspect_root(
     findings += found
     _add(spec, "security", security)
 
-    hub, found = probe_hub()
+    hub, found = probe_hub(tree.present(paths.TKLBAM_HUB_REGISTRATION))
     findings += found
     _add(spec, "hub", hub)
 

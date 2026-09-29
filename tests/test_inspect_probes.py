@@ -703,10 +703,28 @@ class TestSecrets(unittest.TestCase):
         section, _ = secrets.probe_secrets(ABSENT, "/run/s", True)
         self.assertEqual(list(section), ["root_password", "db_password"])
 
-    def test_hub_key_is_skip(self):
-        section, findings = secrets.probe_hub()
+    def test_hub_key_is_skip_without_a_hub_registration(self):
+        section, findings = secrets.probe_hub(
+            File("/x/var/lib/tklbam/sub_apikey", problem=NOT_PRESENT))
         self.assertEqual(section, {"api_key": "skip"})
-        self.assertEqual(findings[0].status, INFERRED)
+        self.assertIn("no Hub registration", reason(findings, "hub.api_key"))
+
+    def test_a_hub_registration_leaves_the_key_unknown(self):
+        """inspect answered skip whatever the machine did, so diff called a
+        machine registered with the TurnKey Hub the same as one that is not"""
+        section, findings = secrets.probe_hub(
+            File("/x/var/lib/tklbam/sub_apikey", "HUBKEY-7f3a9\n"))
+        self.assertIsNone(section)
+        self.assertEqual(statuses(findings, "hub.api_key"), [NOT_INFERRED])
+        self.assertIn("registered with the TurnKey Hub",
+                      reason(findings, "hub.api_key"))
+        self.assertNotIn("HUBKEY-7f3a9", str(findings) + str(section))
+
+    def test_a_registry_that_cannot_be_read_leaves_the_key_unknown(self):
+        section, findings = secrets.probe_hub(
+            File("/x/var/lib/tklbam/sub_apikey", problem=PERMISSION_DENIED))
+        self.assertIsNone(section)
+        self.assertIn("permission denied", reason(findings, "hub.api_key"))
 
 
 class TestUsers(unittest.TestCase):

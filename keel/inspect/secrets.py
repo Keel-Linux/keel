@@ -9,8 +9,8 @@ the operator which files to create before apply.
 
 import os
 
-from keel.inspect.report import Finding, inferred, placeholder
-from keel.inspect.tree import File
+from keel.inspect.report import Finding, inferred, missing, placeholder
+from keel.inspect.tree import NOT_PRESENT, File
 
 ROOT_PASSWORD = "root_password"
 DB_PASSWORD = "db_password"
@@ -46,5 +46,25 @@ def probe_secrets(
     return secrets, findings
 
 
-def probe_hub() -> tuple[dict, list[Finding]]:
-    return {"api_key": "skip"}, [inferred("hub.api_key", "skip", HUB_REASON)]
+def probe_hub(registration: File) -> tuple[dict | None, list[Finding]]:
+    """skip only when the machine is not registered with the Hub
+
+    The key itself is never read, so a machine that is registered cannot
+    tell a key from skip; it used to answer skip anyway, and diff called
+    it the same as one that never registered. tklbam keeps the Hub
+    registration in its registry; only whether that file is there is
+    asked, never what it holds.
+    """
+    if registration.readable:
+        return None, [missing(
+            "hub.api_key",
+            f"registered with the TurnKey Hub ({registration.path} is"
+            f" present); {HUB_REASON}",
+        )]
+    if registration.problem != NOT_PRESENT:
+        return None, [missing(
+            "hub.api_key", f"{registration.path} {registration.problem}")]
+    return {"api_key": "skip"}, [inferred(
+        "hub.api_key", "skip",
+        f"no Hub registration ({registration.path} not present)",
+    )]

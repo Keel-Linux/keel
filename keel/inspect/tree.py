@@ -74,6 +74,24 @@ class Tree:
     def exists(self, relative: str) -> bool:
         return os.path.lexists(self.path(relative))
 
+    def present(self, relative: str) -> File:
+        """Whether a file is there, without opening it
+
+        For a file that holds a secret and whose presence alone is the
+        answer: nothing is read, so nothing of it is in memory. The File
+        has empty text when present, and says why when it cannot tell.
+        """
+        path = self.path(relative)
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            return File(path, problem=NOT_PRESENT)
+        except PermissionError:
+            return File(path, problem=PERMISSION_DENIED)
+        except OSError as e:
+            return File(path, problem=f"not readable: {e.strerror}")
+        return File(path, "")
+
     def readlink(self, relative: str) -> str | None:
         try:
             return os.readlink(self.path(relative))

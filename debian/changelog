@@ -1,3 +1,16 @@
+keel (0.8.1) unstable; urgency=medium
+
+  * inspect answers hub.api_key skip only when the machine is not
+    registered with the TurnKey Hub (/var/lib/tklbam/sub_apikey absent,
+    asked with lstat so the file is never opened), and leaves it not
+    inferred, with that
+    reason, when it is. It answered skip whatever the machine did, so
+    diff called a registered machine the same as one that never
+    registered. hub is not converged by apply: that would register with
+    the Hub on day two, against brief 5.6 (keel#35).
+
+ -- Marcos Mendez <mendez.foto@gmail.com>  Tue, 29 Sep 2026 09:30:51 +0000
+
 keel (0.8.0) unstable; urgency=medium
 
   * spec apply --system converges tls.acme on a running machine. With
