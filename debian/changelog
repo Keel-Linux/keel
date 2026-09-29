@@ -18,8 +18,8 @@ keel (0.4.0) unstable; urgency=medium
     its blob. A layer the pointer does not name is a mismatch.
   * A pointer that names an earlier revision than the one the instance
     is on is refused with exit 20, CHANNEL_ROLLBACK. Going back is what
-    --release with --rev is for, and it always works, because a blob is
-    never deleted.
+    --release with --rev is for, and it works for any revision a channel
+    has named, because a blob is never deleted.
   * keel pull records the channel and revision it followed in
     /var/lib/keel/channel, and keel inspect reports them. keel inspect
     --check-channel also asks the mirror what that channel now holds and
