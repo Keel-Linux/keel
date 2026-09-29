@@ -1,9 +1,9 @@
 # Copyright (c) 2026 KeelLinux maintainers
-"""The single exception type the layer code raises"""
+"""The exception types the layer code raises"""
 
 
-class ManifestError(Exception):
-    """A manifest, or a file it names, cannot be used
+class FileProblem(Exception):
+    """A file, or something it names, cannot be used
 
     `errors` lists every problem found, so a caller can print them all;
     the message joins them for callers that want one line.
@@ -13,6 +13,23 @@ class ManifestError(Exception):
         self.path = path
         self.errors = list(errors)
         super().__init__(f"{path}: " + "; ".join(self.errors))
+
+
+class ManifestError(FileProblem):
+    """A manifest, or a file it names, cannot be used"""
+
+
+class ChannelError(FileProblem):
+    """A channel pointer, or the state record of one, cannot be used"""
+
+
+class SignatureError(Exception):
+    """A clear signed file is not signed by a key that may have signed it
+
+    Raised instead of returning the text, because gpgv writes the plain
+    text of a document whose signature it refused: a caller that read
+    the output of a failed verification would be reading unsigned data.
+    """
 
 
 class LayerError(Exception):

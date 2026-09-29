@@ -1,3 +1,65 @@
+keel (0.4.0) unstable; urgency=medium
+
+  * keel pull --channel stable|testing resolves a channel pointer to an
+    immutable release revision and its content addressed blobs, the
+    mirror layout of handbook decision 0016. The pointer is clear
+    signed and carries a timestamp and an expiry; its signature is
+    verified with gpgv against --channel-keyring, and --channel-signer
+    narrows that to the one key that may move a channel. The package now
+    depends on gpgv: on Debian 13 apt verifies with sqv, so gpgv is a
+    package of its own and its presence has to be declared.
+  * An expired pointer is an error and not a warning. A mirror that is
+    stale, broken or hostile can hold an appliance on an old and
+    vulnerable release simply by not updating, and without a timestamp
+    inside the signature the client cannot tell that apart from
+    "nothing new". Exit 19, CHANNEL_EXPIRED.
+  * The digest chain is checked end to end: the signature covers the
+    sha256 of every manifest, and each manifest covers the sha256 of
+    its blob. A layer the pointer does not name is a mismatch.
+  * A pointer that names an earlier revision than the one the instance
+    is on is refused with exit 20, CHANNEL_ROLLBACK. Going back is what
+    --release with --rev is for, and it works for any revision a channel
+    has named, because a blob is never deleted.
+  * keel pull records the channel and revision it followed in
+    /var/lib/keel/channel, and keel inspect reports them. keel inspect
+    --check-channel also asks the mirror what that channel now holds and
+    says whether the instance is behind; it makes the only network
+    request inspect has, and only when asked.
+  * The flat layout is unchanged and is still what a pull that names no
+    channel reads, so every appliance published before the conversion
+    keeps working. Removing it is a separate, later change.
+  * A revoked or expired signing key is refused. gpgv exits 0 for both
+    and still prints VALIDSIG, with "Good signature from" on stderr;
+    GOODSIG is the only line it withholds. A verifier that accepted
+    VALIDSIG would make revocation do nothing, which is the one answer
+    there is to the theft of the unattended key that signs a channel.
+    SHA-1 is refused too, with --weak-digest.
+  * keel pull --release/--rev verifies as well, against the pointer each
+    revision archives of itself at layers/<release>/<rev>/revision. A
+    rollback is what an operator does when the mirror is least trusted,
+    so it is not the path that skips the signature. Only the expiry is
+    not enforced there: an earlier revision is old on purpose.
+  * A pointer may claim at most 30 days of life, and one signed in the
+    future is refused. Unbounded, an expiry is a permanent freeze: one
+    signature pins an appliance to a known vulnerable revision for ever
+    and the rollback refusal never fires, which is the failure mode the
+    expiry exists to prevent. The bound is the client's, not the
+    publisher's environment's.
+  * An expired pointer's message prints this machine's clock beside the
+    expiry and names a wrong local clock as one of the three
+    explanations. A clock that has run ahead expires every pointer there
+    is, and the old message sent the operator to the mirror.
+  * A pull that read no pointer says so above the layer lines, so it no
+    longer prints exactly what a verified pull prints.
+  * A `.hash` file is read with a bound and is not stored when it
+    disagrees with the manifest, so an unauthenticated file on the
+    mirror can no longer pick keel verify's exit code for a layer whose
+    bytes match its signed manifest.
+  * $KEEL_CHANNEL_SIGNER sets the keys allowed to move a channel for an
+    image that does not pass --channel-signer on every call.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Mon, 28 Sep 2026 09:40:00 +0000
+
 keel (0.3.5) unstable; urgency=medium
 
   * keel database promote makes this replica a primary. Its own command

@@ -10,6 +10,7 @@ records the placeholder and what the operator has to provide.
 from dataclasses import dataclass
 
 from keel.inspect.constants import REQUIRED
+from keel.layers.channel import State
 
 INFERRED = "inferred"
 NOT_INFERRED = "not inferred"
@@ -49,12 +50,19 @@ def placeholder(field: str, value: str, reason: str) -> Finding:
 
 @dataclass(frozen=True)
 class Inspection:
-    """The spec document inspect built and the findings behind it"""
+    """The spec document inspect built and the findings behind it
+
+    `channel` is the record of the channel and release revision this
+    machine was last pulled to, when there is one. It sits beside the
+    spec rather than in it, because it is not something an operator
+    declares: it is where the machine was taken.
+    """
 
     root: str
     appliance: str
     spec: dict
     findings: tuple[Finding, ...]
+    channel: State | None = None
 
     @property
     def missing_required(self) -> tuple[str, ...]:

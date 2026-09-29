@@ -5,6 +5,7 @@ Every function here takes the parsed arguments and returns an exit code.
 Nothing here prompts, so confconsole can call the same functions.
 """
 
+import dataclasses
 import os
 import sys
 
@@ -230,6 +231,43 @@ def not_implemented(command: str, section: str, summary: str) -> int:
     return exits.NOT_IMPLEMENTED
 
 
+def check_channel(args, result):
+    """Ask the mirror what its channel now holds; adds one report line
+
+    Returns the inspection to report, the exit code and the message to
+    print when the pointer was refused. An expired or unverifiable
+    pointer is an error here exactly as it is in `keel pull`: the whole
+    point of signing the pointer is that "nothing new" and "you are
+    being held back" are different answers.
+    """
+    state = result.channel
+    if state is None:
+        return (
+            add_finding(
+                result,
+                inspection.inferred(
+                    inspection.AVAILABLE_FIELD, inspection.NO_CHANNEL,
+                    args.root,
+                ),
+            ),
+            exits.OK,
+            None,
+        )
+    try:
+        found = layers.fetch_channel_at(
+            state.source, state.channel, args.channel_keyring,
+            signers(args),
+        )
+    except layers.LayerError as e:
+        return result, e.code, str(e)
+    line = inspection.available(state, found)
+    return add_finding(result, line), exits.OK, None
+
+
+def add_finding(result, finding):
+    return dataclasses.replace(result, findings=result.findings + (finding,))
+
+
 def inspect(args) -> int:
     """Write a spec from the machine under --root, and report every field
 
@@ -237,8 +275,16 @@ def inspect(args) -> int:
     or --report. A required field that could not be inferred makes the
     exit code INSPECT_INCOMPLETE, but the spec is written all the same,
     with placeholders, so the operator edits instead of starting over.
+
+    --check-channel adds the one question that costs a fetch: what the
+    channel this instance follows now holds. Its refusals win over
+    INSPECT_INCOMPLETE, because a mirror that cannot be believed is a
+    worse answer than a spec field nobody could infer.
     """
     result = inspection.inspect_root(args.root, args.secrets_dir)
+    channel_code, refusal = exits.OK, None
+    if getattr(args, "check_channel", False):
+        result, channel_code, refusal = check_channel(args, result)
     text = inspection.to_yaml(result)
     report = "".join(f"{line}\n" for line in inspection.report_lines(result))
     try:
@@ -254,6 +300,9 @@ def inspect(args) -> int:
     except OSError as e:
         error(f"inspect: {e}")
         return exits.CONF_ERROR
+    if refusal is not None:
+        error(refusal)
+        return channel_code
     if not result.complete:
         error(
             "inspect: required fields not inferred: "
@@ -319,18 +368,53 @@ def verify_layers(args) -> int:
     return report.code
 
 
+def signers(args) -> tuple[str, ...]:
+    """The fingerprints that may move a channel, from flags or the env
+
+    One reader, because there are two call sites and a mutation run showed
+    that dropping either of them left every test passing.
+    """
+    named = getattr(args, "channel_signers", None)
+    if named is None:
+        named = os.environ.get(layers.SIGNER_ENV, "").split()
+    return tuple(named)
+
+
+def resolution(args) -> layers.Resolution:
+    """The layout keel pull was told to resolve through
+
+    A bad combination of options raises ValueError here, before anything
+    is fetched, so the CLI turns it into a usage error rather than the
+    mirror answering 404 for a path that was never going to exist.
+    """
+    return layers.Resolution(
+        channel=getattr(args, "channel", None),
+        release=getattr(args, "release", None),
+        rev=getattr(args, "rev", None),
+        keyring=getattr(args, "channel_keyring", None),
+        signers=signers(args),
+        state=getattr(args, "channel_state", None),
+        allow_rollback=getattr(args, "allow_rollback", False),
+    )
+
+
 def pull(args) -> int:
     """Fetch the layers of `args.layer` that the cache does not have
 
     One line per layer on stdout, fetched or cached, then a summary with
-    the bytes transferred. A failure prints the reason and returns the
-    code that names it.
+    the bytes transferred. When a channel or a release revision was
+    named, a line above them says which one was resolved and, for a
+    channel, when its pointer was signed and when it expires. A failure
+    prints the reason and returns the code that names it.
     """
     try:
-        report = layers.pull(args.layer, args.source, args.cache_dir)
+        report = layers.pull(
+            args.layer, args.source, args.cache_dir, resolution(args)
+        )
     except layers.LayerError as e:
         error(str(e))
         return e.code
+    print(report.resolution_line())
     for result in report.results:
         print(result.line())
     print(report.summary())

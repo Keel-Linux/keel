@@ -22,6 +22,10 @@ INSPECT_INCOMPLETE = 13
 DRIFT_FOUND = 14
 APPLY_NEEDS_ROOT = 15
 APPLY_FAILED = 16
+CHANNEL_INVALID = 17
+CHANNEL_UNVERIFIED = 18
+CHANNEL_EXPIRED = 19
+CHANNEL_ROLLBACK = 20
 
 DESCRIPTIONS = {
     OK: "success, including the no-op cases",
@@ -47,4 +51,12 @@ DESCRIPTIONS = {
     APPLY_NEEDS_ROOT: "apply --system on the live system must run as root",
     APPLY_FAILED: "apply --system could not make a change; the conf was"
     " written and every other change was made",
+    CHANNEL_INVALID: "a channel pointer, or the record of the one this"
+    " instance follows, cannot be read or fails validation",
+    CHANNEL_UNVERIFIED: "a channel pointer is not signed by a key that may"
+    " move a channel",
+    CHANNEL_EXPIRED: "a channel pointer is past its expiry: the mirror is"
+    " stale, broken or holding this instance back",
+    CHANNEL_ROLLBACK: "a channel pointer names an earlier revision than the"
+    " one this instance is on",
 }

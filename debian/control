@@ -20,6 +20,7 @@ Depends:
  python3 (>= 3.12),
  python3-yaml,
  zstd,
+ gpgv,
  ${python3:Depends},
  ${misc:Depends},
 Description: Declarative management of one appliance instance

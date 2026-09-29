@@ -3,9 +3,10 @@
 
 The file is prose for a human with two digest lines in it, of the
 sha256sum and sha512sum form, and may be wrapped in a clear signature.
-Only the digest lines and the presence of a signature are read here;
-checking the signature needs a trusted key, which the project does not
-have yet, so nothing in this module claims to verify one.
+Only the digest lines and the presence of a signature are read here.
+Checking that signature needs the key it was made with, which is not the
+channel keyring `keel pull` verifies a pointer against, and no caller
+passes one, so nothing in this module claims to verify anything.
 """
 
 import re
