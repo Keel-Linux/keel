@@ -7,6 +7,14 @@ keel (0.6.0) unstable; urgency=medium
     also rewrote the name inside other words. The fqdn step plans on the
     renamed /etc/hosts, so the two compose into one file. The self-signed
     certificate is not remade; the run says how. Second field of keel#35.
+  * In postfix's main.cf only the values of myhostname and mydestination
+    are renamed, so a host called mail, smtp or relay cannot rewrite
+    $mail_name or smtpd_relay_restrictions; an underscore is part of a
+    name everywhere. A trailing dot is the same name, as diff reads it.
+    On the live system a kernel name that a failed hostnamectl left
+    behind is set again on the next run.
+  * The /etc/hosts step says when the fqdn's first label is not the
+    hostname.
 
  -- Marcos Mendez <mendez.foto@gmail.com>  Tue, 29 Sep 2026 07:32:28 +0000
 

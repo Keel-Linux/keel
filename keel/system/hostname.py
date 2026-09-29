@@ -34,8 +34,13 @@ HOSTS = "etc/hosts"
 MAILNAME = "etc/mailname"
 POSTFIX_MAIN = "etc/postfix/main.cf"
 ETC_MODE = 0o644
-# a character that can be part of a name on either side of it
-NAME_CHAR = "A-Za-z0-9-"
+# a character that can be part of a name on either side of it; the
+# underscore too, or postfix's $mail_name is renamed with a host "mail"
+NAME_CHAR = r"A-Za-z0-9_\-"
+# the postfix settings that carry the host's name; nothing else in main.cf
+# is renamed, since a host called smtp or relay would otherwise rewrite
+# parameter names (smtpd_relay_restrictions) and drop what they enforce
+POSTFIX_NAME_SETTINGS = ("myhostname", "mydestination")
 
 
 def plan_hostname(
@@ -45,10 +50,12 @@ def plan_hostname(
     declared = instance.get("hostname")
     if declared is None:
         return [], state
-    new = str(declared)
+    # diff strips a trailing dot and ignores case; so does this, and a
+    # dotted spelling is never written into a file
+    new = str(declared).rstrip(".")
     old = current_name(state.hostname)
     if old is not None and old.lower() == new.lower():
-        return [Step(FIELD, (Note(f"unchanged ({new})"),))], state
+        return [kernel_step(new, state)], state
 
     files = {HOSTS: state.hosts, MAILNAME: state.mailname,
              POSTFIX_MAIN: state.postfix_main}
@@ -66,7 +73,8 @@ def plan_hostname(
         for path, file in files.items():
             if file is None or not file.readable:
                 continue
-            text = renamed(file.text or "", old, new)
+            rename = renamed_postfix if path == POSTFIX_MAIN else renamed
+            text = rename(file.text or "", old, new)
             if text != (file.text or ""):
                 rewritten[path] = text
                 actions.append(WriteFile(
@@ -98,6 +106,37 @@ def renamed(text: str, old: str, new: str) -> str:
         re.IGNORECASE,
     )
     return pattern.sub(new, text)
+
+
+def renamed_postfix(text: str, old: str, new: str) -> str:
+    """Rename in the values of POSTFIX_NAME_SETTINGS, continuations too"""
+    out, inside = [], False
+    for line in text.splitlines(keepends=True):
+        if line[:1].isspace() and line.strip():
+            if inside:
+                line = renamed(line, old, new)
+        else:
+            key, sep, value = line.partition("=")
+            inside = bool(sep) and key.strip() in POSTFIX_NAME_SETTINGS
+            if inside:
+                line = key + sep + renamed(value, old, new)
+        out.append(line)
+    return "".join(out)
+
+
+def kernel_step(new: str, state: SystemState) -> Step:
+    """The file already names the host; the running kernel may not
+
+    hostnamectl can fail after /etc/hostname was written (a container
+    without systemd-hostnamed), and a rerun deciding from the file alone
+    would never try again.
+    """
+    kernel = state.kernel_hostname
+    if not state.live or kernel is None or kernel.lower() == new.lower():
+        return Step(FIELD, (Note(f"unchanged ({new})"),))
+    return Step(FIELD, tuple(
+        a for a in live_actions(new, state, mail=False)
+    ))
 
 
 def live_actions(new: str, state: SystemState, mail: bool) -> list[Action]:

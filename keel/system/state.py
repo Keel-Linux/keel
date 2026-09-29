@@ -8,6 +8,7 @@ scratch tree has no locale archive of its own to ask.
 """
 
 import shutil
+import socket
 import subprocess
 from dataclasses import dataclass
 
@@ -47,6 +48,7 @@ class SystemState:
     hostname: File | None = None
     mailname: File | None = None
     postfix_main: File | None = None
+    kernel_hostname: str | None = None
 
 
 def observe(root: str, doc: dict) -> SystemState:
@@ -80,6 +82,7 @@ def observe(root: str, doc: dict) -> SystemState:
         hostname=tree.read(paths.HOSTNAME),
         mailname=tree.read(MAILNAME),
         postfix_main=tree.read(POSTFIX_MAIN),
+        kernel_hostname=socket.gethostname() if live else None,
     )
 
 

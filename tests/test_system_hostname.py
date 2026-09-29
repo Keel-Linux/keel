@@ -5,14 +5,20 @@ The planner is pure; the loop through the CLI (rename, then diff is same,
 then a second run changes nothing) is in tests/test_apply_system_cli.py.
 """
 
+import subprocess
+import tempfile
 import unittest
+from os.path import join
+from unittest import mock
 
 from helpers import spec  # noqa: F401
 
 from keel.inspect.tree import NOT_PRESENT, PERMISSION_DENIED, File
+from keel.system import Effects, execute
 from keel.system import plan as plan_all
+from keel.system import effects
 from keel.system.actions import Note, Refuse, Run, WriteFile
-from keel.system.hostname import plan_hostname, renamed
+from keel.system.hostname import plan_hostname, renamed, renamed_postfix
 from keel.system.state import SystemState
 
 ABSENT = File("/x/absent", problem=NOT_PRESENT)
@@ -79,9 +85,89 @@ class TestRenamed(unittest.TestCase):
                          "127.0.1.1\tnews   # news")
 
 
+DEBIAN_MAIN_CF = (
+    "smtpd_banner = $myhostname ESMTP $mail_name (Debian/GNU)\n"
+    "smtpd_tls_session_cache_database = btree:${data_directory}/smtpd_scache\n"
+    "smtp_tls_session_cache_database = btree:${data_directory}/smtp_scache\n"
+    "smtpd_relay_restrictions = permit_mynetworks reject_unauth_destination\n"
+    "# the mail host\n"
+    "myhostname = mail.example.org\n"
+    "mydestination = $myhostname, mail, localhost\n"
+    "relayhost = relay.example.org\n"
+)
+
+
+class TestPostfixIsRenamedInItsTwoNameSettingsOnly(unittest.TestCase):
+    """The review of #37: a host named like a postfix word"""
+
+    def rename(self, old):
+        found = state(hostname=File("/x/etc/hostname", f"{old}\n"),
+                      postfix_main=File("/x/etc/postfix/main.cf",
+                                        DEBIAN_MAIN_CF))
+        steps, _ = plan_hostname({"hostname": "news"}, found)
+        [main] = by_path(steps, "etc/postfix/main.cf")
+        return main.content
+
+    def test_mail_renames_its_settings_and_not_mail_name(self):
+        self.assertEqual(self.rename("mail"), DEBIAN_MAIN_CF.replace(
+            "myhostname = mail.example.org", "myhostname = news.example.org"
+        ).replace("mydestination = $myhostname, mail,",
+                  "mydestination = $myhostname, news,"))
+
+    def test_smtp_and_relay_leave_every_parameter_name_alone(self):
+        for old in ("smtp", "relay", "smtpd", "tls"):
+            found = state(hostname=File("/x/etc/hostname", f"{old}\n"),
+                          postfix_main=File("/x/etc/postfix/main.cf",
+                                            DEBIAN_MAIN_CF))
+            steps, _ = plan_hostname({"hostname": "news"}, found)
+            self.assertEqual(by_path(steps, "etc/postfix/main.cf"), [], old)
+
+    def test_a_continued_value_is_renamed_only_under_a_name_setting(self):
+        text = ("mydestination = localhost,\n    mail, mail.example.org\n"
+                "smtpd_recipient_restrictions = permit,\n    mail_check\n"
+                "relay_domains =\n    mail\n")
+        self.assertEqual(renamed_postfix(text, "mail", "news"), (
+            "mydestination = localhost,\n    news, news.example.org\n"
+            "smtpd_recipient_restrictions = permit,\n    mail_check\n"
+            "relay_domains =\n    mail\n"))
+
+    def test_an_underscore_is_part_of_a_name(self):
+        self.assertEqual(renamed("$mail_name mail", "mail", "news"),
+                         "$mail_name news")
+
+
 class TestPlanHostname(unittest.TestCase):
     def test_nothing_declared_plans_nothing(self):
         self.assertEqual(plan_hostname({}, state())[0], [])
+
+    def test_a_trailing_dot_is_the_same_name_as_diff_says(self):
+        steps, after = plan_hostname({"hostname": "blog."}, state())
+        self.assertEqual(steps[0].actions, (Note("unchanged (blog)"),))
+        self.assertEqual(after, state())
+
+    def test_a_rename_to_a_dotted_spelling_writes_no_dot(self):
+        steps, _ = plan_hostname({"hostname": "news."}, state())
+        [hostname] = by_path(steps, "etc/hostname")
+        self.assertEqual(hostname.content, "news\n")
+        [hosts] = by_path(steps, "etc/hosts")
+        self.assertNotIn("news.\n", hosts.content)
+        self.assertNotIn("news. ", hosts.content)
+
+    def test_a_live_kernel_name_left_behind_is_set_again(self):
+        """hostnamectl failed after the file was written; the rerun retries"""
+        found = state(root="/", live=True, kernel_hostname="blog",
+                      hostname=File("/x/etc/hostname", "news\n"),
+                      available=frozenset(("hostnamectl",)))
+        steps, _ = plan_hostname({"hostname": "news"}, found)
+        self.assertEqual(runs(steps), [("hostnamectl", "set-hostname", "news")])
+        self.assertEqual(by_path(steps, "etc/hostname"), [])
+
+    def test_a_live_kernel_name_that_matches_is_unchanged(self):
+        found = state(root="/", live=True, kernel_hostname="news",
+                      hostname=File("/x/etc/hostname", "news\n"),
+                      available=frozenset(("hostnamectl",)))
+        steps, _ = plan_hostname({"hostname": "news"}, found)
+        self.assertEqual(steps[0].actions, (Note("unchanged (news)"),))
 
     def test_the_declared_name_is_unchanged(self):
         steps, after = plan_hostname({"hostname": "blog"}, state())
@@ -197,3 +283,45 @@ class TestPlanHostname(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestHostnameAndFqdnAgree(unittest.TestCase):
+    def test_a_fqdn_whose_first_label_is_another_name_is_said(self):
+        doc = {"instance": {"hostname": "blog", "fqdn": "shop.example.org"}}
+        notes = [a.summary for step in plan_all(doc, state()).steps
+                 for a in step.actions if isinstance(a, Note)]
+        self.assertTrue(any("shop.example.org" in n and "blog" in n
+                            and "first label" in n for n in notes), notes)
+
+
+class TestLiveRenameThatFails(unittest.TestCase):
+    """hostnamectl fails at the subprocess boundary, as in a container
+    without systemd-hostnamed: the field fails, the file stays written, and
+    the plan for the rerun asks the kernel again"""
+
+    def test_the_failure_is_reported_and_the_rerun_retries(self):
+        root = tempfile.mkdtemp()
+        found = state(root=root, live=True, kernel_hostname="blog",
+                      available=frozenset(("hostnamectl",)),
+                      mailname=ABSENT, postfix_main=ABSENT,
+                      hosts=File(join(root, "etc/hosts"), "127.0.1.1 blog\n"))
+
+        def failing(argv, **kwargs):
+            return subprocess.CompletedProcess(
+                argv, 1, "", "Failed to connect to bus\n")
+
+        doc = {"instance": {"hostname": "news"}}
+        with mock.patch.object(effects.subprocess, "run", side_effect=failing):
+            outcome = execute(plan_all(doc, found), Effects(root), False,
+                              "apply --system")
+        self.assertTrue(outcome.failed)
+        self.assertTrue(any("Failed to connect to bus" in line
+                            for line in outcome.lines), outcome.lines)
+        with open(join(root, "etc", "hostname")) as fob:
+            self.assertEqual(fob.read(), "news\n")
+
+        rerun = state(root=root, live=True, kernel_hostname="blog",
+                      available=frozenset(("hostnamectl",)),
+                      hostname=File(join(root, "etc/hostname"), "news\n"))
+        steps, _ = plan_hostname({"hostname": "news"}, rerun)
+        self.assertEqual(runs(steps), [("hostnamectl", "set-hostname", "news")])

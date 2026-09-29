@@ -132,18 +132,29 @@ and a dry run prints `field: would action`.
 
 `09hostname` sets the name once, at first boot. On a running machine a
 declared name that differs from the first word of `/etc/hostname`
-(compared case insensitively, as `diff` compares it) is converged:
+(compared as `diff` compares it: case insensitively, a trailing dot
+ignored and never written) is converged:
 
 - `/etc/hostname` is written with the new name;
-- in `/etc/hosts`, `/etc/mailname` and `/etc/postfix/main.cf` the old name
-  is replaced as a whole token or as the first label of a dotted name
-  (`blog`, `blog.example.org`), and never inside another word (`weblog`,
-  `backup-blog`), unlike the hook's `sed` over the bare string; a file
-  that does not carry the name is not written;
+- in `/etc/hosts` and `/etc/mailname` the old name is replaced as a whole
+  token or as the first label of a dotted name (`blog`,
+  `blog.example.org`), and never inside another word (`weblog`,
+  `backup-blog`, `mail_name`), unlike the hook's `sed` over the bare
+  string; a file that does not carry the name is not written;
+- in `/etc/postfix/main.cf`, only in the values of `myhostname` and
+  `mydestination`, continuation lines included. A host called `mail`,
+  `smtp` or `relay` would otherwise rename `$mail_name` or a parameter
+  such as `smtpd_relay_restrictions`, and drop what it enforces;
 - on the live system, `hostnamectl set-hostname`, or `hostname` without
   it, and `systemctl try-reload-or-restart postfix.service` when postfix's
   configuration or the mail name changed, which reloads it only if it is
   running.
+
+On the live system the running name is read too: when `/etc/hostname`
+already names the host but the kernel does not, which is what a
+`hostnamectl` that failed in a container without `systemd-hostnamed`
+leaves, the run sets the kernel name again rather than calling the field
+unchanged.
 
 The renamed `/etc/hosts` is what the `instance.fqdn` step below plans on,
 so a spec that renames `blog` to `news` and declares `news.example.org`
