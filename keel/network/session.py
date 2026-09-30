@@ -23,7 +23,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 SSH_PROCESS = "sshd-session"
-CONSOLE = re.compile(r"^/dev/(tty[0-9]+|ttyS[0-9]+|hvc[0-9]+|console)$")
+# /dev/lxc/: in an LXC container (plain LXC and Proxmox) /dev/tty1 is a
+# link to lxc/tty1, so the console the first boot runs on, and a login
+# from lxc-console or pct console, hold /dev/lxc/ttyN. Only the host
+# reaches those, which is as good as a console, like `pct enter` below.
+CONSOLE = re.compile(
+    r"^/dev/(tty[0-9]+|ttyS[0-9]+|hvc[0-9]+|console"
+    r"|lxc/tty[0-9]+|lxc/console)$"
+)
 # /proc/PID/stat after the command name: field 3 onwards, so the parent is
 # index 1 and the start time (field 22) index 19
 PPID_INDEX = 1

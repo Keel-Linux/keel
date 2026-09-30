@@ -1,3 +1,17 @@
+keel (0.11.2) unstable; urgency=medium
+
+  * keel network confirm accepts the console of an LXC container. There
+    /dev/tty1 is a link to lxc/tty1, so the first boot on the console,
+    and a login from lxc-console or pct console, hold /dev/lxc/tty1 (or
+    /dev/lxc/console), which keel refused as "neither an SSH session nor
+    a console": the overlay change the first boot's role screen and
+    confconsole's Overlay network screen offer to confirm from the
+    console reverted (role-a, 2026-09-30). Only the host reaches those
+    terminals, which is as good as a console, as a process attached
+    from the host already was.
+
+ -- Marcos Mendez <mendez.foto@gmail.com>  Wed, 30 Sep 2026 09:20:00 +0000
+
 keel (0.11.1) unstable; urgency=medium
 
   * A MariaDB primary no longer grants an IPv6 prefix as a host pattern
