@@ -119,7 +119,7 @@ def url_path_error(key: str, value: Any) -> str | None:
 def pattern_error(key: str, value: Any, regex: re.Pattern,
                   text: str) -> str | None:
     """A name of the shape REGEX, which the message spells as TEXT"""
-    if isinstance(value, str) and regex.match(value):
+    if isinstance(value, str) and regex.fullmatch(value):
         return None
     return f"{key}: {quote(value)} must match {text}"
 
@@ -149,7 +149,7 @@ def argv_errors(key: str, value: Any) -> list[str]:
 
 
 def constraint_error(key: str, value: Any, regex: re.Pattern) -> str | None:
-    if isinstance(value, str) and regex.match(value):
+    if isinstance(value, str) and regex.fullmatch(value):
         return None
     return f"{key}: must be a constraint such as '>= 1.26'"
 

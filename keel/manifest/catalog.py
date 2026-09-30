@@ -67,7 +67,7 @@ class Catalog:
                       if entry.endswith(SUFFIX))
 
     def exists(self, kind: str, name: str) -> bool:
-        return bool(NAME_RE.match(name)) and os.path.isfile(
+        return bool(NAME_RE.fullmatch(name)) and os.path.isfile(
             self.path(kind, name))
 
     def read(self, kind: str, name: str) -> dict:

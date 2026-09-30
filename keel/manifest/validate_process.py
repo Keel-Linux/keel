@@ -17,11 +17,13 @@ from keel.manifest.constants import (
     ITEM_TEXT,
     LOOPBACK,
     LOOPBACK_LITERALS,
+    MAX_UNIT,
     MONIT_PROTOCOLS,
     NEVER,
     ON_FAILURE,
     PROTOCOLS,
     RESTART,
+    UNIT_RE,
     UNIT_SUFFIX,
 )
 from keel.manifest.fields import (
@@ -61,9 +63,17 @@ ALL_TYPE_FIELDS = ("address", "port", "path", "expect", "tls", "protocol",
 
 
 def unit_errors(key: str, unit: Any, root: str) -> list[str]:
-    """A unit ends in .service and, under the root, has a file (rule 5)"""
+    """A unit ends in .service and, under the root, has a file (rule 5)
+
+    The name is checked against systemd.unit(5) before it is looked up,
+    so it is one file name and never a path out of the unit directories.
+    """
     if not isinstance(unit, str) or not unit.endswith(UNIT_SUFFIX):
         return [f"{key}: {quote(unit)} must end in {UNIT_SUFFIX}"]
+    if not UNIT_RE.fullmatch(unit) or len(unit) > MAX_UNIT:
+        return [f"{key}: {quote(unit)} is not a systemd unit name: letters,"
+                ' digits, ":", "-", "_", "." and "\\", at most one "@",'
+                f" at most {MAX_UNIT} characters (systemd.unit(5))"]
     problem = machine.unit_problem(root, unit)
     return [f"{key}: {problem}"] if problem else []
 

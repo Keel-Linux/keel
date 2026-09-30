@@ -19,14 +19,31 @@ def under(root: str, path: str) -> str:
 
 
 def unit_problem(root: str, unit: str) -> str | None:
-    """A unit file in one of systemd's directories, or an init script"""
+    """A unit file in one of systemd's directories, or an init script
+
+    UNIT has the shape of a systemd unit name (no "/"), checked by the
+    caller. The init script systemd's sysv generator would read must be a
+    regular executable file that resolves inside the root, not a symbolic
+    link to something outside it.
+    """
     for directory in UNIT_DIRS:
         if os.path.exists(under(root, f"{directory}/{unit}")):
             return None
-    script = unit[:-len(UNIT_SUFFIX)]
-    if os.path.exists(under(root, f"{INIT_DIR}/{script}")):
+    script = under(root, f"{INIT_DIR}/{unit[:-len(UNIT_SUFFIX)]}")
+    if _executable_inside(root, script):
         return None
     return f"{unit} has no unit file under {root}"
+
+
+def _executable_inside(root: str, path: str) -> bool:
+    real, top = os.path.realpath(path), os.path.realpath(root)
+    if os.path.commonpath([real, top]) != top:
+        return False
+    try:
+        info = os.stat(real)
+    except OSError:
+        return False
+    return stat.S_ISREG(info.st_mode) and bool(info.st_mode & 0o111)
 
 
 def hook_problems(root: str, path: str) -> list[str]:

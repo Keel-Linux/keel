@@ -13,6 +13,11 @@ keel (0.12.0) unstable; urgency=medium
     mode, names once across the chain. A state written on, off, yes or
     no reaches PyYAML as a boolean and is refused with that reason; a
     key given twice in one mapping is refused rather than overwritten.
+    A unit name has the shape systemd.unit(5) gives it, so none climbs
+    out of the unit directories with "..", and an init script counts
+    only as a regular executable file inside the root. Names and values
+    are matched whole, so a trailing newline is refused. YAML nested past
+    the recursion limit cannot be read (exit 2).
   * show prints a manifest, and with --resolved the overlays with their
     state per installation mode, the ports with their loopback, mesh or
     public exposure, the processes, checks, secrets and hooks of the

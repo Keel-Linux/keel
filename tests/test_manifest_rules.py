@@ -191,6 +191,7 @@ class Rule05Units(ManifestCase):
         script = os.path.join(self.root, "etc/init.d/etcd")
         os.makedirs(os.path.dirname(script))
         open(script, "w").close()
+        os.chmod(script, 0o755)
         code, _, err = self.cli("manifest", "validate", "etcd")
         self.assertEqual(code, 0, err)
 

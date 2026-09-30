@@ -73,18 +73,26 @@ UNIT_SUFFIX = ".service"
 NEVER_REPLICATED = ("/etc", "/usr", "/tmp", "/var/tmp", "/var/cache",
                     "/var/log", "/run")
 
+# Every pattern ends in \Z, never $, and is applied with fullmatch: `$`
+# also matches before a trailing newline, so "core\n" would pass as core.
 MAX_NAME = 32
-NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
+NAME_RE = re.compile(r"[a-z][a-z0-9-]*\Z")
 NAME_TEXT = "[a-z][a-z0-9-]*"
-ITEM_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
+ITEM_RE = re.compile(r"[a-z][a-z0-9_-]*\Z")
 ITEM_TEXT = "[a-z][a-z0-9_-]*"
-VAR_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+VAR_RE = re.compile(r"[a-z][a-z0-9_]*\Z")
 VAR_TEXT = "[a-z][a-z0-9_]*"
+# systemd.unit(5): ASCII letters, digits, ":", "-", "_", "." and "\", at
+# most one "@" before the suffix of a template or an instance, and at
+# most 255 characters in all; never "/", so a unit name is one file name
+# inside systemd's directories and cannot climb out of them
+UNIT_RE = re.compile(r"[A-Za-z0-9:_.\\-]+(@[A-Za-z0-9:_.\\-]*)?\.service\Z")
+MAX_UNIT = 255
 # Debian's relations, then a version as dpkg --compare-versions reads it
 CONSTRAINT_RE = re.compile(
-    r"^(<<|<=|=|>=|>>) ?([0-9]+:)?[0-9][A-Za-z0-9.+~-]*$")
-TIMESPAN_RE = re.compile(r"^[1-9][0-9]*(s|min|h|d|w)$")
-SIZE_RE = re.compile(r"^[1-9][0-9]*[kKmMgG]?$")
+    r"(<<|<=|=|>=|>>) ?([0-9]+:)?[0-9][A-Za-z0-9.+~-]*\Z")
+TIMESPAN_RE = re.compile(r"[1-9][0-9]*(s|min|h|d|w)\Z")
+SIZE_RE = re.compile(r"[1-9][0-9]*[kKmMgG]?\Z")
 
 COMMON_KEYS = ("manifest_version", "kind", "name", "title", "summary")
 OVERLAY_KEYS = ("requires", "provides", "processes", "checks", "data",

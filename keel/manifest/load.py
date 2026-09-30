@@ -51,6 +51,10 @@ def load(path: str) -> dict:
         raise ManifestError(f"{path}: {e.strerror or e}")
     except _Duplicate as e:
         raise ManifestError(f"{path}: {e}")
+    except RecursionError:
+        # PyYAML composes and constructs nodes recursively, so a file of
+        # enough nested brackets exhausts the interpreter's stack
+        raise ManifestError(f"{path}: nested too deeply to be read")
     except yaml.YAMLError as e:
         raise ManifestError(f"{path}: not valid YAML: {e}")
     if doc is None:

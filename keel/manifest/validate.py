@@ -105,7 +105,7 @@ def _top_errors(doc: dict, stem: str | None) -> list[str]:
         errors.extend([error] if error else [])
     if "name" in doc:
         name = doc["name"]
-        if (not isinstance(name, str) or not NAME_RE.match(name)
+        if (not isinstance(name, str) or not NAME_RE.fullmatch(name)
                 or len(name) > MAX_NAME):
             errors.append(f"name: {quote(name)} must match {NAME_TEXT} and"
                           f" be at most {MAX_NAME} characters")
@@ -221,7 +221,7 @@ def _requires_errors(doc: dict, catalog) -> list[str]:
         return [error]
     errors, names = [], []
     for index, name in enumerate(requires):
-        if not isinstance(name, str) or not NAME_RE.match(name):
+        if not isinstance(name, str) or not NAME_RE.fullmatch(name):
             errors.append(f"requires[{index}]: {quote(name)} is not an"
                           " overlay name")
         elif name != doc.get("name") and not catalog.exists(OVERLAY, name):
@@ -246,7 +246,7 @@ def _cycle(name: str, requires: list[str], catalog) -> list[str] | None:
         if not isinstance(found, list):
             return []
         return [item for item in found
-                if isinstance(item, str) and NAME_RE.match(item)]
+                if isinstance(item, str) and NAME_RE.fullmatch(item)]
 
     done: set = set()
 
@@ -330,7 +330,7 @@ def _appliance_errors(doc: dict) -> list[str]:
         errors.append("base: core is built on Debian: its base is none")
     elif base == NO_BASE and name != CORE:
         errors.append("base: none is for core only")
-    elif base != NO_BASE and not NAME_RE.match(base):
+    elif base != NO_BASE and not NAME_RE.fullmatch(base):
         errors.append(f"base: {quote(base)} is not an appliance name")
     overlays = doc.get("overlays")
     if overlays is None:
@@ -339,7 +339,7 @@ def _appliance_errors(doc: dict) -> list[str]:
     if error:
         return errors + [error]
     for overlay, states in overlays.items():
-        if not isinstance(overlay, str) or not NAME_RE.match(overlay):
+        if not isinstance(overlay, str) or not NAME_RE.fullmatch(overlay):
             errors.append(f"overlays: {quote(overlay)} is not an overlay"
                           " name")
             continue

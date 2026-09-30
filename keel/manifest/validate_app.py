@@ -250,7 +250,7 @@ def _workers_errors(value: Any, services: set, root: str) -> list[str]:
             errors.extend(unit_errors(f"{key}.unit", item["unit"], root))
         every = item.get("every")
         if "every" in item and not (isinstance(every, str)
-                                    and TIMESPAN_RE.match(every)):
+                                    and TIMESPAN_RE.fullmatch(every)):
             errors.append(f"{key}.every: {quote(every)} is not a time span"
                           " such as 5min")
         if "queue" in item and not known(item["queue"], services):
@@ -296,7 +296,7 @@ def _web_errors(web: Any) -> list[str]:
         errors.extend([error] if error else [])
     size = web.get("max_body")
     if "max_body" in web and not (isinstance(size, str)
-                                  and SIZE_RE.match(size)):
+                                  and SIZE_RE.fullmatch(size)):
         errors.append(f"web.max_body: {quote(size)} must be a size such as"
                       " 128M")
     if "routes" in web:
