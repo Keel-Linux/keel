@@ -283,6 +283,41 @@ class TestAPrimaryHoldsAuthorizations(unittest.TestCase):
         self.assertIn("DROP USER IF EXISTS 'repl'@'2001:db8:9:%'", text)
         self.assertNotIn(f"DROP USER IF EXISTS 'repl'@'{PATTERN}'", text)
 
+    def test_an_account_at_an_expanded_address_is_replaced(self):
+        # keel 0.11.0 granted an address as written. canonical() makes the
+        # expanded and the compressed spelling one origin, so comparing on
+        # it kept the dead account beside the new one; the text decides.
+        plan = steps(
+            declaring(
+                role="primary",
+                replication={"allowed_from": ["fd3d:80b2:d0d7::2"]},
+            ),
+            state(answered=dict(
+                MARIADB_STANDALONE,
+                grants=f"fd3d:80b2:d0d7:0:0:0:0:2\n{PATTERN}\n",
+            )),
+        )
+        text = sql(plan["database.server.replication.allowed_from"])
+        self.assertIn(
+            "DROP USER IF EXISTS 'repl'@'fd3d:80b2:d0d7:0:0:0:0:2'", text
+        )
+        self.assertIn(f"DROP USER IF EXISTS 'repl'@'{PATTERN}'", text)
+        self.assertIn("'repl'@'fd3d:80b2:d0d7::2'", text)
+
+    def test_an_account_held_in_another_case_is_kept(self):
+        plan = steps(
+            declaring(
+                role="primary",
+                replication={"allowed_from": ["fd3d:80b2:d0d7::2", PREFIX]},
+            ),
+            state(answered=dict(
+                MARIADB_STANDALONE,
+                grants=f"FD3D:80B2:D0D7::2\n{PATTERN}\n",
+            )),
+        )
+        text = sql(plan["database.server.replication.allowed_from"])
+        self.assertNotIn("DROP USER", text)
+
     def test_an_empty_list_withdraws_every_authorization(self):
         plan = steps(
             declaring(role="primary", replication={"allowed_from": []}),
@@ -310,6 +345,36 @@ class TestAPrimaryHoldsAuthorizations(unittest.TestCase):
             state(),
         )
         self.assertIn("names no whole group of the address", refusals(plan))
+
+    def test_the_overlay_prefix_is_refused_and_the_address_named(self):
+        # The Template B smoke test of 2026-09-30: suggest-address gave
+        # fd3d:80b2:d0d7::/64, keel granted fd3d:80b2:d0d7:0:% and MariaDB
+        # refused the replica at fd3d:80b2:d0d7::2.
+        plan = steps(
+            declaring(
+                role="primary",
+                replication={"allowed_from": ["fd3d:80b2:d0d7::/64"]},
+            ),
+            state(),
+        )
+        actions = plan["database.server.replication.allowed_from"]
+        self.assertEqual(only(actions, RunSql), [])
+        refused = refusals(plan)
+        self.assertIn("fd3d:80b2:d0d7::/64", refused)
+        self.assertIn("fd3d:80b2:d0d7::1,", refused)
+        self.assertIn("each replica's address", refused)
+        self.assertNotIn("fd3d:80b2:d0d7:0:%'", refused)
+
+    def test_an_address_is_granted_in_its_compressed_text(self):
+        plan = steps(
+            declaring(
+                role="primary",
+                replication={"allowed_from": ["FD3D:80B2:D0D7:0:0:0:0:2"]},
+            ),
+            state(),
+        )
+        text = sql(plan["database.server.replication.allowed_from"])
+        self.assertIn("'repl'@'fd3d:80b2:d0d7::2'", text)
 
     def test_a_missing_credential_grants_nothing(self):
         plan = steps(
@@ -356,6 +421,34 @@ class TestBecomingAReplicaDestroysTheLocalDatabase(unittest.TestCase):
         self.assertEqual(
             only(plan["database.server.replication.primary"], RunSql), []
         )
+
+    def test_a_refused_replica_leaves_the_server_as_it_was(self):
+        # The Template B smoke test of 2026-09-30: the refusal said
+        # nothing was changed after the configuration had been rewritten
+        # and the server restarted. The check comes first now.
+        plan = self.replica(schemas=SYSTEM_SCHEMAS + "wordpress\n")
+        self.assertNotIn("database.server", plan)
+        self.assertIn("left as it was", refusals(plan))
+
+    def test_every_refusal_of_the_replica_comes_before_any_change(self):
+        for plan in (
+            self.replica(schemas=None),
+            self.replica(credential=Credential(problem="no secret file")),
+        ):
+            self.assertEqual(
+                list(plan), ["database.server.replication.primary"]
+            )
+            self.assertTrue(refusals(plan))
+
+    def test_a_confirmed_replica_is_configured_and_then_replicates(self):
+        plan = self.replica(
+            schemas=SYSTEM_SCHEMAS + "wordpress\n", confirmed=True
+        )
+        self.assertEqual(
+            list(plan),
+            ["database.server", "database.server.replication.primary"],
+        )
+        self.assertTrue(only(plan["database.server"], WriteFile))
 
     def test_the_confirmation_drops_what_it_named_and_then_replicates(self):
         plan = self.replica(

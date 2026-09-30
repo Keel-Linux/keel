@@ -716,6 +716,31 @@ grants the pattern the engine needs from the prefix the description wrote
 has no pattern at all, and apply says so rather than authorizing a wider or a
 narrower range than the description asked for.
 
+**On MariaDB, an IPv6 prefix with a zero group the text can drop has no
+pattern either.** The pattern is matched against the text of the client's
+address, and that text writes the longest run of zero groups as `::`. When
+the last group of the prefix is zero, or two of its groups in a row are, some
+addresses of the prefix are written without them: in `fd3d:80b2:d0d7::/64`,
+which is what `keel network wireguard suggest-address` prints, the replica
+`fd3d:80b2:d0d7::2` does not match `fd3d:80b2:d0d7:0:%`. No pattern holds
+such a prefix exactly and MariaDB has no IPv6 netmask, so validation refuses
+it when the engine is `mariadb`, naming an address it would have missed. A
+host pattern with `::` is refused on every engine: `::` stands for a number
+of zero groups no wildcard counts, so `2001::5:%` holds addresses outside any
+one prefix. **Write each replica's address
+instead**, as the overlay's peers are written:
+
+```yaml
+    replication:
+      allowed_from:
+        - fd3d:80b2:d0d7::2      # the replica's overlay address
+        - fd3d:80b2:d0d7::3
+```
+
+A prefix whose groups are all written, `2804:710:d0:5::/64` or
+`2001:db8:0:5::/64` (a lone zero between two groups is never compressed),
+keeps working as a pattern, and PostgreSQL takes any prefix as it is.
+
 **A name is accepted and it is fragile.** MariaDB resolves the `Host` of a
 grant, and `pg_hba.conf` matches a name by reverse resolving the client address
 and then forward resolving the answer. Both fail quietly: the authorization

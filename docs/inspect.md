@@ -151,7 +151,10 @@ itself reported, so it is the addresses the machine is really answering on and
 not the setting it was given. `database.server.replication.allowed_from` is the
 origins the server holds an authorization for, a MariaDB `Host` verbatim and a
 `pg_hba` address and netmask joined into a prefix. Redis reports it as not
-inferred: it has no per origin authorization, and the reason says so.
+inferred: it has no per origin authorization, and the reason says so. So is a
+MariaDB primary holding a grant no description may declare, such as the
+`fd3d:80b2:d0d7:0:%` keel 0.11.0 made for an overlay /64: written into the
+description it would not validate, so the reason names it instead.
 
 ### The client side is the application's own configuration
 

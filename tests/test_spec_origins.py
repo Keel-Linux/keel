@@ -6,10 +6,20 @@ tells an operator to prefer while a MariaDB primary holds the host pattern
 that engine has for the same range.
 """
 
+import ipaddress
+import re
+
 import pytest
 
 from keel.spec.fields import origin_error
-from keel.spec.origins import as_prefix, canonical, host_pattern, is_name
+from keel.spec.origins import (
+    as_prefix,
+    canonical,
+    compressed_address,
+    host_pattern,
+    is_name,
+    mariadb_problem,
+)
 
 
 class TestCanonical:
@@ -138,11 +148,182 @@ class TestHostPattern:
     def test_what_a_grant_already_holds_comes_back_unchanged(self, origin):
         assert host_pattern(origin) == origin
 
+    @pytest.mark.parametrize(
+        "address,text",
+        [
+            ("fd3d:80b2:d0d7:0:0:0:0:2", "fd3d:80b2:d0d7::2"),
+            ("FD3D:80B2:D0D7::2", "fd3d:80b2:d0d7::2"),
+            ("2001:0db8::0020", "2001:db8::20"),
+        ],
+    )
+    def test_an_address_is_granted_in_the_text_the_server_compares(
+        self, address, text
+    ):
+        # MariaDB 11.8 refused fd3d:80b2:d0d7::2 on a grant to
+        # fd3d:80b2:d0d7:0:0:0:0:2: it compares the client's address as
+        # the text getnameinfo gives, which is the compressed form.
+        assert host_pattern(address) == text
+
+    @pytest.mark.parametrize(
+        "prefix",
+        [
+            # What keel network wireguard suggest-address prints: the
+            # fourth group is zero, and fd3d:80b2:d0d7::2 is written
+            # without it, so fd3d:80b2:d0d7:0:% refused the replica.
+            "fd3d:80b2:d0d7::/64",
+            "2001:db8::/48",
+            "2001:0:0:5::/64",
+            "2001:db8:1:2:3:4:0:0/112",
+        ],
+    )
+    def test_a_prefix_whose_zero_groups_compress_away_has_no_spelling(
+        self, prefix
+    ):
+        assert host_pattern(prefix) is None
+
+    @pytest.mark.parametrize(
+        "pattern", ["fd3d:80b2:d0d7:0:%", "2001:0:0:5:%"]
+    )
+    def test_a_host_pattern_with_those_groups_has_none_either(self, pattern):
+        assert host_pattern(pattern) is None
+
+    @pytest.mark.parametrize("pattern", ["2001::5:%", "fd00::_", "::%"])
+    def test_a_host_pattern_with_a_double_colon_has_none(self, pattern):
+        # :: stands for a number of zero groups no wildcard counts, so
+        # 2001::5:% holds 2001::5:a:b, which is 2001:0:0:0:0:5:a:b.
+        assert host_pattern(pattern) is None
+
+    def test_a_lone_zero_group_inside_the_prefix_is_never_compressed(self):
+        # The text compresses a run of two zero groups or more, so a zero
+        # between two groups that are not zero is always written.
+        assert host_pattern("2001:db8:0:5::/64") == "2001:db8:0:5:%"
+
+
+def like(pattern: str, text: str) -> bool:
+    """MariaDB's LIKE on a host, with % and _ and nothing else special"""
+    expression = "".join(
+        ".*" if one == "%" else "." if one == "_" else re.escape(one)
+        for one in pattern
+    )
+    return re.fullmatch(expression, text, re.IGNORECASE) is not None
+
+
+def samples(network: ipaddress.IPv6Network) -> list[ipaddress.IPv6Address]:
+    """Addresses of a prefix whose text compresses in every way it can"""
+    host_groups = (128 - network.prefixlen) // 16
+    base = int(network.network_address)
+    found = []
+    for mask in range(1 << host_groups):
+        value = sum(
+            1 << (16 * index)
+            for index in range(host_groups) if mask & (1 << index)
+        )
+        found.append(ipaddress.IPv6Address(base + value))
+    return found
+
+
+def naive(network: ipaddress.IPv6Network) -> str:
+    """The pattern keel granted before: the prefix's groups, then %"""
+    groups = network.network_address.exploded.split(":")
+    head = [format(int(one, 16), "x") for one in groups]
+    return ":".join(head[: network.prefixlen // 16] + ["%"])
+
+
+PREFIXES = [
+    "fd3d:80b2:d0d7::/64",
+    "2804:710:d0:5::/64",
+    "2001:db8::/48",
+    "2001:db8:0:5::/64",
+    "2001:0:0:5::/64",
+    "2001:db8:1::/48",
+    "2001:db8::/32",
+    "2001:db8:1:2:3::/80",
+    "2001:db8:1:2:3:4:0:0/112",
+    "2001:db8:1:2:3:4:5:0/112",
+    "2001::/16",
+]
+
+
+class TestEveryAddressOfThePrefix:
+    """The pattern a prefix is granted as matches exactly that prefix
+
+    A grant is matched against the text of the client's address, so this
+    is checked against that text, for addresses whose zero groups fall in
+    every place they can. Where no pattern would, there is none, and the
+    address the old one refused is named.
+    """
+
+    @pytest.mark.parametrize("prefix", PREFIXES)
+    def test_a_pattern_matches_every_address_in_its_prefix(self, prefix):
+        network = ipaddress.IPv6Network(prefix)
+        pattern = host_pattern(prefix)
+        if pattern is None:
+            escaped = compressed_address(prefix)
+            assert escaped is not None
+            assert ipaddress.IPv6Address(escaped) in network
+            assert not like(naive(network), escaped)
+            return
+        assert compressed_address(prefix) is None
+        for address in samples(network):
+            assert like(pattern, str(address)), (pattern, str(address))
+
+    @pytest.mark.parametrize("prefix", PREFIXES)
+    def test_and_no_address_outside_it(self, prefix):
+        network = ipaddress.IPv6Network(prefix)
+        pattern = host_pattern(prefix)
+        if pattern is None:
+            return
+        wider = network.supernet(16)
+        for address in samples(wider):
+            if address not in network:
+                assert not like(pattern, str(address)), (pattern, address)
+
+    def test_the_address_the_old_pattern_refused_is_named(self):
+        # The Template B smoke test of 2026-09-30: the replica came in as
+        # fd3d:80b2:d0d7::2 and the grant said fd3d:80b2:d0d7:0:%.
+        assert not like("fd3d:80b2:d0d7:0:%", "fd3d:80b2:d0d7::2")
+        escaped = compressed_address("fd3d:80b2:d0d7::/64")
+        assert escaped is not None
+        assert not like("fd3d:80b2:d0d7:0:%", escaped)
+
+    @pytest.mark.parametrize(
+        "origin",
+        ["192.0.2.0/24", "2001:db8::/56", "2001:db8::2",
+         "replica.example.org", "not a prefix/64", "::/0",
+         "2001:db8:1:5%"],
+    )
+    def test_nothing_else_names_such_an_address(self, origin):
+        assert compressed_address(origin) is None
+
     def test_a_prefix_that_does_not_parse_has_no_spelling(self):
         assert host_pattern("2001:db8::/999") is None
 
     def test_an_empty_origin_has_no_spelling(self):
         assert host_pattern("") is None
+
+
+class TestWhyMariadbCannotHoldIt:
+    """The one reason validate, inspect and apply give for an origin"""
+
+    @pytest.mark.parametrize(
+        "origin",
+        ["fd3d:80b2:d0d7::2", "2804:710:d0:5::/64", "2001:db8:1:%",
+         "192.0.2.0/24", "replica.example.org", "%"],
+    )
+    def test_an_origin_mariadb_holds_exactly_has_no_problem(self, origin):
+        assert mariadb_problem(origin) is None
+
+    def test_a_compressed_zero_group_names_the_address_it_would_miss(self):
+        found = mariadb_problem("fd3d:80b2:d0d7::/64")
+
+        assert "fd3d:80b2:d0d7::1," in found
+        assert "each replica's address" in found
+
+    def test_a_prefix_inside_a_group_says_so(self):
+        assert "names no whole group" in mariadb_problem("2001:db8::/56")
+
+    def test_a_double_colon_pattern_says_what_it_would_hold(self):
+        assert "2001:0:0:0:0:5:a:b" in mariadb_problem("2001::5:%")
 
 
 class TestAgainstTheSchema:

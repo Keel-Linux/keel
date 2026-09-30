@@ -332,14 +332,40 @@ Every role writes one file,
 A **primary** then holds its authorizations. Each entry of
 `allowed_from` becomes `CREATE USER`, `ALTER USER` and `GRANT REPLICATION
 SLAVE` for the account `repl` at that origin, written in the spelling
-MariaDB has for it, so the preferred `2804:710:d0:5::/64` becomes
-`2804:710:d0:5:%` (`keel.spec.origins`). An origin the description no
-longer names has its account dropped, because `inspect` reads the
-authorizations off the server and one left behind would drift for ever.
-A prefix that stops inside a group, a `/56`, is refused: authorizing a
+MariaDB has for it, so `2804:710:d0:5::/64` becomes `2804:710:d0:5:%`
+and an address is written compressed, `fd3d:80b2:d0d7::2` for
+`fd3d:80b2:d0d7:0:0:0:0:2` (`keel.spec.origins`). An origin the
+description no longer names has its account dropped, because `inspect`
+reads the authorizations off the server and one left behind would drift
+for ever. `allowed_from` absent, as against empty, leaves the server's
+authorizations alone.
+
+Three kinds of origin are refused on MariaDB, because authorizing a
 wider or a narrower range than the description asked for is not a
-decision apply makes. `allowed_from` absent, as against empty, leaves the
-server's authorizations alone.
+decision apply makes. `keel spec validate` refuses them, so apply stops
+before it writes the configuration or restarts the server, and before
+it grants the other origins of the list; the plan refuses them again
+for a description that reaches it some other way:
+
+- a prefix that stops inside a group, a `/56`;
+- a host pattern with `::`, on any engine: `::` stands for a number of
+  zero groups no wildcard counts, so `2001::5:%` holds
+  `2001:0:0:0:0:5:a:b`, outside `2001:0:0:5::/64`;
+- an IPv6 prefix with a zero group the address text can compress away:
+  its last group is zero, or two groups in a row are. MariaDB compares
+  the text of the client's address, and in `fd3d:80b2:d0d7::/64`, what
+  `keel network wireguard suggest-address` prints, the replica at
+  `fd3d:80b2:d0d7::2` is not written `fd3d:80b2:d0d7:0:...`, so the
+  pattern `fd3d:80b2:d0d7:0:%` refuses it. MariaDB 11.8 (Debian 13) has
+  no IPv6 netmask or CIDR host either; both were tried and match
+  nothing. The refusal names an address the pattern would have missed;
+  write each replica's address instead.
+
+An account is dropped unless the description grants exactly its host,
+ignoring case. An account 0.11.0 made at the expanded
+`fd3d:80b2:d0d7:0:0:0:0:2` names the same origin as the
+`fd3d:80b2:d0d7::2` granted now, and MariaDB never matches it, so it is
+dropped and not kept beside the new one.
 
 The account name is a constant and not a field. Both ends of a pair must
 name the same account, and a field each operator sets on their own
@@ -383,11 +409,14 @@ feature that loses data and it gets the most explicit treatment:
 
 ```
 $ keel spec apply --system-only
-database.server: write /etc/mysql/mariadb.conf.d/99-keel-database.cnf: replica, server id 1857420371: done
-database.server: restart the server, which is the only way these take effect (systemctl restart mariadb): done
-database.server.replication.primary: refused: becoming a replica replaces the local database with a copy of the primary, and this server holds 1 database(s) that are not its own (wordpress). Nothing was changed. Move the data elsewhere, or run the same command again with --destroy-local-database to drop them and build the replica
-apply --system-only: 2 change(s), 1 failed
+database.server.replication.primary: refused: becoming a replica replaces the local database with a copy of the primary, and this server holds 1 database(s) that are not its own (wordpress). The server was left as it was: its configuration was not rewritten and it was not restarted. Move the data elsewhere, or run the same command again with --destroy-local-database to drop them and build the replica
+apply --system-only: 0 change(s), 1 failed
 ```
+
+The refusal is decided before the replica's configuration is written, so a
+declined replica keeps the file and the running server it had. Every
+refusal of the replica step works that way, a missing credential
+included.
 
 #### apply never promotes and never demotes
 
