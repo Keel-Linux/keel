@@ -143,6 +143,7 @@ def spec_apply(args) -> int:
         getattr(args, "defer_certificate", False),
         getattr(args, "network_window", system.DEFAULT_WINDOW),
         getattr(args, "skip_network", False),
+        getattr(args, "skip_uplink", False),
     )
 
 
@@ -178,6 +179,7 @@ def apply_system(
     doc: dict, root: str, dry_run: bool, label: str = "apply --system",
     confirmed: bool = False, defer_certificate: bool = False,
     network_window: int = system.DEFAULT_WINDOW, skip_network: bool = False,
+    skip_uplink: bool = False,
 ) -> int:
     """Observe, plan, then carry out or only print; one line per action
 
@@ -191,7 +193,7 @@ def apply_system(
     """
     state = system.observe(root, doc)
     plan = system.plan(doc, state, confirmed, defer_certificate,
-                       network_window, skip_network)
+                       network_window, skip_network, skip_uplink)
     if not plan.steps:
         print(f"{label}: nothing declared that this phase converges")
         return exits.OK

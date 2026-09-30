@@ -82,6 +82,32 @@ def route_via(peer: str) -> str | None:
     return None
 
 
+def route_dev(address: str) -> str | None:
+    """The interface the route to `address` leaves through, or None"""
+    return route_dev_in(output(("ip", "route", "get", address)) or "")
+
+
+def route_dev_in(text: str) -> str | None:
+    """`ip route get` output: the word after `dev`"""
+    fields = text.split()
+    if "dev" in fields and fields.index("dev") + 1 < len(fields):
+        return fields[fields.index("dev") + 1]
+    return None
+
+
+def link_up(iface: str) -> bool:
+    """Whether `iface` exists and is up; False when `ip` cannot say"""
+    return link_up_in(output(("ip", "link", "show", "dev", iface)) or "")
+
+
+def link_up_in(text: str) -> bool:
+    """`ip link show` output: UP among the flags between < and >"""
+    start, end = text.find("<"), text.find(">")
+    if start < 0 or end < start:
+        return False
+    return "UP" in text[start + 1:end].split(",")
+
+
 def probes() -> Probes:
     return Probes(boot_id=marker.boot_id, addresses=addresses,
-                  route_via=route_via, holder=holder)
+                  route_via=route_via, holder=holder, route_dev=route_dev)

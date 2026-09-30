@@ -64,6 +64,7 @@ exactly as `inspect` is.
 | `--destroy-local-database` | Confirm, for this run only, that making this node a replica may drop the databases this server holds. Without it apply refuses and changes nothing. See "database.server" below |
 | `--network-window SECONDS` | With either flag: how long a network change waits for `keel network confirm` before it reverts by itself; 120 by default, at least 30. See "network" below |
 | `--skip-network` | With either flag: leave the network alone in this run, the overlay included, except that a missing overlay key is still made. The first boot hook passes it |
+| `--skip-uplink` | With either flag: leave `network.interfaces` alone in this run (its step says so) and converge the overlay, under its window. For a caller that changes the overlay only, so a peer added from the console never moves the interface the operator came in on; confconsole's overlay screen passes it. With `--skip-network` too, the overlay is left alone as well |
 
 `--destroy-local-database` with neither flag is a usage error as well:
 it confirms one decision of phase 2, so asking for it without phase 2 is
@@ -679,6 +680,14 @@ running.
 `--boot` restores the file without touching the interface, for the boot
 unit. Both need root on the live system.
 
+Beside the saved copy, `saved.json` records which file it is a copy of
+(`/etc/network/interfaces`, or the overlay's file under
+`/etc/wireguard`), written apart from the marker. A marker that cannot
+be read is reverted onto that file, without restarting any interface.
+When the record is missing or names any other file, nothing is restored
+and revert says so and exits 16, leaving the marker and the copy for the
+operator: a guess could write an overlay's file over the uplink's.
+
 **network.overlay** (`/etc/wireguard/<interface>.conf`; handbook decisions
 0018 and 0020)
 
@@ -696,9 +705,27 @@ goes through the same window, marker, lock, timers and boot unit, with
   the pair exists from the first boot and the public key can be handed
   out before the overlay is brought up. An existing key file that is not
   root's and 0600 is refused.
+- **An inline key is kept, not replaced.** A file written by hand may
+  hold its key in a `PrivateKey` line. Before the file is rewritten
+  without it, the key is moved into the key file (created exclusively,
+  mode 0600, under `--root` too), so the node keeps the public key its
+  peers know it by; no new key is made. The key is read from the one
+  file and written to the other when the step runs: it is never in the
+  plan, an argument or the output. A key file that already holds the
+  same key is fine; one that holds another is refused and both are left
+  as they are, since keel cannot tell which one the peers know.
 - **keel owns the file.** It is rewritten whenever it is not exactly what
-  the spec renders, and left alone when it is. It holds no private key: a
-  `PostUp` line gives the key file to `wg set`.
+  the spec renders. It holds no private key: a `PostUp` line gives the
+  key file to `wg set`.
+- **The interface is read too.** On the live system the file alone is
+  not the overlay: `ip link show dev <interface>` says whether it is up.
+  A right file whose change was confirmed (`wg-quick@<interface>`
+  enabled) but whose interface is down is drift, and the step is
+  `systemctl restart wg-quick@<interface>`. A right file that was never
+  brought up and confirmed on this machine (it came with an image, say)
+  is brought up as a change, under the window; its revert puts the file
+  back and leaves the interface down, as it was. A right file that is up
+  is left alone, and its unit enabled if it is not.
 - **Refused, with the reason:** without `wg`, `wg-quick`, `ip`,
   `systemd-run` or `systemctl` (install `wireguard-tools`); in a container
   whose host has not loaded the `wireguard` module (the message names
@@ -739,6 +766,17 @@ Requiring the overlay alone would make pairing impossible: the first
 node's overlay carries nothing until the second node declares it too,
 and the first change would always revert. An agent of Keel Cloud that
 reaches the node again over the overlay confirms the same way.
+
+Whoever confirms, a console included, the uplink's gateways are asked
+first: `ip route get` for each gateway `network.interfaces` declares,
+IPv6 first. When one of those routes leaves through the overlay's
+interface, the change routes the uplink's traffic into the overlay, and
+confirm refuses (exit 21) and leaves the change to revert when its
+window ends, or at once with `keel network revert`. Validation already
+refuses what the spec shows (docs/spec.md, "Routes"); this catches what
+it cannot, a route from elsewhere. A gateway with no route at all is not
+taken as captured, and an uplink with no declared gateway (DHCP, SLAAC,
+a container's host) has nothing to ask.
 
 ```
 $ ssh root@fd00:6b65:1::1        # from the other node, over the overlay

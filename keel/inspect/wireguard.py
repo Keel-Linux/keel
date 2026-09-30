@@ -6,8 +6,9 @@ reads: the interface is named after it, the address, port, key file and
 peers are its lines. The public key is reported beside the spec rather
 than in it, since it follows from the private key; it is computed by
 `wg pubkey` from the key file (keel.network.wgkeys), and the private key
-itself is never read by keel, never printed and never written into the
-spec: only the path of its file is.
+itself is never read by inspect, never printed and never written into
+the spec: only the path of its file is. An inline PrivateKey line is
+reported as such; apply is what moves it into the key file.
 
 In a container the kernel module is the host's to load (decision 0018),
 so on the live system inspect says when it is missing, rather than
@@ -95,10 +96,15 @@ def key_findings(section: dict, inline: bool, path: str,
                  public_key: PublicKey) -> list[Finding]:
     """The key file's path, and the public key it gives; never the key"""
     if inline:
+        default = f"/{wireguard.CONF_DIR}/{section['interface']}.key"
         return [
             placeholder(f"{FIELD}.private_key", "inline", f"{path} holds a"
-                        " PrivateKey line, which keel never reads; apply"
-                        " moves the key to a file of its own"),
+                        " PrivateKey line, which inspect does not read;"
+                        " apply --system moves the key into the key file"
+                        f" the spec names ({default} by default), mode 0600,"
+                        " before it rewrites the file without it, so this"
+                        " node keeps its public key; it refuses when that"
+                        " file holds another key, and never prints it"),
             missing(f"{FIELD}.public_key", "the private key is inline in"
                     f" {path}, which keel does not read"),
         ]

@@ -41,12 +41,14 @@ NAMESERVER_LIMIT = (
 
 def plan_network(network: dict, state: NetworkState | None, live: bool,
                  available: frozenset[str], window: int = DEFAULT_WINDOW,
-                 skip: bool = False) -> list[Step]:
+                 skip: bool = False, skipped_by: str = "--skip-network") -> (
+                     list[Step]):
+    """`skipped_by` names the flag that asked for `skip`"""
     if state is None:
         return []
     if skip:
         return [Step(FIELD, (Note(
-            "not converged in this run (--skip-network)"),))]
+            f"not converged in this run ({skipped_by})"),))]
     if state.owner == "host":
         return [Step(FIELD, (Note(
             "the host owns this container's interfaces: compared by keel"

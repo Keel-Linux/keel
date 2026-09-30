@@ -611,6 +611,17 @@ class TestRoundTrip(unittest.TestCase):
         self.assertEqual(
             open(join(self.root, "etc/network/interfaces")).read(), before)
 
+    def test_skip_uplink_leaves_the_file_and_says_why(self):
+        before = open(join(self.root, "etc/network/interfaces")).read()
+        code, out, _ = self.cli("spec", "apply", "--spec", self.spec,
+                                "--system-only", "--skip-uplink",
+                                "--root", self.root)
+        self.assertEqual(code, 0, out)
+        self.assertIn("network: not converged in this run (--skip-uplink)",
+                      out)
+        self.assertEqual(
+            open(join(self.root, "etc/network/interfaces")).read(), before)
+
 
 if __name__ == "__main__":
     unittest.main()

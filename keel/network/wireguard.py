@@ -160,7 +160,9 @@ class Parsed:
     """A wg-quick file read back into the spec's shape
 
     `inline_key` is a file that holds its private key in a PrivateKey
-    line, which keel never writes and never reads. `problems` are lines
+    line, which keel never writes; the parse does not keep the value, and
+    only apply reads it, to move it into the key file
+    (keel.network.wgkeys.adopt). `problems` are lines
     the spec cannot hold (DNS, MTU, a preshared key...), which inspect
     reports rather than dropping them in silence.
     """

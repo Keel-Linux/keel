@@ -50,7 +50,7 @@ UNITS = (WINDOW_UNIT, SAFETY_UNIT)
 # how long ifup may take on top of the window: ifupdown-ng waits for a
 # DHCP lease, and the safety timer must not fire before the window starts
 UP_ALLOWANCE = 60
-INTERFACES = "etc/network/interfaces"
+INTERFACES = marker.UPLINK_FILE
 
 # A command runner: argv in, None on success or what went wrong
 Runner = Callable[[tuple[str, ...]], str | None]
@@ -113,16 +113,16 @@ def put_file(root: str, relative: str, text: str) -> str | None:
     return rename(staged, root, relative)
 
 
-def put_back(root: str, pending: marker.Pending, text: str) -> str | None:
+def put_back(root: str, target: marker.Target, text: str) -> str | None:
     """The saved file restored, or removed for a change that created it"""
-    if pending.kind != marker.OVERLAY:
-        return put_file(root, pending.path, text)
-    if pending.absent:
-        return remove(root, pending.path)
-    staged, problem = stage(root, pending.path, text, OVERLAY_MODE)
+    if target.kind != marker.OVERLAY:
+        return put_file(root, target.path, text)
+    if target.absent:
+        return remove(root, target.path)
+    staged, problem = stage(root, target.path, text, OVERLAY_MODE)
     if problem:
         return problem
-    return rename(staged, root, pending.path)
+    return rename(staged, root, target.path)
 
 
 def remove(root: str, relative: str) -> str | None:
@@ -185,14 +185,15 @@ def bounce(root: str, iface: str, relative: str, text: str,
 
 
 def bounce_overlay(root: str, iface: str, relative: str, text: str | None,
-                   run: Runner) -> tuple[bool, str | None]:
+                   run: Runner, up: bool = True) -> tuple[bool, str | None]:
     """wg-quick down, the file put in place (or removed), wg-quick up
 
     `text` None removes the file and leaves the interface down: the
-    revert of a change that created the overlay. `wg-quick down` failing
-    is not fatal, an interface that is not up has nothing to take down;
-    it runs on the outgoing file, which is how it finds the routes and
-    hooks to undo.
+    revert of a change that created the overlay. `up` False puts the file
+    back and leaves it down too: the revert of a change to an overlay
+    that was down before it. `wg-quick down` failing is not fatal, an
+    interface that is not up has nothing to take down; it runs on the
+    outgoing file, which is how it finds the routes and hooks to undo.
     """
     staged = None
     if text is not None:
@@ -203,19 +204,25 @@ def bounce_overlay(root: str, iface: str, relative: str, text: str | None,
     problem = (rename(staged, root, relative) if staged
                else remove(root, relative))
     if problem:
-        if os.path.exists(marker.path(root, relative)):
+        if up and os.path.exists(marker.path(root, relative)):
             run(("wg-quick", "up", iface))
         return False, problem
-    if text is None:
+    if text is None or not up:
         return True, None
     return True, run(("wg-quick", "up", iface))
 
 
 def move(root: str, pending: marker.Pending, text: str | None, run: Runner,
-         autoconf: str | None = None) -> tuple[bool, str | None]:
-    """The sequence of the change's kind, in either direction"""
+         autoconf: str | None = None, back: bool = False) -> (
+             tuple[bool, str | None]):
+    """The sequence of the change's kind, in either direction
+
+    `back` is a revert: an overlay that was down before the change is
+    left down on the restored file.
+    """
     if pending.kind == marker.OVERLAY:
-        return bounce_overlay(root, pending.iface, pending.path, text, run)
+        return bounce_overlay(root, pending.iface, pending.path, text, run,
+                              not (back and pending.down_before))
     return bounce(root, pending.iface, pending.path, text or "", run,
                   autoconf)
 
@@ -294,7 +301,7 @@ def changed(root: str, pending: marker.Pending, text: str,
         if problem:
             return f"{problem}; nothing changed"
         pending = prepared(root, pending, current)
-        marker.save(root, current)
+        marker.save(root, current, pending.target())
         marker.write(root, pending)
         problem = arm(SAFETY_UNIT, pending.window + UP_ALLOWANCE, run)
         if problem:
@@ -340,7 +347,7 @@ def rolled_back(root: str, pending: marker.Pending, current: str,
     so the timer, or the boot unit, still has something to restore.
     """
     written, back = move(root, pending, previous(pending, current), run,
-                         pending.autoconf)
+                         pending.autoconf, back=True)
     if not written:
         return (f"{problem}; putting the previous file back failed too"
                 f" ({back}); the revert timer will try again")
@@ -360,47 +367,68 @@ def revert(root: str, run: Runner, boot: bool = False) -> tuple[bool, str]:
     the restored file. The marker goes only once the saved file is back
     on disk, so a revert that could not write it can be run again, and
     the boot unit still finds it.
+
+    A marker that cannot be read is restored to the file recorded beside
+    the saved copy (marker.Target); when that is unknown too, nothing is
+    restored rather than a guess: an overlay's file written over
+    /etc/network/interfaces would cut the uplink off.
     """
     with marker.locked(root):
         if not marker.exists(root):
             return True, "no network change is waiting; nothing to revert"
         pending = marker.read(root)
+        target = pending.target() if pending else marker.saved_target(root)
+        if target is None:
+            return False, UNKNOWN_TARGET
         text = marker.saved(root)
-        relative = pending.path if pending else INTERFACES
         if text is None:
             marker.clear(root)
-            return False, (f"the saved copy of /{relative} is missing;"
+            return False, (f"the saved copy of /{target.path} is missing;"
                            " nothing was restored")
         if boot or pending is None:
-            problem = (put_back(root, pending, text) if pending
-                       else put_file(root, relative, text))
+            problem = put_back(root, target, text)
             if problem:
                 return False, f"cannot restore: {problem}"
             marker.clear(root)
             if boot:
-                return True, (f"{restored(pending, relative)} before"
-                              " networking starts")
+                return True, f"{restored(target)} before networking starts"
             disarm(run)
-            return True, (f"restored /{relative}; the pending change could"
+            return True, (f"{restored(target)}; the pending change could"
                           " not be read, so no interface was restarted")
-        autoconf = (None if pending.kind == marker.OVERLAY
-                    else restored_autoconf(pending))
-        written, problem = move(root, pending, previous(pending, text), run,
-                                autoconf)
-        if not written:
-            return False, f"cannot restore: {problem}"
-        marker.clear(root)
-        disarm(run)
-        if problem:
-            return False, f"{restored(pending, relative)}, but {problem}"
-        if pending.absent:
-            return True, (f"{restored(pending, relative)}; {pending.iface} is"
-                          " down, as it was before the change")
-        return True, (f"{restored(pending, relative)} and {pending.iface} is"
-                      " up on it")
+        return moved_back(root, pending, text, run)
 
 
-def restored(pending: marker.Pending | None, relative: str) -> str:
-    if pending is not None and pending.absent:
-        return f"removed /{relative}, which the change had created"
-    return f"restored /{relative}"
+# what revert says of a marker that names no file it can restore
+UNKNOWN_TARGET = (
+    "the pending change cannot be read, and what is beside it does not"
+    f" say which file the saved copy /{marker.SAVED} belongs to; nothing"
+    " was restored. Put it back by hand where it belongs"
+    f" (/{marker.UPLINK_FILE} or a file under /etc/wireguard), then"
+    f" remove /{marker.PENDING}"
+)
+
+
+def moved_back(root: str, pending: marker.Pending, text: str,
+               run: Runner) -> tuple[bool, str]:
+    """The live revert of a readable marker: the interface moved back"""
+    autoconf = (None if pending.kind == marker.OVERLAY
+                else restored_autoconf(pending))
+    written, problem = move(root, pending, previous(pending, text), run,
+                            autoconf, back=True)
+    if not written:
+        return False, f"cannot restore: {problem}"
+    marker.clear(root)
+    disarm(run)
+    done = restored(pending.target())
+    if problem:
+        return False, f"{done}, but {problem}"
+    if pending.absent or pending.down_before:
+        return True, (f"{done}; {pending.iface} is down, as it was before"
+                      " the change")
+    return True, f"{done} and {pending.iface} is up on it"
+
+
+def restored(target: marker.Target) -> str:
+    if target.absent:
+        return f"removed /{target.path}, which the change had created"
+    return f"restored /{target.path}"

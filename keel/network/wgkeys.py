@@ -8,11 +8,18 @@ every appliance built from it the same identity on the overlay
 by root, and `wg pubkey` reads that file as its standard input, so the
 private key never passes through keel's memory, its output or an
 argument vector.
+
+One exception: a wg-quick file written by hand may hold its key in a
+PrivateKey line. keel rewrites that file without it, so `adopt` first
+moves the key into the key file, the same way (created exclusively,
+0600), and the node keeps the identity its peers know. The key is read
+from the file and written to the other, never printed or passed on.
 """
 
 import os
 import subprocess
 
+from keel.network.wireguard import is_key
 from keel.spec.secretstore import secret_file_error
 
 KEY_MODE = 0o600
@@ -44,6 +51,64 @@ def generate(path: str) -> str | None:
     if problem:
         os.remove(path)
     return problem
+
+
+def inline_key(text: str) -> str | None:
+    """The value of the [Interface] PrivateKey line of a wg-quick file"""
+    section = None
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip().lower()
+            continue
+        name, sep, value = line.partition("=")
+        if section == "interface" and sep and \
+                name.strip().lower() == "privatekey":
+            return value.strip()
+    return None
+
+
+def adopt(conf: str, path: str) -> str | None:
+    """Move the PrivateKey line of `conf` into `path`; None on success
+
+    A key file that already holds the same key is fine; one that holds
+    another is refused and left alone, since either key may be the one
+    the peers know. No message carries the key.
+    """
+    try:
+        with open(conf) as fob:
+            key = inline_key(fob.read())
+    except OSError as e:
+        return f"cannot read {conf}: {e.strerror or e}"
+    if key is None or not is_key(key):
+        return (f"{conf} has no PrivateKey line keel can move (a WireGuard"
+                " key is 44 characters of base64)")
+    if os.path.lexists(path):
+        return same_key(path, key, conf)
+    os.makedirs(os.path.dirname(path), mode=DIR_MODE, exist_ok=True)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, KEY_MODE)
+    except OSError as e:
+        return f"cannot create {path}: {e.strerror or e}"
+    with os.fdopen(fd, "w") as fob:
+        os.fchmod(fob.fileno(), KEY_MODE)
+        fob.write(key + "\n")
+        fob.flush()
+        os.fsync(fob.fileno())
+    return None
+
+
+def same_key(path: str, key: str, conf: str) -> str | None:
+    try:
+        with open(path) as fob:
+            held = fob.read().strip()
+    except OSError as e:
+        return f"cannot read {path}: {e.strerror or e}"
+    if held == key:
+        return None
+    return (f"{path} holds another key than the PrivateKey line of {conf};"
+            " keel does not choose between them: remove the one this node"
+            " should not use, then apply again")
 
 
 def run_to(argv: tuple[str, ...], fob) -> str | None:

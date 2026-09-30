@@ -471,6 +471,13 @@ def add_apply_options(parser: argparse.ArgumentParser) -> None:
         " this run; the first boot hook passes it, since 01ipconfig has"
         " already written the file and nobody is there to confirm",
     )
+    parser.add_argument(
+        "--skip-uplink",
+        action="store_true",
+        help="with --system or --system-only: leave network.interfaces"
+        " alone in this run and converge the overlay only; the console's"
+        " overlay screen passes it",
+    )
     add_root_option(parser, "converge with --system")
 
 
@@ -605,11 +612,12 @@ def main(argv: list[str] | None = None) -> int:
             "--defer-certificate requires --system or --system-only:"
             " the certificate is requested there"
         )
-    if getattr(args, "skip_network", False) and not system:
-        parser.error(
-            "--skip-network requires --system or --system-only:"
-            " the network is converged there"
-        )
+    for flag in ("skip_network", "skip_uplink"):
+        if getattr(args, flag, False) and not system:
+            parser.error(
+                f"--{flag.replace('_', '-')} requires --system or"
+                " --system-only: the network is converged there"
+            )
     if getattr(args, "destroy_local_database", False) and not system:
         parser.error(
             "--destroy-local-database requires --system or --system-only:"

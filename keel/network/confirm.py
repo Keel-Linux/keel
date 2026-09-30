@@ -28,13 +28,15 @@ class Probes:
     """What confirm asks the live machine, as functions for the tests
 
     `holder` names the interface that holds an address now, or None when
-    no interface of this machine does.
+    no interface of this machine does. `route_dev` names the interface
+    the route to an address leaves through, or None when there is none.
     """
 
     boot_id: Callable[[], str | None]
     addresses: Callable[[str], list[str]]
     route_via: Callable[[str], str | None]
     holder: Callable[[str], str | None] = lambda address: None
+    route_dev: Callable[[str], str | None] = lambda address: None
 
 
 def confirm(root: str, origin: session.Origin, probes: Probes,
@@ -50,7 +52,8 @@ def confirm(root: str, origin: session.Origin, probes: Probes,
         if refusal:
             return False, [refusal]
         overlay = pending.kind == marker.OVERLAY
-        refusal = (overlay_not_proof if overlay else not_proof)(
+        refusal = captured(pending, probes.route_dev) or (
+            overlay_not_proof if overlay else not_proof)(
             pending, origin, probes)
         if refusal:
             return False, [refusal]
@@ -73,7 +76,7 @@ def not_ready(pending: marker.Pending | None, boot_id: str | None) -> (
 ):
     if pending is None:
         return ("the pending change cannot be read; keel network revert"
-                " restores the saved file")
+                " restores the saved file to the file recorded beside it")
     if pending.changed_at is None:
         # the lock is held, so no change is running: this one was never
         # dated (the uptime could not be read after ifup), and reverts
@@ -164,6 +167,32 @@ def overlay_not_proof(pending: marker.Pending, origin: session.Origin,
             f" neither an address the overlay declares"
             f" ({', '.join(pending.addresses)}) nor one another interface"
             " of this machine holds")
+
+
+def captured(pending: marker.Pending,
+             route_dev: Callable[[str], str | None]) -> str | None:
+    """An overlay change that routes the uplink's gateway into itself
+
+    Whoever confirms, a console included, would keep a change that cuts
+    the uplink off: a peer's allowed_ips, or the overlay's own prefix,
+    that covers a gateway takes every reply that goes through it.
+    Validation refuses what the spec shows; this asks the machine, for
+    what it cannot show (an uplink the host or DHCP configures, another
+    route). Each declared gateway, IPv6 first; one without a route is
+    not taken as captured.
+    """
+    if pending.kind != marker.OVERLAY:
+        return None
+    for gateway in sorted(pending.uplink_gateways, reverse=True,
+                          key=lambda one: ipaddress.ip_address(one).version):
+        if route_dev(gateway) == pending.iface:
+            return (f"refused: the route to the uplink gateway {gateway}"
+                    f" leaves through {pending.iface}, so the change routes"
+                    " the uplink's traffic into the overlay; it is left to"
+                    " revert when its window ends, or now with keel network"
+                    " revert. Narrow the peers' allowed_ips, then apply"
+                    " again")
+    return None
 
 
 def overlay_lines(pending: marker.Pending, origin: session.Origin,

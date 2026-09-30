@@ -290,15 +290,27 @@ network:
 | Field | State | Notes |
 | --- | --- | --- |
 | `network.overlay.wireguard.interface` | system | The interface name, as wg-quick accepts it (at most 15 of `A-Z a-z 0-9 _ = + . -`). Default `wg0`. Not a name `network.interfaces` declares |
-| `network.overlay.wireguard.address` | system | Required. This node's IPv6 address on the overlay, with its prefix length; unicast. A unique local address (`fd00::/8`, RFC 4193) is the usual choice: `keel network wireguard suggest-address` prints a random one for the first node, `::1` on its /64, and the others take `::2`, `::3` on the same /64 |
-| `network.overlay.wireguard.ipv4_address` | system | Optional, an IPv4 address with its prefix length beside the IPv6 one |
+| `network.overlay.wireguard.address` | system | Required. This node's IPv6 address on the overlay, with its prefix length: a unique local address (`fc00::/7`, RFC 4193), the whole prefix inside that range. `keel network wireguard suggest-address` prints a random one in `fd00::/8` for the first node, `::1` on its /64, and the others take `::2`, `::3` on the same /64. The prefix may not overlap what `network.interfaces` declares or a peer's endpoint address (see "Routes" below) |
+| `network.overlay.wireguard.ipv4_address` | system | Optional, an IPv4 address with its prefix length beside the IPv6 one: private, RFC 1918 (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) or the shared `100.64.0.0/10` (RFC 6598), the whole prefix inside one of them, and clear of the uplink as the IPv6 one is |
 | `network.overlay.wireguard.listen_port` | system | The UDP port. Default 51820, written out so peers can name it in their endpoint |
 | `network.overlay.wireguard.private_key.file` | system | Where the private key is. Default `/etc/wireguard/<interface>.key`. Only a file: no other backend, and never a value. An absolute path of letters, digits and `. _ - /`, because wg-quick hands it to a shell. Absent, the key is **made** by `apply --system` on the machine itself, `wg genkey` into the file, mode 0600, the first time the overlay is converged (or by `keel network wireguard key`); never under `--root`, where it would end up in an image every appliance built from it would share (keel-core#8). Present, it must be root's and 0600, as every secret file |
 | `network.overlay.wireguard.peers` | system | A list; may be empty. Each peer is known by its public key |
 | `...peers[].public_key` | system | Required. The peer's key as `wg pubkey` prints it (44 characters of base64). Each key once |
 | `...peers[].endpoint` | system | Optional: where to reach the peer, `host:port`. An IPv6 literal goes in brackets, `[2001:db8:2::20]:51820`, as wg writes it; a name or an IPv4 address without. Without it this node waits for the peer to reach it |
-| `...peers[].allowed_ips` | system | Required, at least one prefix: what is routed to this peer and accepted from it. For a node, its overlay address as a `/128` (and `/32`). A prefix with host bits set is an error, and so is a prefix given to two peers, since wg would silently keep it for the last one only |
+| `...peers[].allowed_ips` | system | Required, at least one prefix: what is routed to this peer and accepted from it. For a node, its overlay address as a `/128` (and `/32`). A prefix with host bits set is an error, and so is a prefix given to two peers, since wg would silently keep it for the last one only. A `/0` (`::/0`, `0.0.0.0/0`) is refused, and so is a prefix that overlaps the uplink or a peer's endpoint (see "Routes" below) |
 | `...peers[].persistent_keepalive` | system | Optional, seconds between 1 and 65535: keeps a path through a NAT or a stateful firewall open. Leave it out for none |
+
+**Routes.** `wg-quick` adds a route for the overlay's own prefixes and
+for each peer's `allowed_ips`. A route that covers the uplink would send
+the uplink's replies into the overlay, and the machine would be cut off
+from the network it is managed over. So validation refuses an overlay
+address or an `allowed_ips` prefix that overlaps anything
+`network.interfaces` declares (an address's prefix, a gateway) or the
+address of a peer's endpoint, and any `/0`. An endpoint given by name,
+and an uplink left to DHCP, SLAAC or the container's host, cannot be
+checked from the spec: `keel network confirm` checks on the machine that
+the declared gateways are not routed into the overlay
+([docs/apply.md](apply.md)).
 
 The overlay belongs to the appliance on either kind of machine (decision
 0018): its file is `/etc/wireguard/<interface>.conf`, which the host of a

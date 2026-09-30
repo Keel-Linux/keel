@@ -16,6 +16,7 @@ with that, a clock that does not jump when the wall clock is set.
 import fcntl
 import json
 import os
+import re
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -25,6 +26,11 @@ DIR = "var/lib/keel/network"
 LOCK = f"{DIR}/lock"
 PENDING = f"{DIR}/pending.json"
 SAVED = f"{DIR}/saved"
+# which file SAVED is a copy of, apart from PENDING (Target)
+TARGET = f"{DIR}/saved.json"
+UPLINK_FILE = "etc/network/interfaces"
+# an overlay's file: wg-quick's rule for the interface name
+OVERLAY_FILE_RE = re.compile(r"^etc/wireguard/[A-Za-z0-9_=+.-]{1,15}\.conf$")
 DIR_MODE = 0o700
 FILE_MODE = 0o600
 BOOT_ID = "proc/sys/kernel/random/boot_id"
@@ -55,6 +61,10 @@ class Pending:
     /etc/network/interfaces, or OVERLAY, wg-quick on a file under
     /etc/wireguard (decision 0020). `absent` is a change that created its
     file: its revert removes the file instead of restoring an empty one.
+    `down_before` is an overlay that was down before the change: its
+    revert puts the file back and leaves it down. `uplink_gateways` are
+    the gateways network.interfaces declares, IPv6 first, which confirm
+    checks an overlay change has not routed into the overlay.
     """
 
     iface: str
@@ -68,9 +78,28 @@ class Pending:
     autoconf: str | None = None
     kind: str = UPLINK
     absent: bool = False
+    down_before: bool = False
+    uplink_gateways: tuple[str, ...] = ()
 
     def up(self, boot_id: str, uptime: float) -> "Pending":
         return replace(self, boot_id=boot_id, changed_at=uptime)
+
+    def target(self) -> "Target":
+        return Target(self.path, self.kind, self.absent)
+
+
+@dataclass(frozen=True)
+class Target:
+    """The file the saved copy belongs to, recorded beside the copy
+
+    Written apart from the marker, so a marker that cannot be read still
+    says where its saved copy goes back to, and a revert never restores
+    an overlay's file over /etc/network/interfaces or the reverse.
+    """
+
+    path: str
+    kind: str = UPLINK
+    absent: bool = False
 
 
 def path(root: str, relative: str) -> str:
@@ -113,6 +142,8 @@ def read(root: str) -> Pending | None:
             autoconf=data.get("autoconf"),
             kind=kind(data.get("kind")),
             absent=bool(data.get("absent")),
+            down_before=bool(data.get("down_before")),
+            uplink_gateways=tuple(data.get("uplink_gateways") or ()),
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -136,9 +167,33 @@ def write(root: str, pending: Pending) -> None:
     write_private(root, PENDING, json.dumps(asdict(pending), indent=2) + "\n")
 
 
-def save(root: str, text: str) -> None:
-    """Keep the file the change replaces"""
+def save(root: str, text: str, target: Target | None = None) -> None:
+    """Keep the file the change replaces, and which file it is
+
+    Without `target`, a revert of a marker that cannot be read restores
+    nothing: it cannot know which file the copy belongs to.
+    """
     write_private(root, SAVED, text)
+    if target is not None:
+        write_private(root, TARGET, json.dumps(asdict(target)) + "\n")
+
+
+def saved_target(root: str) -> Target | None:
+    """The file the saved copy belongs to; None when it cannot be known
+
+    Only the two files a change replaces are accepted, each with its own
+    kind, so a damaged record never sends a revert anywhere else.
+    """
+    try:
+        with open(path(root, TARGET)) as fob:
+            data = json.load(fob)
+        found = Target(str(data["path"]), kind(data.get("kind")),
+                       bool(data.get("absent")))
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    wanted = (found.path == UPLINK_FILE if found.kind == UPLINK
+              else OVERLAY_FILE_RE.match(found.path) is not None)
+    return found if wanted else None
 
 
 def saved(root: str) -> str | None:
@@ -151,7 +206,7 @@ def saved(root: str) -> str | None:
 
 def clear(root: str) -> None:
     """Remove the marker and the saved file: confirmed, or reverted"""
-    for relative in (PENDING, SAVED):
+    for relative in (PENDING, SAVED, TARGET):
         try:
             os.remove(path(root, relative))
         except FileNotFoundError:

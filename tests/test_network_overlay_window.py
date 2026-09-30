@@ -214,6 +214,52 @@ class TestRevert(RootCase):
         self.assertEqual(self.mode(), 0o600)
         self.assertEqual(run.calls, [])
 
+    def test_an_unreadable_marker_restores_the_overlay_file_it_recorded(self):
+        with open(join(self.root, "interfaces"), "w") as fob:
+            fob.write("uplink\n")
+        for absent, saved, left in ((False, OLD, OLD), (True, "", None)):
+            with self.subTest(absent=absent):
+                marker.save(self.root, saved, pending(absent=absent).target())
+                marker.write_private(self.root, marker.PENDING, "garbage")
+                self.write(NEW)
+                run = Recorder()
+                worked, line = switch.revert(self.root, run)
+                self.assertTrue(worked, line)
+                self.assertEqual(self.current(), left)
+                if left is not None:
+                    self.assertEqual(self.mode(), 0o600)
+                self.assertIn("no interface was restarted", line)
+                self.assertEqual(self.wg_calls(run), [])
+                self.assertFalse(os.path.exists(join(
+                    self.root, switch.INTERFACES)))
+
+    def test_the_change_records_the_overlay_file(self):
+        switch.change(self.root, pending(), NEW, Recorder())
+        self.assertEqual(marker.saved_target(self.root),
+                         marker.Target(CONF, "overlay", True))
+
+    def test_an_overlay_that_was_down_is_left_down_by_its_revert(self):
+        self.prepared(absent=False, saved=OLD)
+        marker.write(self.root, pending(down_before=True).up("b1", 50.0))
+        run = Recorder()
+        worked, line = switch.revert(self.root, run)
+        self.assertTrue(worked)
+        self.assertEqual(line, "restored /etc/wireguard/wg0.conf; wg0 is"
+                         " down, as it was before the change")
+        self.assertEqual(self.current(), OLD)
+        self.assertEqual(self.wg_calls(run), [("wg-quick", "down", "wg0")])
+
+    def test_an_overlay_that_was_down_is_brought_up_by_its_change(self):
+        self.write(OLD)
+        run = Recorder(fail={"wg-quick": 2})
+        problem = switch.change(self.root, pending(down_before=True), NEW,
+                                run)
+        self.assertIn("reverted", problem)
+        self.assertEqual(self.wg_calls(run), [
+            ("wg-quick", "down", "wg0"), ("wg-quick", "up", "wg0"),
+            ("wg-quick", "down", "wg0")])
+        self.assertEqual(self.current(), OLD)
+
     def test_a_boot_restore_that_cannot_stage_is_a_failure(self):
         self.prepared(absent=False, saved=OLD)
         with mock.patch.object(switch, "stage",
@@ -262,9 +308,10 @@ HOLDERS = {"2001:db8:1::20": "eth0", "fd00:1::9": "wg0", "fd00:1::7": "wg0",
            "2001:db8:1::21": "eth0"}
 
 
-def probes(boot="b1"):
+def probes(boot="b1", routes=None):
     return Probes(boot_id=lambda: boot, addresses=lambda iface: [],
-                  route_via=lambda peer: None, holder=HOLDERS.get)
+                  route_via=lambda peer: None, holder=HOLDERS.get,
+                  route_dev=(routes or {}).get)
 
 
 def ssh(local, peer="2001:db8:9::5", started=60.0):
@@ -333,6 +380,108 @@ class TestConfirm(RootCase):
         origin = session.Origin(session.CONSOLE_KIND, "the console")
         self.assertEqual(netconfirm.overlay_lines(pending(), origin,
                                                   probes()), [])
+
+
+GATEWAYS = ("192.0.2.1", "2001:db8:1::1")
+
+
+class TestCapturedUplink(RootCase):
+    """A confirmation is refused while the uplink's gateway is routed
+    into the overlay: whoever confirms, the uplink is cut off"""
+
+    def setUp(self):
+        super().setUp()
+        marker.save(self.root, "")
+        marker.write(self.root, pending(
+            absent=True, uplink_gateways=GATEWAYS).up("b1", 50.0))
+
+    def confirm(self, origin, routes):
+        run = Recorder()
+        return netconfirm.confirm(self.root, origin,
+                                  probes(routes=routes), run), run
+
+    def test_a_captured_gateway_refuses_every_origin(self):
+        routes = {"2001:db8:1::1": "wg0", "192.0.2.1": "eth0"}
+        for origin in (
+            session.Origin(session.CONSOLE_KIND, "the console /dev/tty1"),
+            session.Origin(session.HOST, "a process attached from the host"),
+            ssh("fd00:1::9", "fd00:1::2"),
+            ssh("2001:db8:1::20"),
+        ):
+            with self.subTest(origin=origin.detail):
+                (confirmed, lines), run = self.confirm(origin, routes)
+                self.assertFalse(confirmed)
+                self.assertEqual(len(lines), 1)
+                self.assertIn("the route to the uplink gateway 2001:db8:1::1"
+                              " leaves through wg0", lines[0])
+                self.assertIn("left to revert", lines[0])
+                self.assertEqual(run.calls, [])
+                self.assertTrue(marker.exists(self.root))
+
+    def test_the_ipv6_gateway_is_asked_first(self):
+        (confirmed, lines), _ = self.confirm(
+            session.Origin(session.CONSOLE_KIND, "the console"),
+            {"2001:db8:1::1": "wg0", "192.0.2.1": "wg0"})
+        self.assertFalse(confirmed)
+        self.assertIn("2001:db8:1::1", lines[0])
+        self.assertIn("gateway 192.0.2.1 leaves", netconfirm.captured(
+            marker.read(self.root), {"192.0.2.1": "wg0"}.get))
+
+    def test_gateways_through_the_uplink_or_unknown_confirm(self):
+        for routes in ({"2001:db8:1::1": "eth0", "192.0.2.1": "eth0"}, {}):
+            with self.subTest(routes=routes):
+                self.setUp()
+                (confirmed, lines), _ = self.confirm(
+                    session.Origin(session.CONSOLE_KIND, "the console"),
+                    routes)
+                self.assertTrue(confirmed, lines)
+
+    def test_an_uplink_change_is_not_asked(self):
+        uplink = marker.Pending(iface="eth0",
+                                path="etc/network/interfaces", window=120,
+                                uplink_gateways=GATEWAYS)
+        self.assertIsNone(netconfirm.captured(uplink, lambda gw: "eth0"))
+
+
+class TestMarkerFields(RootCase):
+    def test_the_overlay_fields_round_trip(self):
+        written = pending(uplink_gateways=GATEWAYS, down_before=True)
+        marker.write(self.root, written)
+        self.assertEqual(marker.read(self.root), written)
+
+    def test_a_marker_without_them_has_none(self):
+        marker.write(self.root, pending())
+        with open(join(self.root, marker.PENDING)) as fob:
+            data = json.load(fob)
+        del data["uplink_gateways"], data["down_before"]
+        with open(join(self.root, marker.PENDING), "w") as fob:
+            json.dump(data, fob)
+        found = marker.read(self.root)
+        self.assertEqual((found.uplink_gateways, found.down_before),
+                         ((), False))
+
+
+class TestRouteDev(unittest.TestCase):
+    def test_the_interface_a_route_leaves_through(self):
+        for text, iface in (
+            ("2001:db8:1::1 from :: dev wg0 proto kernel src fd00:1::9"
+             " metric 256 pref medium\n", "wg0"),
+            ("192.0.2.1 dev eth0 src 192.0.2.10 uid 0 \n    cache \n",
+             "eth0"),
+            ("192.0.2.1 via 10.0.0.1 dev\n", None),
+            ("", None),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(live.route_dev_in(text), iface)
+
+    def test_the_live_probe_asks_ip(self):
+        text = "192.0.2.1 dev wg0 src x\n"
+        with mock.patch.object(live, "output", return_value=text) as out:
+            self.assertEqual(live.route_dev("192.0.2.1"), "wg0")
+        out.assert_called_once_with(("ip", "route", "get", "192.0.2.1"))
+        with mock.patch.object(live, "output", return_value=None):
+            self.assertIsNone(live.route_dev("192.0.2.1"))
+        self.assertIs(live.probes().route_dev, live.route_dev)
 
 
 class TestHolder(unittest.TestCase):

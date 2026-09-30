@@ -26,11 +26,8 @@ def validate_network(network: Any, check_secret_files: bool = True) -> (
     for key in network:
         if key not in ("managed_by", "interfaces", "nameservers", "overlay"):
             errors.append(f"network.{key}: unknown key")
-    uplinks = network.get("interfaces")
     errors.extend(validate_overlay(
-        network.get("overlay"),
-        tuple(str(name) for name in uplinks)
-        if isinstance(uplinks, dict) else (),
+        network.get("overlay"), network.get("interfaces"),
         check_secret_files,
     ))
 

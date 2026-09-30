@@ -31,6 +31,26 @@ keel (0.11.0) unstable; urgency=medium
     making the pair first) and keel network wireguard suggest-address (a
     random unique local /64 for the first node of a set).
   * Suggests: wireguard-tools.
+  * From the review of #49: no route of the overlay may capture the
+    uplink. The overlay address must be unique local (fc00::/7), the IPv4
+    one RFC 1918 or 100.64.0.0/10, and neither they nor any allowed_ips
+    may overlap an address prefix or gateway of network.interfaces or a
+    peer's endpoint address; a /0 is refused. keel network confirm
+    refuses an overlay change, from a console too, while ip route get
+    sends a declared uplink gateway through the overlay.
+  * A wg0.conf with an inline PrivateKey keeps its identity: apply moves
+    the key into the key file (0600, created exclusively, never printed)
+    before rewriting the file, instead of making a new one, and refuses
+    when the key file holds another key.
+  * A revert whose marker cannot be read restores the saved copy to the
+    file recorded beside it (saved.json), and restores nothing when that
+    is unknown, never an overlay's file over /etc/network/interfaces.
+  * apply reads the overlay interface as well as its file: a confirmed
+    overlay that is down is drift and is restarted; a right file never
+    brought up here comes up under the window, and its revert leaves it
+    down.
+  * New apply flag --skip-uplink: converge the overlay and leave
+    network.interfaces alone, for confconsole's overlay screen.
 
  -- Marcos Mendez <mendez.foto@gmail.com>  Wed, 30 Sep 2026 05:47:51 +0000
 

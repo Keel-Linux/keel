@@ -12,15 +12,23 @@ wg-quick in place of ifupdown.
 keel owns the file: it is rewritten whenever it is not exactly what the
 spec renders. The private key is not in it (keel.network.wireguard), and
 is made on this machine the first time the overlay is converged, never
-under --root, where it would end up in an image (keel-core#8).
-wg-quick@<interface> is enabled once a change is confirmed, not before,
-so a reboot inside the window of a first overlay leaves nothing up.
+under --root, where it would end up in an image (keel-core#8); a file
+that held its key inline has it moved into the key file first, so the
+node keeps its identity. wg-quick@<interface> is enabled once a change
+is confirmed, not before, so a reboot inside the window of a first
+overlay leaves nothing up.
+
+The file alone is not the overlay: on the live system the interface is
+read too (`ip link show`). A confirmed overlay that is down is drift and
+is started again; a right file that was never brought up here is brought
+up under the window, like a change.
 """
 
 from keel.network import marker
 from keel.network.wireguard import conf_path
 from keel.system.actions import (
     Action,
+    AdoptKey,
     GenerateKey,
     Note,
     Refuse,
@@ -62,15 +70,23 @@ def plan_overlay(state: OverlayState | None, live: bool,
     if skip:
         return [Step(FIELD, (*key, Note(
             "not brought up in this run (--skip-network)"),))]
-    if state.current == state.rendered:
+    if state.current == state.rendered and not never_up(state, live):
         return [Step(FIELD, (*key, *kept(state, live)))]
     return [Step(FIELD, (*key, *change(state, live, window, uplink_moves)))]
 
 
 def key_actions(state: OverlayState, live: bool) -> tuple[Action, ...]:
+    """The key file: refused, kept, moved out of the file, or made
+
+    A file with an inline PrivateKey is this node's identity already, so
+    the key is moved into the key file rather than a new one made, under
+    --root as well: the file keel writes there would drop it otherwise.
+    """
     if state.key_problem:
         return (Refuse(f"the private key file cannot be used:"
                        f" {state.key_problem}"),)
+    if state.inline_key:
+        return (AdoptKey(conf_path(state.iface), state.key_path),)
     if state.key_present:
         return ()
     if not live:
@@ -80,13 +96,35 @@ def key_actions(state: OverlayState, live: bool) -> tuple[Action, ...]:
     return (GenerateKey(state.key_path),)
 
 
+def never_up(state: OverlayState, live: bool) -> bool:
+    """The file is right but was never brought up and confirmed here
+
+    It came with an image, or its first change was reverted by a boot
+    after its unit failed to be enabled: bringing it up is a change like
+    any other, under the window, and its revert leaves it down.
+    """
+    return (live and not state.pending and state.up is False
+            and not state.enabled)
+
+
 def kept(state: OverlayState, live: bool) -> tuple[Action, ...]:
-    """The file says what the spec renders; only the boot unit may lack"""
+    """The file says what the spec renders; the interface may not
+
+    A confirmed overlay (its unit enabled) that is down is drift, and is
+    started again; an overlay that is up may still lack its boot unit.
+    """
     note = Note(f"unchanged (/{conf_path(state.iface)} says what the spec"
                 " declares)")
-    if not live or state.enabled or state.pending:
+    if not live or state.pending:
         return (note,)
     unit = f"wg-quick@{state.iface}"
+    if state.up is False:
+        return (Run(("systemctl", "restart", unit),
+                    f"drift: {state.iface} is down, though its file says"
+                    f" what the spec declares and its change was"
+                    f" confirmed; start {unit}"),)
+    if state.enabled:
+        return (note,)
     return (note, Run(("systemctl", "enable", unit),
                       f"enable {unit}, so the overlay comes up at boot"))
 
@@ -113,5 +151,6 @@ def change(state: OverlayState, live: bool, window: int,
     return [SwitchNetwork(
         iface=state.iface, path=path, content=state.rendered, window=window,
         addresses=state.addresses, gateways=(), old_gateways=(),
-        kind=marker.OVERLAY,
+        kind=marker.OVERLAY, down_before=state.up is False,
+        uplink_gateways=state.uplink_gateways,
     )]

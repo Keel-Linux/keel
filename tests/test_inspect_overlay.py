@@ -92,6 +92,13 @@ class TestProbe(unittest.TestCase):
                          .status, NOT_INFERRED)
         self.assertEqual(found["network.overlay.wireguard.address"].status,
                          NOT_INFERRED)
+        # what apply does with it, said as it is (keel#49)
+        said = found["network.overlay.wireguard.private_key"].source
+        self.assertIn("apply --system moves the key into the key file the"
+                      " spec names (/etc/wireguard/wg0.key by default), mode"
+                      " 0600, before it rewrites the file", said)
+        self.assertIn("keeps its public key", said)
+        self.assertIn("never prints it", said)
 
     def test_a_file_without_a_key_and_a_key_that_gives_nothing(self):
         _, findings = probe_overlay([conf("[Interface]\n")], public,

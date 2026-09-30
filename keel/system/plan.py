@@ -18,7 +18,7 @@ from keel.system.users import plan_users
 def plan(
     doc: dict, state: SystemState, confirmed: bool = False,
     defer_certificate: bool = False, network_window: int = DEFAULT_WINDOW,
-    skip_network: bool = False,
+    skip_network: bool = False, skip_uplink: bool = False,
 ) -> Plan:
     """Steps: instance, users, locale, security, tls, database, monitor,
     network
@@ -35,6 +35,9 @@ def plan(
     run had to do is done before the interface moves. The overlay last
     (decision 0020): one change waits in the window at a time, so an
     overlay change is refused in a run whose uplink moves.
+    `skip_uplink` leaves the uplink alone and converges the overlay, for
+    a caller that changes only the overlay (the console's screen), so
+    what it applies never moves the interface its operator came in on.
     """
     instance = doc.get("instance") or {}
     # the rename first, and the fqdn step on the /etc/hosts it produces
@@ -49,7 +52,9 @@ def plan(
                           state.live, state.available)
     uplink = plan_network(doc.get("network") or {}, state.network,
                           state.live, state.available, network_window,
-                          skip_network)
+                          skip_network or skip_uplink,
+                          "--skip-network" if skip_network
+                          else "--skip-uplink")
     steps += uplink
     steps += plan_overlay(state.overlay, state.live, state.available,
                           network_window, skip_network, moves(uplink))

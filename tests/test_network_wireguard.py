@@ -239,6 +239,88 @@ class TestKeysWithoutTools(KeyCase):
             self.assertIn("wireguard-tools", wgkeys.public(self.key)[1])
 
 
+INLINE_KEY = "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk="
+INLINE_CONF = (
+    "[Interface]\n"
+    "Address = fd00:1::1/64\n"
+    f"PrivateKey = {INLINE_KEY}   # this node\n"
+    "\n"
+    "[Peer]\n"
+    f"PublicKey = {PEER_KEY}\n"
+    "PrivateKey = not-this-one\n"
+)
+
+
+class TestAdoptKey(KeyCase):
+    """An inline PrivateKey moved into the key file, never regenerated"""
+
+    def setUp(self):
+        super().setUp()
+        self.conf = join(self.tmp, "wg0.conf")
+        self.write_conf(INLINE_CONF)
+
+    def write_conf(self, text):
+        with open(self.conf, "w") as fob:
+            fob.write(text)
+
+    def read_key(self):
+        with open(self.key) as fob:
+            return fob.read()
+
+    def test_the_interface_key_is_read_and_a_peer_line_is_not(self):
+        self.assertEqual(wgkeys.inline_key(INLINE_CONF), INLINE_KEY)
+        self.assertEqual(wgkeys.inline_key(
+            "[Interface]\nprivatekey=" + INLINE_KEY + "\n"), INLINE_KEY)
+        for text in ("", "[Interface]\nAddress = fd00:1::1/64\n",
+                     "[Peer]\nPrivateKey = " + INLINE_KEY + "\n",
+                     "PrivateKey = " + INLINE_KEY + "\n"):
+            with self.subTest(text=text):
+                self.assertIsNone(wgkeys.inline_key(text))
+
+    def test_the_key_is_moved_into_a_private_file(self):
+        with mock.patch.object(wgkeys.subprocess, "run") as run:
+            self.assertIsNone(wgkeys.adopt(self.conf, self.key))
+        run.assert_not_called()
+        self.assertEqual(self.read_key(), INLINE_KEY + "\n")
+        self.assertEqual(stat.S_IMODE(os.stat(self.key).st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(
+            os.stat(os.path.dirname(self.key)).st_mode) & 0o077, 0)
+
+    def test_the_same_key_already_in_the_file_is_kept(self):
+        self.assertIsNone(wgkeys.adopt(self.conf, self.key))
+        self.assertIsNone(wgkeys.adopt(self.conf, self.key))
+        self.assertEqual(self.read_key(), INLINE_KEY + "\n")
+
+    def test_a_different_key_in_the_file_is_refused_and_kept(self):
+        os.makedirs(os.path.dirname(self.key))
+        fd = os.open(self.key, os.O_WRONLY | os.O_CREAT, 0o600)
+        with os.fdopen(fd, "w") as fob:
+            fob.write(PEER_KEY + "\n")
+        problem = wgkeys.adopt(self.conf, self.key)
+        self.assertIn("holds another key", problem)
+        self.assertIn(self.conf, problem)
+        self.assertIn(self.key, problem)
+        self.assertNotIn(INLINE_KEY, problem)
+        self.assertNotIn(PEER_KEY, problem)
+        self.assertEqual(self.read_key(), PEER_KEY + "\n")
+
+    def test_what_cannot_be_moved_is_said_without_the_key(self):
+        self.write_conf("[Interface]\nPrivateKey = not a key\n")
+        problem = wgkeys.adopt(self.conf, self.key)
+        self.assertIn("no PrivateKey line", problem)
+        self.assertNotIn("not a key", problem)
+        self.assertFalse(os.path.exists(self.key))
+        self.assertIn("cannot read", wgkeys.adopt(
+            join(self.tmp, "missing.conf"), self.key))
+        self.write_conf(INLINE_CONF)
+        os.makedirs(os.path.dirname(self.key))
+        with mock.patch.object(wgkeys.os, "open",
+                               side_effect=PermissionError(13, "denied")):
+            self.assertIn("cannot create", wgkeys.adopt(self.conf, self.key))
+        os.mkdir(self.key)
+        self.assertIn("cannot read", wgkeys.adopt(self.conf, self.key))
+
+
 class TestRealKeys(KeyCase):
     """wg genkey and wg pubkey themselves"""
 
@@ -271,6 +353,16 @@ class TestRealKeys(KeyCase):
         first = wgkeys.public(self.key)
         wgkeys.generate(self.key)
         self.assertEqual(wgkeys.public(self.key), first)
+
+    def test_an_adopted_key_keeps_the_public_key(self):
+        conf = join(self.tmp, "wg0.conf")
+        with open(conf, "w") as fob:
+            fob.write(INLINE_CONF)
+        before = subprocess.run(["wg", "pubkey"], input=INLINE_KEY + "\n",
+                                capture_output=True, text=True, check=True)
+        self.assertIsNone(wgkeys.adopt(conf, self.key))
+        self.assertEqual(wgkeys.public(self.key),
+                         (before.stdout.strip(), None))
 
     def test_pubkey_refuses_what_is_not_a_key(self):
         os.makedirs(os.path.dirname(self.key))

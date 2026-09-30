@@ -107,7 +107,10 @@ class SwitchNetwork:
     addresses the new file declares, `gateways` its gateways and
     `old_gateways` those it replaces, which confirm checks against.
     `kind` is keel.network.marker.UPLINK or OVERLAY, the WireGuard
-    interface, which wg-quick moves instead of ifupdown.
+    interface, which wg-quick moves instead of ifupdown. For an overlay,
+    `down_before` says it is down now, so its revert leaves it down, and
+    `uplink_gateways` are the gateways network.interfaces declares, which
+    confirm checks are not routed into the overlay.
     """
 
     iface: str
@@ -118,6 +121,8 @@ class SwitchNetwork:
     gateways: tuple[str, ...]
     old_gateways: tuple[str, ...]
     kind: str = "uplink"
+    down_before: bool = False
+    uplink_gateways: tuple[str, ...] = ()
 
     def describe(self) -> str:
         if self.kind == "overlay":
@@ -126,6 +131,8 @@ class SwitchNetwork:
                 f" (wg-quick down, then up); it reverts in {self.window} s"
                 " unless `keel network confirm` is run from a new session,"
                 " over the overlay or the uplink"
+                + ("; it is down now, and a revert leaves it down"
+                   if self.down_before else "")
             )
         return (
             f"bring {self.iface} up on a new /{self.path}; it reverts in"
@@ -148,6 +155,27 @@ class GenerateKey:
     def describe(self) -> str:
         return (f"generate this node's WireGuard private key {self.path}"
                 " (wg genkey, mode 0600; never printed)")
+
+
+@dataclass(frozen=True)
+class AdoptKey:
+    """Move the PrivateKey line of the overlay's file into the key file
+
+    A file wg-quick was given by hand may hold its key inline. keel
+    rewrites the file without it, so the key is first written to `path`
+    (0600, created exclusively) by keel.network.wgkeys, which reads it
+    from `conf` when it runs: the key is never in the plan, an argument
+    vector or the output, and the node keeps its public key, which its
+    peers know it by. A key file that already holds another key is
+    refused, never overwritten.
+    """
+
+    conf: str
+    path: str
+
+    def describe(self) -> str:
+        return (f"move the PrivateKey of /{self.conf} into {self.path} (mode"
+                " 0600; never printed), so this node keeps its public key")
 
 
 @dataclass(frozen=True)
@@ -178,7 +206,7 @@ class Refuse:
 
 
 Change = (Run | RunSql | WriteFile | RemoveFile | MakeDir | Symlink
-          | SwitchNetwork | GenerateKey)
+          | SwitchNetwork | GenerateKey | AdoptKey)
 Action = Change | Note | Refuse
 
 
