@@ -156,7 +156,8 @@ def build_parser() -> argparse.ArgumentParser:
     promote_parser.set_defaults(handler=commands.database_promote)
 
     network_parser = subparsers.add_parser(
-        "network", help="a network change apply made, waiting to be kept"
+        "network", help="a network change apply made, waiting to be kept;"
+        " this node's WireGuard key"
     )
     network_actions = network_parser.add_subparsers(
         dest="action", metavar="ACTION"
@@ -182,6 +183,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_root_option(revert_parser, "revert the change of")
     revert_parser.set_defaults(handler=commands.network_revert)
+    add_wireguard_parser(network_actions)
 
     # no --spec: notify reads the settings apply wrote, never the spec
     notify_parser = subparsers.add_parser(
@@ -229,6 +231,39 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_assemble_options(assemble_parser)
     return parser
+
+
+def add_wireguard_parser(network_actions) -> None:
+    """keel network wireguard: this node's side of the overlay (0020)"""
+    wireguard_parser = network_actions.add_parser(
+        "wireguard",
+        help="this node's WireGuard key and a first overlay address; the"
+        " overlay itself is network.overlay.wireguard, converged by apply",
+    )
+    wireguard_actions = wireguard_parser.add_subparsers(
+        dest="wireguard_action", metavar="ACTION"
+    )
+    key_parser = wireguard_actions.add_parser(
+        "key",
+        help="print this node's public key, making the key pair first when"
+        " there is none (root, live system only); the private key is never"
+        " printed",
+    )
+    key_parser.add_argument(
+        "--spec",
+        default=spec_default(),
+        metavar="FILE",
+        help="where the overlay's key file is declared (default:"
+        f" ${SPEC_ENV} or {SPEC_DEFAULT}; without it, wg0's default)",
+    )
+    add_root_option(key_parser, "read the key of")
+    key_parser.set_defaults(handler=commands.network_wireguard_key)
+    suggest_parser = wireguard_actions.add_parser(
+        "suggest-address",
+        help="print a fresh unique local IPv6 address (RFC 4193) with its"
+        " /64, for the first node of a set; the others take ::2, ::3",
+    )
+    suggest_parser.set_defaults(handler=commands.network_wireguard_suggest)
 
 
 def add_layer_options(parser: argparse.ArgumentParser) -> None:

@@ -89,6 +89,7 @@ network:
 | `network.interfaces.<name>.ipv4.address` | read | Required when the method is `static`. Must carry a prefix length |
 | `network.interfaces.<name>.ipv4.gateway` | read | An IPv4 address |
 | `network.nameservers` | read | A list of addresses of either family |
+| `network.overlay.wireguard` | system | The WireGuard overlay of a replicated appliance; see "overlay" below |
 
 What "read" means per case:
 
@@ -261,6 +262,77 @@ the first, before it touches the file, so the image's file stays and the
 declared address is not applied, and it ignores the second. The keel
 package therefore declares `Breaks: inithooks (<< 2.3.6+keel9~)`: it does
 not depend on inithooks, but it cannot be installed beside an older one.
+
+### overlay: the WireGuard interface
+
+The private network the nodes of a replicated appliance share (handbook
+decision 0020): this node's side of it, its address, its port, where its
+private key is, and the peers it accepts. Each node declares its own; no
+node lists the others' configuration, only their public keys.
+
+```yaml
+network:
+  managed_by: host
+  overlay:
+    wireguard:
+      interface: wg0
+      address: fd00:6b65:1::1/64
+      listen_port: 51820
+      private_key:
+        file: /etc/wireguard/wg0.key
+      peers:
+        - public_key: 0niNkgzhpbKmTSrWCzukb6jaYogKZkGhW+xWlh52Mh8=
+          endpoint: "[2001:db8:2::20]:51820"
+          allowed_ips: [fd00:6b65:1::2/128]
+          persistent_keepalive: 25
+```
+
+| Field | State | Notes |
+| --- | --- | --- |
+| `network.overlay.wireguard.interface` | system | The interface name, as wg-quick accepts it (at most 15 of `A-Z a-z 0-9 _ = + . -`). Default `wg0`. Not a name `network.interfaces` declares |
+| `network.overlay.wireguard.address` | system | Required. This node's IPv6 address on the overlay, with its prefix length; unicast. A unique local address (`fd00::/8`, RFC 4193) is the usual choice: `keel network wireguard suggest-address` prints a random one for the first node, `::1` on its /64, and the others take `::2`, `::3` on the same /64 |
+| `network.overlay.wireguard.ipv4_address` | system | Optional, an IPv4 address with its prefix length beside the IPv6 one |
+| `network.overlay.wireguard.listen_port` | system | The UDP port. Default 51820, written out so peers can name it in their endpoint |
+| `network.overlay.wireguard.private_key.file` | system | Where the private key is. Default `/etc/wireguard/<interface>.key`. Only a file: no other backend, and never a value. An absolute path of letters, digits and `. _ - /`, because wg-quick hands it to a shell. Absent, the key is **made** by `apply --system` on the machine itself, `wg genkey` into the file, mode 0600, the first time the overlay is converged (or by `keel network wireguard key`); never under `--root`, where it would end up in an image every appliance built from it would share (keel-core#8). Present, it must be root's and 0600, as every secret file |
+| `network.overlay.wireguard.peers` | system | A list; may be empty. Each peer is known by its public key |
+| `...peers[].public_key` | system | Required. The peer's key as `wg pubkey` prints it (44 characters of base64). Each key once |
+| `...peers[].endpoint` | system | Optional: where to reach the peer, `host:port`. An IPv6 literal goes in brackets, `[2001:db8:2::20]:51820`, as wg writes it; a name or an IPv4 address without. Without it this node waits for the peer to reach it |
+| `...peers[].allowed_ips` | system | Required, at least one prefix: what is routed to this peer and accepted from it. For a node, its overlay address as a `/128` (and `/32`). A prefix with host bits set is an error, and so is a prefix given to two peers, since wg would silently keep it for the last one only |
+| `...peers[].persistent_keepalive` | system | Optional, seconds between 1 and 65535: keeps a path through a NAT or a stateful firewall open. Leave it out for none |
+
+The overlay belongs to the appliance on either kind of machine (decision
+0018): its file is `/etc/wireguard/<interface>.conf`, which the host of a
+container does not write, so it is converged from inside even with
+`managed_by: host`. `apply --system` renders it, brings it up under the
+same confirmation window as the uplink and enables `wg-quick@<interface>`
+once the change is confirmed ([docs/apply.md](apply.md)); `keel inspect`
+reads it back, with the public key the key file gives, and `keel diff`
+compares each peer with the peer of the same key. The file holds no
+private key: a `PostUp` line gives the key file to `wg set`, so the key
+is read by `wg` alone:
+
+```
+[Interface]
+Address = fd00:6b65:1::1/64
+ListenPort = 51820
+PostUp = wg set %i private-key /etc/wireguard/wg0.key
+
+[Peer]
+PublicKey = 0niNkgzhpbKmTSrWCzukb6jaYogKZkGhW+xWlh52Mh8=
+Endpoint = [2001:db8:2::20]:51820
+AllowedIPs = fd00:6b65:1::2/128
+PersistentKeepalive = 25
+```
+
+What it needs from the machine: the `wireguard-tools` package (`wg`,
+`wg-quick`), and the `wireguard` kernel module. A VM loads the module
+itself when the interface comes up. An unprivileged container cannot: the
+host must have it loaded (`modprobe wireguard` on the host, and
+`wireguard` in its `/etc/modules-load.d/`), and without it `apply`
+refuses and says so, and `keel inspect` reports it.
+
+The overlay is not removed when the section is: a spec without it leaves
+the interface as it is.
 
 ## tls
 

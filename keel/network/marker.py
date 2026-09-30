@@ -16,6 +16,7 @@ with that, a clock that does not jump when the wall clock is set.
 import fcntl
 import json
 import os
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
@@ -29,6 +30,12 @@ FILE_MODE = 0o600
 BOOT_ID = "proc/sys/kernel/random/boot_id"
 UPTIME = "proc/uptime"
 AUTOCONF = "proc/sys/net/ipv6/conf/{iface}/autoconf"
+UPLINK = "uplink"
+OVERLAY = "overlay"
+KINDS = (UPLINK, OVERLAY)
+# /proc/PID/stat after the command name: the start time is index 19, as
+# keel.network.session reads a session's
+STARTTIME_INDEX = 19
 
 
 @dataclass(frozen=True)
@@ -43,6 +50,11 @@ class Pending:
     `autoconf` is the interface's IPv6 autoconf setting when no file of
     keel turns SLAAC off, read before the change (keel.network.switch
     writes it back), or None when the interface has no IPv6 settings.
+
+    `kind` says which sequence moves the interface: UPLINK, ifupdown on
+    /etc/network/interfaces, or OVERLAY, wg-quick on a file under
+    /etc/wireguard (decision 0020). `absent` is a change that created its
+    file: its revert removes the file instead of restoring an empty one.
     """
 
     iface: str
@@ -54,6 +66,8 @@ class Pending:
     boot_id: str | None = None
     changed_at: float | None = None
     autoconf: str | None = None
+    kind: str = UPLINK
+    absent: bool = False
 
     def up(self, boot_id: str, uptime: float) -> "Pending":
         return replace(self, boot_id=boot_id, changed_at=uptime)
@@ -97,9 +111,20 @@ def read(root: str) -> Pending | None:
             boot_id=data.get("boot_id"),
             changed_at=data.get("changed_at"),
             autoconf=data.get("autoconf"),
+            kind=kind(data.get("kind")),
+            absent=bool(data.get("absent")),
         )
     except (KeyError, TypeError, ValueError):
         return None
+
+
+def kind(value: object) -> str:
+    """A marker written before there was an overlay is an uplink change"""
+    if value is None:
+        return UPLINK
+    if value not in KINDS:
+        raise ValueError(f"unknown kind {value!r}")
+    return str(value)
 
 
 def exists(root: str) -> bool:
@@ -170,3 +195,37 @@ def uptime(proc_root: str = "/") -> float | None:
             return float(fob.read().split()[0])
     except (OSError, ValueError, IndexError):
         return None
+
+
+def process_clock(proc_root: str = "/") -> float | None:
+    """Now, on the clock a session's start time is read on
+
+    The start time of a thread started for the purpose, in seconds since
+    boot, which is exactly what keel.network.session reads off an
+    `sshd-session`. /proc/uptime is not that clock in a container: lxcfs
+    counts it from the container's start while process start times count
+    from the host's boot, so a change dated by it could not be told from
+    a session opened before it. The overlay is converged in containers
+    (decision 0018), so its changes are dated here.
+    """
+    found: list[float | None] = []
+    worker = threading.Thread(target=lambda: found.append(
+        thread_started(proc_root, threading.get_native_id())))
+    worker.start()
+    worker.join()
+    return found[0] if found else None
+
+
+def thread_started(proc_root: str, tid: int) -> float | None:
+    try:
+        with open(path(proc_root, f"proc/self/task/{tid}/stat")) as fob:
+            stat = fob.read()
+        rest = stat[stat.rindex(")") + 2:].split()
+        return int(rest[STARTTIME_INDEX]) / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def clock(kind_of: str) -> float | None:
+    """The time a change of this kind is dated with"""
+    return process_clock() if kind_of == OVERLAY else uptime()

@@ -106,6 +106,8 @@ class SwitchNetwork:
     configuration within `window` seconds. `addresses` are the static
     addresses the new file declares, `gateways` its gateways and
     `old_gateways` those it replaces, which confirm checks against.
+    `kind` is keel.network.marker.UPLINK or OVERLAY, the WireGuard
+    interface, which wg-quick moves instead of ifupdown.
     """
 
     iface: str
@@ -115,13 +117,37 @@ class SwitchNetwork:
     addresses: tuple[str, ...]
     gateways: tuple[str, ...]
     old_gateways: tuple[str, ...]
+    kind: str = "uplink"
 
     def describe(self) -> str:
+        if self.kind == "overlay":
+            return (
+                f"bring the overlay {self.iface} up on a new /{self.path}"
+                f" (wg-quick down, then up); it reverts in {self.window} s"
+                " unless `keel network confirm` is run from a new session,"
+                " over the overlay or the uplink"
+            )
         return (
             f"bring {self.iface} up on a new /{self.path}; it reverts in"
             f" {self.window} s unless `keel network confirm` is run from a"
             " new session over the new configuration"
         )
+
+
+@dataclass(frozen=True)
+class GenerateKey:
+    """Make a WireGuard private key at `path`, 0600, never printed
+
+    Carried out by keel.network.wgkeys on the machine that will use it,
+    never under --root: a key made into an image would be shared by every
+    appliance built from it (keel-core#8).
+    """
+
+    path: str
+
+    def describe(self) -> str:
+        return (f"generate this node's WireGuard private key {self.path}"
+                " (wg genkey, mode 0600; never printed)")
 
 
 @dataclass(frozen=True)
@@ -152,7 +178,7 @@ class Refuse:
 
 
 Change = (Run | RunSql | WriteFile | RemoveFile | MakeDir | Symlink
-          | SwitchNetwork)
+          | SwitchNetwork | GenerateKey)
 Action = Change | Note | Refuse
 
 

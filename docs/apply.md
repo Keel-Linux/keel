@@ -32,7 +32,8 @@ keel spec apply --system --root /mnt/rootfs
 With `--system`, after the conf, `apply` converges the parts of the spec
 that describe system state rather than hook input: `instance.hostname`,
 `instance.fqdn`, `users`, `locale`, `security.alerts`, `tls.acme`,
-`database.server`, `monitor` and, last, `network`. With `--system-only` it converges them and does nothing
+`database.server`, `monitor` and, last, `network` and its WireGuard
+`overlay`. With `--system-only` it converges them and does nothing
 else, for a machine whose conf phase has already run. Neither flag is on
 by default.
 
@@ -62,7 +63,7 @@ exactly as `inspect` is.
 | `--defer-certificate` | With either flag: write `tls.acme` but ask no certificate authority for a certificate in this run. The first boot hook passes it. See "tls.acme" below |
 | `--destroy-local-database` | Confirm, for this run only, that making this node a replica may drop the databases this server holds. Without it apply refuses and changes nothing. See "database.server" below |
 | `--network-window SECONDS` | With either flag: how long a network change waits for `keel network confirm` before it reverts by itself; 120 by default, at least 30. See "network" below |
-| `--skip-network` | With either flag: leave the network alone in this run. The first boot hook passes it |
+| `--skip-network` | With either flag: leave the network alone in this run, the overlay included, except that a missing overlay key is still made. The first boot hook passes it |
 
 `--destroy-local-database` with neither flag is a usage error as well:
 it confirms one decision of phase 2, so asking for it without phase 2 is
@@ -678,6 +679,81 @@ running.
 `--boot` restores the file without touching the interface, for the boot
 unit. Both need root on the live system.
 
+**network.overlay** (`/etc/wireguard/<interface>.conf`; handbook decisions
+0018 and 0020)
+
+The WireGuard interface the nodes of a replicated appliance share
+(docs/spec.md, "overlay"). It is the appliance's own interface on either
+kind of machine, so it is converged from inside a container too, where
+the uplink is the host's. It is the last step, after the uplink, and it
+goes through the same window, marker, lock, timers and boot unit, with
+`wg-quick` in place of ifupdown:
+
+- **The key first.** A missing private key is made with `wg genkey` into
+  its file, mode 0600, on the live system only; under `--root` the step
+  says it is made on the machine itself, never in an image (keel-core#8).
+  `--skip-network`, which the first boot passes, still makes the key, so
+  the pair exists from the first boot and the public key can be handed
+  out before the overlay is brought up. An existing key file that is not
+  root's and 0600 is refused.
+- **keel owns the file.** It is rewritten whenever it is not exactly what
+  the spec renders, and left alone when it is. It holds no private key: a
+  `PostUp` line gives the key file to `wg set`.
+- **Refused, with the reason:** without `wg`, `wg-quick`, `ip`,
+  `systemd-run` or `systemctl` (install `wireguard-tools`); in a container
+  whose host has not loaded the `wireguard` module (the message names
+  `modprobe wireguard` on the host; a VM loads it itself); while another
+  change waits for its confirmation; and in a run whose uplink changes,
+  since one change waits in the window at a time: confirm the uplink,
+  then apply again.
+- **The sequence**, both directions alike: `wg-quick down` on the
+  outgoing file (a failure is not fatal: an interface that is not up has
+  nothing to take down), the new file put in place, `wg-quick up` on it. A
+  change that created the file reverts by removing it, which leaves the
+  interface down, as it was. A change is dated on the clock a session's
+  start time is read on (the start of a thread, in seconds since the
+  host's boot), not `/proc/uptime`, which lxcfs counts from a container's
+  start.
+- **Enabled once confirmed.** `keel network confirm` enables
+  `wg-quick@<interface>` after it cancels the revert, so a reboot inside
+  the window of a first overlay leaves no interface behind, and a later
+  run enables it if that failed. At boot the revert unit runs before
+  `network-pre.target`, which every `wg-quick@` instance follows, so an
+  unconfirmed change is undone before the overlay comes up.
+
+Which sessions confirm an overlay change is the one rule that differs
+from the uplink's. What such a change can break is two paths: the
+overlay itself, and the uplink, whose replies the routes `wg-quick` adds
+for a peer's `allowed_ips` can capture (a peer given `::/0`, or the
+operator's own prefix). A new session over either proves that the path it
+used survived, so:
+
+| Run from | Accepted when |
+| --- | --- |
+| SSH, over the overlay | the session started after the change, came from another machine, and arrived at an address the overlay declares (`address`, `ipv4_address`). confirm says the overlay was tested |
+| SSH, over the uplink | the session started after the change, came from another machine, and arrived at an address another interface of this machine holds now. confirm says the overlay itself was not tested, and at which address a peer would test it |
+| A console, a process attached from a container's host | always, as for the uplink |
+| Anything else, a session older than the change, a session from this machine to itself, or one arriving at an address the overlay does not declare | refused (exit 21) |
+
+Requiring the overlay alone would make pairing impossible: the first
+node's overlay carries nothing until the second node declares it too,
+and the first change would always revert. An agent of Keel Cloud that
+reaches the node again over the overlay confirms the same way.
+
+```
+$ ssh root@fd00:6b65:1::1        # from the other node, over the overlay
+# keel network confirm
+confirmed from an SSH session
+the overlay was tested: this session arrived at fd00:6b65:1::1 on wg0, from fd00:6b65:1::2
+wg-quick@wg0 enabled: the overlay comes back up at boot
+the network change stays; the revert is cancelled
+```
+
+`keel network wireguard key` prints this node's public key, and makes the
+pair first when there is none (root, live system only); only the public
+key is printed. `keel network wireguard suggest-address` prints a fresh
+unique local address for the first node of a set.
+
 ### Failures and exit codes
 
 A failed action, and a refusal, fail their field: the actions after it in
@@ -761,6 +837,9 @@ blog.yaml --root /tmp/scratch` then reports `instance.fqdn` and every
 - Converging a container's network from inside, more than one
   interface, bridges, VLANs or interface names; or changing the network
   on the live system without the revert armed first.
+- Making a WireGuard private key anywhere but on the machine that uses
+  it, printing one, or writing one into a file keel renders; removing an
+  overlay the spec no longer declares; loading a kernel module.
 - Touching the conf when a populated one exists, or anything at all with
   `--dry-run`.
 
@@ -870,3 +949,18 @@ covers the planner, `tests/test_apply_monitor_cli.py` the round trip
 through `keel diff`, and `tests/test_monitor_notify.py` sends every channel
 to an HTTPS server on `[::1]` with a certificate made for the run, and
 checks that no token reaches what `keel notify` prints.
+
+The overlay has its own files too. `tests/test_spec_overlay.py` covers
+the fields, `tests/test_system_overlay.py` the planner and its state,
+`tests/test_network_overlay_window.py` the wg-quick sequence, its revert
+(a first overlay removed, a changed one restored, the boot revert) and
+which sessions confirm, and `tests/test_inspect_overlay.py` the file read
+back and compared by `keel diff`. The mocked command boundary once hid
+real defects, so `tests/test_network_wireguard.py` hands keel's output to
+the real tools when they are at hand (`wireguard-tools` on `PATH`, or
+its directory in `KEEL_WG_DIR`; CI installs it, and fails rather than
+skips without it): the key pair is made and read by `wg genkey` and `wg
+pubkey`, the rendered file is parsed by `wg-quick strip` and brought up
+by `wg-quick up` in a network namespace of its own (`unshare -n` as root,
+`unshare -rn`, or `sudo -n`), where `wg show` must report the declared
+key, port, peers, endpoints, allowed IPs and keepalive.

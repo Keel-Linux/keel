@@ -51,9 +51,12 @@ def plan_network(network: dict, state: NetworkState | None, live: bool,
         return [Step(FIELD, (Note(
             "the host owns this container's interfaces: compared by keel"
             " diff, not converged from inside (decision 0018)"),))]
+    # the overlay is its own interface and its own step (keel.system.overlay)
+    uplink = {key: value for key, value in network.items()
+              if key != "overlay"}
     drift = [
         found.field for found in compare_section(
-            FIELD, network, state.observed, state.unknowns)
+            FIELD, uplink, state.observed, state.unknowns)
         if found.status == DRIFT
     ]
     if not drift:

@@ -1,13 +1,14 @@
 # Copyright (c) 2026 KeelLinux maintainers
 """Build the plan for a spec from the observed state; pure"""
 
-from keel.system.actions import Plan
+from keel.system.actions import Plan, Step, SwitchNetwork
 from keel.system.database import plan_database
 from keel.system.hostname import plan_hostname
 from keel.system.hosts import plan_hosts
 from keel.system.locale import plan_locale
 from keel.system.monitor import plan_monitor
 from keel.system.network import DEFAULT_WINDOW, plan_network
+from keel.system.overlay import plan_overlay
 from keel.system.security import plan_security
 from keel.system.state import SystemState
 from keel.system.tls import plan_tls
@@ -31,7 +32,9 @@ def plan(
 
     The network after everything, because it is the one step that can
     cut off the session running apply (decision 0018): whatever else the
-    run had to do is done before the interface moves.
+    run had to do is done before the interface moves. The overlay last
+    (decision 0020): one change waits in the window at a time, so an
+    overlay change is refused in a run whose uplink moves.
     """
     instance = doc.get("instance") or {}
     # the rename first, and the fqdn step on the /etc/hosts it produces
@@ -44,7 +47,16 @@ def plan(
     steps += plan_database(doc, state.database, confirmed)
     steps += plan_monitor(doc.get("monitor"), doc, state.monitor,
                           state.live, state.available)
-    steps += plan_network(doc.get("network") or {}, state.network,
+    uplink = plan_network(doc.get("network") or {}, state.network,
                           state.live, state.available, network_window,
                           skip_network)
+    steps += uplink
+    steps += plan_overlay(state.overlay, state.live, state.available,
+                          network_window, skip_network, moves(uplink))
     return Plan(tuple(steps))
+
+
+def moves(steps: list[Step]) -> bool:
+    """Whether a step of these changes an interface under the window"""
+    return any(isinstance(action, SwitchNetwork)
+               for step in steps for action in step.actions)

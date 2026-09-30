@@ -20,6 +20,7 @@ from keel.inspect.tree import File, Tree
 from keel.system.dbstate import DatabaseState, observe_database
 from keel.system.monstate import MonitorState, observe_monitor
 from keel.system.netstate import NetworkState, observe_network
+from keel.system.ovstate import OverlayState, observe_overlay
 
 LOCALE_GEN = "etc/locale.gen"
 MAILNAME = "etc/mailname"
@@ -52,7 +53,7 @@ LOCALE_LIST = ("locale", "-a")
 COMMANDS = (
     "useradd", "usermod", "timedatectl", "locale-gen", "localedef", "newaliases",
     "hostnamectl", "hostname", "systemctl", "ifup", "ifdown", "ip",
-    "systemd-run", "monit",
+    "systemd-run", "monit", "wg", "wg-quick",
 )
 
 
@@ -85,6 +86,7 @@ class SystemState:
     service_units: frozenset[str] = frozenset()
     network: NetworkState | None = None
     monitor: MonitorState | None = None
+    overlay: OverlayState | None = None
 
 
 def observe(root: str, doc: dict) -> SystemState:
@@ -130,6 +132,7 @@ def observe(root: str, doc: dict) -> SystemState:
         ),
         network=observe_network(root, doc),
         monitor=observe_monitor(root, doc),
+        overlay=observe_overlay(root, doc),
     )
 
 

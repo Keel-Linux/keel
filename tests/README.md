@@ -45,6 +45,16 @@ leaves the machine. When a monit binary is on `PATH`, or named by
 installing it), `tests/test_monitor_render.py` also hands the rendered
 file to `monit -t`; without one those two tests skip.
 
+The WireGuard overlay tests hand the rendered file and the key pair to
+the real `wg` and `wg-quick` when they are at hand: on `PATH`, or in the
+directory `KEEL_WG_DIR` names (`apt-get download wireguard-tools` and
+`dpkg-deb -x` give them without installing anything). `wg-quick` wants
+root, so it runs in a network namespace of its own (`unshare -n` as root,
+`unshare -rn`, or `sudo -n unshare -n`), and `wg-quick up` there also
+needs the `wireguard` kernel module. Without the tools those tests skip,
+except in CI, where the workflow installs `wireguard-tools`
+(tests/wgtools.py).
+
 The one shell file the package ships, the firstboot hook
 `firstboot.d/10keel-system`, is tested with bats in `tests/hook.bats`, with
 `keel` replaced by a script on `PATH` that records its arguments and

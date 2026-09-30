@@ -28,9 +28,13 @@ from keel.inspect.security import probe_security
 from keel.inspect.tls import probe_tls
 from keel.inspect.tree import File, Tree
 from keel.inspect.users import probe_users
+from keel.inspect.wireguard import Module, probe_overlay
+from keel.network import wgkeys
+from keel.network.wireguard import CONF_DIR, MODULE
 from keel.spec import SCHEMA_VERSION
 
 OFFLINE = "not run: the root is not the live system"
+OVERLAY_FILES = f"{CONF_DIR}/*.conf"
 
 
 def inspect_root(
@@ -58,6 +62,10 @@ def inspect_root(
         Runtime(run_command(tree, paths.IP_ADDR_COMMAND), leases(tree)),
     )
     findings += found
+    overlay, found = overlay_section(tree)
+    findings += found
+    if overlay:
+        network = {**(network or {}), "overlay": overlay}
     _add(spec, "network", network)
 
     tls, found = probe_tls(
@@ -135,6 +143,18 @@ def inspect_root(
 def _add(spec: dict, key: str, section: dict | None) -> None:
     if section is not None:
         spec[key] = section
+
+
+def overlay_section(tree: Tree) -> tuple[dict | None, list[Finding]]:
+    """The WireGuard files, the public key of the key file they name, and
+    on the live system whether the kernel module is loaded"""
+    live = tree.root == paths.ROOT_DEFAULT
+    return probe_overlay(
+        [tree.read(name) for name in tree.glob(OVERLAY_FILES)],
+        lambda key: wgkeys.public(tree.path(key.lstrip("/"))),
+        Module(tree.exists(MODULE) if live else None,
+               tree.exists(paths.LXC_MARKER)),
+    )
 
 
 def run_command(tree: Tree, argv: tuple[str, ...]) -> File:

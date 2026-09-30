@@ -20,8 +20,10 @@ jobs:
       # gnupg and gpgv are what the channel tests sign and verify
       # with. Named rather than assumed: without them those tests
       # skip, and a skipped suite would pass the coverage gate on
-      # code nothing ran.
-      apt-packages: bats shellcheck gnupg gpgv
+      # code nothing ran. wireguard-tools is the real wg and wg-quick
+      # the overlay tests hand keel's key and file to (tests/wgtools.py);
+      # in CI they fail rather than skip without it.
+      apt-packages: bats shellcheck gnupg gpgv wireguard-tools
   # A change that ships must come with a changelog entry, or it cannot be
   # installed and never reaches an appliance. The rule and its tests are
   # bin/require-changelog of the .github repository. The check is

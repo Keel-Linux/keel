@@ -107,6 +107,16 @@ addresses, gateways and nameservers compare in canonical form
 booleans; the thresholds under `monitor.checks` compare as numbers, so
 `2.0` equals `2`. Everything else compares as a stripped string.
 
+The WireGuard overlay (`network.overlay.wireguard`, docs/spec.md) is
+compared peer by peer: each peer is known by its public key, so a line
+is `network.overlay.wireguard.peers.<key>.endpoint`, the order of the
+list means nothing, and a peer on one side only is its own lines rather
+than a shifted list. `allowed_ips` compare as a set of prefixes, an
+endpoint in canonical form (`[2001:DB8:0::20]:51820` equals
+`[2001:db8::20]:51820`), and an undeclared `interface` and `listen_port`
+as the defaults apply renders (`wg0`, 51820). `private_key` is a secret
+reference and is not compared.
+
 Not compared, each with its reason in the output when the spec declares
 it:
 

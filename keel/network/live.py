@@ -6,6 +6,7 @@ are tested against fixture output, and this stays a thin layer of
 subprocess calls.
 """
 
+import ipaddress
 import subprocess
 
 from keel.network import marker
@@ -53,6 +54,26 @@ def addresses(iface: str) -> list[str]:
     return found
 
 
+def holder(address: str) -> str | None:
+    """The interface that holds `address` now, or None"""
+    return holder_in(output(("ip", "-o", "address", "show")) or "", address)
+
+
+def holder_in(text: str, address: str) -> str | None:
+    """`ip -o address show` output: which interface holds `address`"""
+    wanted = ipaddress.ip_address(address)
+    for line in text.splitlines():
+        fields = line.split()
+        if len(fields) > 3 and fields[2] in ("inet", "inet6"):
+            try:
+                found = ipaddress.ip_interface(fields[3]).ip
+            except ValueError:
+                continue
+            if found == wanted:
+                return fields[1].split("@")[0]
+    return None
+
+
 def route_via(peer: str) -> str | None:
     """The gateway the route back to `peer` uses, or None when on link"""
     fields = (output(("ip", "route", "get", peer)) or "").split()
@@ -63,4 +84,4 @@ def route_via(peer: str) -> str | None:
 
 def probes() -> Probes:
     return Probes(boot_id=marker.boot_id, addresses=addresses,
-                  route_via=route_via)
+                  route_via=route_via, holder=holder)
