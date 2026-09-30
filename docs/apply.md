@@ -1539,8 +1539,8 @@ losing exactly CrowdSec's checks, with `systemctl` replaced by a fake that
 makes the links the real one makes under `--root`. The firewall has
 `tests/test_spec_firewall.py` (cloud advanced only),
 `tests/test_manifest_firewall.py` (the ruleset, given to `nft -c` in a
-network namespace of its own, `unshare -rn`, when an nft binary is on
-`PATH` or named by `KEEL_NFT`) and `tests/test_system_firewall.py`, one
+network namespace of its own, made as for the WireGuard tests below,
+when an nft binary is on `PATH` or named by `KEEL_NFT`) and `tests/test_system_firewall.py`, one
 test per guard against a lockout.
 
 The overlay has its own files too. `tests/test_spec_overlay.py` covers

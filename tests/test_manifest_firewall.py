@@ -3,8 +3,8 @@
 
 The renderer is pure. When an nft binary is at hand (on PATH, or named
 by KEEL_NFT) every ruleset rendered here is also checked with `nft -c`
-in a network namespace of its own (`unshare -rn`), which changes no
-rule of the machine running the tests.
+in a network namespace of its own (tests/wgtools.py says how), which
+changes no rule of the machine running the tests.
 """
 
 import os
@@ -14,6 +14,7 @@ import tempfile
 import unittest
 
 from manifest_helpers import ManifestCase
+from wgtools import namespace_prefix
 
 from keel.manifest.catalog import Catalog
 from keel.manifest.constants import APPLIANCE
@@ -31,12 +32,12 @@ def nft_binary() -> str | None:
     return os.environ.get("KEEL_NFT") or shutil.which("nft")
 
 
-def nft_check(text: str) -> subprocess.CompletedProcess:
+def nft_check(prefix: list[str], text: str) -> subprocess.CompletedProcess:
     with tempfile.NamedTemporaryFile("w", suffix=".nft") as fob:
         fob.write(text)
         fob.flush()
-        return subprocess.run(["unshare", "-rn", nft_binary(), "-c", "-f",
-                               fob.name], capture_output=True, text=True)
+        return subprocess.run([*prefix, nft_binary(), "-c", "-f", fob.name],
+                              capture_output=True, text=True)
 
 
 class FirewallCase(ManifestCase):
@@ -48,9 +49,13 @@ class FirewallCase(ManifestCase):
         return render(resolved, states, wireguard)
 
     def assertNftAccepts(self, text: str) -> None:
-        if not nft_binary() or not shutil.which("unshare"):
+        """nft -c as root in a network namespace of its own: `unshare
+        -n` as root, `unshare -rn`, or `sudo -n unshare -n` where user
+        namespaces are not allowed (Ubuntu's CI runners)"""
+        prefix = namespace_prefix() if nft_binary() else None
+        if prefix is None:
             return
-        out = nft_check(text)
+        out = nft_check(prefix, text)
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
 
