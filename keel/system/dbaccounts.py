@@ -158,25 +158,30 @@ def alignment(
 ) -> str:
     """The statements that make this server's accounts the primary's
 
-    An account it lacks is created. One it holds with the same grants is
-    left alone, with its own password, which the primary's next ALTER
-    USER replaces like any other change. One it holds with other grants
-    is dropped and created as the primary has it, password included: a
-    REVOKE of a grant it lacks, or of one it has in another form, stops
-    the replica ("There is no such grant"). All of it with sql_log_bin
-    off, so none of it enters a binary log or the GTID history of this
-    server. Empty when there is nothing to do.
+    An account it lacks is created as the primary has it. One it holds
+    keeps its own authentication, always: every node makes its own
+    application password at first boot, and the primary's would lock the
+    replica's application out (1045). Only its grants are aligned, when
+    they differ: all of them revoked, then the primary's granted without
+    the credential the first one carries, since a REVOKE on the primary
+    of a grant the replica lacks stops the replica ("There is no such
+    grant"). The primary's next ALTER USER of such an account still
+    replaces the replica's password; keel.system.database says so. All
+    of it with sql_log_bin off, so none of it enters a binary log or the
+    GTID history of this server. Empty when there is nothing to do.
     """
     theirs = {account.key(): grants for account, grants in local.items()}
     text = ""
     for account, definition in primary.items():
-        if account.key() in held:
-            mine = theirs.get(account.key(), ())
-            if _same(definition.grants, mine):
-                continue
-            text += f"DROP USER {account.sql()};\n"
+        if account.key() not in held:
+            text += "".join(line + ";\n" for line in
+                            (definition.create,) + definition.grants)
+            continue
+        if _same(definition.grants, theirs.get(account.key(), ())):
+            continue
+        text += f"REVOKE ALL PRIVILEGES, GRANT OPTION FROM {account.sql()};\n"
         text += "".join(
-            line + ";\n" for line in (definition.create,) + definition.grants
+            normalized(line) + ";\n" for line in definition.grants
         )
     return NO_LOG + text if text else ""
 

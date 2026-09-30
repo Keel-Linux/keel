@@ -131,6 +131,13 @@ STOPPED = (
     " diverged from its primary, and rebuilding it replaces the local"
     " data with a fresh copy of the primary"
 )
+SHARED = (
+    "{accounts} exist on both nodes and keep this node's own password;"
+    " only their grants are made the primary's. An ALTER USER of them on"
+    " the primary will replicate and replace this node's password, and"
+    " the application on this node (wp-config.php and its DB_PASS for"
+    " WordPress) must then be given the new one"
+)
 UNREACHABLE = (
     "{problem}. The replica cannot be seeded, so nothing was dropped, its"
     " configuration was not rewritten and the server was not restarted"
@@ -401,6 +408,8 @@ def _become_replica(
         if not confirmed:
             return Step(REPLICATION, (Refuse(reason + REMEDY),))
         actions.append(Note(CONFIRMED.format(reason=reason)))
+    if state.shared:
+        actions.append(Note(SHARED.format(accounts=", ".join(state.shared))))
     actions.append(
         SeedReplica(host, port, state.credential.value, tuple(held))
     )

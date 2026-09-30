@@ -446,14 +446,25 @@ a binary log of the replica's or its GTID history (a keel replica has no
 binary log; the setting keeps it so on one given one by hand):
 
 - an account the replica lacks is created as the primary has it;
-- an account it holds with the same grants, such as the application
-  user its own first boot created, keeps the replica's password until
-  the primary changes it, which then replicates like any other change;
-- an account it holds with **other grants** is dropped and created as
-  the primary has it, password included: otherwise the primary's next
+- an account it holds already, such as the application user its own
+  first boot created, **keeps the replica's own authentication**: every
+  node makes its own application password at first boot, and taking
+  the primary's would lock the replica's application out (error 1045).
+  Only its grants are aligned, and only when they differ: `REVOKE ALL
+  PRIVILEGES, GRANT OPTION`, then the primary's grants without the
+  credential the first of them carries. Otherwise the primary's next
   `REVOKE` of a grant the replica lacks stops it ("There is no such
-  grant"). An application on the replica that logged in with the old
-  password needs the primary's.
+  grant").
+
+**An account on both nodes keeps two passwords, until the primary
+changes its own.** The plan names these accounts in a line before the
+seed. A later `ALTER USER` of one of them on the primary replicates like
+any other change and replaces the replica's password with the
+primary's, and the replica's application then gets error 1045 until its
+configuration is given the new one (`wp-config.php`, and `DB_PASS` for
+the first boot hooks, on WordPress). Keel does not do that edit. One
+password for the pair, handed from the primary or kept as a shared
+secret, is the lasting fix and is tracked in Keel-Linux/tracker#25.
 
 Left out: the server's accounts and keel's (`root`, `mysql`,
 `mariadb.sys`, `debian-sys-maint` and `repl`, each node's own) and the

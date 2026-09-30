@@ -146,19 +146,40 @@ class TestTheAlignment(unittest.TestCase):
         )
         self.assertEqual(text, "")
 
-    def test_other_grants_are_replaced_by_the_primarys(self):
+    def other_grants(self) -> str:
         # The replica's own first boot gave it the account with other
         # grants, and a REVOKE on the primary stopped the replica.
         local, _ = dbaccounts.local_grants(
             LOCAL + "GRANT SELECT ON `other`.* TO `wordpress`@`localhost`\n",
             [WORDPRESS],
         )
-        text = dbaccounts.alignment(
+        return dbaccounts.alignment(
             {WORDPRESS: definitions()[WORDPRESS]}, {WORDPRESS.key()}, local
         )
-        self.assertIn("DROP USER 'wordpress'@'localhost';\n", text)
-        self.assertLess(text.index("DROP USER"), text.index("CREATE USER"))
-        self.assertIn("GRANT ALL PRIVILEGES ON `wordpress`.*", text)
+
+    def test_other_grants_are_replaced_by_the_primarys(self):
+        text = self.other_grants()
+        self.assertTrue(text.startswith("SET SESSION sql_log_bin = 0;\n"))
+        self.assertIn(
+            "REVOKE ALL PRIVILEGES, GRANT OPTION FROM"
+            " 'wordpress'@'localhost';\n",
+            text,
+        )
+        self.assertLess(text.index("REVOKE"), text.index("GRANT ALL"))
+        self.assertIn(
+            "GRANT ALL PRIVILEGES ON `wordpress`.* TO"
+            " `wordpress`@`localhost`;\n",
+            text,
+        )
+
+    def test_the_replicas_own_authentication_is_kept(self):
+        # Every node makes its own application password at first boot;
+        # the primary's would lock the replica's WordPress out (1045).
+        text = self.other_grants()
+        self.assertNotIn("DROP USER", text)
+        self.assertNotIn("CREATE USER", text)
+        self.assertNotIn("IDENTIFIED", text)
+        self.assertNotIn("'*P'", text)
 
     def test_the_host_of_a_held_account_compares_without_case(self):
         self.assertEqual(Account("wp", "LOCALHOST").key(),

@@ -307,8 +307,8 @@ class TestTheAccounts(SeedTestCase):
         runner = Runner({"accounts": (
             0, (PRIMARY_ACCOUNTS + "editor\t\tY\n").encode(), b"",
         )})
-        problem = dbseed.reach(self.root, HOST, 3306, PASSWORD, runner)
-        self.assertIn("editor", problem)
+        found = dbseed.reach(self.root, HOST, 3306, PASSWORD, runner)
+        self.assertIn("editor", found.problem)
 
     def test_a_held_account_with_other_grants_is_aligned(self):
         runner = Runner({"local-grants": (0, (
@@ -317,8 +317,10 @@ class TestTheAccounts(SeedTestCase):
         ).encode(), b"")})
         self.assertIsNone(self.seed(runner))
         copy = runner.named("copy")[0]["stdin"]
-        self.assertIn("DROP USER 'wordpress'@'localhost';\n", copy)
-        self.assertIn("CREATE USER `wordpress`@`localhost`", copy)
+        self.assertIn("REVOKE ALL PRIVILEGES, GRANT OPTION FROM"
+                      " 'wordpress'@'localhost';\n", copy)
+        self.assertNotIn("CREATE USER `wordpress`", copy)
+        self.assertNotIn("'*P'", copy)
 
     def test_they_are_created_outside_the_binary_log_before_it_starts(self):
         runner = Runner()
@@ -525,27 +527,38 @@ class TestAfterTheDrop(SeedTestCase):
 class TestReach(SeedTestCase):
     def test_a_primary_granting_the_copy_is_reachable(self):
         runner = Runner()
-        self.assertEqual(
-            dbseed.reach(self.root, HOST, 3306, PASSWORD, runner), ""
-        )
+        found = dbseed.reach(self.root, HOST, 3306, PASSWORD, runner)
+        self.assertEqual(found.problem, "")
         self.assertIn("CURRENT_USER()", runner.calls[0]["argv"][-1])
         self.assertEqual(self.leftovers(), [])
 
+    def test_the_accounts_both_hold_are_named(self):
+        # Their authentication stays the replica's, until the primary's
+        # next ALTER USER of them replicates.
+        found = dbseed.reach(self.root, HOST, 3306, PASSWORD, Runner())
+        self.assertEqual(found.shared, ("'wordpress'@'LOCALHOST'",))
+
+    def test_accounts_this_server_cannot_list_are_a_reason(self):
+        runner = Runner({"local-accounts": (1, b"", b"ERROR 1045")})
+        found = dbseed.reach(self.root, HOST, 3306, PASSWORD, runner)
+        self.assertIn("ERROR 1045", found.problem)
+
     def test_an_unreachable_primary_says_why(self):
         runner = Runner({"probe": (1, b"", b"ERROR 2002 (HY000): refused")})
-        problem = dbseed.reach(self.root, HOST, 3306, PASSWORD, runner)
-        self.assertIn("did not answer", problem)
-        self.assertIn("refused", problem)
+        found = dbseed.reach(self.root, HOST, 3306, PASSWORD, runner)
+        self.assertIn("did not answer", found.problem)
+        self.assertIn("refused", found.problem)
+        self.assertEqual(found.shared, ())
 
     def test_a_failure_with_nothing_on_stderr_names_the_code(self):
         runner = Runner({"probe": (1, b"", b"")})
-        problem = dbseed.reach(self.root, HOST, 3306, PASSWORD, runner)
-        self.assertIn("exited 1", problem)
+        found = dbseed.reach(self.root, HOST, 3306, PASSWORD, runner)
+        self.assertIn("exited 1", found.problem)
 
     def test_no_private_directory_is_a_reason_too(self):
         os.rmdir(os.path.join(self.root, "var/tmp"))
-        problem = dbseed.reach(self.root, HOST, 3306, PASSWORD, Runner())
-        self.assertIn("No such file or directory", problem)
+        found = dbseed.reach(self.root, HOST, 3306, PASSWORD, Runner())
+        self.assertIn("No such file or directory", found.problem)
 
 
 class TestPureParts(unittest.TestCase):

@@ -49,6 +49,7 @@ def state(
     binary: str = "/usr/sbin/mariadbd",
     problem: str = "",
     reach: str = "",
+    shared: tuple = (),
 ) -> DatabaseState:
     """One machine's database, as the planner is given it"""
     answered = answered or MARIADB_STANDALONE
@@ -63,6 +64,7 @@ def state(
         credential=credential or Credential(value=PASSWORD),
         status=File("SHOW REPLICA STATUS", answered.get("status", "")),
         reach=reach,
+        shared=shared,
     )
 
 
@@ -536,6 +538,20 @@ class TestBecomingAReplicaDestroysTheLocalDatabase(unittest.TestCase):
             only(plan["database.server.replication.primary"], SeedReplica),
             [],
         )
+
+    def test_the_accounts_both_nodes_hold_are_named_before_the_seed(self):
+        plan = self.replica(shared=("'wordpress'@'localhost'",))
+        actions = plan["database.server.replication.primary"]
+        note = only(actions, Note)[0].summary
+        self.assertIn("'wordpress'@'localhost'", note)
+        self.assertIn("ALTER USER", note)
+        self.assertIn("application", note)
+        self.assertLess(actions.index(only(actions, Note)[0]),
+                        actions.index(seeding(actions)))
+
+    def test_no_shared_account_needs_no_note(self):
+        actions = self.replica()["database.server.replication.primary"]
+        self.assertEqual(only(actions, Note), [])
 
     def test_an_unreachable_primary_is_refused_before_any_change(self):
         for confirmed in (False, True):

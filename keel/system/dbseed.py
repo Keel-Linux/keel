@@ -45,6 +45,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from contextlib import contextmanager
 
 from keel.system import dbaccounts
@@ -145,19 +146,35 @@ def seed(root: str, action, runner=subprocess.run) -> str | None:
 
 def reach(
     root: str, host: str, port: int, password: str, runner=subprocess.run,
-) -> str:
-    """Why the primary cannot be copied from, or an empty string
+) -> "Reach":
+    """Why the primary cannot be copied from, and the accounts both hold
 
     Asked before the plan is made, so a replica that cannot be seeded is
-    refused before its configuration is rewritten or anything dropped.
+    refused before its configuration is rewritten or anything dropped,
+    and the plan can name the accounts that keep this server's password.
     """
     try:
         with spool(root) as directory:
             options = write_options(directory, host, port, password)
-            return (_privileges(options, host, port, runner)
-                    or _primary_accounts(options, runner)[1])
+            problem = _privileges(options, host, port, runner)
+            if problem:
+                return Reach(problem)
+            primary, problem = _primary_accounts(options, runner)
+            if problem:
+                return Reach(problem)
+            held, problem = _held(primary, runner)
+            return Reach(problem, tuple(one.sql() for one in held))
     except OSError as e:
-        return f"cannot ask [{host}]:{port}: {e.strerror or e}"
+        return Reach(f"cannot ask [{host}]:{port}: {e.strerror or e}")
+
+
+@dataclass(frozen=True)
+class Reach:
+    """What the replica learnt from the primary before planning"""
+
+    problem: str = ""
+    # The primary's accounts this server holds too, as it spells them.
+    shared: tuple[str, ...] = ()
 
 
 def _seed(
@@ -277,17 +294,24 @@ def _primary_accounts(options: str, runner) -> tuple[dict, str]:
     return dbaccounts.primary_definitions(answer["stdout"], accounts)
 
 
-def _alignment(primary: dict, runner) -> tuple[str, str]:
-    """The statements that give this server the primary's accounts"""
+def _held(primary: dict, runner) -> tuple[list, str]:
+    """The primary's accounts this server holds too, as it spells them"""
     listed = {}
     problem = _run(runner, REMOTE + READ + ("--execute", dbaccounts.LIST_SQL),
                    output=listed)
     if problem:
-        return "", ACCOUNTS_UNREADABLE.format(where="this server",
+        return [], ACCOUNTS_UNREADABLE.format(where="this server",
                                               detail=problem)
     mine, _ = dbaccounts.listing(listed["stdout"])
     wanted = {account.key() for account in primary}
-    held = [account for account in mine if account.key() in wanted]
+    return [account for account in mine if account.key() in wanted], ""
+
+
+def _alignment(primary: dict, runner) -> tuple[str, str]:
+    """The statements that give this server the primary's accounts"""
+    held, problem = _held(primary, runner)
+    if problem:
+        return "", problem
     local = {}
     if held:
         answer = {}

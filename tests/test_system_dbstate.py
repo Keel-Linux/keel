@@ -227,8 +227,9 @@ class TestThePrimaryIsAskedOnTheLiveSystem(unittest.TestCase):
             return answer("")
         with mock.patch("keel.inspect.constants.ROOT_DEFAULT", root), \
                 mock.patch.object(subprocess, "run", side_effect=ran), \
-                mock.patch.object(dbseed, "reach",
-                                  return_value="refused") as reach:
+                mock.patch.object(dbseed, "reach", return_value=dbseed.Reach(
+                    "refused", ("'wordpress'@'localhost'",),
+                )) as reach:
             found = observe_database(root, {"database": {"server": server}})
         return found, reach, root
 
@@ -238,12 +239,14 @@ class TestThePrimaryIsAskedOnTheLiveSystem(unittest.TestCase):
             os.path.abspath(root), "2001:db8:1::10", 3306, PASSWORD
         )
         self.assertEqual(found.reach, "refused")
+        self.assertEqual(found.shared, ("'wordpress'@'localhost'",))
         self.assertEqual(found.status.text, "")
 
     def test_a_healthy_replica_asks_nobody(self):
         found, reach, _ = self.observe(REPLICA_OF.format(running="Yes"))
         reach.assert_not_called()
         self.assertEqual(found.reach, "")
+        self.assertEqual(found.shared, ())
         self.assertIn("Slave_SQL_Running: Yes", found.status.text)
 
     def test_no_credential_asks_nobody(self):
