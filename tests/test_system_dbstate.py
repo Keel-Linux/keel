@@ -16,7 +16,8 @@ from unittest import mock
 from helpers import spec  # noqa: F401
 
 from keel.inspect.tree import File
-from keel.system import dbseed
+from keel.system import dbready, dbseed
+from keel.system.dbmariadb import PING
 from keel.system.dbstate import (
     Credential,
     credential,
@@ -90,6 +91,94 @@ class TestWhatIsRead(unittest.TestCase):
             with open(os.path.join(path, "99-keel-database.cnf"), "w") as fob:
                 fob.write(dropin)
         return root
+
+
+class TestTheServerIsUpBeforeItIsAsked(unittest.TestCase):
+    """The first boot race: a server still starting was asked and refused"""
+
+    def live(self, engine: str = "mariadb", binary: str = "usr/sbin/mariadbd"):
+        root = self.enterContext(
+            __import__("tempfile").TemporaryDirectory()
+        )
+        os.makedirs(os.path.join(root, os.path.dirname(binary)))
+        open(os.path.join(root, binary), "w").close()
+        os.makedirs(os.path.join(root, "etc"))
+        with open(os.path.join(root, "etc/machine-id"), "w") as fob:
+            fob.write("abc\n")
+        self.enterContext(
+            mock.patch("keel.inspect.constants.ROOT_DEFAULT", root)
+        )
+        doc = {"database": {"server": {"engine": engine,
+                                       "role": "primary"}}}
+        return root, doc
+
+    def test_a_server_that_does_not_come_up_is_asked_nothing_else(self):
+        root, doc = self.live()
+        with mock.patch.object(dbready, "ready",
+                               return_value="mariadb is failed") as ready, \
+                mock.patch.object(subprocess, "run") as run:
+            found = observe_database(root, doc, start=True)
+        ready.assert_called_once_with(
+            "mariadb", PING, True, dbready.READY_TIMEOUT
+        )
+        run.assert_not_called()
+        self.assertEqual(found.down, "mariadb is failed")
+        self.assertTrue(found.installed)
+        self.assertFalse(found.reading.role.known)
+        self.assertEqual(found.machine_id.text, "abc\n")
+
+    def test_a_server_that_is_up_is_asked_as_before(self):
+        root, doc = self.live()
+        with mock.patch.object(dbready, "ready", return_value="") as ready, \
+                mock.patch.object(subprocess, "run",
+                                  return_value=answer("")) as run:
+            found = observe_database(root, doc)
+        self.assertEqual(ready.call_args.args[2], False)
+        self.assertEqual(found.down, "")
+        self.assertTrue(found.reading.role.known)
+        self.assertTrue(run.called)
+
+    def test_whether_it_starts_at_boot_is_read_once_it_answers(self):
+        root, doc = self.live()
+        with mock.patch.object(dbready, "ready", return_value=""), \
+                mock.patch.object(dbready, "enabled",
+                                  return_value="disabled") as enabled, \
+                mock.patch.object(subprocess, "run",
+                                  return_value=answer("")):
+            found = observe_database(root, doc, start=True)
+        enabled.assert_called_once_with("mariadb")
+        self.assertEqual(found.enabled, "disabled")
+
+    def test_an_engine_keel_does_not_configure_is_not_started(self):
+        root, doc = self.live(
+            "redis", "usr/bin/redis-server"
+        )
+        with mock.patch.object(dbready, "ready") as ready, \
+                mock.patch.object(subprocess, "run",
+                                  return_value=answer("")):
+            found = observe_database(root, doc, start=True)
+        ready.assert_not_called()
+        self.assertEqual(found.down, "")
+
+    def test_the_system_observation_passes_the_permission_on(self):
+        from keel.system import state
+        root = self.enterContext(
+            __import__("tempfile").TemporaryDirectory()
+        )
+        for start in (True, False):
+            with mock.patch.object(state, "observe_database",
+                                   return_value=None) as observed:
+                state.observe(root, {}, start=start)
+            observed.assert_called_once_with(root, {}, start)
+
+    def test_an_offline_root_starts_nothing(self):
+        root, doc = self.live()
+        with mock.patch("keel.inspect.constants.ROOT_DEFAULT", "/"), \
+                mock.patch.object(dbready, "ready") as ready:
+            found = observe_database(root, doc, start=True)
+        ready.assert_not_called()
+        self.assertFalse(found.live)
+        self.assertEqual(found.down, "")
 
 
 class TestTheCredential(unittest.TestCase):

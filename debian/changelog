@@ -1,3 +1,26 @@
+keel (0.11.6) unstable; urgency=medium
+
+  * apply makes the MariaDB server it converges answer before asking it
+    anything: one that is starting is waited for, one that is stopped is
+    started with systemctl start, both within one bound of 300 s. At
+    first boot inithooks.service is not ordered after mariadb.service,
+    so the hook 10keel-system asked the server while it was starting,
+    the field was refused, the hook carried on as a first boot hook
+    must, and the appliance kept server_id = 1 until apply ran again.
+  * A server that does not answer within the bound, whose start fails,
+    or that is active and refuses the client fails the field with that
+    reason: nothing is written or restarted and the run exits non zero,
+    so the next apply takes the field up again. A dry run starts no
+    server, and under --root none is asked, started or waited for.
+  * Before the wait, apply prints one line on the terminal (standard
+    output when it is one, else /dev/tty, where the first boot dialogs
+    draw), never into the output 10keel-system reads through a pipe, so
+    tty1 no longer stays blank while the server starts.
+  * A declared server whose unit is disabled is enabled, a line of the
+    plan, so it starts at boot and not only when apply starts it.
+
+ -- Marcos Mendez <mendez.foto@gmail.com>  Wed, 30 Sep 2026 12:30:00 +0000
+
 keel (0.11.5) unstable; urgency=medium
 
   * A MariaDB replica is read only (tracker#26). The replica's drop-in

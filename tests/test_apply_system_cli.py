@@ -241,8 +241,27 @@ class TestApplySystem(ApplySystemTestCase):
                                    "--conf", self.conf, "--system")
         self.assertEqual(code, exits.OK)
         self.assertEqual(observe.call_args.args[0], "/")
+        # A run that may change the machine may start the database server
+        # it converges; a dry run only waits for one already starting.
+        self.assertIs(observe.call_args.kwargs["start"], True)
         self.assertEqual(execute.call_args.args[2], False)
         self.assertIn("users.root: unchanged (x)\napply --system", out)
+
+    def test_a_dry_run_starts_no_database_server(self):
+        fake_state = mock.MagicMock()
+        outcome = mock.MagicMock(lines=(), failed=0)
+        outcome.summary.return_value = "dry run"
+        with AS_USER, \
+                mock.patch.object(commands.system, "observe",
+                                  return_value=fake_state) as observe, \
+                mock.patch.object(commands.system, "plan"), \
+                mock.patch.object(commands.system, "execute",
+                                  return_value=outcome):
+            code, _, _ = run_cli("spec", "apply", "--spec", self.spec,
+                                 "--conf", self.conf, "--system",
+                                 "--dry-run")
+        self.assertEqual(code, exits.OK)
+        self.assertIs(observe.call_args.kwargs["start"], False)
 
     def test_dry_run_on_the_live_system_needs_no_root(self):
         with AS_USER:
@@ -806,6 +825,14 @@ class TestDatabasePromote(unittest.TestCase):
 
         self.assertEqual(code, exits.OK)
         self.assertIn("dry run", out)
+
+    def test_only_a_run_that_may_change_the_machine_starts_the_server(self):
+        for extra, start in (((), True), (("--dry-run",), False)):
+            with self.subTest(extra=extra), AS_ROOT, \
+                    mock.patch("keel.commands.system.observe",
+                               wraps=commands.system.observe) as observe:
+                self.promote(*extra)
+            self.assertIs(observe.call_args.kwargs["start"], start)
 
     def test_the_live_system_needs_root(self):
         with AS_USER:

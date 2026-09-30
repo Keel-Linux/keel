@@ -56,10 +56,16 @@ def state(
     problem: str = "",
     reach: str = "",
     shared: tuple = (),
+    down: str = "",
     revoked: str | None = None,
+    enabled: str = "enabled",
 ) -> DatabaseState:
     """One machine's database, as the planner is given it"""
     answered = answered or MARIADB_STANDALONE
+    if down:
+        # What dbstate observes of a server that never came up: nothing
+        # was asked of it, so every answer carries no value.
+        problem = problem or down
     return DatabaseState(
         engine=engine,
         live=live,
@@ -72,7 +78,9 @@ def state(
         status=File("SHOW REPLICA STATUS", answered.get("status", "")),
         reach=reach,
         shared=shared,
+        down=down,
         revoked=_file(dbreadonly.RECORD, revoked),
+        enabled=enabled,
     )
 
 
@@ -203,6 +211,89 @@ def with_overlay(doc: dict, address: str, ipv4: str | None = None) -> dict:
     if ipv4:
         wireguard["ipv4_address"] = ipv4
     return dict(doc, network={"overlay": {"wireguard": wireguard}})
+
+
+DOWN = (
+    "mariadb is failed after systemctl start mariadb and does not answer"
+    " (mariadb --batch --skip-column-names --execute SELECT 1 exited 1)"
+)
+
+
+class TestAServerThatIsDownIsNeverConverged(unittest.TestCase):
+    """The first boot race: server_id = 1 and a run that moved on"""
+
+    def test_nothing_is_written_or_restarted_and_the_run_fails(self):
+        plan = steps(declaring(role="primary"), state(down=DOWN))
+        self.assertEqual(list(plan), ["database.server"])
+        self.assertEqual(only(plan["database.server"], WriteFile), [])
+        self.assertEqual(only(plan["database.server"], Run), [])
+        text = refusals(plan)
+        self.assertIn("the server is not answering", text)
+        self.assertIn(DOWN, text)
+
+    def test_the_refusal_says_the_field_is_left_for_the_next_run(self):
+        text = refusals(steps(declaring(role="standalone"),
+                              state(down=DOWN)))
+        self.assertIn("its configuration was not written", text)
+        self.assertIn("the next keel spec apply --system", text)
+
+    def test_a_replica_is_neither_seeded_nor_configured(self):
+        plan = steps(
+            declaring(role="replica",
+                      replication={"primary": {"host": PRIMARY_HOST}}),
+            state(down=DOWN), confirmed=True,
+        )
+        self.assertEqual(list(plan), ["database.server"])
+        self.assertIn("not answering", refusals(plan))
+
+    def test_promotion_of_a_server_that_is_down_is_refused(self):
+        plan = {
+            step.field: step.actions
+            for step in plan_promote(
+                declaring(role="replica"), state(down=DOWN),
+            )
+        }
+        self.assertIn("not answering", refusals(plan))
+
+    def test_a_server_that_is_up_is_planned_as_before(self):
+        plan = steps(declaring(role="standalone"), state())
+        self.assertEqual(len(only(plan["database.server"], WriteFile)), 1)
+
+
+ENABLE = ("systemctl", "enable", "mariadb")
+
+
+class TestADeclaredServerStartsAtBoot(unittest.TestCase):
+    """apply may start a disabled server; it must not stop at that"""
+
+    def runs(self, plan) -> list:
+        return [one.argv for one in only(plan["database.server"], Run)]
+
+    def test_a_disabled_server_is_enabled(self):
+        plan = steps(declaring(role="primary"), state(enabled="disabled"))
+        self.assertIn(ENABLE, self.runs(plan))
+        enable = next(one for one in only(plan["database.server"], Run)
+                      if one.argv == ENABLE)
+        self.assertIn("starts at boot", enable.summary)
+
+    def test_it_is_enabled_even_when_the_file_is_unchanged(self):
+        first = steps(declaring(role="standalone"), state())
+        text = only(first["database.server"], WriteFile)[0].content
+        plan = steps(declaring(role="standalone"),
+                     state(dropin=text, enabled="disabled"))
+        self.assertEqual(self.runs(plan), [ENABLE])
+
+    def test_an_enabled_or_unknown_server_is_left_alone(self):
+        for enabled in ("enabled", "static", "masked", ""):
+            with self.subTest(enabled=enabled):
+                plan = steps(declaring(role="primary"),
+                             state(enabled=enabled))
+                self.assertNotIn(ENABLE, self.runs(plan))
+
+    def test_a_server_that_is_down_is_not_enabled_either(self):
+        plan = steps(declaring(role="primary"),
+                     state(down=DOWN, enabled="disabled"))
+        self.assertNotIn(ENABLE, self.runs(plan))
 
 
 class TestTheOverlayGivesTheServerIdItsIdentity(unittest.TestCase):

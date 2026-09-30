@@ -190,8 +190,11 @@ def apply_system(
     `confirmed` is --destroy-local-database, and it reaches exactly one
     decision: whether becoming a replica may drop the databases this
     server holds. Nothing else in keel passes it, so a first boot cannot.
+
+    A run that is not a dry run may start the database server it
+    converges before asking it anything (keel.system.dbready).
     """
-    state = system.observe(root, doc)
+    state = system.observe(root, doc, start=not dry_run)
     plan = system.plan(doc, state, confirmed, defer_certificate,
                        network_window, skip_network, skip_uplink)
     if not plan.steps:
@@ -366,7 +369,7 @@ def database_promote(args) -> int:
         if refusal:
             error(refusal)
             return exits.APPLY_NEEDS_ROOT
-    state = system.observe(root, doc)
+    state = system.observe(root, doc, start=not dry_run)
     plan = system.Plan(tuple(system.plan_promote(doc, state.database)))
     outcome = system.execute(
         plan, system.Effects(root), dry_run, "database promote"
