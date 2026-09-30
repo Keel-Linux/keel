@@ -1,3 +1,42 @@
+keel (0.11.3) unstable; urgency=medium
+
+  * A new MariaDB replica is seeded with a copy of its primary before it
+    replicates. It used to start from an empty gtid_slave_pos, so only
+    what the primary wrote afterwards arrived: a WordPress replica had
+    no wp_* tables, and the first UPDATE of an older post stopped its
+    SQL thread. apply --system now pulls mariadb-dump
+    --single-transaction --gtid --master-data=2 from the primary, as the
+    replication account, drops the local databases the operator
+    confirmed only once the copy is on disk, loads it and starts
+    replication at the dump's GTID position (MASTER_USE_GTID=slave_pos).
+    The password reaches the clients in an options file of mode 0600,
+    created exclusively and removed afterwards, never an argument.
+  * The primary is asked first, while apply observes the machine: an
+    unreachable primary, or one that does not grant the copy, is refused
+    before the replica's configuration is rewritten or anything dropped.
+    A replica already replicating healthily from the declared primary is
+    never dialled or copied again.
+  * A primary grants the replication account SELECT, SHOW VIEW, TRIGGER
+    and EVENT beside REPLICATION SLAVE, which is what the dump needs and
+    no more than the binary log already carries to it. GRANT only adds,
+    so a primary set up by an older keel gains them at its next apply.
+  * The primary's accounts come with the copy: the ones the replica
+    lacks, other than root, mysql, mariadb.sys, debian-sys-maint, repl,
+    the anonymous account and roles, are read with SHOW CREATE USER and
+    SHOW GRANTS and created with sql_log_bin off before replication
+    starts, so an ALTER USER of the application's database user no
+    longer stops the replica.
+  * The seed is refused before anything is dropped when the data
+    directory has less free space than twice the dump.
+  * docs/apply.md states what the grant exposes: repl reads every table
+    of the primary, password hashes included, and why that is the grant
+    rather than one per schema.
+  * A replica whose SQL thread stopped is refused with the server's
+    error, and rebuilt from a fresh copy with --destroy-local-database:
+    the way out for a replica 0.11.2 or older built empty.
+
+ -- Marcos Mendez <mendez.foto@gmail.com>  Wed, 30 Sep 2026 10:00:00 +0000
+
 keel (0.11.2) unstable; urgency=medium
 
   * keel network confirm accepts the console of an LXC container. There

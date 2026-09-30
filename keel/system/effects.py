@@ -21,11 +21,13 @@ from keel.system.actions import (
     RemoveFile,
     Run,
     RunSql,
+    SeedReplica,
     Symlink,
     SwitchNetwork,
     WriteFile,
 )
 from keel.network import marker, switch, wgkeys
+from keel.system import dbseed
 
 NOT_RUNNABLE = 127
 
@@ -55,6 +57,8 @@ class Effects:
             if isinstance(action, AdoptKey):
                 return wgkeys.adopt(self.tree.path(action.conf),
                                     self.tree.path(action.path.lstrip("/")))
+            if isinstance(action, SeedReplica):
+                return dbseed.seed(self.tree.root, action)
             return self.symlink(action)
         except OSError as e:
             return f"{e.strerror or e}"

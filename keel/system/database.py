@@ -32,7 +32,6 @@ Nothing here reads a file or runs a command: keel.system.dbstate observes
 and keel.system.effects acts.
 """
 
-from keel.spec.constants import DEFAULT_PORTS
 from keel.spec.origins import canonical, is_name, mariadb_problem
 from keel.system import dbmariadb as mariadb
 from keel.system.actions import (
@@ -41,10 +40,16 @@ from keel.system.actions import (
     Refuse,
     Run,
     RunSql,
+    SeedReplica,
     Step,
     WriteFile,
 )
-from keel.system.dbstate import DatabaseState, declared_server
+from keel.system.dbstate import (
+    DatabaseState,
+    declared_server,
+    endpoint,
+    sql_stopped,
+)
 
 FIELD = "database.server"
 AUTHORIZATIONS = f"{FIELD}.replication.allowed_from"
@@ -120,6 +125,16 @@ NAME_ORIGIN = (
     " a name fragile for this reason: it fails quietly when DNS does"
 )
 ALREADY = "unchanged (already replicating from [{host}]:{port})"
+STOPPED = (
+    "this machine replicates from [{host}]:{port} and its SQL thread"
+    " stopped ({error}). A replica that stopped on a row it does not hold"
+    " diverged from its primary, and rebuilding it replaces the local"
+    " data with a fresh copy of the primary"
+)
+UNREACHABLE = (
+    "{problem}. The replica cannot be seeded, so nothing was dropped, its"
+    " configuration was not rewritten and the server was not restarted"
+)
 NOT_DECLARED = (
     "not declared, so the authorizations the server holds are left alone"
 )
@@ -317,9 +332,7 @@ def _replication(
     server: dict, state: DatabaseState, observed: str, confirmed: bool,
 ) -> Step:
     """Make this node a replica of the declared primary, or refuse to"""
-    endpoint = (server.get("replication") or {}).get("primary") or {}
-    host = str(endpoint.get("host") or "")
-    port = int(endpoint.get("port") or DEFAULT_PORTS[mariadb_name()])
+    host, port = endpoint(server)
     if observed == REPLICA:
         return _already_replicating(state, host, port, confirmed)
     return _become_replica(state, host, port, confirmed, "")
@@ -339,7 +352,15 @@ def _already_replicating(
     was_host = str(current.get("host") or "")
     was_port = int(current.get("port") or port)
     if canonical(was_host) == canonical(host) and was_port == port:
-        return Step(REPLICATION, (Note(ALREADY.format(host=host, port=port)),))
+        error = sql_stopped(state.status)
+        if error is None:
+            return Step(REPLICATION, (
+                Note(ALREADY.format(host=host, port=port)),
+            ))
+        return _become_replica(
+            state, host, port, confirmed,
+            STOPPED.format(host=host, port=port, error=error),
+        )
     return _become_replica(
         state, host, port, confirmed,
         REPOINT.format(
@@ -352,12 +373,23 @@ def _already_replicating(
 def _become_replica(
     state: DatabaseState, host: str, port: int, confirmed: bool, why: str,
 ) -> Step:
-    """The one step of this feature that can lose data"""
+    """The one step of this feature that can lose data
+
+    A replica is a copy of its primary, so it is seeded with one before it
+    replicates (keel.system.dbseed): replicating from an empty position
+    carries only what the primary writes afterwards. The primary was
+    asked whether it can be copied from while the machine was observed,
+    so an unreachable one is refused here, before anything is written.
+    """
     if not state.credential.known:
         return Step(REPLICATION, (Refuse(state.credential.problem),))
     if not state.schemas.readable:
         return Step(REPLICATION, (
             Refuse(UNKNOWN_CONTENT.format(problem=state.schemas.problem)),
+        ))
+    if state.reach:
+        return Step(REPLICATION, (
+            Refuse(UNREACHABLE.format(problem=state.reach)),
         ))
     held = mariadb.user_schemas((state.schemas.text or "").splitlines())
     actions: list[Action] = []
@@ -366,13 +398,9 @@ def _become_replica(
         if not confirmed:
             return Step(REPLICATION, (Refuse(reason + REMEDY),))
         actions.append(Note(CONFIRMED.format(reason=reason)))
-    if held:
-        destruction = mariadb.destroy(held)
-        actions.append(
-            RunSql(mariadb.CLIENT, destruction.text, destruction.summary)
-        )
-    start = mariadb.replicate_from(host, port, state.credential.value)
-    actions.append(RunSql(mariadb.CLIENT, start.text, start.summary))
+    actions.append(
+        SeedReplica(host, port, state.credential.value, tuple(held))
+    )
     return Step(REPLICATION, tuple(actions))
 
 

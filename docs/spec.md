@@ -676,7 +676,7 @@ decision 0013 drew: each screen configures the machine it runs on.
 
 | Engine | What an entry becomes |
 | --- | --- |
-| mariadb | A grant of `REPLICATION SLAVE` to the replication account from that origin, which is the `Host` part of the account |
+| mariadb | A grant of `REPLICATION SLAVE` to the replication account from that origin, which is the `Host` part of the account, with `SELECT`, `SHOW VIEW`, `TRIGGER` and `EVENT` beside it so a new replica can copy what the primary already holds ([docs/apply.md](apply.md)) |
 | postgresql | A line in `pg_hba.conf` for the `replication` pseudo database with that address |
 | redis | Reachability: the origin has to be inside `listen`, and the credential is an ACL user or `requirepass`. Redis has no per origin authorization at all, so `inspect` reports this field as one it cannot infer on Redis and says why |
 

@@ -19,7 +19,14 @@ from test_inspect_database import (
 
 from keel.inspect.tree import File
 from keel.system import dbmariadb as mariadb
-from keel.system.actions import Note, Refuse, Run, RunSql, WriteFile
+from keel.system.actions import (
+    Note,
+    Refuse,
+    Run,
+    RunSql,
+    SeedReplica,
+    WriteFile,
+)
 from keel.system.database import plan_database, plan_promote
 from keel.system.dbstate import Credential, DatabaseState
 
@@ -41,19 +48,21 @@ def state(
     live: bool = True,
     binary: str = "/usr/sbin/mariadbd",
     problem: str = "",
+    reach: str = "",
 ) -> DatabaseState:
     """One machine's database, as the planner is given it"""
+    answered = answered or MARIADB_STANDALONE
     return DatabaseState(
         engine=engine,
         live=live,
         binary=binary,
-        reading=mariadb_reading(
-            answered or MARIADB_STANDALONE, SOCKETS, problem
-        ),
+        reading=mariadb_reading(answered, SOCKETS, problem),
         schemas=_file("schemas", schemas),
         machine_id=_file("/etc/machine-id", machine_id),
         dropin=_file(mariadb.DROPIN, dropin),
         credential=credential or Credential(value=PASSWORD),
+        status=File("SHOW REPLICA STATUS", answered.get("status", "")),
+        reach=reach,
     )
 
 
@@ -84,6 +93,14 @@ def written(actions) -> str:
 
 def sql(actions) -> str:
     return "\n".join(one.statements for one in only(actions, RunSql))
+
+
+def seeding(actions) -> SeedReplica:
+    """The one seed of a replica step, which a test expects to be there"""
+    found = only(actions, SeedReplica)
+    if len(found) != 1:
+        raise AssertionError(f"expected one seed, found {actions}")
+    return found[0]
 
 
 def refusals(plan: dict) -> str:
@@ -253,7 +270,23 @@ class TestAPrimaryHoldsAuthorizations(unittest.TestCase):
         )
         text = sql(plan["database.server.replication.allowed_from"])
         self.assertIn(f"'repl'@'{PATTERN}'", text)
-        self.assertIn("GRANT REPLICATION SLAVE ON *.*", text)
+        self.assertIn("GRANT REPLICATION SLAVE", text)
+
+    def test_the_grant_lets_a_new_replica_copy_what_is_already_here(self):
+        # A replica is seeded with mariadb-dump over the network, as the
+        # same account: without these it copies nothing and says so.
+        plan = steps(
+            declaring(
+                role="primary", replication={"allowed_from": [PREFIX]}
+            ),
+            state(),
+        )
+        text = sql(plan["database.server.replication.allowed_from"])
+        self.assertIn(
+            "GRANT REPLICATION SLAVE, SELECT, SHOW VIEW, TRIGGER, EVENT"
+            f" ON *.* TO 'repl'@'{PATTERN}'",
+            text,
+        )
 
     def test_the_credential_never_reaches_an_argument_vector(self):
         plan = steps(
@@ -407,20 +440,43 @@ class TestBecomingAReplicaDestroysTheLocalDatabase(unittest.TestCase):
             kwargs.get("confirmed", False),
         )
 
-    def test_an_empty_server_becomes_a_replica_with_gtid(self):
-        text = sql(self.replica()["database.server.replication.primary"])
-        self.assertIn(f"MASTER_HOST='{PRIMARY_HOST}'", text)
-        self.assertIn("MASTER_USE_GTID=slave_pos", text)
-        self.assertIn("START SLAVE", text)
-        self.assertNotIn("DROP DATABASE", text)
+    def test_an_empty_server_is_seeded_from_its_primary(self):
+        # Replicating from an empty gtid_slave_pos copied only what the
+        # primary wrote afterwards, and the first UPDATE of an older
+        # WordPress row stopped the SQL thread. The copy comes first now.
+        actions = self.replica()["database.server.replication.primary"]
+        seed = seeding(actions)
+        self.assertEqual((seed.host, seed.port), (PRIMARY_HOST, 3306))
+        self.assertEqual(seed.drop, ())
+        self.assertEqual(seed.password, PASSWORD)
+        self.assertEqual(only(actions, RunSql), [])
 
     def test_a_server_holding_data_is_refused_by_default(self):
         plan = self.replica(schemas=SYSTEM_SCHEMAS + "wordpress\nkeeltest\n")
         self.assertIn("--destroy-local-database", refusals(plan))
         self.assertIn("wordpress, keeltest", refusals(plan))
         self.assertEqual(
-            only(plan["database.server.replication.primary"], RunSql), []
+            only(plan["database.server.replication.primary"], SeedReplica),
+            [],
         )
+
+    def test_an_unreachable_primary_is_refused_before_any_change(self):
+        for confirmed in (False, True):
+            plan = self.replica(
+                schemas=SYSTEM_SCHEMAS + "wordpress\n",
+                reach="the primary did not answer",
+                confirmed=confirmed,
+            )
+            self.assertEqual(
+                list(plan), ["database.server.replication.primary"]
+            )
+            self.assertIn("the primary did not answer", refusals(plan))
+            self.assertIn("nothing was dropped", refusals(plan))
+            self.assertEqual(
+                only(plan["database.server.replication.primary"],
+                     SeedReplica),
+                [],
+            )
 
     def test_a_refused_replica_leaves_the_server_as_it_was(self):
         # The Template B smoke test of 2026-09-30: the refusal said
@@ -454,9 +510,8 @@ class TestBecomingAReplicaDestroysTheLocalDatabase(unittest.TestCase):
         plan = self.replica(
             schemas=SYSTEM_SCHEMAS + "wordpress\n", confirmed=True
         )
-        text = sql(plan["database.server.replication.primary"])
-        self.assertIn("DROP DATABASE IF EXISTS `wordpress`", text)
-        self.assertIn("CHANGE MASTER TO", text)
+        seed = seeding(plan["database.server.replication.primary"])
+        self.assertEqual(seed.drop, ("wordpress",))
         note = only(
             plan["database.server.replication.primary"], Note
         )[0].summary
@@ -512,9 +567,9 @@ class TestBecomingAReplicaDestroysTheLocalDatabase(unittest.TestCase):
             )),
             True,
         )
-        self.assertIn(
-            "MASTER_HOST='2001:db8:2::10'",
-            sql(plan["database.server.replication.primary"]),
+        self.assertEqual(
+            seeding(plan["database.server.replication.primary"]).host,
+            "2001:db8:2::10",
         )
 
     def test_a_replica_with_no_credential_replicates_from_nowhere(self):
@@ -531,14 +586,72 @@ class TestBecomingAReplicaDestroysTheLocalDatabase(unittest.TestCase):
             ),
             state(),
         )
-        self.assertIn(
-            "MASTER_PORT=3307",
-            sql(with_port["database.server.replication.primary"]),
+        self.assertEqual(
+            seeding(with_port["database.server.replication.primary"]).port,
+            3307,
         )
-        self.assertIn(
-            "MASTER_PORT=3306",
-            sql(self.replica()["database.server.replication.primary"]),
+        self.assertEqual(
+            seeding(self.replica()["database.server.replication.primary"])
+            .port,
+            3306,
         )
+
+
+STOPPED_STATUS = MARIADB_REPLICA_STATUS.replace(
+    "Slave_SQL_Running: Yes",
+    "Slave_SQL_Running: No\n"
+    "                Last_SQL_Error: Could not execute Update_rows_v1"
+    " event on table wordpress.wp_posts; Can't find record in 'wp_posts'",
+)
+
+
+class TestAReplicaThatStoppedIsReseededOnlyOnRequest(unittest.TestCase):
+    """A replica built empty by 0.11.1 halts on its first UPDATE"""
+
+    def plan(self, status: str, confirmed: bool = False):
+        return steps(
+            declaring(
+                role="replica",
+                replication={"primary": {"host": "2001:db8:1::10"}},
+            ),
+            state(
+                answered=dict(MARIADB_STANDALONE, status=status),
+                schemas=SYSTEM_SCHEMAS + "wordpress\n",
+            ),
+            confirmed,
+        )
+
+    def test_a_healthy_replica_is_never_seeded_again(self):
+        for confirmed in (False, True):
+            actions = self.plan(MARIADB_REPLICA_STATUS, confirmed)[
+                "database.server.replication.primary"
+            ]
+            self.assertEqual(only(actions, SeedReplica), [])
+            self.assertIn("already replicating",
+                          only(actions, Note)[0].summary)
+
+    def test_a_stopped_sql_thread_is_refused_with_its_error(self):
+        plan = self.plan(STOPPED_STATUS)
+        refused = refusals(plan)
+        self.assertIn("Can't find record in 'wp_posts'", refused)
+        self.assertIn("--destroy-local-database", refused)
+        self.assertEqual(
+            only(plan["database.server.replication.primary"], SeedReplica),
+            [],
+        )
+
+    def test_a_stopped_sql_thread_is_reseeded_once_confirmed(self):
+        plan = self.plan(STOPPED_STATUS, confirmed=True)
+        seed = seeding(plan["database.server.replication.primary"])
+        self.assertEqual(seed.host, "2001:db8:1::10")
+        self.assertEqual(seed.drop, ("wordpress",))
+
+    def test_a_status_that_does_not_say_is_left_alone(self):
+        status = MARIADB_REPLICA_STATUS.replace(
+            "            Slave_SQL_Running: Yes\n", ""
+        )
+        actions = self.plan(status)["database.server.replication.primary"]
+        self.assertIn("already replicating", only(actions, Note)[0].summary)
 
 
 class TestPromotionIsASeparateAct(unittest.TestCase):

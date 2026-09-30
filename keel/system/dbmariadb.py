@@ -35,6 +35,12 @@ SERVICE = "mariadb"
 # own machine is a way to end up with two machines that cannot talk, and
 # decision 0013 keeps every screen to the machine it runs on.
 REPLICATION_USER = "repl"
+# What mariadb-dump --single-transaction --gtid --master-data=2 --routines
+# --events --triggers needs, measured against MariaDB 11.8 on Debian 13:
+# no RELOAD and no LOCK TABLES, because the server hands the dump a
+# consistent binary log position without FLUSH TABLES WITH READ LOCK.
+SEED_GRANTS = ("SELECT", "SHOW VIEW", "TRIGGER", "EVENT")
+GRANTED = ", ".join(("REPLICATION SLAVE",) + SEED_GRANTS)
 # Relative, so the binary log lands in the data directory the package
 # owns, rather than in a directory this code would have to create.
 BINLOG = "mariadb-bin"
@@ -130,10 +136,18 @@ def as_host(origin: str) -> str | None:
 
 
 def grants(hosts: list[str], password: str) -> Statements | None:
-    """Authorize replication from each origin, and nothing else
+    """Authorize replication from each origin, and the copy that seeds it
 
-    Idempotent: a re-run of apply alters the account it already created
-    rather than failing, which is what makes the phase safe to repeat.
+    `REPLICATION SLAVE` streams the binary log. The rest (`SEED_GRANTS`)
+    is what mariadb-dump needs to copy the data the primary held before a
+    replica existed (keel.system.dbseed), and SELECT on *.* is also what
+    reads the primary's accounts so the replica can hold them. Nothing is
+    written with them, but they let `repl` read every table, the password
+    hashes of mysql.global_priv included, root's among them: docs/apply.md
+    says why this is the grant and not one per schema. Idempotent: a
+    re-run of apply alters the account it already
+    created rather than failing, and GRANT only adds, so a primary set up
+    by an older keel gains them at its next apply.
     """
     text = ""
     for host in hosts:
@@ -143,7 +157,7 @@ def grants(hosts: list[str], password: str) -> Statements | None:
             f" IDENTIFIED BY {literal(password)};\n"
             f"ALTER USER '{REPLICATION_USER}'@{quoted}"
             f" IDENTIFIED BY {literal(password)};\n"
-            f"GRANT REPLICATION SLAVE ON *.* TO"
+            f"GRANT {GRANTED} ON *.* TO"
             f" '{REPLICATION_USER}'@{quoted};\n"
         )
     if not text:
@@ -173,17 +187,21 @@ def revoke(hosts: list[str]) -> Statements | None:
     )
 
 
-def replicate_from(host: str, port: int, password: str) -> Statements:
+def replicate_from(
+    host: str, port: int, password: str, position: str = "",
+) -> Statements:
     """Make this node a replica of that endpoint, with GTID
 
-    `gtid_slave_pos` empty means from the start of the primary's binary
-    log, which is right for a database that holds nothing, and is the only
-    seeding this version does: see docs/apply.md.
+    `position` is the GTID position of the copy this node was just seeded
+    with (keel.system.dbseed), so replication resumes exactly after the
+    last transaction the copy holds. Empty means from the start of the
+    primary's binary log, which is only right when the primary has never
+    logged anything yet.
     """
     return Statements(
         "STOP SLAVE;\n"
         "RESET SLAVE ALL;\n"
-        "SET GLOBAL gtid_slave_pos = '';\n"
+        f"SET GLOBAL gtid_slave_pos = {literal(position)};\n"
         f"CHANGE MASTER TO MASTER_HOST={literal(host)}, MASTER_PORT={port},"
         f" MASTER_USER='{REPLICATION_USER}',"
         f" MASTER_PASSWORD={literal(password)},"
