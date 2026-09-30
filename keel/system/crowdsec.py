@@ -129,18 +129,21 @@ def plan_identity(state: CrowdsecState, live: bool,
         return [Refuse("cscli not found: the crowdsec package is not"
                        " installed, and keel installs no package")]
     actions: list[Action] = []
+    # cscli refuses to run without the file, so it comes first
+    if state.capi == "absent":
+        actions.append(WriteFile(
+            CAPI, "", KEY_MODE, None,
+            f"create /{CAPI} empty, which CrowdSec's unit needs and which"
+            " says not registered yet"))
     if not state.lapi:
         actions.append(Run(
             (CSCLI, "--error", "machines", "add", "--auto", "--force"),
             f"register this machine with CrowdSec's local API; cscli writes"
             f" the password to /{LAPI}"))
-    if state.capi == "absent":
-        # after the local registration: a run that fails there leaves the
-        # file absent, so the next one still tries the central API
-        actions.append(WriteFile(
-            CAPI, "", KEY_MODE, None,
-            f"create /{CAPI} empty, which CrowdSec's unit needs and which"
-            " says not registered yet"))
+    # an empty file with no local registration is a first enable that
+    # stopped half way, so the central API is still asked; an empty one
+    # beside a registered machine is offline or the operator's choice
+    if state.capi == "absent" or (state.capi == "empty" and not state.lapi):
         actions.append(Attempt(
             (CSCLI, "--error", "capi", "register"),
             "register with CrowdSec's central API",

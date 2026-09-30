@@ -231,14 +231,12 @@ class TestCrowdsecIdentity(PlanCase):
     def test_a_first_enable_makes_the_identity_before_the_units(self):
         found = self.actions(ON, self.state(crowdsec=self.NONE),
                              field="overlays.crowdsec")
-        # the empty CAPI file only once the machine is registered: a
-        # registration that fails leaves it absent, so the next run
-        # still registers with the central API
-        self.assertEqual(found[0].argv, ("cscli", "--error", "machines",
-                                         "add", "--auto", "--force"))
-        self.assertIsInstance(found[1], WriteFile)
-        self.assertEqual((found[1].path, found[1].content, found[1].mode),
+        # cscli machines add refuses to run without the CAPI file
+        self.assertIsInstance(found[0], WriteFile)
+        self.assertEqual((found[0].path, found[0].content, found[0].mode),
                          (CAPI, "", 0o600))
+        self.assertEqual(found[1].argv, ("cscli", "--error", "machines",
+                                         "add", "--auto", "--force"))
         self.assertIsInstance(found[2], Attempt)
         self.assertEqual(found[2].argv, ("cscli", "--error", "capi",
                                          "register"))
@@ -285,6 +283,15 @@ class TestCrowdsecIdentity(PlanCase):
         bouncer = [a for a in self.actions(ON, state)
                    if isinstance(a, AddBouncer)][0]
         self.assertEqual(bouncer.mode, "nftables")
+
+    def test_a_first_enable_that_stopped_half_way_asks_capi_again(self):
+        """the empty file made, then cscli machines add failed: the next
+        run registers locally and still asks the central API"""
+        state = self.state(crowdsec=dataclasses.replace(
+            self.NONE, capi="empty"))
+        found = self.actions(ON, state, field="overlays.crowdsec")
+        self.assertEqual([type(a).__name__ for a in found[:3]],
+                         ["Run", "Attempt", "AddBouncer"])
 
     def test_an_empty_capi_file_is_left_to_the_operator(self):
         state = self.state(crowdsec=dataclasses.replace(REGISTERED,
