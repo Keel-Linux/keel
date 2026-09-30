@@ -33,7 +33,7 @@ and keel.system.effects acts.
 """
 
 from keel.spec.constants import DEFAULT_PORTS
-from keel.spec.origins import canonical, compressed_address, is_name
+from keel.spec.origins import canonical, is_name, mariadb_problem
 from keel.system import dbmariadb as mariadb
 from keel.system.actions import (
     Action,
@@ -113,23 +113,6 @@ CONFIRMED = "confirmed with --destroy-local-database: {reason}"
 UNKNOWN_CONTENT = (
     "the server could not be asked which databases it holds ({problem}),"
     " and becoming a replica replaces them; not knowing is not permission"
-)
-NO_PATTERN = (
-    "{origin} names no whole group of the address, so MariaDB has no host"
-    " pattern for it; authorizing a wider or a narrower range than the"
-    " description asked for is not something apply decides. Write a prefix"
-    " that stops on a group boundary, or each replica's address"
-)
-COMPRESSED = (
-    "{origin} has no host pattern MariaDB can match: the server compares"
-    " the text of a client's address, that text writes a run of zero"
-    " groups as ::, and here the run can take in a group of the prefix,"
-    " so a pattern of its groups would refuse {address}, which the prefix"
-    " holds. MariaDB has no netmask for IPv6, and authorizing a wider or a"
-    " narrower range than the description asked for is not something"
-    " apply decides."
-    " Write each replica's address instead (on an overlay, the address of"
-    " each peer)"
 )
 NAME_ORIGIN = (
     "an origin is a name ({names}), so the server must keep resolving"
@@ -305,13 +288,17 @@ def _authorizations(server: dict, state: DatabaseState) -> Step:
     for origin in (str(one) for one in declared):
         host = mariadb.as_host(origin)
         if host is None:
-            actions.append(Refuse(_no_host(origin)))
+            actions.append(Refuse(str(mariadb_problem(origin))))
             continue
         hosts.append(host)
-    wanted = {canonical(host) for host in hosts}
+    # By the text of the host and not by canonical(): an account 0.11.0
+    # made at fd3d:80b2:d0d7:0:0:0:0:2 is the same origin as the
+    # fd3d:80b2:d0d7::2 granted now, but an account MariaDB never matches,
+    # so it is dropped. Case alone does not count: MariaDB ignores it.
+    wanted = {host.lower() for host in hosts}
     extra = [
         str(one) for one in (state.reading.allowed_from.value or [])
-        if canonical(str(one)) not in wanted
+        if str(one).lower() not in wanted
     ]
     for statements in (mariadb.revoke(extra),
                        mariadb.grants(hosts, state.credential.value)):
@@ -324,14 +311,6 @@ def _authorizations(server: dict, state: DatabaseState) -> Step:
             Note("unchanged (no origin is declared and none is held)"),
         ))
     return Step(AUTHORIZATIONS, tuple(actions))
-
-
-def _no_host(origin: str) -> str:
-    """Why an origin has no host a grant could hold"""
-    address = compressed_address(origin)
-    if address is None:
-        return NO_PATTERN.format(origin=origin)
-    return COMPRESSED.format(origin=origin, address=address)
 
 
 def _replication(

@@ -283,6 +283,41 @@ class TestAPrimaryHoldsAuthorizations(unittest.TestCase):
         self.assertIn("DROP USER IF EXISTS 'repl'@'2001:db8:9:%'", text)
         self.assertNotIn(f"DROP USER IF EXISTS 'repl'@'{PATTERN}'", text)
 
+    def test_an_account_at_an_expanded_address_is_replaced(self):
+        # keel 0.11.0 granted an address as written. canonical() makes the
+        # expanded and the compressed spelling one origin, so comparing on
+        # it kept the dead account beside the new one; the text decides.
+        plan = steps(
+            declaring(
+                role="primary",
+                replication={"allowed_from": ["fd3d:80b2:d0d7::2"]},
+            ),
+            state(answered=dict(
+                MARIADB_STANDALONE,
+                grants=f"fd3d:80b2:d0d7:0:0:0:0:2\n{PATTERN}\n",
+            )),
+        )
+        text = sql(plan["database.server.replication.allowed_from"])
+        self.assertIn(
+            "DROP USER IF EXISTS 'repl'@'fd3d:80b2:d0d7:0:0:0:0:2'", text
+        )
+        self.assertIn(f"DROP USER IF EXISTS 'repl'@'{PATTERN}'", text)
+        self.assertIn("'repl'@'fd3d:80b2:d0d7::2'", text)
+
+    def test_an_account_held_in_another_case_is_kept(self):
+        plan = steps(
+            declaring(
+                role="primary",
+                replication={"allowed_from": ["fd3d:80b2:d0d7::2", PREFIX]},
+            ),
+            state(answered=dict(
+                MARIADB_STANDALONE,
+                grants=f"FD3D:80B2:D0D7::2\n{PATTERN}\n",
+            )),
+        )
+        text = sql(plan["database.server.replication.allowed_from"])
+        self.assertNotIn("DROP USER", text)
+
     def test_an_empty_list_withdraws_every_authorization(self):
         plan = steps(
             declaring(role="primary", replication={"allowed_from": []}),

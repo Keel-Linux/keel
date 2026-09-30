@@ -9,10 +9,23 @@ keel (0.11.1) unstable; urgency=medium
     netmask or CIDR host, so a prefix whose last group is zero, or with
     two zero groups in a row, is refused now, naming an address the
     pattern would have missed; write each replica's address instead.
-    Prefixes whose groups are all written keep their pattern.
+    Prefixes whose groups are all written keep their pattern. keel spec
+    validate refuses such an origin when the engine is mariadb, so apply
+    stops before it writes the primary's configuration or restarts it,
+    and before it grants the rest of the list.
+  * A host pattern with :: is refused on every engine: :: stands for a
+    number of zero groups no wildcard counts, so 2001::5:% holds
+    2001:0:0:0:0:5:a:b, outside 2001:0:0:5::/64.
   * An address in allowed_from is granted compressed and lower cased:
     MariaDB refused fd3d:80b2:d0d7::2 on a grant to
-    fd3d:80b2:d0d7:0:0:0:0:2.
+    fd3d:80b2:d0d7:0:0:0:0:2. An account is dropped unless its host is
+    one the description grants, ignoring case, so the account 0.11.0
+    made at the expanded address is replaced, not kept beside the new
+    one.
+  * keel inspect reports allowed_from as not inferred, naming the grant,
+    when a MariaDB primary holds one no description may declare (the
+    fd3d:80b2:d0d7:0:% of 0.11.0), instead of writing a description
+    that does not validate.
   * A replica apply declines to build (it holds databases and
     --destroy-local-database was not given, its credential is missing,
     and the like) keeps its configuration file and is not restarted:

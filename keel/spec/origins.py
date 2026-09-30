@@ -108,13 +108,16 @@ def host_pattern(origin: str) -> str | None:
     text can compress away (see `compressed_address`): the caller says so
     rather than authorizing a wider or a narrower range than the
     description asked for. A host pattern written as such is held to the
-    same rule, as the prefix it names.
+    same rule, as the prefix it names, and one with `::` has none: `::`
+    stands for a number of zero groups no wildcard counts.
     """
     text = str(origin).strip()
     if "/" not in text:
         address = _address(text)
         if address is not None:
             return address
+        if _elided_pattern(text):
+            return None
         prefix = _pattern_prefix(text)
         if prefix is None:
             return text or None
@@ -177,6 +180,53 @@ def compressed_address(origin: str) -> str | None:
         for offset in (1, 0, every_host_group)
     )
     return next((one for one in texts if not one.startswith(head)), None)
+
+
+def mariadb_problem(origin: str) -> str | None:
+    """Why a MariaDB grant cannot hold this origin exactly, or None
+
+    One reason for the three places that meet it: validate refuses the
+    description before apply writes anything, inspect does not write a
+    grant it would refuse into one, and apply refuses rather than grant
+    a wider or a narrower range than the description asked for.
+    """
+    if host_pattern(origin) is not None:
+        return None
+    text = str(origin).strip()
+    address = compressed_address(text)
+    if address is not None:
+        return COMPRESSED.format(origin=text, address=address)
+    if _elided_pattern(text):
+        return ELIDED.format(origin=text)
+    return NO_GROUP.format(origin=text)
+
+
+NO_GROUP = (
+    "{origin} names no whole group of the address, so MariaDB has no host"
+    " pattern for it, and a wider or a narrower range than the description"
+    " asked for is never granted. Write a prefix that stops on a group"
+    " boundary, or each replica's address"
+)
+COMPRESSED = (
+    "{origin} has no host pattern MariaDB can match: the server compares"
+    " the text of a client's address, that text writes a run of zero"
+    " groups as ::, and here the run can take in a group of the prefix,"
+    " so a pattern of its groups would refuse {address}, which the prefix"
+    " holds. MariaDB has no netmask for IPv6, and a wider or a narrower"
+    " range than the description asked for is never granted. Write each"
+    " replica's address instead (on an overlay, the address of each peer)"
+)
+ELIDED = (
+    "{origin} is a host pattern with ::, which stands for a number of zero"
+    " groups no wildcard counts, so it holds addresses outside any one"
+    " prefix (2001::5:% holds 2001::5:a:b, which is 2001:0:0:0:0:5:a:b)."
+    " Write the prefix, or each replica's address"
+)
+
+
+def _elided_pattern(text: str) -> bool:
+    """A host pattern that writes zero groups as `::`"""
+    return "::" in text and any(one in text for one in "%_")
 
 
 def _always_written(groups: list[str]) -> bool:

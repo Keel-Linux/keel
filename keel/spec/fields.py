@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from keel.spec.constants import MAX_PORT
+from keel.spec.origins import mariadb_problem
 
 LABEL_RE = re.compile(r"^(?!-)[A-Za-z0-9-]{1,63}(?<!-)$")
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -135,6 +136,10 @@ def origin_error(key: str, value: Any) -> str | None:
     if _version(text) is not None:
         return None
     if PATTERN_RE.match(text):
+        # A pattern is MariaDB's spelling on every engine, and one with ::
+        # matches addresses outside any one prefix.
+        if "::" in text:
+            return f"{key}: {mariadb_problem(text)}"
         return None
     if domain_error(key, text) is not None:
         return (

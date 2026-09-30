@@ -340,11 +340,17 @@ reads the authorizations off the server and one left behind would drift
 for ever. `allowed_from` absent, as against empty, leaves the server's
 authorizations alone.
 
-Two kinds of prefix are refused, because authorizing a wider or a
-narrower range than the description asked for is not a decision apply
-makes:
+Three kinds of origin are refused on MariaDB, because authorizing a
+wider or a narrower range than the description asked for is not a
+decision apply makes. `keel spec validate` refuses them, so apply stops
+before it writes the configuration or restarts the server, and before
+it grants the other origins of the list; the plan refuses them again
+for a description that reaches it some other way:
 
-- one that stops inside a group, a `/56`;
+- a prefix that stops inside a group, a `/56`;
+- a host pattern with `::`, on any engine: `::` stands for a number of
+  zero groups no wildcard counts, so `2001::5:%` holds
+  `2001:0:0:0:0:5:a:b`, outside `2001:0:0:5::/64`;
 - an IPv6 prefix with a zero group the address text can compress away:
   its last group is zero, or two groups in a row are. MariaDB compares
   the text of the client's address, and in `fd3d:80b2:d0d7::/64`, what
@@ -354,6 +360,12 @@ makes:
   no IPv6 netmask or CIDR host either; both were tried and match
   nothing. The refusal names an address the pattern would have missed;
   write each replica's address instead.
+
+An account is dropped unless the description grants exactly its host,
+ignoring case. An account 0.11.0 made at the expanded
+`fd3d:80b2:d0d7:0:0:0:0:2` names the same origin as the
+`fd3d:80b2:d0d7::2` granted now, and MariaDB never matches it, so it is
+dropped and not kept beside the new one.
 
 The account name is a constant and not a field. Both ends of a pair must
 name the same account, and a field each operator sets on their own

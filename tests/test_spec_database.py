@@ -275,7 +275,7 @@ class TestReplication(unittest.TestCase):
         valid(
             "version: 1\ndatabase:\n  server:\n    engine: mariadb\n"
             "    role: standalone\n    replication:\n"
-            "      allowed_from: [2001:db8::/64]\n"
+            "      allowed_from: [2804:710:d0:5::/64]\n"
         )
 
     def test_the_primary_endpoint_must_be_a_literal_address(self):
@@ -354,6 +354,43 @@ class TestAllowedFrom(unittest.TestCase):
             "    role: primary\n    replication:\n      allowed_from:\n"
             "        - 2001:db8:1:%\n        - 192.0.2.%\n"
             "        - replica_.example.org\n"
+        )
+
+    def test_a_pattern_with_a_double_colon_is_refused_for_any_engine(self):
+        messages(
+            "version: 1\ndatabase:\n  server:\n    engine: postgresql\n"
+            "    role: primary\n    replication:\n      allowed_from:\n"
+            '        - "2001::5:%"\n',
+            "2001:0:0:0:0:5:a:b",
+        )
+
+    def test_mariadb_refuses_a_prefix_it_cannot_match_before_any_apply(self):
+        # The Template B smoke test of 2026-09-30: the overlay /64 was
+        # granted as fd3d:80b2:d0d7:0:%, which refused fd3d:80b2:d0d7::2.
+        # Refused here, apply never writes the primary's configuration.
+        messages(
+            "version: 1\ndatabase:\n  server:\n    engine: mariadb\n"
+            "    role: primary\n    replication:\n      allowed_from:\n"
+            "        - fd3d:80b2:d0d7::/64\n        - 2001:db8::/56\n"
+            "        - fd3d:80b2:d0d7::2\n",
+            "allowed_from: fd3d:80b2:d0d7::/64 has no host pattern",
+            "fd3d:80b2:d0d7::1,",
+            "allowed_from: 2001:db8::/56 names no whole group",
+        )
+
+    def test_mariadb_accepts_what_it_holds_exactly(self):
+        valid(
+            "version: 1\ndatabase:\n  server:\n    engine: mariadb\n"
+            "    role: primary\n    replication:\n      allowed_from:\n"
+            "        - fd3d:80b2:d0d7::2\n        - 2804:710:d0:5::/64\n"
+            "        - 2001:db8:0:5::/64\n        - 192.0.2.0/24\n"
+        )
+
+    def test_another_engine_takes_the_same_prefix_as_it_is(self):
+        valid(
+            "version: 1\ndatabase:\n  server:\n    engine: postgresql\n"
+            "    role: primary\n    replication:\n      allowed_from:\n"
+            "        - fd3d:80b2:d0d7::/64\n        - 2001:db8::/56\n"
         )
 
     def test_a_pattern_of_nothing_but_a_wildcard_is_accepted(self):

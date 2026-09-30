@@ -34,6 +34,7 @@ from keel.spec.fields import (
     origin_error,
     port_error,
 )
+from keel.spec.origins import mariadb_problem
 from keel.spec.validate_secret import validate_secret
 
 SERVER_KEYS = ("engine", "role", "listen", "replication")
@@ -86,7 +87,8 @@ def _validate_server(server: Any, check_secret_files: bool) -> list[str]:
     errors.extend(_listen(server.get("listen")))
     errors.extend(
         _replication(
-            server.get("replication"), str(role), check_secret_files
+            server.get("replication"), str(role), check_secret_files,
+            str(server.get("engine")),
         )
     )
     return errors
@@ -114,7 +116,7 @@ def _listen(listen: Any) -> list[str]:
 
 
 def _replication(
-    replication: Any, role: str, check_secret_files: bool
+    replication: Any, role: str, check_secret_files: bool, engine: str,
 ) -> list[str]:
     key = "database.server.replication"
     error = mapping_error(key, replication)
@@ -136,7 +138,7 @@ def _replication(
     elif primary is not None:
         errors.extend(_endpoint(f"{key}.primary", primary, ENDPOINT_KEYS))
 
-    errors.extend(_allowed_from(replication.get("allowed_from")))
+    errors.extend(_allowed_from(replication.get("allowed_from"), engine))
     errors.extend(
         _secret(f"{key}.secret", replication.get("secret"),
                 check_secret_files)
@@ -144,16 +146,30 @@ def _replication(
     return errors
 
 
-def _allowed_from(allowed: Any) -> list[str]:
+def _allowed_from(allowed: Any, engine: str) -> list[str]:
     key = "database.server.replication.allowed_from"
     error = list_error(key, allowed)
     if error:
         return [error]
-    return [
-        error
-        for origin in allowed or []
-        if (error := origin_error(key, origin)) is not None
-    ]
+    errors = []
+    for origin in allowed or []:
+        error = origin_error(key, origin) or _grantable(key, origin, engine)
+        if error:
+            errors.append(error)
+    return errors
+
+
+def _grantable(key: str, origin: str, engine: str) -> str | None:
+    """A MariaDB grant holds an origin exactly, or the description is wrong
+
+    Refused here and not only in the plan: by then apply has written the
+    primary's configuration and restarted it, and the refusal skips the
+    grants of the other origins in the list too.
+    """
+    if engine != "mariadb":
+        return None
+    problem = mariadb_problem(origin)
+    return f"{key}: {problem}" if problem else None
 
 
 def _validate_client(client: Any, check_secret_files: bool) -> list[str]:

@@ -19,6 +19,7 @@ from keel.inspect.dbengines import Engine
 from keel.inspect.dbreading import Reading, Value
 from keel.inspect.report import Finding, inferred, missing
 from keel.inspect.tree import File
+from keel.spec.origins import mariadb_problem
 
 SERVER = "database.server"
 CLIENT = "database.client"
@@ -52,6 +53,11 @@ ROLE_FIELDS = {
 NOT_ASKED = (
     "the {engine} server is installed ({binary}) and could not be asked what"
     " it is: {problem}"
+)
+UNHELD = (
+    "the server holds a grant no description may declare, so none is"
+    " written: {problems}. keel spec apply drops it once the description"
+    " names the origins it should hold"
 )
 SEVERAL_ENGINES = (
     "this machine runs {count} database servers ({engines}); the description"
@@ -139,7 +145,9 @@ def probe_server(
         ("allowed_from", reading.allowed_from),
     ):
         path = f"{SERVER}.replication.{name}"
-        reason = _other_role(f"replication.{name}", role)
+        reason = _other_role(f"replication.{name}", role) or _unheld(
+            engine.name, name, value
+        )
         if reason:
             findings.append(missing(path, reason))
             continue
@@ -147,6 +155,23 @@ def probe_server(
     if replication:
         section["replication"] = replication
     return section, findings
+
+
+def _unheld(engine: str, name: str, value: Value) -> str:
+    """Why the grants a MariaDB primary holds are not written, if so
+
+    keel 0.11.0 granted the overlay /64 as fd3d:80b2:d0d7:0:%, which
+    refuses fd3d:80b2:d0d7::2. Written into the description, that grant
+    would not validate, and a description inspect writes must, so the
+    field is reported with the reason instead.
+    """
+    if engine != "mariadb" or name != "allowed_from" or not value.known:
+        return ""
+    problems = [
+        problem for one in value.value or []
+        if (problem := mariadb_problem(str(one)))
+    ]
+    return UNHELD.format(problems="; ".join(problems)) if problems else ""
 
 
 def _other_role(path: str, role: object) -> str:

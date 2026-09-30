@@ -163,13 +163,13 @@ class TestFieldsOfAnotherRole(unittest.TestCase):
         declared = declaring(
             role="primary",
             replication={
-                "allowed_from": ["2001:db8:1::/64"],
+                "allowed_from": ["2001:db8:1:5::/64"],
                 "primary": {"host": "2001:db8:1::10"},
             },
         )
         found = verdicts(
             declared,
-            observe(dict(MARIADB_STANDALONE, grants="2001:db8:1::/64\n")),
+            observe(dict(MARIADB_STANDALONE, grants="2001:db8:1:5:%\n")),
         )
         self.assertEqual(
             found["database.server.replication.primary.host"], NOT_COMPARED
@@ -216,11 +216,13 @@ class TestNormalisation(unittest.TestCase):
         declared = declaring(
             role="primary",
             replication={"allowed_from": [
-                "2001:0DB8:0002::/64", "2001:db8:1::/64",
+                "2001:0DB8:0002:0005::/64", "2001:db8:1:5::/64",
             ]},
         )
+        # Grants MariaDB matches: a host written as a /64 matches nothing
+        # there, and inspect reports it as not inferred (keel 0.11.1).
         observed = observe(dict(
-            MARIADB_STANDALONE, grants="2001:db8:1::/64\n2001:db8:2::/64\n"
+            MARIADB_STANDALONE, grants="2001:db8:1:5:%\n2001:db8:2:5:%\n"
         ))
         found = verdicts(declared, observed)
         self.assertEqual(

@@ -18,6 +18,7 @@ from keel.spec.origins import (
     compressed_address,
     host_pattern,
     is_name,
+    mariadb_problem,
 )
 
 
@@ -186,6 +187,12 @@ class TestHostPattern:
     def test_a_host_pattern_with_those_groups_has_none_either(self, pattern):
         assert host_pattern(pattern) is None
 
+    @pytest.mark.parametrize("pattern", ["2001::5:%", "fd00::_", "::%"])
+    def test_a_host_pattern_with_a_double_colon_has_none(self, pattern):
+        # :: stands for a number of zero groups no wildcard counts, so
+        # 2001::5:% holds 2001::5:a:b, which is 2001:0:0:0:0:5:a:b.
+        assert host_pattern(pattern) is None
+
     def test_a_lone_zero_group_inside_the_prefix_is_never_compressed(self):
         # The text compresses a run of two zero groups or more, so a zero
         # between two groups that are not zero is always written.
@@ -293,6 +300,30 @@ class TestEveryAddressOfThePrefix:
 
     def test_an_empty_origin_has_no_spelling(self):
         assert host_pattern("") is None
+
+
+class TestWhyMariadbCannotHoldIt:
+    """The one reason validate, inspect and apply give for an origin"""
+
+    @pytest.mark.parametrize(
+        "origin",
+        ["fd3d:80b2:d0d7::2", "2804:710:d0:5::/64", "2001:db8:1:%",
+         "192.0.2.0/24", "replica.example.org", "%"],
+    )
+    def test_an_origin_mariadb_holds_exactly_has_no_problem(self, origin):
+        assert mariadb_problem(origin) is None
+
+    def test_a_compressed_zero_group_names_the_address_it_would_miss(self):
+        found = mariadb_problem("fd3d:80b2:d0d7::/64")
+
+        assert "fd3d:80b2:d0d7::1," in found
+        assert "each replica's address" in found
+
+    def test_a_prefix_inside_a_group_says_so(self):
+        assert "names no whole group" in mariadb_problem("2001:db8::/56")
+
+    def test_a_double_colon_pattern_says_what_it_would_hold(self):
+        assert "2001:0:0:0:0:5:a:b" in mariadb_problem("2001::5:%")
 
 
 class TestAgainstTheSchema:

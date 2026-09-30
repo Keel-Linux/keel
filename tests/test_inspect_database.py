@@ -740,6 +740,22 @@ class TestWhatInspectWritesValidates(unittest.TestCase):
         )
         self.assertEqual(self.validate({"server": section}), [])
 
+    def test_a_grant_mariadb_cannot_match_is_reported_not_written(self):
+        # What keel 0.11.0 granted for the overlay /64. Written into the
+        # description it would not validate, so the field is not inferred
+        # and the reason names the grant and what to write instead.
+        answered = dict(
+            MARIADB_STANDALONE, grants="fd3d:80b2:d0d7:0:%\n2001:db8:1:%\n"
+        )
+        section, findings = probe_server((self.one("mariadb", answered),))
+        self.assertNotIn("allowed_from", section.get("replication", {}))
+        reason = reason_of(
+            findings, "database.server.replication.allowed_from"
+        )
+        self.assertIn("fd3d:80b2:d0d7:0:%", reason)
+        self.assertIn("each replica's address", reason)
+        self.assertEqual(self.validate({"server": section}), [])
+
     def test_a_postgresql_primary_with_an_hba_prefix_validates(self):
         answered = dict(
             PG_STANDALONE,

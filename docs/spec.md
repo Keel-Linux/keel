@@ -723,8 +723,11 @@ the last group of the prefix is zero, or two of its groups in a row are, some
 addresses of the prefix are written without them: in `fd3d:80b2:d0d7::/64`,
 which is what `keel network wireguard suggest-address` prints, the replica
 `fd3d:80b2:d0d7::2` does not match `fd3d:80b2:d0d7:0:%`. No pattern holds
-such a prefix exactly and MariaDB has no IPv6 netmask, so apply refuses it
-and names an address it would have missed. **Write each replica's address
+such a prefix exactly and MariaDB has no IPv6 netmask, so validation refuses
+it when the engine is `mariadb`, naming an address it would have missed. A
+host pattern with `::` is refused on every engine: `::` stands for a number
+of zero groups no wildcard counts, so `2001::5:%` holds addresses outside any
+one prefix. **Write each replica's address
 instead**, as the overlay's peers are written:
 
 ```yaml
