@@ -28,6 +28,7 @@ from keel.system.actions import (
     Refuse,
     RemoveFile,
     Run,
+    SetBouncerMode,
     Symlink,
     WriteFile,
 )
@@ -51,8 +52,7 @@ ON = {**OFF, "crowdsec": "enabled"}
 UNITS = ("etcd.service", "crowdsec.service",
          "crowdsec-firewall-bouncer.service")
 REGISTERED = CrowdsecState(lapi=True, capi="present", bouncer_key=True,
-                           bouncer_mode="nftables", bouncer_id="FB-1",
-                           iptables=None)
+                           bouncer_mode="nftables", bouncer_id="FB-1")
 
 
 def units(enabled: str = "disabled", active: str | None = "inactive",
@@ -225,8 +225,7 @@ class TestUnits(PlanCase):
 
 class TestCrowdsecIdentity(PlanCase):
     NONE = CrowdsecState(lapi=False, capi="absent", bouncer_key=False,
-                         bouncer_mode=None, bouncer_id=None,
-                         iptables="/usr/sbin/iptables-legacy")
+                         bouncer_mode=None, bouncer_id=None)
 
     def test_a_first_enable_makes_the_identity_before_the_units(self):
         found = self.actions(ON, self.state(crowdsec=self.NONE),
@@ -242,7 +241,7 @@ class TestCrowdsecIdentity(PlanCase):
                                          "register"))
         self.assertIsInstance(found[3], AddBouncer)
         self.assertEqual((found[3].mode, found[3].old_id),
-                         ("iptables", None))
+                         ("nftables", None))
         self.assertEqual(found[4].argv,
                          ("systemctl", "enable", "crowdsec.service"))
 
@@ -277,12 +276,34 @@ class TestCrowdsecIdentity(PlanCase):
         self.assertEqual(found[0].pending, PENDING)
         self.assertIn(f"remove /{PENDING}", found[0].describe())
 
-    def test_the_mode_follows_the_iptables_alternative(self):
+    def test_an_iptables_bouncer_is_moved_to_nftables_and_restarted(self):
+        """iptables mode needs ipset, which nothing installs; nftables
+        tables live beside TurnKey's legacy iptables rules"""
         state = self.state(crowdsec=dataclasses.replace(
-            self.NONE, iptables="/usr/sbin/iptables-nft"))
-        bouncer = [a for a in self.actions(ON, state)
-                   if isinstance(a, AddBouncer)][0]
-        self.assertEqual(bouncer.mode, "nftables")
+            REGISTERED, bouncer_mode="iptables"),
+            units=units("enabled", "active"))
+        found = self.actions(ON, state, field="overlays.crowdsec")
+        self.assertIsInstance(found[0], SetBouncerMode)
+        self.assertEqual((found[0].config, found[0].mode, found[0].was),
+                         (BOUNCER, "nftables", "iptables"))
+        self.assertEqual([a.argv for a in found[1:]], [
+            ("systemctl", "restart", "crowdsec.service"),
+            ("systemctl", "restart", "crowdsec-firewall-bouncer.service")])
+
+    def test_the_mode_is_set_under_a_root_too(self):
+        state = self.state(crowdsec=dataclasses.replace(
+            REGISTERED, lapi=False, bouncer_mode=None),
+            units=units(active=None), root="/srv/tree")
+        found = self.actions(ON, state, live=False, available=frozenset(),
+                             field="overlays.crowdsec")
+        self.assertIsInstance(found[0], Note)
+        self.assertIsInstance(found[1], SetBouncerMode)
+
+    def test_a_disabled_overlay_keeps_its_mode(self):
+        state = self.state(crowdsec=dataclasses.replace(
+            REGISTERED, bouncer_mode="iptables"))
+        self.assertFalse([a for a in self.actions(OFF, state)
+                          if isinstance(a, SetBouncerMode)])
 
     def test_a_first_enable_that_stopped_half_way_asks_capi_again(self):
         """the empty file made, then cscli machines add failed: the next
@@ -457,7 +478,7 @@ class TestObserve(ManifestCase):
         self.assertEqual(found.crowdsec, CrowdsecState(
             lapi=True, capi="empty", bouncer_key=True,
             bouncer_mode="iptables", bouncer_id="FirewallBouncer-1",
-            iptables=None, pending=True))
+            pending=True))
         self.assertEqual(found.monit_link, "/" + MANIFEST_MONIT)
         self.assertTrue(found.monit_link_present)
         self.assertFalse(found.monit_file.readable)
@@ -467,7 +488,7 @@ class TestObserve(ManifestCase):
             "version": 1, "appliance": {"name": "core"}})
         self.assertEqual(found.crowdsec, CrowdsecState(
             lapi=False, capi="absent", bouncer_key=False,
-            bouncer_mode=None, bouncer_id=None, iptables=None))
+            bouncer_mode=None, bouncer_id=None))
 
     def test_manifests_that_cannot_be_used(self):
         found = observe_appliance(self.root, {

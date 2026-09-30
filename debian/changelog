@@ -18,7 +18,9 @@ keel (0.13.0) unstable; urgency=medium
     failure offline is said and survived since the local API runs
     without it, and cscli bouncers add, whose key goes from its standard
     output to the bouncer's .local file, mode 0600, and nowhere else. No
-    identity is made under --root.
+    identity is made under --root. The bouncer always runs in nftables
+    mode: its iptables mode, which the Debian postinst picks under
+    TurnKey's iptables-legacy, needs ipset, which nothing installs.
   * apply --system writes Monit's checks derived from the manifests to
     /etc/keel/monit/keel-manifest.conf: the appliance's own processes and
     checks and those of every enabled overlay, restarted through systemd

@@ -72,6 +72,23 @@ class AddBouncer:
 
 
 @dataclass(frozen=True)
+class SetBouncerMode:
+    """Set the `mode:` line of CrowdSec's bouncer file, keeping the rest
+
+    Carried out by keel.system.crowdsec. The file holds the bouncer's key,
+    so it is rewritten in place, mode 0600, and never part of the plan.
+    """
+
+    config: str
+    mode: str
+    was: str | None
+
+    def describe(self) -> str:
+        return (f"set mode: {self.mode} in /{self.config} (was"
+                f" {self.was or 'unset'}; the rest of the file is kept)")
+
+
+@dataclass(frozen=True)
 class WriteFile:
     """Write `content` to `path` (relative to the root) with mode and owner"""
 
@@ -346,7 +363,7 @@ class Refuse:
 Change = (Run | RunSql | WriteFile | RemoveFile | MakeDir | Symlink
           | SwitchNetwork | GenerateKey | AdoptKey | SeedReplica
           | LockReplica | UnlockAccounts | PromoteReplica | Attempt
-          | AddBouncer)
+          | AddBouncer | SetBouncerMode)
 Action = Change | Note | Refuse
 
 

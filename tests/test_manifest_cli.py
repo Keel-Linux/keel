@@ -36,7 +36,7 @@ FORMAT_PORTS = """\
 | Port | Process | From | Exposure |
 | --- | --- | --- | --- |
 | 22/tcp | sshd | core | public |
-| 25/tcp | postfix | core | loopback |
+| 25/tcp | postfix | core | loopback, IPv4 |
 | 80/tcp, 443/tcp | nginx | web (nginx) | public |
 | 2379/tcp, 2380/tcp | etcd | core (etcd) | mesh |
 | 6060/tcp, 8080/tcp | crowdsec | core (crowdsec) | loopback, IPv4 |

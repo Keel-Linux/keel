@@ -18,7 +18,14 @@ from unittest import mock
 from helpers import spec  # noqa: F401
 
 from keel.system import Effects, execute
-from keel.system.actions import AddBouncer, Attempt, Plan, Run, Step
+from keel.system.actions import (
+    AddBouncer,
+    Attempt,
+    Plan,
+    Run,
+    SetBouncerMode,
+    Step,
+)
 from keel.system.crowdsec import (
     BOUNCER,
     BOUNCER_ID,
@@ -106,6 +113,21 @@ class TestAddBouncer(unittest.TestCase):
                 fob.write("x\n")
             self.assertIsNotNone(Effects(self.root).apply(action))
         self.assertTrue(os.path.exists(pending))
+
+    def test_the_mode_is_set_and_the_key_kept(self):
+        os.makedirs(os.path.dirname(join(self.root, BOUNCER)))
+        with open(join(self.root, BOUNCER), "w") as fob:
+            fob.write(f"mode: iptables\napi_key: {KEY}\n")
+        action = SetBouncerMode(BOUNCER, "nftables", "iptables")
+        self.assertIsNone(Effects(self.root).apply(action))
+        self.assertEqual(self.read(BOUNCER),
+                         f"mode: nftables\napi_key: {KEY}\n")
+        info = os.stat(join(self.root, BOUNCER))
+        self.assertEqual(stat.S_IMODE(info.st_mode), 0o600)
+        self.assertNotIn(KEY, action.describe())
+        os.remove(join(self.root, BOUNCER))
+        self.assertEqual(Effects(self.root).apply(action),
+                         f"/{BOUNCER} cannot be read")
 
     def test_a_failure_says_why_and_never_the_key(self):
         problem = self.add(Cscli(1, "", "LAPI database locked\n"))
