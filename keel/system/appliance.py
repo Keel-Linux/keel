@@ -136,7 +136,8 @@ def start(systemctl: tuple[str, ...], unit: str, found, live: bool,
         actions.append(Run(("systemctl", "start", unit), f"start {unit}"))
     elif live and made:
         actions.append(Run(("systemctl", "restart", unit),
-                           f"restart {unit} on its new identity"))
+                           f"restart {unit}: its identity or its bouncer's"
+                           " mode changed"))
     return actions
 
 
