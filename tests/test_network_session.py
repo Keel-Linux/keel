@@ -83,6 +83,26 @@ class TestOrigin(unittest.TestCase):
         self.assertEqual((found.kind, found.detail),
                          (session.CONSOLE_KIND, "the console /dev/ttyS0"))
 
+    def test_a_container_console_is_a_console(self):
+        # In an LXC container (plain LXC and Proxmox) /dev/tty1 is a link
+        # to lxc/tty1, so the first boot on the console, and a login from
+        # lxc-console or pct console, hold /dev/lxc/tty1: keel refused it
+        # as "neither an SSH session nor a console" (role-a, 2026-09-30).
+        for terminal in ("/dev/lxc/tty1", "/dev/lxc/tty4",
+                         "/dev/lxc/console"):
+            proc = FakeProc(self).add(1, "init", 0).add(
+                60, "keel", 1, stdin=terminal)
+            found = session.origin(proc.path, 60, lambda: "")
+            self.assertEqual((found.kind, found.detail), (
+                session.CONSOLE_KIND, f"the console {terminal}"))
+
+    def test_other_names_under_lxc_are_not_consoles(self):
+        for terminal in ("/dev/lxc/pts/1", "/dev/lxc/ttyX", "/dev/lxctty1"):
+            proc = FakeProc(self).add(1, "init", 0).add(
+                60, "keel", 1, stdin=terminal)
+            self.assertEqual(session.origin(proc.path, 60, lambda: "").kind,
+                             session.UNKNOWN, terminal)
+
     def test_a_tmux_shell_on_a_pseudo_terminal_is_unknown(self):
         proc = FakeProc(self).add(1, "init", 0).add(20, "tmux: server", 1).add(
             60, "keel", 20, stdin="/dev/pts/3")

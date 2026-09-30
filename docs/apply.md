@@ -692,7 +692,7 @@ works:
 | Run from | Accepted when |
 | --- | --- |
 | SSH | the session (its `sshd-session` process) started after the interface came up on the new file, and came from another machine (`ssh` to the new address from the old session proves nothing), and arrived at a static address the new file declares for the session's family; for a family the file leaves to DHCP or SLAAC, at an address of the new file or one the interface now holds. With SLAAC kept beside a static address, a session over the SLAAC address does not show the static one works, so it is refused |
-| A console (`tty1`, `ttyS0`, `hvc0`, `console`) | always: a person there has seen the machine |
+| A console (`tty1`, `ttyS0`, `hvc0`, `console`, and in an LXC container `lxc/tty1` and `lxc/console`, which `/dev/tty1` links to and which only `lxc-console` or `pct console` on the host reach) | always: a person there has seen the machine |
 | A process attached from a container's host | always, as a console |
 | Anything else: a shell that survived the change in tmux, a service | refused |
 
