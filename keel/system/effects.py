@@ -17,17 +17,20 @@ from keel.system.actions import (
     AdoptKey,
     Change,
     GenerateKey,
+    LockReplica,
     MakeDir,
+    PromoteReplica,
     RemoveFile,
     Run,
     RunSql,
     SeedReplica,
     Symlink,
     SwitchNetwork,
+    UnlockAccounts,
     WriteFile,
 )
 from keel.network import marker, switch, wgkeys
-from keel.system import dbseed
+from keel.system import dbreadonly, dbseed
 
 NOT_RUNNABLE = 127
 
@@ -59,6 +62,12 @@ class Effects:
                                     self.tree.path(action.path.lstrip("/")))
             if isinstance(action, SeedReplica):
                 return dbseed.seed(self.tree.root, action)
+            if isinstance(action, LockReplica):
+                return dbreadonly.lock(self.tree.root)
+            if isinstance(action, UnlockAccounts):
+                return dbreadonly.unlock(self.tree.root)
+            if isinstance(action, PromoteReplica):
+                return dbreadonly.promote(self.tree.root, action)
             return self.symlink(action)
         except OSError as e:
             return f"{e.strerror or e}"

@@ -161,7 +161,8 @@ of the description it writes: a replica is read only and every other role is
 writable, so it follows the role and nothing declares it. It is the server's
 `read_only` variable, `true` or `false`, and the line names the accounts that
 write through it anyway, those holding `READ_ONLY ADMIN` other than the
-server's own `root`, `mysql` and `mariadb.sys`:
+server's own `root`, `mysql` and `mariadb.sys` at `localhost`, `127.0.0.1` or
+`::1` (`'root'@'%'` is named):
 
 ```
 database.server.read_only: true (from mariadb ... SHOW GLOBAL VARIABLES ...; READ_ONLY ADMIN lets 'admin'@'localhost', 'admin'@'::1', 'admin'@'127.0.0.1' write through it)

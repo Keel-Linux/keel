@@ -519,6 +519,17 @@ class TestReadOnly(unittest.TestCase):
             reading.bypass.value, ["'admin'@'localhost'", "'admin'@'::1'"]
         )
 
+    def test_root_from_anywhere_is_not_the_servers_own(self):
+        """Debian's root is a socket account at localhost; a root that
+        connects from the network is somebody's, and is named"""
+        answered = with_variables(
+            "read_only\tON\n",
+            bypass="'root'@'localhost'\n'root'@'%'\n'mysql'@'::1'\n"
+                   "'mariadb.sys'@'127.0.0.1'\n",
+        )
+        reading = mariadb_reading(answered, SOCKETS)
+        self.assertEqual(reading.bypass.value, ["'root'@'%'"])
+
     def test_the_bypass_question_names_read_only_admin(self):
         engine = next(one for one in ENGINES if one.name == "mariadb")
         self.assertIn("READ_ONLY ADMIN", engine.questions["bypass"][-1])

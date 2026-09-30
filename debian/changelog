@@ -10,13 +10,25 @@ keel (0.11.5) unstable; urgency=medium
     privileges on its own schema only and is refused with error 1290.
     The restart that turns it on comes before the seed, whose load runs
     as root.
-  * apply names the accounts other than the server's own that hold
-    READ_ONLY ADMIN on a replica, and sets read_only with SET GLOBAL
-    when the file already says so and the server does not (turned off
-    by hand, or a standalone that was a replica).
-  * keel database promote stops replication, then turns read_only off
-    and removes the line from the drop-in, without a restart, so the
-    new primary stays writable across one.
+  * On a replica, after the seed, apply revokes READ_ONLY ADMIN with
+    sql_log_bin off from every account that holds it but root, mysql
+    and mariadb.sys at this machine: the image's admin and Adminer's
+    adminer hold ALL ON *.*, and Adminer could write to the replica
+    through them. The accounts are recorded in
+    /var/lib/keel/database/read-only-admin first, and a promotion or a
+    return to standalone or primary grants it back to those only. root,
+    and Webmin's MySQL module with it, still writes: MariaDB 11.8 has no
+    way to stop it, and docs/apply.md says so.
+  * apply sets read_only with SET GLOBAL when the file already says so
+    and the server does not (turned off by hand, or a standalone that
+    was a replica), and says so when the server names no read_only.
+  * keel database promote no longer loses what the replica received and
+    had not applied: it stops the I/O thread, waits up to 600 s for the
+    SQL thread to apply the relay log, and only then runs STOP SLAVE,
+    RESET SLAVE ALL and turns read_only off. A SQL thread stopped on an
+    error is refused with what to do, and one that stops or does not
+    catch up while draining starts the I/O thread again and promotes
+    nothing. The read_only line leaves the drop-in without a restart.
   * keel inspect reports database.server.read_only, with the accounts
     that write through it, and keel diff compares it with the role the
     server has (decision 0020), not with a field of the description.

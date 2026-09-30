@@ -36,14 +36,18 @@ from keel.spec.origins import canonical, is_name, mariadb_problem
 from keel.system import dbmariadb as mariadb
 from keel.system.actions import (
     Action,
+    LockReplica,
     Note,
+    PromoteReplica,
     Refuse,
     Run,
     RunSql,
     SeedReplica,
     Step,
+    UnlockAccounts,
     WriteFile,
 )
+from keel.system.dbreadonly import STOPPED as UNDRAINABLE
 from keel.system.dbstate import (
     DatabaseState,
     declared_server,
@@ -138,12 +142,22 @@ SHARED = (
     " the application on this node (wp-config.php and its DB_PASS for"
     " WordPress) must then be given the new one"
 )
-BYPASSED = (
-    "{accounts} hold READ_ONLY ADMIN and write through read_only on this"
-    " replica, as the replication thread and root do. An application"
-    " connecting as one of them would write rows its primary does not"
-    " have and stop replication: give the application an account with"
-    " privileges on its own schema only"
+READ_ONLY_FIELD = f"{FIELD}.read_only"
+# How long a promotion waits for the SQL thread to apply what the I/O
+# thread received. A WordPress replica holds seconds of backlog; one that
+# needs longer is refused and replicates on.
+DRAIN_TIMEOUT = 600
+LOCKED = (
+    "unchanged (no account but root, mysql and mariadb.sys at this machine"
+    " holds READ_ONLY ADMIN)"
+)
+UNLISTED = (
+    "the accounts that write through read_only could not be listed"
+    " ({problem}), so none had READ_ONLY ADMIN taken"
+)
+UNREAD = (
+    "the server names no read_only ({problem}), so it was not set on a"
+    " guess; the configuration file carries it into the next restart"
 )
 UNREACHABLE = (
     "{problem}. The replica cannot be seeded, so nothing was dropped, its"
@@ -183,11 +197,35 @@ def plan_database(
         replication = _replication(server, state, observed, confirmed)
         if any(isinstance(one, Refuse) for one in replication.actions):
             return [replication]
-        return [_configuration(server, state, role, overlay), replication]
+        seeds = any(isinstance(one, SeedReplica)
+                    for one in replication.actions)
+        return [_configuration(server, state, role, overlay), replication,
+                _lock(state, seeds)]
     steps = [_configuration(server, state, role, overlay)]
     if role == PRIMARY:
         steps.append(_authorizations(server, state))
+    if state.revoked.readable:
+        steps.append(Step(READ_ONLY_FIELD, (UnlockAccounts(),)))
     return steps
+
+
+def _lock(state: DatabaseState, seeds: bool) -> Step:
+    """Take READ_ONLY ADMIN from the accounts that write through read_only
+
+    After the seed, which copies the primary's grants and with them the
+    privilege this takes away; and whenever a seed runs, since what it
+    brings was not observed. Asked of the server when it runs.
+    """
+    accounts = state.reading.bypass
+    if seeds or accounts.value:
+        return Step(READ_ONLY_FIELD, (
+            LockReplica(tuple(accounts.value or ())),
+        ))
+    if not accounts.known:
+        return Step(READ_ONLY_FIELD, (
+            Note(UNLISTED.format(problem=accounts.problem)),
+        ))
+    return Step(READ_ONLY_FIELD, (Note(LOCKED),))
 
 
 PROMOTE_FIELD = "database.server.role"
@@ -228,9 +266,13 @@ def plan_promote(doc: dict, state: DatabaseState | None) -> list[Step]:
         return [Step(PROMOTE_FIELD, (
             Refuse(NOT_A_REPLICA.format(observed=observed)),
         ))]
-    statements = mariadb.promote()
+    error = sql_stopped(state.status)
+    if error is not None:
+        return [Step(PROMOTE_FIELD, (
+            Refuse(UNDRAINABLE.format(error=error)),
+        ))]
     return [Step(PROMOTE_FIELD, (
-        RunSql(mariadb.CLIENT, statements.text, statements.summary),
+        PromoteReplica(DRAIN_TIMEOUT),
     ) + _writable_file(state) + (
         Note(AFTER),
         Note(OLD_PRIMARY),
@@ -305,9 +347,6 @@ def _configuration(
     notes: list[Action] = []
     if names:
         notes.append(Note(NAME_ORIGIN.format(names=", ".join(names))))
-    accounts = state.reading.bypass.value or []
-    if role == REPLICA and accounts:
-        notes.append(Note(BYPASSED.format(accounts=", ".join(accounts))))
     if state.dropin.readable and state.dropin.text == text:
         return Step(FIELD, tuple(notes) + (
             Note(f"unchanged ({state.dropin.path}, server id {identity})"),
@@ -334,7 +373,9 @@ def _read_only_now(state: DatabaseState, role: str) -> tuple[Action, ...]:
     """
     running = state.reading.read_only
     wanted = role == REPLICA
-    if not running.known or running.value == wanted:
+    if not running.known:
+        return (Note(UNREAD.format(problem=running.problem)),)
+    if running.value == wanted:
         return ()
     statements = mariadb.set_read_only(wanted)
     return (RunSql(mariadb.CLIENT, statements.text, statements.summary),)

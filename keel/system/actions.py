@@ -127,6 +127,65 @@ class SeedReplica:
         )
 
 
+# Where keel.system.dbreadonly records the accounts it took READ_ONLY
+# ADMIN from, relative to the root, so only those get it back.
+READ_ONLY_RECORD = "var/lib/keel/database/read-only-admin"
+
+
+@dataclass(frozen=True)
+class LockReplica:
+    """Take READ_ONLY ADMIN from every account on this replica that holds
+    it, the server's own aside, recording which (keel.system.dbreadonly)
+
+    Asked of the server when it runs, not planned from `accounts`, which
+    is what was observed before a seed brought the primary's grants.
+    """
+
+    accounts: tuple[str, ...]
+
+    def describe(self) -> str:
+        observed = (f" ({', '.join(self.accounts)} before this run)"
+                    if self.accounts else "")
+        return (
+            "revoke READ_ONLY ADMIN, with sql_log_bin off, from every"
+            f" account but root, mysql and mariadb.sys at this machine"
+            f"{observed}, recorded in /{READ_ONLY_RECORD} so that a"
+            " promotion gives it back"
+        )
+
+
+@dataclass(frozen=True)
+class UnlockAccounts:
+    """Give READ_ONLY ADMIN back to what a replica took it from"""
+
+    def describe(self) -> str:
+        return (
+            "grant READ_ONLY ADMIN back, with sql_log_bin off, to the"
+            f" accounts /{READ_ONLY_RECORD} records, and remove the record"
+        )
+
+
+@dataclass(frozen=True)
+class PromoteReplica:
+    """Drain, then promote (keel.system.dbreadonly)
+
+    The I/O thread stops first and the SQL thread applies what was
+    received, for at most `timeout` seconds: RESET SLAVE ALL discards the
+    relay log, and with it anything received and not applied.
+    """
+
+    timeout: int
+
+    def describe(self) -> str:
+        return (
+            "stop the I/O thread, wait up to"
+            f" {self.timeout} s for the SQL thread to apply everything it"
+            " received, then stop replicating, forget the primary, turn"
+            " read_only off and grant READ_ONLY ADMIN back to the accounts"
+            " the replica took it from"
+        )
+
+
 @dataclass(frozen=True)
 class SwitchNetwork:
     """Bring an interface up on a new file, reverting unless confirmed
@@ -237,7 +296,8 @@ class Refuse:
 
 
 Change = (Run | RunSql | WriteFile | RemoveFile | MakeDir | Symlink
-          | SwitchNetwork | GenerateKey | AdoptKey | SeedReplica)
+          | SwitchNetwork | GenerateKey | AdoptKey | SeedReplica
+          | LockReplica | UnlockAccounts | PromoteReplica)
 Action = Change | Note | Refuse
 
 

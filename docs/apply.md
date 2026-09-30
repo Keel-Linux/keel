@@ -342,10 +342,29 @@ MariaDB 11.8 (Debian 13):
   since MariaDB 10.11, and is refused with error 1290 like any account;
 - the application's account is refused with error 1290. The WordPress
   image's `wordpress` account holds `ALL PRIVILEGES ON wordpress.*` and
-  nothing global, so it has no way through. The image's `admin` account
-  holds `ALL PRIVILEGES ON *.*` and does: the plan names every account
-  other than `root`, `mysql` and `mariadb.sys` that holds
-  `READ_ONLY ADMIN` on a replica, and no application may connect as one.
+  nothing global, so it has no way through.
+
+**No account but root writes through it.** The image's `admin` and, on
+the LAMP appliances, Adminer's `adminer` hold `ALL PRIVILEGES ON *.*`,
+so Adminer on port 12322 could write to a replica through them. On a
+replica, after the seed (which copies the primary's grants), apply runs
+`SET SESSION sql_log_bin = 0` and `REVOKE READ_ONLY ADMIN ON *.* FROM`
+every account that holds it, matched by user and host exactly, except
+`root`, `mysql` and `mariadb.sys` at `localhost`, `127.0.0.1` or `::1`
+(`'root'@'%'` is somebody's and loses it). Each account is recorded in
+`/var/lib/keel/database/read-only-admin` before the REVOKE, and
+`keel database promote`, or an apply that makes the node standalone or
+primary, grants it back to those accounts only, again with
+`sql_log_bin` off, and removes the record. An account dropped since is
+not created again. A `GRANT ALL ON *.*` on the primary replicates and
+gives the privilege back; the next apply on the replica takes it again.
+
+**root still writes, and so does anything that connects as root**:
+Webmin's MySQL module among them. MariaDB 11.8 has no setting that
+stops an account holding every privilege (it has no `super_read_only`),
+and root can grant itself anything it lacks. A write by root on a
+replica diverges it the way tracker#26 did, so nobody administers a
+replica's data by hand: do it on the primary.
 
 The order is safe for the seed: the file is written and the server
 restarted with `read_only = ON` before the copy is loaded, and the load,
@@ -645,18 +664,34 @@ never be corrected automatically is drift apply will not correct.
 #### `keel database promote`
 
 Promotion is the one thing keel makes the operator type, because it is
-the one decision no machine here can make. It stops replication and
-forgets the primary (`STOP SLAVE`, `RESET SLAVE ALL`, not `STOP SLAVE`
-alone: a node that still held the coordinates would follow its old
-primary again at the next restart), then turns `read_only` off, in that
-order, so nothing arrives from the old primary once the node takes
-writes. It removes the `read_only = ON` line from the drop-in and
-restarts nothing, so a restart before the description is changed keeps
-the new primary writable. Then it says two things:
+the one decision no machine here can make. In this order:
+
+1. It stops the I/O thread (`STOP SLAVE IO_THREAD`) and waits, for at
+   most 600 seconds, until the SQL thread has applied everything the I/O
+   thread received: `Relay_Master_Log_File` equals `Master_Log_File` and
+   `Exec_Master_Log_Pos` equals `Read_Master_Log_Pos`. `RESET SLAVE ALL`
+   discards the relay log, so without the wait whatever was received and
+   not yet applied would be lost. If the SQL thread stops on an error
+   while it drains, or the wait runs out, the I/O thread is started
+   again and nothing is promoted.
+2. It stops replication and forgets the primary (`STOP SLAVE`,
+   `RESET SLAVE ALL`, not `STOP SLAVE` alone: a node that still held the
+   coordinates would follow its old primary again at the next restart),
+   turns `read_only` off, and grants `READ_ONLY ADMIN` back to the
+   accounts the replica took it from.
+3. It removes the `read_only = ON` line from the drop-in and restarts
+   nothing, so a restart before the description is changed keeps the new
+   primary writable.
+
+A replica whose SQL thread already stopped on an error is refused before
+anything changes: what it received and did not apply would be lost. Fix
+what stopped it and `START SLAVE` until `Seconds_Behind_Master` is 0,
+then promote; or, while the old primary is there, rebuild the replica
+from it with `--destroy-local-database`. Then it says two things:
 
 ```
 $ keel database promote
-database.server.role: stop replicating and forget the primary, then turn read_only off (mariadb --batch, 3 statement(s) on standard input): done
+database.server.role: stop the I/O thread, wait up to 600 s for the SQL thread to apply everything it received, then stop replicating, forget the primary, turn read_only off and grant READ_ONLY ADMIN back to the accounts the replica took it from: done
 database.server.role: remove read_only from /etc/mysql/mariadb.conf.d/99-keel-database.cnf (mode 0644): done
 database.server.role: this node is a primary now and the description still says replica, which keel diff reports as drift and must not be corrected automatically. Change the description to primary and run `keel spec apply --system-only` to give it a binary log of its own
 database.server.role: nothing here stopped the old primary or told anybody else about this. There is no failover in Keel: two writable servers on one dataset is what this command can cause, and only the operator knows the old primary is gone

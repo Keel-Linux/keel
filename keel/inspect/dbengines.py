@@ -69,8 +69,25 @@ MARIADB_SQL = {
 MARIADB_ROLE_QUESTIONS = ("status", "replicas", "variables", "grants")
 # Accounts of the server itself, which hold every privilege by design:
 # root and mysql are Debian's socket accounts, mariadb.sys the definer of
-# the sys views. The replication thread is not an account at all.
+# the sys views, all at this machine only. The same name at another host,
+# 'root'@'%', is somebody's. The replication thread is not an account.
 MARIADB_OWN_ACCOUNTS = ("root", "mysql", "mariadb.sys")
+MARIADB_OWN_HOSTS = ("localhost", "127.0.0.1", "::1")
+
+
+def grantee(text: str) -> tuple[str, str] | None:
+    """The user and host of a GRANTEE as information_schema prints it,
+    `'user'@'host'`, or None for anything else"""
+    user, sep, host = text.strip().rpartition("'@'")
+    if not sep or not user.startswith("'") or not host.endswith("'"):
+        return None
+    return user[1:], host[:-1]
+
+
+def own_account(user: str, host: str) -> bool:
+    """Whether an account is the server's own and not anybody's"""
+    return (user in MARIADB_OWN_ACCOUNTS
+            and host.lower() in MARIADB_OWN_HOSTS)
 POSTGRESQL_SQL = {
     "state": "SELECT pg_is_in_recovery(),"
              " (SELECT count(*) FROM pg_stat_replication),"
@@ -177,11 +194,11 @@ def _mariadb_bypass(answer: File) -> Value:
     """The accounts that write through read_only, the server's own aside"""
     if not answer.readable:
         return unknown(f"{answer.path} {answer.problem}")
-    accounts = [
-        row[0] for row in columns(answer)
-        if row and row[0].rpartition("@")[0].strip("'")
-        not in MARIADB_OWN_ACCOUNTS
-    ]
+    accounts = []
+    for row in columns(answer):
+        pair = grantee(row[0])
+        if pair is None or not own_account(*pair):
+            accounts.append(row[0])
     return found(accounts, answer.path)
 
 

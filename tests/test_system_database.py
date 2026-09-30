@@ -9,6 +9,7 @@ container or root.
 """
 
 import unittest
+from dataclasses import replace
 
 from helpers_database import mariadb_reading
 from test_inspect_database import (
@@ -17,17 +18,22 @@ from test_inspect_database import (
     SOCKETS,
 )
 
+from keel.inspect.dbreading import Value
 from keel.inspect.tree import File
 from keel.system import dbmariadb as mariadb
+from keel.system import dbreadonly
 from keel.system.actions import (
+    LockReplica,
     Note,
+    PromoteReplica,
     Refuse,
     Run,
     RunSql,
     SeedReplica,
+    UnlockAccounts,
     WriteFile,
 )
-from keel.system.database import plan_database, plan_promote
+from keel.system.database import DRAIN_TIMEOUT, plan_database, plan_promote
 from keel.system.dbstate import Credential, DatabaseState
 
 MACHINE_ID = "0123456789abcdef0123456789abcdef\n"
@@ -50,6 +56,7 @@ def state(
     problem: str = "",
     reach: str = "",
     shared: tuple = (),
+    revoked: str | None = None,
 ) -> DatabaseState:
     """One machine's database, as the planner is given it"""
     answered = answered or MARIADB_STANDALONE
@@ -65,6 +72,7 @@ def state(
         status=File("SHOW REPLICA STATUS", answered.get("status", "")),
         reach=reach,
         shared=shared,
+        revoked=_file(dbreadonly.RECORD, revoked),
     )
 
 
@@ -374,7 +382,8 @@ class TestAReplicaIsReadOnly(unittest.TestCase):
         fields = [step.field for step in plan]
         self.assertEqual(
             fields,
-            ["database.server", "database.server.replication.primary"],
+            ["database.server", "database.server.replication.primary",
+             "database.server.read_only"],
         )
         self.assertIn("read_only = ON", written(plan[0].actions))
         seeding(plan[1].actions)
@@ -417,25 +426,79 @@ class TestAReplicaIsReadOnly(unittest.TestCase):
         ))
         self.assertEqual(only(plan["database.server"], RunSql), [])
 
-    def test_an_account_that_writes_through_it_is_named(self):
-        plan = steps(REPLICA_DOC, state(answered=answering(
-            "OFF", bypass="'root'@'localhost'\n'admin'@'localhost'\n",
-        )))
+    def test_a_read_only_that_cannot_be_read_is_said(self):
+        text = written(steps(REPLICA_DOC, state())["database.server"])
+        plan = steps(REPLICA_DOC, state(
+            answered=answering(None, replicating=True), dropin=text,
+        ))
         notes = " ".join(
             one.summary for one in only(plan["database.server"], Note)
         )
-        self.assertIn("'admin'@'localhost'", notes)
-        self.assertNotIn("'root'@'localhost'", notes)
-        self.assertIn("READ_ONLY ADMIN", notes)
+        self.assertIn("names no read_only", notes)
+        self.assertIn("was not set", notes)
 
-    def test_a_primary_does_not_name_them(self):
-        plan = steps(declaring(role="primary"), state(answered=answering(
+
+READ_ONLY_STEP = "database.server.read_only"
+
+
+class TestNoApplicationWritesThroughIt(unittest.TestCase):
+    """READ_ONLY ADMIN is taken from the accounts that hold it on a
+    replica, `admin` and Adminer's `adminer` among them, and given back
+    when the node is no longer one"""
+
+    def test_a_replica_with_accounts_that_bypass_it_takes_it_away(self):
+        plan = steps(REPLICA_DOC, state(answered=answering(
+            "ON", replicating=True,
+            bypass="'root'@'localhost'\n'admin'@'localhost'\n",
+        )))
+        lock = only(plan[READ_ONLY_STEP], LockReplica)[0]
+        self.assertEqual(lock.accounts, ("'admin'@'localhost'",))
+
+    def test_it_comes_after_the_seed_which_copies_the_primarys_grants(self):
+        plan = plan_database(REPLICA_DOC, state(answered=answering(
             "OFF", bypass="'admin'@'localhost'\n",
         )))
-        notes = " ".join(
-            one.summary for one in only(plan["database.server"], Note)
-        )
-        self.assertNotIn("READ_ONLY ADMIN", notes)
+        self.assertEqual([step.field for step in plan][-1], READ_ONLY_STEP)
+        seeding(plan[1].actions)
+        self.assertTrue(only(plan[2].actions, LockReplica))
+
+    def test_a_seed_is_always_followed_by_it(self):
+        """The copy brings the primary's grants, READ_ONLY ADMIN too"""
+        plan = steps(REPLICA_DOC, state())
+        self.assertTrue(only(plan[READ_ONLY_STEP], LockReplica))
+
+    def test_a_replica_where_nobody_bypasses_it_is_unchanged(self):
+        plan = steps(REPLICA_DOC, state(answered=answering(
+            "ON", replicating=True, bypass="'root'@'localhost'\n",
+        )))
+        self.assertEqual(only(plan[READ_ONLY_STEP], LockReplica), [])
+        self.assertIn("unchanged",
+                      only(plan[READ_ONLY_STEP], Note)[0].summary)
+
+    def test_accounts_that_cannot_be_listed_are_said(self):
+        observed = state(answered=answering("ON", replicating=True))
+        observed = replace(observed, reading=replace(
+            observed.reading, bypass=Value(problem="bypass exited 1"),
+        ))
+        plan = steps(REPLICA_DOC, observed)
+        self.assertIn("could not be listed",
+                      only(plan[READ_ONLY_STEP], Note)[0].summary)
+
+    def test_a_standalone_gives_back_what_a_replica_took(self):
+        plan = steps(declaring(role="standalone"), state(
+            revoked="admin\tlocalhost\n",
+        ))
+        self.assertTrue(only(plan[READ_ONLY_STEP], UnlockAccounts))
+
+    def test_a_primary_gives_it_back_as_well(self):
+        plan = steps(declaring(role="primary"), state(
+            revoked="admin\tlocalhost\n",
+        ))
+        self.assertTrue(only(plan[READ_ONLY_STEP], UnlockAccounts))
+
+    def test_nothing_taken_is_nothing_given_back(self):
+        plan = steps(declaring(role="standalone"), state())
+        self.assertNotIn(READ_ONLY_STEP, plan)
 
 
 class TestAPrimaryHoldsAuthorizations(unittest.TestCase):
@@ -696,7 +759,8 @@ class TestBecomingAReplicaDestroysTheLocalDatabase(unittest.TestCase):
         )
         self.assertEqual(
             list(plan),
-            ["database.server", "database.server.replication.primary"],
+            ["database.server", "database.server.replication.primary",
+             "database.server.read_only"],
         )
         self.assertTrue(only(plan["database.server"], WriteFile))
 
@@ -916,17 +980,29 @@ class TestPromotion(unittest.TestCase):
             **kwargs,
         )
 
-    def test_a_replica_stops_replicating_and_forgets_the_primary(self):
+    def test_a_replica_drains_then_is_promoted(self):
+        """keel.system.dbreadonly stops the I/O thread, waits for the
+        SQL thread, then forgets the primary and turns read_only off"""
         plan = self.promote(self.replicating())
-        text = sql(plan["database.server.role"])
-        self.assertIn("STOP SLAVE", text)
-        self.assertIn("RESET SLAVE ALL", text)
+        promotion = only(plan["database.server.role"], PromoteReplica)
+        self.assertEqual(len(promotion), 1)
+        self.assertEqual(promotion[0].timeout, DRAIN_TIMEOUT)
+        self.assertEqual(only(plan["database.server.role"], RunSql), [])
 
-    def test_it_turns_read_only_off_after_replication_stopped(self):
-        text = sql(self.promote(self.replicating())["database.server.role"])
-        self.assertIn("SET GLOBAL read_only = OFF", text)
-        self.assertLess(text.index("RESET SLAVE ALL"),
-                        text.index("SET GLOBAL read_only = OFF"))
+    def test_a_stopped_sql_thread_is_refused_and_says_what_to_do(self):
+        stopped = MARIADB_REPLICA_STATUS.replace(
+            "Slave_SQL_Running: Yes",
+            "Slave_SQL_Running: No\n  Last_SQL_Error: Error 1062",
+        )
+        plan = self.promote(state(
+            answered=dict(MARIADB_STANDALONE, status=stopped),
+        ))
+        text = refusals(plan)
+        self.assertIn("Error 1062", text)
+        self.assertIn("START SLAVE", text)
+        self.assertIn("--destroy-local-database", text)
+        self.assertEqual(only(plan["database.server.role"], PromoteReplica),
+                         [])
 
     def test_it_keeps_the_primary_writable_across_a_restart(self):
         """The file apply wrote for the replica says read_only = ON, and
