@@ -84,6 +84,7 @@ network:
 | `network.interfaces.<name>.ipv6.method` | read | One of `static`, `dhcp`, `auto`, `manual`, `none`. `auto` is an address from a router advertisement (SLAAC), `dhcp` an address from a DHCPv6 lease; see "auto and dhcp are two things" below |
 | `network.interfaces.<name>.ipv6.address` | read | Required when the method is `static`. Must carry a prefix length and must be a unicast address, so link local, loopback and multicast are rejected |
 | `network.interfaces.<name>.ipv6.gateway` | read | An IPv6 address. A link local gateway such as `fe80::1` is normal and is accepted |
+| `network.interfaces.<name>.ipv6.slaac` | read | `true` or `false`, only with `method: static`; default `true`. See "static and SLAAC" below |
 | `network.interfaces.<name>.ipv4.method` | read | One of `static`, `dhcp`, `manual`, `none`. Optional everywhere |
 | `network.interfaces.<name>.ipv4.address` | read | Required when the method is `static`. Must carry a prefix length |
 | `network.interfaces.<name>.ipv4.gateway` | read | An IPv4 address |
@@ -102,30 +103,75 @@ What "read" means per case:
   build). The hook configures that one interface, so when the spec declares
   several, the last `ipv4` block and the last `ipv6` block win, each as a
   whole.
-- `nameservers` are split by family: the first two IPv4 addresses become
-  `IP_DNS1` and `IP_DNS2`, the first two IPv6 addresses `IP6_DNS1` and
-  `IP6_DNS2`. An IPv4 address never lands in an `IP6_*` variable, nor the
-  other way round. `IP6_DNS*` are exported only when an interface declares an
-  `ipv6` block, so a spec without one renders exactly what it rendered before
-  IPv6 was written.
+- `nameservers` go where the file can hold them. ifupdown writes
+  `dns-nameservers` only in a static stanza, two per stanza, and resolvconf
+  takes them from any stanza whatever the server's family. So:
+  - when one family is `static` and the other is not (or is not declared,
+    which leaves it dynamic), the static stanza carries every declared
+    server, in the spec's order, and the first two are kept: a spec that
+    lists `2001:db8:1::53` first with IPv4 static and IPv6 `auto` exports
+    `IP_DNS1=2001:db8:1::53`. A dynamic family's servers are never dropped
+    for being of the other family;
+  - when both are static, or neither, they are split by family: the first
+    two IPv4 addresses become `IP_DNS1` and `IP_DNS2`, the first two IPv6
+    addresses `IP6_DNS1` and `IP6_DNS2`. With neither static the file holds
+    none of them.
+
+  A server beyond those two is not written. `apply --system` names every
+  declared server the file cannot hold ([docs/apply.md](apply.md)).
+  `IP6_*` variables are exported only when an interface declares an `ipv6`
+  block.
 
 | Spec value | Conf variables |
 | --- | --- |
 | `ipv4.method: dhcp` or `manual` | `IP_CONFIG=dhcp` or `IP_CONFIG=manual` |
 | `ipv4.method: static` | `IP_CONFIG=static`, `IP_ADDRESS` (the address alone), `IP_NETMASK` (dotted, from the prefix length), `IP_GW` when set |
 | `ipv4.method: none`, or no `ipv4` block | nothing |
-| `ipv6.method: static` | `IP6_CONFIG=static`, `IP6_ADDRESS` (address with its prefix length, as an `inet6` stanza has no netmask), `IP6_GW` when set |
+| `ipv6.method: static` | `IP6_CONFIG=static`, `IP6_ADDRESS` (address with its prefix length, as an `inet6` stanza has no netmask), `IP6_GW` when set, `IP6_SLAAC=no` with `slaac: false` |
 | `ipv6.method: dhcp` or `auto` | `IP6_CONFIG=dhcp`. ifupdown has one method for both: `inet6 dhcp` is what the hook writes either way, and it keeps SLAAC on as confconsole does |
 | `ipv6.method: manual` | `IP6_CONFIG=manual` |
 | `ipv6.method: none`, or no `ipv6` block | nothing, and no `IP6_DNS*` |
-| `nameservers` | `IP_DNS1`, `IP_DNS2` from the IPv4 entries; `IP6_DNS1`, `IP6_DNS2` from the IPv6 entries |
+| `nameservers` | `IP_DNS1`, `IP_DNS2` and `IP6_DNS1`, `IP6_DNS2`, placed as described above |
+
+### static and SLAAC
+
+On ifupdown-ng an `inet6 static` stanza does not stop SLAAC: the interface
+keeps taking an address from the router's advertisements beside the static
+one. That is the default, `slaac: true`, and it is what a static spec has
+always rendered.
+
+`slaac: false` makes the static address the only global one. The stanza
+turns `autoconf` off for the interface before the address is added, and
+back on when the stanza goes down, so bringing the interface up on another
+file gives SLAAC back:
+
+```
+iface eth0 inet6 static
+    hostname blog
+    address 2001:db8:1::10/64
+    gateway fe80::1
+    pre-up sysctl -q -w net.ipv6.conf.eth0.autoconf=0
+    post-down sysctl -q -w net.ipv6.conf.eth0.autoconf=1
+```
+
+`accept_ra` stays on, so the routes the router advertises are kept;
+ifupdown-ng has no option of its own for this (its `ipv6-ra` setting
+toggles `accept_ra`, which would drop them). The lines are written by
+inithooks' `lib/ipconfig.sh` from `IP6_SLAAC=no`, at first boot and on a
+running machine alike; an inithooks older than that option cannot write
+them, and `apply --system` then refuses instead of writing a file that
+keeps SLAAC. `slaac` with any other method is a validation error: `auto`
+and `dhcp` already take the advertisements, and `manual` configures nothing.
 
 ### auto and dhcp are two things
 
 `auto` means the address is formed from a router advertisement (SLAAC).
 `dhcp` means it comes from a DHCPv6 lease. Both are written to
 `/etc/network/interfaces` as `iface <name> inet6 dhcp`, because ifupdown has
-no separate method, so the file cannot say which one a spec declared.
+no separate method, so the file cannot say which one a spec declared. A file
+that already says `iface <name> inet6 auto`, as some images ship it, means
+`auto` too, and `apply --system` keeps that word when it rewrites the file
+for `method: auto` rather than turning it into `dhcp`.
 
 The running machine can, and `keel inspect` reads it there:
 
@@ -181,8 +227,11 @@ export IP6_DNS2=2001:db8:2::53
 
 The hook validates every `IP6_*` value again before writing anything, with
 the same rules as the spec (an IPv6 address, a prefix length on `IP6_ADDRESS`,
-no multicast, loopback or link local address as the address itself), so a
-value the spec accepted is never rejected at first boot.
+no multicast, loopback or link local address as the address itself; a
+nameserver of either family), so a value the spec accepted is never rejected
+at first boot. An IPv4 nameserver in `IP6_DNS*`, which a static IPv6 beside
+IPv4 on DHCP exports, needs an inithooks that accepts it (2.3.6+keel9 or
+later); an older hook stops the first boot with a fatal error naming it.
 
 ## tls
 

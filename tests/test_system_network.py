@@ -16,7 +16,7 @@ from unittest import mock
 from helpers import spec  # noqa: F401
 
 from keel.network import marker
-from keel.network.render import LIBRARY, Rendered, render
+from keel.network.render import LIBRARY, Rendered, render, slaac_off
 from keel.system import netstate
 from keel.system.actions import Note, Refuse, SwitchNetwork, WriteFile
 from keel.system.netstate import NetworkState, observe_network
@@ -44,16 +44,17 @@ OBSERVED = {
     "managed_by": "file",
     "interfaces": {"eth0": {
         "ipv6": {"method": "static", "address": "2001:db8:1::10/64",
-                 "gateway": "fe80::1"},
+                 "gateway": "fe80::1", "slaac": True},
     }},
     "nameservers": ["2001:db8:1::53"],
 }
+NEW_FILE = "# the new file\n    dns-nameservers 2001:db8:1::53\n"
 
 
 def state(**overrides) -> NetworkState:
     values = dict(observed=OBSERVED, unknowns={}, in_container=False,
                   owner="file", pending=False,
-                  rendered=Rendered(text="# the new file\n"))
+                  rendered=Rendered(text=NEW_FILE))
     values.update(overrides)
     return NetworkState(**values)
 
@@ -99,7 +100,7 @@ class TestPlan(unittest.TestCase):
         self.assertIsInstance(switch, SwitchNetwork)
         self.assertEqual(switch.iface, "eth0")
         self.assertEqual(switch.window, 90)
-        self.assertEqual(switch.content, "# the new file\n")
+        self.assertEqual(switch.content, NEW_FILE)
         self.assertEqual(switch.addresses, ("2001:db8:1::20", "192.0.2.20"))
         self.assertEqual(switch.gateways, ("fe80::1", "192.0.2.1"))
         self.assertEqual(switch.old_gateways, ("fe80::1",))
@@ -146,7 +147,7 @@ class TestPlan(unittest.TestCase):
 
     def test_a_file_that_already_says_it_is_not_bounced(self):
         found = actions(plan_network(STATIC, state(
-            current="# the new file\n"), True, ALL))
+            current=NEW_FILE), True, ALL))
         self.assertEqual(len(found), 1)
         self.assertIn("already says", found[0].describe())
 
@@ -156,6 +157,30 @@ class TestPlan(unittest.TestCase):
             rendered=Rendered(text="iface eth0 inet6 dhcp\n")), True, ALL))
         self.assertEqual(len(found), 1)
         self.assertIn("cannot hold them", found[0].describe())
+
+    def test_an_interface_change_that_loses_nameservers_says_so(self):
+        """keel#45: neither stanza static, so the file holds none of them,
+        and the converge names them instead of dropping them silently"""
+        declared = {"managed_by": "file", "interfaces": {"eth0": {
+            "ipv6": {"method": "auto"}, "ipv4": {"method": "dhcp"}}},
+            "nameservers": ["2606:4700:4700::1111", "192.0.2.53"]}
+        found = actions(plan_network(declared, state(
+            rendered=Rendered(text="iface eth0 inet6 dhcp\n")), True, ALL))
+        self.assertIn("differs: network.interfaces.eth0.ipv6.method",
+                      found[0].describe())
+        self.assertEqual(found[1].describe(), (
+            "the interfaces file cannot hold the nameservers"
+            " 2606:4700:4700::1111, 192.0.2.53: ifupdown writes nameservers"
+            " only in a static stanza, two per stanza; they are not"
+            " written"))
+        self.assertIsInstance(found[2], SwitchNetwork)
+
+    def test_a_refused_change_does_not_list_lost_nameservers(self):
+        declared = dict(STATIC, nameservers=["2001:db8:1::99"])
+        found = actions(plan_network(declared, state(in_container=True),
+                                     True, ALL))
+        self.assertEqual(len(found), 2)
+        self.assertIsInstance(found[1], Refuse)
 
     def test_nameservers_the_file_can_hold_are_converged(self):
         declared = dict(OBSERVED, nameservers=["2001:db8:1::99"])
@@ -199,6 +224,49 @@ class TestRender(unittest.TestCase):
             "    address 2001:db8:1::20/64\n    gateway fe80::1\n"
             "    dns-nameservers 2001:db8:1::53\n"
         ))
+
+    def test_slaac_off_is_written_in_the_inet6_stanza(self):
+        env = {"IP6_CONFIG": "static", "IP6_ADDRESS": "2001:db8:1::20/64",
+               "IP6_SLAAC": "no"}
+        found = render(IPCONFIG, "ens18", "blog", env)
+        self.assertTrue(found.text.endswith(
+            "iface ens18 inet6 static\n    hostname blog\n"
+            "    address 2001:db8:1::20/64\n"
+            "    pre-up sysctl -q -w net.ipv6.conf.ens18.autoconf=0\n"
+            "    post-down sysctl -q -w net.ipv6.conf.ens18.autoconf=1\n"))
+        self.assertIn(slaac_off("ens18"), found.text.splitlines())
+
+    def test_slaac_kept_writes_no_sysctl(self):
+        for slaac in ("yes", ""):
+            env = {"IP6_CONFIG": "static",
+                   "IP6_ADDRESS": "2001:db8:1::20/64", "IP6_SLAAC": slaac}
+            found = render(IPCONFIG, "eth0", "blog", env)
+            self.assertNotIn("autoconf", found.text)
+
+    def test_a_library_without_slaac_renders_without_failing(self):
+        old = join(self.tmp(), "ipconfig.sh")
+        with open(IPCONFIG) as src, open(old, "w") as dst:
+            dst.write(src.read().replace("ipconfig_render_slaac6()",
+                                         "ipconfig_render_gone()"))
+        found = render(old, "eth0", "blog", {
+            "IP6_CONFIG": "static", "IP6_ADDRESS": "2001:db8:1::20/64",
+            "IP6_SLAAC": "no"})
+        self.assertIsNone(found.problem)
+        self.assertNotIn("autoconf", found.text)
+
+    def test_an_ipv4_nameserver_in_the_static_inet6_stanza(self):
+        env = {"IP_CONFIG": "dhcp", "IP6_CONFIG": "static",
+               "IP6_ADDRESS": "2001:db8:1::20/64",
+               "IP6_DNS1": "2001:db8:1::53", "IP6_DNS2": "192.0.2.53"}
+        found = render(IPCONFIG, "eth0", "blog", env)
+        self.assertIsNone(found.problem)
+        self.assertIn("    dns-nameservers 2001:db8:1::53 192.0.2.53\n",
+                      found.text)
+
+    def tmp(self):
+        path = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, path)
+        return path
 
     def test_ipv6_only_keeps_ipv4_on_dhcp_as_the_hook_does(self):
         found = render(IPCONFIG, "eth0", "blog", {"IP6_CONFIG": "dhcp"})
@@ -277,6 +345,122 @@ class TestObserve(unittest.TestCase):
         self.assertIn("address 192.0.2.5\n", found.rendered.text)
         self.assertIn("address 2001:db8:1::20/64", found.rendered.text)
         self.assertEqual(found.current.count("192.0.2.5"), 1)
+
+    def interfaces(self, text):
+        with open(join(self.root, "etc", "network", "interfaces"), "w") as f:
+            f.write(text)
+
+    def no_slaac(self):
+        ipv6 = dict(STATIC["interfaces"]["eth0"]["ipv6"], slaac=False)
+        return dict(STATIC, interfaces={"eth0": dict(
+            STATIC["interfaces"]["eth0"], ipv6=ipv6)})
+
+    def test_slaac_false_is_rendered(self):
+        found = observe_network(self.root, {"network": self.no_slaac()})
+        self.assertIn(slaac_off("eth0"), found.rendered.text.splitlines())
+
+    def test_a_library_that_cannot_write_slaac_false_is_a_problem(self):
+        library = join(self.root, LIBRARY)
+        with open(IPCONFIG) as src, open(library, "w") as dst:
+            dst.write(src.read().replace("ipconfig_render_slaac6()",
+                                         "ipconfig_render_gone()"))
+        found = observe_network(self.root, {"network": self.no_slaac()})
+        self.assertIsNone(found.rendered.text)
+        self.assertEqual(found.rendered.problem, "the installed inithooks"
+                         " cannot write slaac: false; update inithooks")
+        # the planner refuses it rather than write a file that keeps SLAAC
+        steps = plan_network(self.no_slaac(), found, True, ALL)
+        refused = actions(steps)[-1]
+        self.assertIsInstance(refused, Refuse)
+        self.assertIn("update inithooks", refused.describe())
+        # SLAAC kept needs nothing new from the library
+        self.assertIsNotNone(observe_network(
+            self.root, {"network": STATIC}).rendered.text)
+
+    def test_an_undeclared_static_ipv6_keeps_its_slaac_off(self):
+        self.interfaces(
+            "auto eth0\niface eth0 inet dhcp\niface eth0 inet6 static\n"
+            "    address 2001:db8:1::10/64\n"
+            "    pre-up sysctl -q -w net.ipv6.conf.eth0.autoconf=0\n")
+        ipv4_only = {"managed_by": "file", "interfaces": {"eth0": {
+            "ipv4": STATIC["interfaces"]["eth0"]["ipv4"]}}}
+        found = observe_network(self.root, {"network": ipv4_only})
+        self.assertIn("address 192.0.2.20\n", found.rendered.text)
+        self.assertIn(slaac_off("eth0"), found.rendered.text.splitlines())
+
+    def test_inet6_auto_in_the_file_stays_auto(self):
+        """keel#45: a TurnKey image's `inet6 auto` is not rewritten as
+        dhcp by a converge that the ipv6 method has no part in"""
+        self.interfaces("auto eth0\niface eth0 inet dhcp\n"
+                        "iface eth0 inet6 auto\n")
+        spec_auto = {"managed_by": "file", "interfaces": {"eth0": {
+            "ipv6": {"method": "auto"},
+            "ipv4": STATIC["interfaces"]["eth0"]["ipv4"]}}}
+        found = observe_network(self.root, {"network": spec_auto})
+        self.assertIn("iface eth0 inet6 auto\n", found.rendered.text)
+        self.assertNotIn("inet6 dhcp", found.rendered.text)
+        self.assertIn("iface eth0 inet static\n", found.rendered.text)
+        self.assertTrue(found.rendered.text.startswith(
+            "# UNCONFIGURED INTERFACES\n"))
+
+    def test_inet6_dhcp_in_the_file_and_other_methods_stay_as_rendered(self):
+        self.interfaces("auto eth0\niface eth0 inet dhcp\n"
+                        "iface eth0 inet6 dhcp\n")
+        spec_auto = {"managed_by": "file", "interfaces": {"eth0": {
+            "ipv6": {"method": "auto"}}}}
+        found = observe_network(self.root, {"network": spec_auto})
+        self.assertIn("iface eth0 inet6 dhcp\n", found.rendered.text)
+        self.interfaces("auto eth0\niface eth0 inet6 auto\n")
+        spec_dhcp = {"managed_by": "file", "interfaces": {"eth0": {
+            "ipv6": {"method": "dhcp"}}}}
+        found = observe_network(self.root, {"network": spec_dhcp})
+        self.assertIn("iface eth0 inet6 dhcp\n", found.rendered.text)
+
+    def test_the_nameservers_of_a_dynamic_ipv6_go_to_the_static_ipv4(self):
+        """keel#45: the IPv6 resolver a real VM lost"""
+        self.interfaces("auto eth0\niface eth0 inet static\n"
+                        "    address 192.0.2.5\n    netmask 255.255.255.0\n"
+                        "iface eth0 inet6 auto\n")
+        declared = {"managed_by": "file", "interfaces": {"eth0": {
+            "ipv6": {"method": "auto"}}},
+            "nameservers": ["2606:4700:4700::1111", "192.0.2.53",
+                            "192.0.2.54"]}
+        found = observe_network(self.root, {"network": declared})
+        self.assertIn("    address 192.0.2.5\n"
+                      "    netmask 255.255.255.0\n"
+                      "    dns-nameservers 2606:4700:4700::1111 192.0.2.53\n",
+                      found.rendered.text)
+        self.assertIn("iface eth0 inet6 auto\n", found.rendered.text)
+
+    def test_an_undeclared_family_the_library_cannot_write_is_a_problem(self):
+        ipv4_only = {"managed_by": "file", "interfaces": {"eth0": {
+            "ipv4": STATIC["interfaces"]["eth0"]["ipv4"]}}}
+        for text, reason in (
+            ("iface eth0 inet6 v4tunnel\n", "(v4tunnel) is not one"),
+            ("iface eth0 inet6 static\n    gateway fe80::1\n",
+             "(static) is not one"),
+        ):
+            with self.subTest(text=text):
+                self.interfaces(text)
+                found = observe_network(self.root, {"network": ipv4_only})
+                self.assertIn(reason, found.rendered.problem)
+        ipv6_only = {"managed_by": "file", "interfaces": {"eth0": {
+            "ipv6": {"method": "auto"}}}}
+        self.interfaces("iface eth0 inet static\n    address bogus\n")
+        found = observe_network(self.root, {"network": ipv6_only})
+        self.assertIn("no usable address", found.rendered.problem)
+
+    def test_an_undeclared_static_ipv6_keeps_address_netmask_and_dns(self):
+        self.interfaces("iface eth0 inet dhcp\niface eth0 inet6 static\n"
+                        "    address 2001:db8:1::10\n    netmask 64\n"
+                        "    dns-nameservers 2001:db8:1::53\n")
+        ipv4_only = {"managed_by": "file", "interfaces": {"eth0": {
+            "ipv4": {"method": "dhcp"}}}}
+        found = observe_network(self.root, {"network": ipv4_only})
+        self.assertIn("    address 2001:db8:1::10/64\n"
+                      "    dns-nameservers 2001:db8:1::53\n",
+                      found.rendered.text)
+        self.assertNotIn("autoconf", found.rendered.text)
 
     def test_the_declared_hostname_wins(self):
         found = observe_network(self.root, {
@@ -358,6 +542,34 @@ class TestRoundTrip(unittest.TestCase):
         code, out, _ = self.cli("spec", "apply", "--spec", self.spec,
                                 "--system-only", "--root", self.root)
         self.assertIn("network: unchanged", out)
+
+    def test_slaac_false_round_trips_and_removing_it_gives_slaac_back(self):
+        with open(self.spec, "w") as fob:
+            fob.write(self.SPEC.replace(
+                "        gateway: fe80::1\n",
+                "        gateway: fe80::1\n        slaac: false\n"))
+        code, out, _ = self.cli("spec", "apply", "--spec", self.spec,
+                                "--system-only", "--root", self.root)
+        self.assertEqual(code, 0, out)
+        written = open(join(self.root, "etc/network/interfaces")).read()
+        self.assertIn(slaac_off("eth0"), written.splitlines())
+        code, out, _ = self.cli("diff", "--spec", self.spec, "--root",
+                                self.root)
+        self.assertEqual(code, 0, out)
+        self.assertIn("network.interfaces.eth0.ipv6.slaac: same (false)",
+                      out)
+        # the default is SLAAC kept, so a spec without the line is drift
+        with open(self.spec, "w") as fob:
+            fob.write(self.SPEC)
+        code, out, _ = self.cli("diff", "--spec", self.spec, "--root",
+                                self.root)
+        self.assertEqual(code, 14)
+        self.assertIn("network.interfaces.eth0.ipv6.slaac: drift", out)
+        code, out, _ = self.cli("spec", "apply", "--spec", self.spec,
+                                "--system-only", "--root", self.root)
+        self.assertEqual(code, 0, out)
+        written = open(join(self.root, "etc/network/interfaces")).read()
+        self.assertNotIn("autoconf", written)
 
     def test_skip_network_leaves_the_file(self):
         before = open(join(self.root, "etc/network/interfaces")).read()

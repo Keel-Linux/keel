@@ -9,6 +9,7 @@ from os.path import join
 from helpers import doc, env, errors, spec
 
 from keel.spec.fields import is_ipv4, is_ipv6  # noqa: E402
+from keel.spec.render import nameserver_env  # noqa: E402
 
 
 class TestMapping(unittest.TestCase):
@@ -123,6 +124,7 @@ IPV4_ONLY_CONF = (
     "export IP_NETMASK=255.255.255.0\n"
     "export IP_GW=192.0.2.1\n"
     "export IP_DNS1=192.0.2.53\n"
+    "export IP_DNS2=2001:db8:1::53\n"
 )
 
 
@@ -158,7 +160,9 @@ class TestNetworkMapping(unittest.TestCase):
         self.assertEqual(self.file_managed("ipv6", "manual"),
                          {"IP6_CONFIG": "manual"})
 
-    def test_spec_without_an_ipv6_block_renders_as_before(self):
+    def test_spec_without_an_ipv6_block_exports_no_ip6_variable(self):
+        """IPv6 stays dynamic, so the static inet stanza takes the IPv6
+        nameserver too; no IP6_* variable appears (keel#45)"""
         document = doc(IPV4_ONLY)
         self.assertEqual(spec.validate(document), [])
         self.assertEqual(spec.render_env(document, {}), IPV4_ONLY_CONF)
@@ -218,6 +222,93 @@ class TestNetworkMapping(unittest.TestCase):
                     "      ipv6:\n" + second
                 )
                 self.assertEqual(exported, expected)
+
+    def test_a_dynamic_ipv6_keeps_its_nameserver_in_the_static_ipv4(self):
+        """keel#45: a real VM lost 2606:4700:4700::1111 this way"""
+        exported = env(
+            "version: 1\n"
+            "network:\n"
+            "  managed_by: file\n"
+            "  interfaces:\n"
+            "    eth0:\n"
+            "      ipv6:\n"
+            "        method: auto\n"
+            "      ipv4:\n"
+            "        method: static\n"
+            "        address: 192.0.2.10/24\n"
+            "  nameservers:\n"
+            "    - 2606:4700:4700::1111\n"
+            "    - 192.0.2.53\n"
+            "    - 192.0.2.54\n"
+        )
+        self.assertEqual(exported, {
+            "IP_CONFIG": "static", "IP_ADDRESS": "192.0.2.10",
+            "IP_NETMASK": "255.255.255.0",
+            "IP_DNS1": "2606:4700:4700::1111", "IP_DNS2": "192.0.2.53",
+            "IP6_CONFIG": "dhcp",
+        })
+
+    def test_a_dynamic_ipv4_keeps_its_nameserver_in_the_static_ipv6(self):
+        exported = env(
+            "version: 1\n"
+            "network:\n"
+            "  managed_by: file\n"
+            "  interfaces:\n"
+            "    eth0:\n"
+            "      ipv4:\n"
+            "        method: dhcp\n"
+            "      ipv6:\n"
+            "        method: static\n"
+            "        address: 2001:db8:1::10/64\n"
+            "  nameservers:\n"
+            "    - 2001:db8:1::53\n"
+            "    - 192.0.2.53\n"
+        )
+        self.assertEqual(list(exported), [
+            "IP_CONFIG", "IP6_CONFIG", "IP6_ADDRESS", "IP6_DNS1", "IP6_DNS2",
+        ])
+        self.assertEqual(exported["IP6_DNS1"], "2001:db8:1::53")
+        self.assertEqual(exported["IP6_DNS2"], "192.0.2.53")
+
+    def test_nameserver_env_places_servers_by_the_static_stanza(self):
+        servers = ["2001:db8:1::53", "192.0.2.53", "2001:db8:2::53",
+                   "192.0.2.54"]
+        for methods, expected in (
+            ({"IP_CONFIG": "static", "IP6_CONFIG": "static"},
+             {"IP_DNS1": "192.0.2.53", "IP_DNS2": "192.0.2.54",
+              "IP6_DNS1": "2001:db8:1::53", "IP6_DNS2": "2001:db8:2::53"}),
+            ({"IP_CONFIG": "dhcp", "IP6_CONFIG": "dhcp"},
+             {"IP_DNS1": "192.0.2.53", "IP_DNS2": "192.0.2.54",
+              "IP6_DNS1": "2001:db8:1::53", "IP6_DNS2": "2001:db8:2::53"}),
+            ({"IP_CONFIG": "dhcp"},
+             {"IP_DNS1": "192.0.2.53", "IP_DNS2": "192.0.2.54"}),
+            ({"IP6_CONFIG": "static"},
+             {"IP6_DNS1": "2001:db8:1::53", "IP6_DNS2": "192.0.2.53"}),
+            ({"IP_CONFIG": "static", "IP6_CONFIG": "manual"},
+             {"IP_DNS1": "2001:db8:1::53", "IP_DNS2": "192.0.2.53"}),
+        ):
+            with self.subTest(methods=methods):
+                self.assertEqual(nameserver_env(servers, methods), expected)
+
+    def test_slaac_false_exports_ip6_slaac_no(self):
+        body = (
+            "version: 1\n"
+            "network:\n"
+            "  managed_by: file\n"
+            "  interfaces:\n"
+            "    eth0:\n"
+            "      ipv6:\n"
+            "        method: static\n"
+            "        address: 2001:db8:1::10/64\n"
+            "        gateway: fe80::1\n"
+        )
+        self.assertEqual(env(body + "        slaac: false\n"), {
+            "IP6_CONFIG": "static", "IP6_ADDRESS": "2001:db8:1::10/64",
+            "IP6_GW": "fe80::1", "IP6_SLAAC": "no",
+        })
+        for kept in ("", "        slaac: true\n"):
+            with self.subTest(kept=kept):
+                self.assertNotIn("IP6_SLAAC", env(body + kept))
 
     def test_is_ipv4_and_is_ipv6_tell_the_families_apart(self):
         self.assertTrue(is_ipv4("192.0.2.53"))

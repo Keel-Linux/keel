@@ -425,7 +425,46 @@ class TestConfirm(RootCase):
         self.prepared()
         (confirmed, lines), _ = self.confirm(ssh(local="2001:db8:1::10"))
         self.assertFalse(confirmed)
-        self.assertIn("not an address of the new configuration", lines[0])
+        self.assertIn("not at the static address the change declares"
+                      " (2001:db8:1::20)", lines[0])
+        self.prepared(addresses=())
+        (confirmed, lines), _ = self.confirm(
+            ssh(local="2001:db8:1::10"), probes(addresses=["2001:db8:1::99"]))
+        self.assertFalse(confirmed)
+        self.assertIn("not an address of the new configuration"
+                      " (2001:db8:1::99)", lines[0])
+
+    def test_a_slaac_address_does_not_prove_the_static_one(self):
+        """keel#45: SLAAC stays beside a static address, and a session
+        over the SLAAC address says nothing of the declared one"""
+        self.prepared()
+        slaac = "2001:db8:1:0:be24:11ff:fef9:707d"
+        (confirmed, lines), _ = self.confirm(
+            ssh(local=slaac), probes(addresses=["2001:db8:1::20", slaac]))
+        self.assertFalse(confirmed)
+        self.assertIn(f"arrived at {slaac}, not at the static address",
+                      lines[0])
+        self.assertTrue(marker.exists(self.root))
+
+    def test_a_static_address_of_the_other_family_is_said_untested(self):
+        self.prepared(addresses=("2001:db8:1::20", "192.0.2.20"),
+                      gateways=("fe80::1",))
+        (confirmed, lines), _ = self.confirm(
+            ssh(), probes(addresses=["2001:db8:1::20", "192.0.2.20"]))
+        self.assertTrue(confirmed)
+        self.assertEqual(lines[1], "the static address 192.0.2.20 was not"
+                         " tested: this session arrived at 2001:db8:1::20,"
+                         " over the other family")
+        self.assertEqual(len(lines), 3)
+
+    def test_an_ipv4_session_at_the_static_ipv4_address_confirms(self):
+        self.prepared(addresses=("2001:db8:1::20", "192.0.2.20"),
+                      gateways=("fe80::1",))
+        (confirmed, lines), _ = self.confirm(
+            ssh(local="192.0.2.20", peer="192.0.2.99"))
+        self.assertTrue(confirmed)
+        self.assertIn("the static address 2001:db8:1::20 was not tested",
+                      lines[1])
 
     def test_a_dynamic_address_is_checked_against_the_interface(self):
         self.prepared(addresses=())
@@ -459,7 +498,7 @@ class TestConfirm(RootCase):
     def test_a_console_and_the_host_confirm(self):
         for origin in (session.Origin(session.CONSOLE_KIND, "the console"),
                        session.Origin(session.HOST, "the host")):
-            self.prepared()
+            self.prepared(addresses=("2001:db8:1::20", "192.0.2.20"))
             (confirmed, lines), _ = self.confirm(origin)
             self.assertTrue(confirmed)
             self.assertEqual(len(lines), 2)

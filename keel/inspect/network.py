@@ -124,7 +124,28 @@ def _family(
     if gateway:
         section["gateway"] = gateway
         summary += f" gateway {gateway}"
+    if family == "ipv6" and method == "static":
+        section["slaac"] = slaac_enabled(stanza)
+        summary += "" if section["slaac"] else " without SLAAC"
     return section, inferred(field, summary, source)
+
+
+def slaac_enabled(stanza: Stanza) -> bool:
+    """False when the stanza turns autoconf off before it comes up
+
+    The option lib/ipconfig.sh writes for IP6_SLAAC=no (keel#45),
+    `pre-up sysctl -q -w net.ipv6.conf.IFACE.autoconf=0`, read by its
+    words, so other spacing, other flags or a full path to sysctl still
+    count. Without it a static inet6 stanza keeps SLAAC, as ifupdown-ng
+    leaves it.
+    """
+    setting = f"net.ipv6.conf.{stanza.iface}.autoconf=0"
+    return not any(
+        len(fields) > 2 and fields[0] == "pre-up"
+        and fields[1].rsplit("/", 1)[-1] == "sysctl"
+        and setting in fields[2:]
+        for fields in stanza.options
+    )
 
 
 def _method(

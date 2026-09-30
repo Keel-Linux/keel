@@ -32,6 +32,10 @@ DEFAULT_WINDOW = 120
 LIVE_COMMANDS = ("ifup", "ifdown", "ip", "systemd-run", "systemctl")
 # drift under these changes the file; nameservers only when it can hold them
 INTERFACE_FIELDS = ("network.interfaces.", "network.managed_by")
+# keel.spec.render.nameserver_env places them
+NAMESERVER_LIMIT = (
+    "ifupdown writes nameservers only in a static stanza, two per stanza"
+)
 
 
 def plan_network(network: dict, state: NetworkState | None, live: bool,
@@ -60,16 +64,21 @@ def plan_network(network: dict, state: NetworkState | None, live: bool,
             f"differs: {', '.join(drift)}; the interfaces file already says"
             " what this converge would write, so the difference is outside"
             " it and the interface is left alone"),))]
+    lost = unexpressed(network, rendered)
     if not [one for one in drift if one.startswith(INTERFACE_FIELDS)] \
-            and not expressed(network, rendered):
+            and lost:
         return [Step(FIELD, (Note(
-            f"differs: {', '.join(drift)}; ifupdown writes nameservers only"
-            " in a static stanza of their family, so the interfaces file"
-            " cannot hold them and the interface is left alone"),))]
+            f"differs: {', '.join(drift)}; {NAMESERVER_LIMIT}, so the"
+            " interfaces file cannot hold them and the interface is left"
+            " alone"),))]
     refusal = not_convergeable(network, state)
     actions = (refusal,) if refusal else tuple(
         change(network, state, live, available, window))
-    return [Step(FIELD, (Note(f"differs: {', '.join(drift)}"), *actions))]
+    notes = (Note(f"the interfaces file cannot hold the nameservers"
+                  f" {', '.join(lost)}: {NAMESERVER_LIMIT}; they are not"
+                  " written"),) if lost and not refusal else ()
+    return [Step(FIELD, (Note(f"differs: {', '.join(drift)}"), *notes,
+                         *actions))]
 
 
 def not_convergeable(network: dict, state: NetworkState) -> Refuse | None:
@@ -98,16 +107,16 @@ def not_convergeable(network: dict, state: NetworkState) -> Refuse | None:
     return None
 
 
-def expressed(network: dict, rendered: str | None) -> bool:
-    """Whether every declared nameserver appears in the rendered file"""
+def unexpressed(network: dict, rendered: str | None) -> list[str]:
+    """The declared nameservers the rendered file does not carry"""
     if rendered is None:
-        return True  # the refusal for an unrenderable file says more
+        return []  # the refusal for an unrenderable file says more
     written = " ".join(
         line.strip() for line in rendered.splitlines()
         if line.strip().startswith("dns-nameservers")
     ).split()
-    return all(str(server) in written
-               for server in network.get("nameservers") or [])
+    return [str(server) for server in network.get("nameservers") or []
+            if str(server) not in written]
 
 
 def change(network: dict, state: NetworkState, live: bool,

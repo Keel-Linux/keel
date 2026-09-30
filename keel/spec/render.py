@@ -101,6 +101,8 @@ def network_env(network: Any) -> dict[str, str]:
     The hook configures one interface. When the spec declares several, the
     last ipv6 block wins as a whole, so an address is never exported next
     to another interface's method.
+
+    The nameservers are placed by nameserver_env.
     """
     env: dict[str, str] = {}
     if not isinstance(network, dict) or managed_by(network) != "file":
@@ -108,16 +110,52 @@ def network_env(network: Any) -> dict[str, str]:
 
     interfaces = network.get("interfaces") or {}
     nameservers = [str(server) for server in network.get("nameservers") or []]
+    ipv4_env: dict[str, str] = {}
     for iface in interfaces.values():
-        env.update(_ipv4_env((iface or {}).get("ipv4") or {}))
-    env.update(_dns_env("IP_DNS", filter(is_ipv4, nameservers)))
+        ipv4_env.update(_ipv4_env((iface or {}).get("ipv4") or {}))
     ipv6_env: dict[str, str] = {}
     for iface in interfaces.values():
         ipv6_env = _ipv6_env((iface or {}).get("ipv6") or {}) or ipv6_env
-    if ipv6_env:
-        env.update(ipv6_env)
-        env.update(_dns_env("IP6_DNS", filter(is_ipv6, nameservers)))
+    dns = nameserver_env(nameservers, {**ipv4_env, **ipv6_env})
+    env.update(ipv4_env)
+    env.update(_prefixed(dns, "IP_DNS"))
+    env.update(ipv6_env)
+    env.update(_prefixed(dns, "IP6_DNS"))
     return env
+
+
+def nameserver_env(nameservers: list[str], env: dict[str, str]) -> (
+    dict[str, str]
+):
+    """The IP_DNS* and IP6_DNS* variables for the methods already in `env`
+
+    lib/ipconfig.sh writes dns-nameservers only in a static stanza, two at
+    most, and resolvconf takes them from any stanza whatever the server's
+    family. So when one family is static and the other is not, the static
+    stanza carries every declared server, in the spec's order, and the
+    first two are kept: a dynamic family's servers are not dropped for
+    being of the other family (keel#45). When both are static, or neither,
+    each family's servers go to its own stanza, the first two of each;
+    with neither static, the file holds none of them.
+    """
+    ipv4_static = env.get("IP_CONFIG") == "static"
+    ipv6_static = env.get("IP6_CONFIG") == "static"
+    if ipv4_static and not ipv6_static:
+        return _dns_env("IP_DNS", nameservers)
+    if ipv6_static and not ipv4_static:
+        return _dns_env("IP6_DNS", nameservers)
+    dns = _dns_env("IP_DNS", filter(is_ipv4, nameservers))
+    if "IP6_CONFIG" in env:
+        dns.update(_dns_env("IP6_DNS", filter(is_ipv6, nameservers)))
+    return dns
+
+
+def _prefixed(env: dict[str, str], prefix: str) -> dict[str, str]:
+    """The variables PREFIX1 and PREFIX2 of `env`, without the others"""
+    return {
+        key: value for key, value in env.items()
+        if key[:-1] == prefix
+    }
 
 
 def _ipv4_env(ipv4: dict) -> dict[str, str]:
@@ -135,7 +173,11 @@ def _ipv4_env(ipv4: dict) -> dict[str, str]:
 
 
 def _ipv6_env(ipv6: dict) -> dict[str, str]:
-    """IP6_ADDRESS keeps its prefix length: an inet6 stanza has no netmask"""
+    """IP6_ADDRESS keeps its prefix length: an inet6 stanza has no netmask
+
+    IP6_SLAAC is exported only to turn SLAAC off; the hook's default keeps
+    it, and a spec that does not say `slaac: false` renders as before.
+    """
     method = str(ipv6.get("method") or "none")
     if method == "none":
         return {}
@@ -144,11 +186,13 @@ def _ipv6_env(ipv6: dict) -> dict[str, str]:
         return env
     env["IP6_ADDRESS"] = str(ipaddress.ip_interface(str(ipv6["address"])))
     _set(env, "IP6_GW", ipv6.get("gateway"))
+    if ipv6.get("slaac") is False:
+        env["IP6_SLAAC"] = "no"
     return env
 
 
 def _dns_env(prefix: str, servers: Any) -> dict[str, str]:
-    """The first two nameservers of one family, as PREFIX1 and PREFIX2"""
+    """The first two nameservers given, as PREFIX1 and PREFIX2"""
     return {
         f"{prefix}{index}": server
         for index, server in enumerate(

@@ -298,10 +298,12 @@ class TestRoundTrip(unittest.TestCase):
         )
         self.assertEqual(env["IP_CONFIG"], "static")
         self.assertEqual(env["IP_ADDRESS"], "192.0.2.10")
-        self.assertEqual(env["IP_DNS1"], "192.0.2.53")
+        # IPv6 is dynamic, so the static inet stanza carries the first two
+        # nameservers in the spec's order, IPv6 first (keel#45)
+        self.assertEqual(env["IP_DNS1"], "2001:db8:1::53")
+        self.assertEqual(env["IP_DNS2"], "2001:db8:1::54")
         self.assertEqual(env["IP6_CONFIG"], "dhcp")
-        self.assertEqual(env["IP6_DNS1"], "2001:db8:1::53")
-        self.assertEqual(env["IP6_DNS2"], "2001:db8:1::54")
+        self.assertNotIn("IP6_DNS1", env)
         self.assertNotIn("IP6_ADDRESS", env)
 
     def test_static_stanzas_the_hook_wrote_render_the_keys_behind_them(self):

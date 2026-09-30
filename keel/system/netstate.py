@@ -16,12 +16,12 @@ from keel.diff.compare import not_inferred
 from keel.inspect import constants as paths
 from keel.inspect.collect import leases, run_command
 from keel.inspect.ipv6 import Runtime
-from keel.inspect.network import probe_network
+from keel.inspect.network import probe_network, slaac_enabled
 from keel.inspect.interfaces import Stanza, parse_interfaces
 from keel.inspect.tree import Tree
 from keel.network import marker
-from keel.network.render import LIBRARY, Rendered, render
-from keel.spec.render import network_env
+from keel.network.render import LIBRARY, Rendered, render, slaac_off
+from keel.spec.render import nameserver_env, network_env
 
 
 @dataclass(frozen=True)
@@ -61,9 +61,52 @@ def observe_network(root: str, doc: dict) -> NetworkState | None:
         env, problem = rendering_env(network, iface, current or "")
         rendered = Rendered(problem=problem) if problem else render(
             tree.path(LIBRARY), iface, hostname(tree, doc), env)
+        declared = interfaces.get(iface) or {}
+        rendered = kept_auto(stale_library(rendered, declared, iface),
+                             declared, iface, current or "")
     return NetworkState(observed, unknowns, in_container, owner,
                         os.path.exists(tree.path(marker.PENDING)), rendered,
                         current)
+
+
+def stale_library(rendered: Rendered, declared: dict, iface: str) -> (
+    Rendered
+):
+    """No file when the library cannot write the `slaac: false` declared
+
+    An inithooks older than IP6_SLAAC renders the stanza without the
+    option, and that file would keep SLAAC while the plan says otherwise.
+    """
+    ipv6 = declared.get("ipv6") or {}
+    if rendered.text is None or ipv6.get("slaac") is not False \
+            or ipv6.get("method") != "static" \
+            or slaac_off(iface) in rendered.text.splitlines():
+        return rendered
+    return Rendered(problem="the installed inithooks cannot write slaac:"
+                    " false; update inithooks")
+
+
+def kept_auto(rendered: Rendered, declared: dict, iface: str,
+              current: str) -> Rendered:
+    """`inet6 auto` stays `inet6 auto` when the spec says auto
+
+    Keel writes `inet6 dhcp` for automatic IPv6 (dhcpcd takes the router
+    advertisement too), and the library has no other word. A file that
+    already says `inet6 auto`, as a TurnKey image ships it, means the
+    same, so a converge for another field keeps the file's word instead of
+    rewriting it (keel#45), as rendering_env keeps an undeclared family.
+    """
+    if rendered.text is None \
+            or (declared.get("ipv6") or {}).get("method") != "auto":
+        return rendered
+    stanzas, _ = parse_interfaces(current)
+    if not any(one.iface == iface and one.family == "inet6"
+               and one.method == "auto" for one in stanzas):
+        return rendered
+    dhcp = f"iface {iface} inet6 dhcp"
+    lines = [f"iface {iface} inet6 auto" if line == dhcp else line
+             for line in rendered.text.splitlines()]
+    return Rendered(text="".join(f"{line}\n" for line in lines))
 
 
 def rendering_env(network: dict, iface: str, current: str) -> (
@@ -78,6 +121,10 @@ def rendering_env(network: dict, iface: str, current: str) -> (
     static stanza's address, mask, gateway and nameservers. A file with
     no stanza of that family gets `manual`, which configures nothing, and
     a stanza the library cannot write again is a reason not to converge.
+
+    Declared nameservers are placed again once the kept family is known,
+    since a kept static stanza changes which stanza can hold them
+    (keel.spec.render.nameserver_env).
     """
     declared = (network.get("interfaces") or {}).get(iface) or {}
     env = network_env({**network, "managed_by": "file",
@@ -96,6 +143,11 @@ def rendering_env(network: dict, iface: str, current: str) -> (
             servers = found[0].values("dns-nameservers")[:2]
             for index, server in enumerate(servers, start=1):
                 env.setdefault(f"{dns_prefix}{index}", server)
+    if network.get("nameservers"):
+        env = {key: value for key, value in env.items()
+               if not key.startswith(("IP_DNS", "IP6_DNS"))}
+        env.update(nameserver_env(
+            [str(server) for server in network["nameservers"]], env))
     return env, None
 
 
@@ -117,8 +169,11 @@ def kept_family(family: str, found: list[Stanza]) -> (
         prefix = stanza.option("netmask")
         if "/" not in address and prefix:
             address = f"{address}/{prefix}"
-        return {config: "static", "IP6_ADDRESS": address,
-                "IP6_GW": stanza.option("gateway") or ""}, None
+        kept = {config: "static", "IP6_ADDRESS": address,
+                "IP6_GW": stanza.option("gateway") or ""}
+        if not slaac_enabled(stanza):
+            kept["IP6_SLAAC"] = "no"
+        return kept, None
     try:
         value = ipaddress.ip_interface(
             address if "/" in address
