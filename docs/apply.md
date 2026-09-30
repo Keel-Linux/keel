@@ -335,6 +335,17 @@ up again. A `--dry-run` never starts a server; it waits for one that is
 activating and otherwise names the unit's state. Under `--root` no
 server is asked, started or waited for.
 
+Before it waits, apply says so on the terminal, not in its output:
+`keel: waiting for the database server (mariadb) to start, up to 300 s`
+goes to standard output when that is the terminal, and otherwise to the
+controlling terminal, where the dialogs of the first boot hooks draw.
+`10keel-system` reads apply's output through a pipe, so without it tty1
+stayed blank for as long as the wait. A unit that `systemctl is-enabled`
+calls `disabled` is also enabled (`systemctl enable mariadb`, a line of
+the plan), so a server the description declares starts at boot and not
+only when apply starts it. A masked unit cannot be started, so it is
+refused as above, and static or generated units are left as they are.
+
 This is what a first boot needs. `inithooks.service` is ordered after
 the getty only, and `mariadb.service` starts beside it, so the hook
 `10keel-system` used to ask the server a second before it accepted

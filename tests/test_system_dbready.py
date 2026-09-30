@@ -80,13 +80,105 @@ class Clock:
         self.slept += seconds
 
 
+TELL = dbready._tell
+QUIET = mock.patch.object(dbready, "_tell")
+
+
+def setUpModule():
+    # Nothing here may draw on the terminal of whoever runs the suite.
+    QUIET.start()
+
+
+def tearDownModule():
+    QUIET.stop()
+
+
 def ready(machine: Machine, start: bool, timeout: int = 300):
     clock = Clock()
     with mock.patch.object(subprocess, "run", side_effect=machine), \
             mock.patch.object(dbready.time, "monotonic", clock.monotonic), \
-            mock.patch.object(dbready.time, "sleep", clock.sleep):
+            mock.patch.object(dbready.time, "sleep", clock.sleep), \
+            mock.patch.object(dbready, "_tell") as tell:
         problem = dbready.ready("mariadb", PING, start, timeout)
+    clock.told = [one.args[0] for one in tell.call_args_list]
     return problem, clock
+
+
+class TestTheOperatorIsToldBeforeTheWait(unittest.TestCase):
+    """10keel-system captures apply's output, so tty1 stayed blank"""
+
+    def test_a_server_that_answers_is_not_announced(self):
+        _, clock = ready(Machine(), start=True)
+        self.assertEqual(clock.told, [])
+
+    def test_a_start_is_announced_once_with_its_bound(self):
+        _, clock = ready(Machine(pings=1), start=True, timeout=300)
+        self.assertEqual(clock.told, [
+            "keel: waiting for the database server (mariadb) to start,"
+            " up to 300 s",
+        ])
+
+    def test_a_dry_run_announces_only_a_wait_it_makes(self):
+        _, clock = ready(Machine(pings=1, units=("inactive",)), start=False)
+        self.assertEqual(clock.told, [])
+        _, clock = ready(
+            Machine(pings=3, units=("activating",)), start=False,
+        )
+        self.assertEqual(len(clock.told), 1)
+
+    def test_the_line_goes_to_the_terminal_and_not_to_stdout(self):
+        # The hook reads stdout through a pipe; the terminal is where the
+        # dialogs of the other hooks draw (libinithooks, /dev/tty).
+        path = self.enterContext(
+            __import__("tempfile").TemporaryDirectory()
+        ) + "/tty"
+        open(path, "w").close()
+        with mock.patch.object(dbready, "TTY", path), \
+                mock.patch.object(dbready.os, "isatty", return_value=False), \
+                mock.patch("sys.stdout") as stdout:
+            TELL("a line")
+        stdout.write.assert_not_called()
+        with open(path) as fob:
+            self.assertEqual(fob.read(), "a line\n")
+
+    def test_stdout_that_is_the_terminal_is_written_to_directly(self):
+        with mock.patch.object(dbready.os, "isatty", return_value=True), \
+                mock.patch("builtins.print") as printed:
+            TELL("a line")
+        printed.assert_called_once_with("a line", flush=True)
+
+    def test_a_terminal_that_refuses_the_write_is_not_an_error(self):
+        path = self.enterContext(
+            __import__("tempfile").TemporaryDirectory()
+        ) + "/tty"
+        open(path, "w").close()
+        with mock.patch.object(dbready, "TTY", path), \
+                mock.patch.object(dbready.os, "isatty", return_value=False), \
+                mock.patch.object(dbready.os, "write",
+                                  side_effect=OSError(5, "EIO")):
+            TELL("a line")
+
+    def test_no_terminal_at_all_is_not_an_error(self):
+        with mock.patch.object(dbready, "TTY", "/nonexistent/tty"), \
+                mock.patch.object(dbready.os, "isatty", return_value=False):
+            TELL("a line")
+
+
+class TestWhetherTheServerStartsAtBoot(unittest.TestCase):
+    def enabled(self, **kwargs):
+        with mock.patch.object(subprocess, "run", **kwargs) as run:
+            found = dbready.enabled("mariadb")
+        return found, run
+
+    def test_systemd_s_word_for_it_is_kept(self):
+        found, run = self.enabled(return_value=done(1, "disabled\n"))
+        self.assertEqual(found, "disabled")
+        self.assertEqual(run.call_args.args[0],
+                         ["systemctl", "is-enabled", "mariadb"])
+
+    def test_no_systemctl_is_an_empty_answer(self):
+        found, _ = self.enabled(side_effect=FileNotFoundError(2, "x"))
+        self.assertEqual(found, "")
 
 
 class TestTheQuestion(unittest.TestCase):

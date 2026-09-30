@@ -76,6 +76,13 @@ NOT_INSTALLED = (
     "the description declares a {engine} server and none is installed here"
     " ({role}); keel does not install packages, so nothing was configured"
 )
+# Only `disabled`: a masked unit cannot be started either, so it never
+# gets here (DOWN), and static, indirect or generated units are started
+# by something else on purpose.
+ENABLE = (
+    "enable the server, so the server the description declares starts at"
+    " boot and not only when apply starts it"
+)
 DOWN = (
     "the server is not answering ({problem}), so what it is cannot be"
     " read; its configuration was not written and nothing was restarted,"
@@ -364,6 +371,8 @@ def _configuration(
     notes: list[Action] = []
     if names:
         notes.append(Note(NAME_ORIGIN.format(names=", ".join(names))))
+    if state.enabled == "disabled":
+        notes.append(Run(("systemctl", "enable", mariadb.SERVICE), ENABLE))
     if state.dropin.readable and state.dropin.text == text:
         return Step(FIELD, tuple(notes) + (
             Note(f"unchanged ({state.dropin.path}, server id {identity})"),

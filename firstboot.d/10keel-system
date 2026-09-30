@@ -25,6 +25,11 @@
 # waits for a confirmation nobody is there to give at first boot, so it would
 # only revert (decision 0018).
 #
+# The output of apply is captured below and logged when it is over. A
+# declared MariaDB server that is still starting is waited for, up to
+# 300 s, and apply says so itself on the terminal (/dev/tty), outside
+# this capture, so tty1 is not blank meanwhile (docs/apply.md).
+#
 # No failure here aborts the boot: an appliance that cannot converge a
 # field must still finish booting, and say what it could not do.
 

@@ -138,6 +138,17 @@ class TestTheServerIsUpBeforeItIsAsked(unittest.TestCase):
         self.assertTrue(found.reading.role.known)
         self.assertTrue(run.called)
 
+    def test_whether_it_starts_at_boot_is_read_once_it_answers(self):
+        root, doc = self.live()
+        with mock.patch.object(dbready, "ready", return_value=""), \
+                mock.patch.object(dbready, "enabled",
+                                  return_value="disabled") as enabled, \
+                mock.patch.object(subprocess, "run",
+                                  return_value=answer("")):
+            found = observe_database(root, doc, start=True)
+        enabled.assert_called_once_with("mariadb")
+        self.assertEqual(found.enabled, "disabled")
+
     def test_an_engine_keel_does_not_configure_is_not_started(self):
         root, doc = self.live(
             "redis", "usr/bin/redis-server"

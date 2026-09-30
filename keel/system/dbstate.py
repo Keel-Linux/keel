@@ -90,6 +90,9 @@ class DatabaseState:
     # Why the server did not answer within the bound, started or waited
     # for (keel.system.dbready); empty when it answered or was not asked.
     down: str = ""
+    # What systemctl is-enabled says of the server's unit, read once it
+    # answers; empty when it was not read.
+    enabled: str = ""
 
     @property
     def installed(self) -> bool:
@@ -170,6 +173,7 @@ def observe_database(
         return DatabaseState(engine=name, live=live)
 
     binary = engine.installed(tree.glob)
+    enabled = ""
     if live and binary is not None and name == "mariadb":
         down = dbready.ready(SERVICE, PING, start, dbready.READY_TIMEOUT)
         if down:
@@ -181,6 +185,7 @@ def observe_database(
                 dropin=tree.read(DROPIN),
                 down=down,
             )
+        enabled = dbready.enabled(SERVICE)
     answers = {} if binary is None else {
         key: run_command(tree, argv)
         for key, argv in engine.questions.items()
@@ -209,6 +214,7 @@ def observe_database(
         status=status,
         reach=found.problem,
         shared=found.shared,
+        enabled=enabled,
     )
 
 

@@ -58,6 +58,7 @@ def state(
     shared: tuple = (),
     down: str = "",
     revoked: str | None = None,
+    enabled: str = "enabled",
 ) -> DatabaseState:
     """One machine's database, as the planner is given it"""
     answered = answered or MARIADB_STANDALONE
@@ -79,6 +80,7 @@ def state(
         shared=shared,
         down=down,
         revoked=_file(dbreadonly.RECORD, revoked),
+        enabled=enabled,
     )
 
 
@@ -256,6 +258,42 @@ class TestAServerThatIsDownIsNeverConverged(unittest.TestCase):
     def test_a_server_that_is_up_is_planned_as_before(self):
         plan = steps(declaring(role="standalone"), state())
         self.assertEqual(len(only(plan["database.server"], WriteFile)), 1)
+
+
+ENABLE = ("systemctl", "enable", "mariadb")
+
+
+class TestADeclaredServerStartsAtBoot(unittest.TestCase):
+    """apply may start a disabled server; it must not stop at that"""
+
+    def runs(self, plan) -> list:
+        return [one.argv for one in only(plan["database.server"], Run)]
+
+    def test_a_disabled_server_is_enabled(self):
+        plan = steps(declaring(role="primary"), state(enabled="disabled"))
+        self.assertIn(ENABLE, self.runs(plan))
+        enable = next(one for one in only(plan["database.server"], Run)
+                      if one.argv == ENABLE)
+        self.assertIn("starts at boot", enable.summary)
+
+    def test_it_is_enabled_even_when_the_file_is_unchanged(self):
+        first = steps(declaring(role="standalone"), state())
+        text = only(first["database.server"], WriteFile)[0].content
+        plan = steps(declaring(role="standalone"),
+                     state(dropin=text, enabled="disabled"))
+        self.assertEqual(self.runs(plan), [ENABLE])
+
+    def test_an_enabled_or_unknown_server_is_left_alone(self):
+        for enabled in ("enabled", "static", "masked", ""):
+            with self.subTest(enabled=enabled):
+                plan = steps(declaring(role="primary"),
+                             state(enabled=enabled))
+                self.assertNotIn(ENABLE, self.runs(plan))
+
+    def test_a_server_that_is_down_is_not_enabled_either(self):
+        plan = steps(declaring(role="primary"),
+                     state(down=DOWN, enabled="disabled"))
+        self.assertNotIn(ENABLE, self.runs(plan))
 
 
 class TestTheOverlayGivesTheServerIdItsIdentity(unittest.TestCase):

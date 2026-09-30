@@ -12,6 +12,12 @@ keel (0.11.6) unstable; urgency=medium
     reason: nothing is written or restarted and the run exits non zero,
     so the next apply takes the field up again. A dry run starts no
     server, and under --root none is asked, started or waited for.
+  * Before the wait, apply prints one line on the terminal (standard
+    output when it is one, else /dev/tty, where the first boot dialogs
+    draw), never into the output 10keel-system reads through a pipe, so
+    tty1 no longer stays blank while the server starts.
+  * A declared server whose unit is disabled is enabled, a line of the
+    plan, so it starts at boot and not only when apply starts it.
 
  -- Marcos Mendez <mendez.foto@gmail.com>  Wed, 30 Sep 2026 12:30:00 +0000
 
