@@ -1,0 +1,20 @@
+# /usr/share/keel/overlays/anubis.yaml, from keel-overlay-anubis
+manifest_version: 1
+kind: overlay
+name: anubis
+title: Anubis
+summary: Proof of work behind Nginx, never at the edge (0030)
+requires: [nginx]
+processes:
+  - name: anubis
+    unit: anubis.service
+    listen:
+      - {port: 8923, protocol: tcp, expose: loopback}
+checks:
+  - {name: anubis, process: anubis, type: tcp, address: loopback, port: 8923,
+     on_failure: restart}
+secrets:
+  - name: anubis_signing_key
+    description: The key Anubis signs its challenge cookies with
+    generate: required
+    shared: true

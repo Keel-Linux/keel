@@ -1,0 +1,21 @@
+# Not from the format: a data overlay for the application tests, shaped
+# after the appendix of docs/manifest-v1.md
+manifest_version: 1
+kind: overlay
+name: mariadb
+title: MariaDB
+summary: The MariaDB server, embedded or offered to the mesh
+provides: {engine: mariadb}
+processes:
+  - name: mariadb
+    unit: mariadb.service
+    listen:
+      - {address: "::1", port: 3306, protocol: tcp, expose: loopback}
+    restart: {attempts: 2, within_cycles: 10}
+checks:
+  - {name: mariadb, process: mariadb, type: protocol, protocol: mysql,
+     address: loopback, port: 3306, on_failure: restart}
+  - {name: mariadb-ping, process: mariadb, type: command,
+     command: [/usr/bin/mariadb-admin, ping], on_failure: alert}
+data:
+  - {path: /var/lib/mysql, replication: native, backup: dump}

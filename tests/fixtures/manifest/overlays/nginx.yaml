@@ -1,0 +1,15 @@
+# /usr/share/keel/overlays/nginx.yaml, from keel-overlay-nginx
+manifest_version: 1
+kind: overlay
+name: nginx
+title: Nginx
+summary: Terminates TLS and serves static files (0030)
+processes:
+  - name: nginx
+    unit: nginx.service
+    listen:
+      - {port: 80, protocol: tcp, expose: public}
+      - {port: 443, protocol: tcp, expose: public}
+checks:
+  - {name: nginx, process: nginx, type: http, address: loopback, port: 80,
+     path: /keel-health, expect: 204, on_failure: restart}

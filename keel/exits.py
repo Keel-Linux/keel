@@ -32,8 +32,10 @@ NOTIFY_FAILED = 22
 DESCRIPTIONS = {
     OK: "success, including the no-op cases",
     USAGE: "usage error: unknown command, option or argument",
-    SPEC_UNREADABLE: "spec file cannot be read or is not valid YAML",
-    SPEC_INVALID: "spec file is valid YAML but fails validation",
+    SPEC_UNREADABLE: "spec file, or an appliance or overlay manifest,"
+    " cannot be read or is not valid YAML",
+    SPEC_INVALID: "spec file, or an appliance or overlay manifest, is"
+    " valid YAML but fails validation",
     SECRET_ERROR: "a referenced secret is missing or badly protected",
     CONF_ERROR: "the conf file, or the file inspect writes, cannot be"
     " written",

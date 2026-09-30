@@ -1,0 +1,16 @@
+# /usr/share/keel/overlays/coraza.yaml, from keel-overlay-coraza
+manifest_version: 1
+kind: overlay
+name: coraza
+title: Coraza
+summary: A WAF inside Nginx with the OWASP Core Rule Set (0030)
+requires: [nginx]
+checks:
+  - name: waf-blocks
+    type: http
+    address: loopback
+    port: 80
+    path: "/keel-health?keel-waf-probe=%3Cscript%3Ealert(1)%3C%2Fscript%3E"
+    expect: 403
+    every_cycles: 10
+    on_failure: alert
