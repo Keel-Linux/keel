@@ -485,6 +485,21 @@ class TestCapturedUplink(RootCase):
                                              routes)
         self.assertTrue(confirmed, lines)
 
+    def test_a_zoned_gateway_is_asked_without_its_zone(self):
+        """`ip route get fe80::1%eth0` fails; the spec accepts the form"""
+        marker.write(self.root, pending(
+            absent=True, uplink_gateways=("fe80::1%eth0",)).up("b1", 50.0))
+        console = session.Origin(session.CONSOLE_KIND, "the console")
+        (confirmed, lines), _ = self.confirm(console, {"fe80::1": "eth0"},
+                                             gateways=("fe80::1%eth0",))
+        self.assertTrue(confirmed, lines)
+        self.assertEqual(netconfirm.route_targets(
+            marker.Pending(iface="wg0", path=CONF, window=120,
+                           uplink_gateways=("fe80::1%eth0", "fe80::1")),
+            console, ["192.0.2.1"]),
+            [("fe80::1", "the uplink gateway"),
+             ("192.0.2.1", "the uplink gateway")])
+
     def test_an_uplink_change_is_not_asked(self):
         uplink = marker.Pending(iface="eth0",
                                 path="etc/network/interfaces", window=120,
@@ -532,6 +547,14 @@ class TestRouteDev(unittest.TestCase):
         with mock.patch.object(live, "output", return_value=None):
             self.assertIsNone(live.route_dev("192.0.2.1"))
         self.assertIs(live.probes().route_dev, live.route_dev)
+
+    def test_a_family_word_after_via_and_what_is_not_an_address(self):
+        """RFC 5549: an IPv4 route via an IPv6 next hop"""
+        self.assertEqual(live.gateways_in(
+            "default via inet6 fe80::1 dev eth0 proto bgp\n"
+            "default via inet 192.0.2.1 dev eth1\n"
+            "default via inet6\n"
+            "default via something dev eth2\n"), ["fe80::1", "192.0.2.1"])
 
     def test_the_default_routes_gateways(self):
         self.assertEqual(live.gateways_in(

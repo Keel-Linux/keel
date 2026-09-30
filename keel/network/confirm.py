@@ -220,10 +220,12 @@ def route_targets(pending: marker.Pending, origin: session.Origin,
 
     A session that came over the overlay is answered through it, as it
     should be, so only one that came over the uplink has its client
-    asked.
+    asked. A zone (`fe80::1%eth0`, which the spec accepts) is dropped:
+    `ip route get` refuses it, and the probe would then fail closed.
     """
-    gateways = sorted(dict.fromkeys((*pending.uplink_gateways,
-                                     *live_gateways)),
+    gateways = sorted(dict.fromkeys(
+        one.split("%", 1)[0]
+        for one in (*pending.uplink_gateways, *live_gateways)),
                       key=lambda one: ipaddress.ip_address(one).version,
                       reverse=True)
     found = [(gateway, "the uplink gateway") for gateway in gateways]

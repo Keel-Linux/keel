@@ -39,6 +39,8 @@ keel (0.11.0) unstable; urgency=medium
     network confirm refuses an overlay change, from a console too, while
     ip route get sends a declared or live default gateway, or an uplink
     session's client, through the overlay, or gives no answer for one.
+    A zoned gateway (fe80::1%eth0) is asked without its zone, and a
+    default route via inet6 fe80::1 (RFC 5549) reads as fe80::1.
   * A wg0.conf with an inline PrivateKey keeps its identity: apply moves
     the key into the key file (0600, written to a temporary file and
     linked into place, never printed) before rewriting the file, instead

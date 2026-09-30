@@ -95,12 +95,24 @@ def default_gateways() -> list[str] | None:
 
 
 def gateways_in(text: str) -> list[str]:
-    """`ip route show default` output: the address after each `via`"""
+    """`ip route show default` output: the address after each `via`
+
+    `via inet6 fe80::1` (an IPv4 route over an IPv6 next hop, RFC 5549)
+    names the family first; that word is skipped, and whatever does not
+    read as an address is left out.
+    """
     found = []
     for line in text.splitlines():
         fields = line.split()
-        if "via" in fields and fields.index("via") + 1 < len(fields):
-            found.append(fields[fields.index("via") + 1])
+        if "via" not in fields:
+            continue
+        rest = fields[fields.index("via") + 1:]
+        if rest and rest[0] in ("inet", "inet6"):
+            rest = rest[1:]
+        try:
+            found.append(str(ipaddress.ip_address(rest[0])))
+        except (IndexError, ValueError):
+            continue
     return found
 
 
