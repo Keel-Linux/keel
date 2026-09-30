@@ -21,6 +21,7 @@ Three things about MariaDB that shape the rest:
 """
 
 import hashlib
+import ipaddress
 from dataclasses import dataclass
 
 from keel.spec.origins import host_pattern
@@ -54,6 +55,8 @@ SYSTEM_SCHEMAS = (
     "information_schema", "performance_schema", "mysql", "sys",
 )
 SERVER_ID_MODULUS = 2**31 - 1
+# Listen entries that are not addresses and name no one machine.
+WILDCARDS = ("*", "localhost")
 HEADER = (
     "# Written by keel spec apply from database.server of the instance\n"
     "# description. Edited by hand, it is overwritten on the next run.\n"
@@ -74,7 +77,9 @@ class Statements:
     summary: str
 
 
-def server_id(machine_id: str, listen: list | None = None) -> int | None:
+def server_id(
+    machine_id: str, listen: list | None = None, overlay: list | tuple = (),
+) -> int | None:
     """A server id of this machine's own, or None when it has nothing to
     derive one from
 
@@ -97,14 +102,58 @@ def server_id(machine_id: str, listen: list | None = None) -> int | None:
     So two machines collide only when they hold the same machine-id and
     answer on the same addresses, which is to say when they are the same
     machine.
+
+    Except that `listen` is `::` on every node that answers everywhere,
+    and then it tells nobody apart. So on a node with a WireGuard overlay
+    the seed is the machine-id, the overlay address(es) (`overlay`, one
+    per family, unique to each node and stable, decision 0020) and the
+    listen entries that name this machine: wildcards and loopback are
+    left out. A node without an overlay keeps the seed, and the server
+    id, it had: changing it restarts the server under a new identity.
     """
     text = (machine_id or "").strip()
     parts = [str(one).strip() for one in (listen or [])]
+    if overlay:
+        parts = [one for one in parts if not _anywhere_or_here(one)]
+        parts += [str(one).strip() for one in overlay]
     if not text and not any(parts):
         return None
     seed = "\n".join([text] + sorted(parts))
     digest = hashlib.sha256(seed.encode()).digest()
     return int.from_bytes(digest[:8], "big") % SERVER_ID_MODULUS + 1
+
+
+def _anywhere_or_here(entry: str) -> bool:
+    """A listen entry every node shares: a wildcard or this machine only"""
+    if entry.lower() in WILDCARDS:
+        return True
+    try:
+        address = ipaddress.ip_address(entry)
+    except ValueError:
+        return False
+    return address.is_unspecified or address.is_loopback
+
+
+def overlay_addresses(doc: dict) -> list[str]:
+    """This node's WireGuard overlay addresses, without their prefix
+
+    network.overlay.wireguard.address and ipv4_address. The prefix length
+    is left out: it is the network's, and changing it must not give the
+    server a new identity. A value that is not an address counts as none;
+    keel spec validate refuses it before apply gets here.
+    """
+    overlay = ((doc.get("network") or {}).get("overlay") or {})
+    wireguard = overlay.get("wireguard") or {}
+    found = []
+    for key in ("address", "ipv4_address"):
+        value = wireguard.get(key)
+        if not value:
+            continue
+        try:
+            found.append(str(ipaddress.ip_interface(str(value)).ip))
+        except ValueError:
+            continue
+    return found
 
 
 def dropin_text(

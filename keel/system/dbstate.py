@@ -78,6 +78,9 @@ class DatabaseState:
     # Why the declared primary cannot be copied from, asked only when a
     # copy would be made (needs_copy); empty when it can, or was not asked.
     reach: str = ""
+    # The primary's accounts this server holds too, which keep this
+    # server's authentication when it is seeded (keel.system.dbaccounts).
+    shared: tuple[str, ...] = ()
 
     @property
     def installed(self) -> bool:
@@ -160,6 +163,10 @@ def observe_database(root: str, doc: dict) -> DatabaseState | None:
     )
     status = answers.get("status", File(""))
     secret = credential(server)
+    found = _reach(
+        tree, server, status, secret,
+        live and bool(binary) and name == "mariadb",
+    )
     return DatabaseState(
         engine=name,
         live=live,
@@ -172,16 +179,14 @@ def observe_database(root: str, doc: dict) -> DatabaseState | None:
         dropin=tree.read(DROPIN),
         credential=secret,
         status=status,
-        reach=_reach(
-            tree, server, status, secret,
-            live and bool(binary) and name == "mariadb",
-        ),
+        reach=found.problem,
+        shared=found.shared,
     )
 
 
 def _reach(
     tree: Tree, server: dict, status: File, secret: Credential, asks: bool,
-) -> str:
+) -> dbseed.Reach:
     """Ask the declared primary whether it can be copied from, if it would be
 
     Only on the live system with a server installed, with a credential,
@@ -189,7 +194,7 @@ def _reach(
     boot of a healthy replica would be a question nobody needs answered.
     """
     if not (asks and secret.known and needs_copy(server, status)):
-        return ""
+        return dbseed.Reach()
     host, port = endpoint(server)
     return dbseed.reach(tree.root, host, port, secret.value)
 

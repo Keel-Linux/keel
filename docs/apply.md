@@ -324,10 +324,23 @@ Every role writes one file,
 
 | Line | Where it comes from |
 | --- | --- |
-| `server_id` | Derived from `/etc/machine-id` **and** `listen`, never from the description alone: two appliances deployed from one description would collide, and two nodes with the same server id stop replicating. Both, because the published `core` layer ships a populated machine-id, so every appliance assembled from it holds the same value (docs/traps.md); a pair on one /64 differs in its addresses whatever the layer shipped. A machine with neither is refused rather than given an invented one |
+| `server_id` | Derived from `/etc/machine-id` **and** addresses of this node, never from the description alone: two appliances deployed from one description would collide, and two nodes with the same server id stop replicating. Both, because the published `core` layer ships a populated machine-id, so every appliance assembled from it holds the same value (docs/traps.md). With a WireGuard overlay (`network.overlay.wireguard`), the addresses are the overlay's (`address`, and `ipv4_address` when declared, without prefix length) and the `listen` entries that name this machine: wildcards (`::`, `0.0.0.0`, `*`) and loopback are left out, since they are the same on every node. Without an overlay, `listen` counts as written, as before 0.11.4, so such a node keeps its server id. A machine with neither a machine-id nor an address is refused rather than given an invented one |
 | `bind-address` | `database.server.listen`, written as the literal list it is. Absent from the description means the file says nothing and the packaged setting stands |
 | `skip_name_resolve` | `ON`, unless an entry of `allowed_from` is a name: MariaDB matches a grant whose host is a name only while it resolves client addresses. The line of the plan says so, because docs/spec.md calls a name fragile for exactly this reason |
 | `log_bin`, `binlog_format` | On a primary alone. A replica reads the primary's log and needs none of its own |
+
+**What changes a server id.** A new machine-id, a new overlay address,
+declaring an overlay on a node that had none, or a new real address in
+`listen`: the next apply writes the new `server_id` and restarts the
+server, once. Nothing is lost by it. On a replica, replication resumes
+after the restart from its GTID position, which does not name its own
+server id. On a primary, the transactions after the restart carry the
+new id in their GTID (`domain-server-sequence`) and the sequence of the
+domain goes on, so replicas following by GTID, as keel's do, follow it.
+What must hold is that the two ids of a pair differ, and apply sees only
+its own node: after changing either, compare `SELECT @@server_id` on
+both. Equal ids stop the replica's I/O thread ("master and slave have
+equal MariaDB server ids").
 
 A **primary** then holds its authorizations. Each entry of
 `allowed_from` becomes `CREATE USER`, `ALTER USER` and `GRANT REPLICATION
@@ -384,7 +397,7 @@ the first UPDATE of an older post stopped its SQL thread.
 #### Seeding a replica
 
 The same `apply --system` that makes the node a replica does it, in this
-order, and a failure in the first four steps leaves the machine as it
+order, and a failure in the first five steps leaves the machine as it
 was:
 
 1. **Ask the primary.** While apply observes the machine, before it plans
@@ -395,22 +408,26 @@ was:
    A replica already replicating healthily from the declared primary is
    never dialled. `--dry-run` asks too, so it says whether the seed would
    be refused; `--root` asks nothing.
-2. **Copy it.** `mariadb-dump --single-transaction --gtid
+2. **Read its accounts.** Each of the primary's own accounts as it would
+   create it, `SHOW CREATE USER` and `SHOW GRANTS` (below). A primary
+   with roles is refused here, and already in step 1.
+3. **Copy it.** `mariadb-dump --single-transaction --gtid
    --master-data=2 --routines --events --triggers --all-databases
    --ignore-database=mysql --ignore-database=sys`, pulled over the
    network (the WireGuard overlay, where the pair has one) into a file of
    mode 0600, in a directory of mode 0700 under `/var/tmp`, which is on
    disk where `/tmp` is a tmpfs on Debian 13.
-3. **Read its position.** The dump ends with the GTID position it was
+4. **Read its position.** The dump ends with the GTID position it was
    taken at, as a comment; a dump without one is refused.
-4. **Check the room, read the accounts.** Too little free space for the
-   load is refused, and the primary's accounts the replica lacks are
-   read (both below).
-5. **Only then drop.** Replication is stopped and forgotten (`STOP SLAVE`,
+5. **Check the room, read the accounts again.** Too little free space
+   for the load is refused, and so is a second reading of the accounts
+   that differs from the first (below). The replica's own accounts are
+   read and compared.
+6. **Only then drop.** Replication is stopped and forgotten (`STOP SLAVE`,
    `RESET SLAVE ALL`) and the databases `--destroy-local-database`
    confirmed are dropped.
-6. **Load and start.** The copy is loaded through the local client, the
-   accounts are created, `gtid_slave_pos` is set to the dump's position,
+7. **Load and start.** The copy is loaded through the local client, the
+   accounts are aligned, `gtid_slave_pos` is set to the dump's position,
    and replication starts.
 
 A failure while loading leaves an incomplete copy and no replication; the
@@ -421,28 +438,56 @@ next run sees databases it did not make and asks for
 which the dump leaves out, and the binary log carries only what changes
 after the seed: without them the primary's first `ALTER USER` of an
 account made before the replica existed (the application's own
-database user) stops the replica's SQL thread. So, right after the dump
-and before anything is dropped, the replica lists the primary's accounts
-and its own, and for each account the primary holds and the replica does
-not, reads `SHOW CREATE USER` and `SHOW GRANTS` from the primary. After
-the data is loaded and before replication starts, it runs them with
-`sql_log_bin = 0`, so they never enter a binary log of the replica's or
-its GTID history (a keel replica has no binary log; the setting keeps it
-so on one given one by hand). Left out:
+database user) stops the replica's SQL thread. So the replica reads
+each of the primary's own accounts with `SHOW CREATE USER` and `SHOW
+GRANTS`, and aligns its own with them after the data is loaded and
+before replication starts, with `sql_log_bin = 0`, so none of it enters
+a binary log of the replica's or its GTID history (a keel replica has no
+binary log; the setting keeps it so on one given one by hand):
 
-- the server's accounts and keel's: `root`, `mysql`, `mariadb.sys`,
-  `debian-sys-maint` and `repl`, each node's own;
-- the anonymous account;
-- roles, and the grants and default roles that name them: a primary
-  that uses roles needs them created on the replica by hand first;
-- an account the replica already holds, such as the application user
-  its own first boot created: it keeps the replica's password until the
-  primary changes it, which then replicates like any other change.
+- an account the replica lacks is created as the primary has it;
+- an account it holds already, such as the application user its own
+  first boot created, **keeps the replica's own authentication**: every
+  node makes its own application password at first boot, and taking
+  the primary's would lock the replica's application out (error 1045).
+  Only its grants are aligned, and only when they differ: `REVOKE ALL
+  PRIVILEGES, GRANT OPTION`, then the primary's grants without the
+  credential the first of them carries. Otherwise the primary's next
+  `REVOKE` of a grant the replica lacks stops it ("There is no such
+  grant").
 
-An account created or changed on the primary in the seconds between the
-dump and the reading of the accounts can be applied twice, once in the
-copy and once from the binary log; a `CREATE USER` in that window stops
-the replica, and `--destroy-local-database` starts over.
+**An account on both nodes keeps two passwords, until the primary
+changes its own.** The plan names these accounts in a line before the
+seed. A later `ALTER USER` of one of them on the primary replicates like
+any other change and replaces the replica's password with the
+primary's, and the replica's application then gets error 1045 until its
+configuration is given the new one (`wp-config.php`, and `DB_PASS` for
+the first boot hooks, on WordPress). Keel does not do that edit. One
+password for the pair, handed from the primary or kept as a shared
+secret, is the lasting fix and is tracked in Keel-Linux/tracker#25.
+
+Left out: the server's accounts and keel's (`root`, `mysql`,
+`mariadb.sys`, `debian-sys-maint` and `repl`, each node's own) and the
+anonymous account.
+
+**The accounts are read before the dump, and again after it.** The
+first reading is the one the replica gets; the second must equal it, or
+the seed is refused before anything is dropped and asks to be run again.
+Read only after the dump, a `CREATE USER` in between was in the copy of
+the accounts and again in the binary log after the dump's position, and
+stopped the replica; read only before, it was in neither. Two equal
+readings around the dump mean no account changed while it was taken.
+
+**Roles are not copied: a primary with any is refused.** A role's
+grants, the roles granted to each user, the roles granted to roles and
+the default roles are a second graph to copy and align, and a user
+copied without the role its privileges come through would hold none of
+them on the replica, silently, while the primary's next `GRANT ... TO`
+a role or `REVOKE` of a role would stop it. So a primary that holds a
+role, or grants privileges to `PUBLIC`, is refused while apply observes
+the machine, before anything on the replica changes, naming the roles.
+Such a primary is seeded by hand, or has its roles replaced by direct
+grants first.
 
 **Room for the copy.** With the dump on disk and nothing dropped yet,
 the free space where the server keeps its data (`/var/lib/mysql`) is

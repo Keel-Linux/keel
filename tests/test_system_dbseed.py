@@ -39,24 +39,38 @@ DUMP = (
 # The accounts of the primary: the application's own, the server's, the
 # replication account and one the replica already holds.
 PRIMARY_ACCOUNTS = (
-    "wp\t%\nroot\tlocalhost\nmysql\tlocalhost\nmariadb.sys\tlocalhost\n"
-    "debian-sys-maint\tlocalhost\nrepl\tfd42:b2:0:1:%\n"
-    "wordpress\tlocalhost\n\tlocalhost\n"
+    "wp\t%\tN\nroot\tlocalhost\tN\nmysql\tlocalhost\tN\n"
+    "mariadb.sys\tlocalhost\tN\ndebian-sys-maint\tlocalhost\tN\n"
+    "repl\tfd42:b2:0:1:%\tN\nwordpress\tlocalhost\tN\n\tlocalhost\tN\n"
 )
 # Host names compare without case, as MariaDB compares them; users do not.
-REPLICA_ACCOUNTS = "root\tlocalhost\nmysql\tlocalhost\nwordpress\tLOCALHOST\n"
+REPLICA_ACCOUNTS = (
+    "root\tlocalhost\tN\nmysql\tlocalhost\tN\nwordpress\tLOCALHOST\tN\n"
+)
 DEFINITIONS = (
+    "keel:account\n"
     "CREATE USER `wp`@`%` IDENTIFIED BY PASSWORD '*0A1B'\n"
     "GRANT USAGE ON *.* TO `wp`@`%` IDENTIFIED BY PASSWORD '*0A1B'\n"
     "GRANT ALL PRIVILEGES ON `wordpress`.* TO `wp`@`%`\n"
-    "GRANT `editor` TO `wp`@`%`\n"
-    "SET DEFAULT ROLE `editor` FOR `wp`@`%`\n"
+    "keel:account\n"
+    "CREATE USER `wordpress`@`localhost` IDENTIFIED BY PASSWORD '*P'\n"
+    "GRANT USAGE ON *.* TO `wordpress`@`localhost` IDENTIFIED BY"
+    " PASSWORD '*P'\n"
+    "GRANT ALL PRIVILEGES ON `wordpress`.* TO `wordpress`@`localhost`\n"
+    "keel:account\n"
+)
+LOCAL_GRANTS = (
+    "keel:account\n"
+    "GRANT USAGE ON *.* TO `wordpress`@`localhost` IDENTIFIED BY"
+    " PASSWORD '*R'\n"
+    "GRANT ALL PRIVILEGES ON `wordpress`.* TO `wordpress`@`localhost`\n"
 )
 ANSWERS = {
     "probe": GRANTED,
     "accounts": PRIMARY_ACCOUNTS,
     "local-accounts": REPLICA_ACCOUNTS,
     "definitions": DEFINITIONS,
+    "local-grants": LOCAL_GRANTS,
 }
 
 
@@ -92,7 +106,11 @@ class Runner:
         self.calls.append(call)
         key = self.key(argv, call.get("stdin", ""))
         default = (0, ANSWERS.get(key, "").encode(), b"")
-        code, out, err = self.answers.get(key, default)
+        answer = self.answers.get(key, default)
+        if isinstance(answer, list):
+            # One answer per call, the last one repeated.
+            answer = answer.pop(0) if len(answer) > 1 else answer[0]
+        code, out, err = answer
         if key == "dump" and not code:
             kwargs["stdout"].write(self.dump.encode())
             out = b""
@@ -111,6 +129,8 @@ class Runner:
             return "definitions"
         if "mysql.user" in asked:
             return "local-accounts"
+        if "SHOW GRANTS" in stdin:
+            return "local-grants"
         if "Seed post" in stdin:
             return "load"
         if "sql_log_bin" in stdin:
@@ -144,8 +164,12 @@ class TestTheCopy(SeedTestCase):
         self.assertIsNone(self.seed(runner))
         order = [Runner.key(one["argv"], one.get("stdin", ""))
                  for one in runner.calls]
+        # The accounts are read before the dump and again after it: the
+        # copy is the first reading, and it is used only if nothing about
+        # an account changed while the dump was taken.
         self.assertEqual(order, [
-            "probe", "dump", "accounts", "local-accounts", "definitions",
+            "probe", "accounts", "definitions", "dump",
+            "accounts", "definitions", "local-accounts", "local-grants",
             "stop", "load", "copy", "start",
         ])
 
@@ -203,16 +227,100 @@ class TestTheAccounts(SeedTestCase):
     stops the replica: they live in the mysql schema, which the dump
     leaves out, and the binary log only carries later changes"""
 
-    def test_only_the_accounts_the_replica_lacks_are_asked_for(self):
+    def test_the_applications_accounts_are_asked_for(self):
         runner = Runner()
         self.seed(runner)
         # Not root, mysql, mariadb.sys, debian-sys-maint or repl, which
-        # are the server's and keel's own; not the anonymous account; not
-        # wordpress, which the replica holds already.
+        # are the server's and keel's own; not the anonymous account.
+        asked = runner.named("definitions")[0]["stdin"]
+        self.assertIn("SHOW CREATE USER 'wp'@'%'", asked)
+        self.assertIn("SHOW CREATE USER 'wordpress'@'localhost'", asked)
+        self.assertEqual(asked.count("SHOW CREATE USER"), 2)
         self.assertEqual(
-            runner.named("definitions")[0]["stdin"],
-            "SHOW CREATE USER 'wp'@'%';\nSHOW GRANTS FOR 'wp'@'%';\n",
+            runner.named("local-grants")[0]["stdin"],
+            "SELECT 'keel:account';\n"
+            "SHOW GRANTS FOR 'wordpress'@'LOCALHOST';\n",
         )
+
+    def test_an_account_made_while_the_dump_ran_is_refused(self):
+        # Read after the dump, a CREATE USER in the gap was applied twice
+        # and stopped the replica; read before, it was never applied.
+        late = DEFINITIONS.replace(
+            "keel:account\nCREATE USER `wordpress`",
+            "keel:account\nCREATE USER `late`@`%`\n"
+            "GRANT USAGE ON *.* TO `late`@`%`\n"
+            "keel:account\nCREATE USER `wordpress`",
+        )
+        runner = Runner({
+            "accounts": [
+                (0, PRIMARY_ACCOUNTS.encode(), b""),
+                (0, PRIMARY_ACCOUNTS.replace(
+                    "wordpress\t", "late\t%\tN\nwordpress\t"
+                ).encode(), b""),
+            ],
+            "definitions": [
+                (0, DEFINITIONS.encode(), b""),
+                (0, late.encode(), b""),
+            ],
+        })
+        problem = self.seed(runner)
+        self.assertIn("changed while", problem)
+        self.assertIn("nothing was dropped", problem)
+        self.assertEqual(runner.named("stop"), [])
+
+    def test_a_grant_changed_while_the_dump_ran_is_refused(self):
+        runner = Runner({"definitions": [
+            (0, DEFINITIONS.encode(), b""),
+            (0, DEFINITIONS.replace("ALL PRIVILEGES", "SELECT").encode(),
+             b""),
+        ]})
+        problem = self.seed(runner)
+        self.assertIn("changed while", problem)
+        self.assertEqual(runner.named("stop"), [])
+
+    def test_a_second_reading_that_fails_drops_nothing(self):
+        runner = Runner({"accounts": [
+            (0, PRIMARY_ACCOUNTS.encode(), b""),
+            (1, b"", b"ERROR 2013 lost connection"),
+        ]})
+        problem = self.seed(runner)
+        self.assertIn("ERROR 2013", problem)
+        self.assertEqual(runner.named("stop"), [])
+
+    def test_local_grants_that_do_not_match_the_question_drop_nothing(self):
+        runner = Runner({"local-grants": (0, b"", b"")})
+        problem = self.seed(runner)
+        self.assertIn("0 account(s)", problem)
+        self.assertEqual(runner.named("stop"), [])
+
+    def test_a_primary_with_roles_is_refused_before_the_dump(self):
+        runner = Runner({"accounts": (
+            0, (PRIMARY_ACCOUNTS + "editor\t\tY\n").encode(), b"",
+        )})
+        problem = self.seed(runner)
+        self.assertIn("editor", problem)
+        self.assertIn("roles", problem)
+        self.assertIn("nothing was dropped", problem)
+        self.assertEqual(runner.named("dump"), [])
+
+    def test_reach_refuses_roles_before_anything_is_written(self):
+        runner = Runner({"accounts": (
+            0, (PRIMARY_ACCOUNTS + "editor\t\tY\n").encode(), b"",
+        )})
+        found = dbseed.reach(self.root, HOST, 3306, PASSWORD, runner)
+        self.assertIn("editor", found.problem)
+
+    def test_a_held_account_with_other_grants_is_aligned(self):
+        runner = Runner({"local-grants": (0, (
+            LOCAL_GRANTS
+            + "GRANT SELECT ON `other`.* TO `wordpress`@`localhost`\n"
+        ).encode(), b"")})
+        self.assertIsNone(self.seed(runner))
+        copy = runner.named("copy")[0]["stdin"]
+        self.assertIn("REVOKE ALL PRIVILEGES, GRANT OPTION FROM"
+                      " 'wordpress'@'localhost';\n", copy)
+        self.assertNotIn("CREATE USER `wordpress`", copy)
+        self.assertNotIn("'*P'", copy)
 
     def test_they_are_created_outside_the_binary_log_before_it_starts(self):
         runner = Runner()
@@ -225,25 +333,37 @@ class TestTheAccounts(SeedTestCase):
         self.assertIn(
             "GRANT ALL PRIVILEGES ON `wordpress`.* TO `wp`@`%`;\n", copy
         )
+        # Held with the same grants, under its own password: left alone.
+        self.assertNotIn("`wordpress`@`localhost`", copy)
 
-    def test_roles_are_left_out(self):
-        copy = Runner()
-        self.seed(copy)
-        text = copy.named("copy")[0]["stdin"]
-        self.assertNotIn("`editor`", text)
-
-    def test_an_account_the_replica_holds_is_left_as_it_is(self):
-        runner = Runner({"local-accounts": (
-            0, (REPLICA_ACCOUNTS + "wp\t%\n").encode(), b"",
-        )})
+    def test_an_account_the_replica_holds_alike_is_left_as_it_is(self):
+        runner = Runner({
+            "local-accounts": (
+                0, (REPLICA_ACCOUNTS + "wp\t%\tN\n").encode(), b"",
+            ),
+            "local-grants": (0, (
+                LOCAL_GRANTS + "keel:account\n"
+                "GRANT USAGE ON *.* TO `wp`@`%` IDENTIFIED BY PASSWORD 'x'\n"
+                "GRANT ALL PRIVILEGES ON `wordpress`.* TO `wp`@`%`\n"
+            ).encode(), b""),
+        })
         self.assertIsNone(self.seed(runner))
-        self.assertEqual(runner.named("definitions"), [])
+        self.assertEqual(runner.named("copy"), [])
+
+    def test_a_primary_with_no_account_of_its_own_copies_none(self):
+        runner = Runner({
+            "accounts": (0, b"root\tlocalhost\tN\n", b""),
+            "definitions": (0, b"keel:account\n", b""),
+        })
+        self.assertIsNone(self.seed(runner))
+        self.assertEqual(runner.named("local-grants"), [])
         self.assertEqual(runner.named("copy"), [])
 
     def test_the_accounts_are_read_raw_and_without_names(self):
         runner = Runner()
         self.seed(runner)
-        for key in ("accounts", "definitions", "local-accounts"):
+        for key in ("accounts", "definitions", "local-accounts",
+                    "local-grants"):
             argv = runner.named(key)[0]["argv"]
             self.assertIn("--raw", argv)
             self.assertIn("--skip-column-names", argv)
@@ -258,7 +378,8 @@ class TestTheAccounts(SeedTestCase):
         self.assertEqual(runner.named("stop"), [])
 
     def test_accounts_that_cannot_be_read_drop_nothing(self):
-        for key in ("accounts", "local-accounts", "definitions"):
+        for key in ("accounts", "local-accounts", "definitions",
+                    "local-grants"):
             runner = Runner({key: (1, b"", b"ERROR 1142 denied")})
             problem = self.seed(runner)
             self.assertIn("ERROR 1142 denied", problem)
@@ -271,12 +392,6 @@ class TestTheAccounts(SeedTestCase):
         self.assertIn("ERROR 1396", problem)
         self.assertIn("--destroy-local-database", problem)
         self.assertEqual(runner.named("start"), [])
-
-    def test_parsing_the_account_lists(self):
-        self.assertEqual(
-            dbseed.accounts("wp\t%\nbroken\n\nroot\tlocalhost\n"),
-            [("wp", "%"), ("root", "localhost")],
-        )
 
 
 class TestDiskSpace(SeedTestCase):
@@ -412,27 +527,38 @@ class TestAfterTheDrop(SeedTestCase):
 class TestReach(SeedTestCase):
     def test_a_primary_granting_the_copy_is_reachable(self):
         runner = Runner()
-        self.assertEqual(
-            dbseed.reach(self.root, HOST, 3306, PASSWORD, runner), ""
-        )
+        found = dbseed.reach(self.root, HOST, 3306, PASSWORD, runner)
+        self.assertEqual(found.problem, "")
         self.assertIn("CURRENT_USER()", runner.calls[0]["argv"][-1])
         self.assertEqual(self.leftovers(), [])
 
+    def test_the_accounts_both_hold_are_named(self):
+        # Their authentication stays the replica's, until the primary's
+        # next ALTER USER of them replicates.
+        found = dbseed.reach(self.root, HOST, 3306, PASSWORD, Runner())
+        self.assertEqual(found.shared, ("'wordpress'@'LOCALHOST'",))
+
+    def test_accounts_this_server_cannot_list_are_a_reason(self):
+        runner = Runner({"local-accounts": (1, b"", b"ERROR 1045")})
+        found = dbseed.reach(self.root, HOST, 3306, PASSWORD, runner)
+        self.assertIn("ERROR 1045", found.problem)
+
     def test_an_unreachable_primary_says_why(self):
         runner = Runner({"probe": (1, b"", b"ERROR 2002 (HY000): refused")})
-        problem = dbseed.reach(self.root, HOST, 3306, PASSWORD, runner)
-        self.assertIn("did not answer", problem)
-        self.assertIn("refused", problem)
+        found = dbseed.reach(self.root, HOST, 3306, PASSWORD, runner)
+        self.assertIn("did not answer", found.problem)
+        self.assertIn("refused", found.problem)
+        self.assertEqual(found.shared, ())
 
     def test_a_failure_with_nothing_on_stderr_names_the_code(self):
         runner = Runner({"probe": (1, b"", b"")})
-        problem = dbseed.reach(self.root, HOST, 3306, PASSWORD, runner)
-        self.assertIn("exited 1", problem)
+        found = dbseed.reach(self.root, HOST, 3306, PASSWORD, runner)
+        self.assertIn("exited 1", found.problem)
 
     def test_no_private_directory_is_a_reason_too(self):
         os.rmdir(os.path.join(self.root, "var/tmp"))
-        problem = dbseed.reach(self.root, HOST, 3306, PASSWORD, Runner())
-        self.assertIn("No such file or directory", problem)
+        found = dbseed.reach(self.root, HOST, 3306, PASSWORD, Runner())
+        self.assertIn("No such file or directory", found.problem)
 
 
 class TestPureParts(unittest.TestCase):

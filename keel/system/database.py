@@ -131,6 +131,13 @@ STOPPED = (
     " diverged from its primary, and rebuilding it replaces the local"
     " data with a fresh copy of the primary"
 )
+SHARED = (
+    "{accounts} exist on both nodes and keep this node's own password;"
+    " only their grants are made the primary's. An ALTER USER of them on"
+    " the primary will replicate and replace this node's password, and"
+    " the application on this node (wp-config.php and its DB_PASS for"
+    " WordPress) must then be given the new one"
+)
 UNREACHABLE = (
     "{problem}. The replica cannot be seeded, so nothing was dropped, its"
     " configuration was not rewritten and the server was not restarted"
@@ -155,6 +162,7 @@ def plan_database(
     refusal = _cannot_act(state, role)
     if refusal:
         return [Step(FIELD, (refusal,))]
+    overlay = mariadb.overlay_addresses(doc)
 
     observed = str(state.reading.role.value)
     stop = _wrong_way_round(role, observed)
@@ -168,8 +176,8 @@ def plan_database(
         replication = _replication(server, state, observed, confirmed)
         if any(isinstance(one, Refuse) for one in replication.actions):
             return [replication]
-        return [_configuration(server, state, role), replication]
-    steps = [_configuration(server, state, role)]
+        return [_configuration(server, state, role, overlay), replication]
+    steps = [_configuration(server, state, role, overlay)]
     if role == PRIMARY:
         steps.append(_authorizations(server, state))
     return steps
@@ -253,10 +261,12 @@ def _wrong_way_round(declared: str, observed: str) -> str:
     return ""
 
 
-def _configuration(server: dict, state: DatabaseState, role: str) -> Step:
+def _configuration(
+    server: dict, state: DatabaseState, role: str, overlay: list[str],
+) -> Step:
     """The server id, the addresses it answers on, and the binary log"""
     identity = mariadb.server_id(
-        state.machine_id.text or "", server.get("listen")
+        state.machine_id.text or "", server.get("listen"), overlay
     )
     if identity is None:
         return Step(FIELD, (
@@ -398,6 +408,8 @@ def _become_replica(
         if not confirmed:
             return Step(REPLICATION, (Refuse(reason + REMEDY),))
         actions.append(Note(CONFIRMED.format(reason=reason)))
+    if state.shared:
+        actions.append(Note(SHARED.format(accounts=", ".join(state.shared))))
     actions.append(
         SeedReplica(host, port, state.credential.value, tuple(held))
     )
