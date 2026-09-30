@@ -11,6 +11,7 @@ replaced.
 
 import dataclasses
 import os
+import stat
 import subprocess
 from os.path import join
 from unittest import mock
@@ -20,7 +21,15 @@ from manifest_helpers import ManifestCase
 from keel.inspect.tree import File, Tree
 from keel.manifest.facts import gather
 from keel.manifest.firewall import HEADER, PATH, render
-from keel.system.actions import Note, Refuse, RemoveFile, Run, WriteFile
+from keel.system.actions import (
+    InstallRuleset,
+    Note,
+    Refuse,
+    RemoveFile,
+    Run,
+    WriteFile,
+)
+from keel.system.effects import Effects
 from keel.system.firewall import plan_firewall
 from keel.system.fwstate import FirewallState, observe_firewall, ssh_ports
 
@@ -41,6 +50,21 @@ def doc(enabled=True, wireguard=WG, mode="cloud_advanced") -> dict:
     return found
 
 
+class Answers:
+    """subprocess.run answering by command name; OSError for the rest"""
+
+    def __init__(self, table: dict):
+        self.table = table
+        self.calls = []
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append(tuple(argv))
+        if argv[0] not in self.table:
+            raise OSError(2, "No such file or directory")
+        code, out = self.table[argv[0]]
+        return subprocess.CompletedProcess(argv, code, out, "")
+
+
 class FirewallCase(ManifestCase):
     def setUp(self):
         super().setUp()
@@ -49,7 +73,7 @@ class FirewallCase(ManifestCase):
     def state(self, **fields) -> FirewallState:
         base = FirewallState(file=ABSENT, loaded=None, ssh_ports=(22,),
                              ssh_source="/r/etc/ssh/sshd_config",
-                             pending=False)
+                             pending=False, bridges=())
         return dataclasses.replace(base, **fields)
 
     def rendered(self):
@@ -63,17 +87,35 @@ class FirewallCase(ManifestCase):
 
 
 class TestEnabled(FirewallCase):
-    def test_written_checked_then_loaded(self):
+    def test_checked_as_a_copy_put_in_place_then_loaded(self):
+        """a file nft refuses never reaches the path the boot unit loads"""
         found = self.actions()
-        self.assertIsInstance(found[0], WriteFile)
-        self.assertEqual((found[0].path, found[0].mode), (PATH, 0o600))
+        self.assertIsInstance(found[0], InstallRuleset)
+        self.assertEqual(found[0].path, PATH)
         self.assertEqual(found[0].content, self.rendered().text)
         self.assertEqual(found[0].describe(), (
             f"write /{PATH}: public tcp 22, 12320, 12321 and udp 51820,"
-            " mesh tcp 2379, 2380 on wg0 (mode 0600)"))
+            " mesh tcp 2379, 2380 on wg0; checked by nft -c as a copy"
+            " first, so a file nft refuses is never put in place (mode"
+            " 0600)"))
         self.assertEqual([a.argv for a in found[1:]], [
-            ("nft", "-c", "-f", f"/{PATH}"),
             ("nft", "-f", f"/{PATH}")])
+
+    def test_the_ssh_ports_unknown_is_refused_and_never_guessed(self):
+        found = self.actions(state=self.state(
+            ssh_ports=(), ssh_source="sshd -T failed and /r/etc/ssh/"
+            "sshd_config cannot be read"))
+        self.assertEqual([type(a) for a in found], [Refuse])
+        self.assertEqual(found[0].describe(), (
+            "the ports sshd listens on cannot be determined (sshd -T failed"
+            " and /r/etc/ssh/sshd_config cannot be read): no firewall is"
+            " applied, since one could close SSH; nothing is written or"
+            " loaded"))
+
+    def test_the_host_s_bridges_are_in_the_ruleset(self):
+        found = self.actions(state=self.state(bridges=("lxcbr0",)))
+        self.assertIn('iifname "lxcbr0" udp dport { 53, 67, 547 } accept',
+                      found[0].content)
 
     def test_the_same_file_loaded_is_unchanged(self):
         ruleset = self.rendered()
@@ -93,6 +135,7 @@ class TestEnabled(FirewallCase):
     def test_under_a_root_it_is_written_and_loaded_at_boot(self):
         found = self.actions(live=False, available=frozenset())
         self.assertIsInstance(found[0], WriteFile)
+        self.assertEqual((found[0].path, found[0].mode), (PATH, 0o600))
         self.assertEqual(found[1].describe(), (
             "not loaded: not the live system; keel-firewall.service loads"
             " it at boot"))
@@ -165,6 +208,55 @@ class TestOff(FirewallCase):
         self.assertEqual(plan_firewall(doc(), None, None, True, LIVE), [])
 
 
+class TestInstall(FirewallCase):
+    """The copy nft checks, and what is left on disk either way"""
+
+    def install(self, code: int, err: str = "") -> tuple:
+        target = join(self.root, PATH)
+        calls = []
+
+        def nft(argv, **kwargs):
+            calls.append(tuple(argv))
+            return subprocess.CompletedProcess(argv, code, "", err)
+        with mock.patch("keel.system.fwinstall.subprocess.run", nft):
+            problem = Effects(self.root).apply(
+                InstallRuleset(PATH, "table inet keel {}\n", "x"))
+        return problem, target, calls
+
+    def test_a_checked_copy_is_put_in_place(self):
+        problem, target, calls = self.install(0)
+        self.assertIsNone(problem)
+        with open(target) as fob:
+            self.assertEqual(fob.read(), "table inet keel {}\n")
+        self.assertEqual(stat.S_IMODE(os.stat(target).st_mode), 0o600)
+        self.assertEqual(calls, [("nft", "-c", "-f",
+                                  target + ".keel-check")])
+        self.assertEqual(os.listdir(os.path.dirname(target)),
+                         ["keel-manifest.nft"])
+
+    def test_a_refused_copy_is_removed_and_the_old_file_kept(self):
+        os.makedirs(os.path.dirname(join(self.root, PATH)))
+        with open(join(self.root, PATH), "w") as fob:
+            fob.write("old\n")
+        problem, target, _ = self.install(1, "Error: syntax error\n")
+        self.assertEqual(problem, "nft -c refused the ruleset, which is"
+                                  " not put in place: Error: syntax error")
+        with open(target) as fob:
+            self.assertEqual(fob.read(), "old\n")
+        self.assertEqual(os.listdir(os.path.dirname(target)),
+                         ["keel-manifest.nft"])
+
+    def test_no_nft(self):
+        def missing(argv, **kwargs):
+            raise OSError(2, "No such file or directory")
+        with mock.patch("keel.system.fwinstall.subprocess.run", missing):
+            problem = Effects(self.root).apply(
+                InstallRuleset(PATH, "x\n", "x"))
+        self.assertEqual(problem, "cannot run nft: No such file or"
+                                  " directory")
+        self.assertFalse(os.path.exists(join(self.root, PATH)))
+
+
 class TestBootUnit(FirewallCase):
     def test_the_shipped_unit_loads_the_file_apply_writes(self):
         unit = join(os.path.dirname(os.path.dirname(os.path.abspath(
@@ -184,18 +276,75 @@ class TestObserve(FirewallCase):
         with open(full, "w") as fob:
             fob.write(text)
 
-    def test_ssh_ports_default_to_22(self):
-        self.assertEqual(ssh_ports(Tree(self.root))[0], (22,))
+    def test_no_config_is_unknown_never_22(self):
+        ports, why = ssh_ports(Tree(self.root), False)
+        self.assertEqual(ports, ())
+        self.assertIn("sshd_config not present", why)
 
-    def test_ssh_ports_from_the_config_and_its_drop_ins(self):
+    def test_a_config_that_sets_no_port_is_sshd_s_default(self):
+        self.write("etc/ssh/sshd_config", "PermitRootLogin yes\n")
+        ports, source = ssh_ports(Tree(self.root), False)
+        self.assertEqual(ports, (22,))
+        self.assertIn("sets no Port: sshd's default", source)
+
+    def test_every_spelling_sshd_reads(self):
         self.write("etc/ssh/sshd_config",
                    "Include /etc/ssh/sshd_config.d/*.conf\n#Port 99\n"
-                   "Port 22\nListenAddress [2001:db8::1]:2200\n"
-                   "ListenAddress 192.0.2.1:2201\nListenAddress ::1\n")
-        self.write("etc/ssh/sshd_config.d/10-keel.conf", "port 2222\n")
-        ports, source = ssh_ports(Tree(self.root))
-        self.assertEqual(ports, (22, 2200, 2201, 2222))
+                   "Port=2222\nPort = 2223\n\tport\t2224\n"
+                   "ListenAddress [2001:db8::1]:2200 rdomain vrf1\n"
+                   "ListenAddress=192.0.2.1:2201\nListenAddress ::1\n")
+        self.write("etc/ssh/sshd_config.d/10-keel.conf", "port 2225\n")
+        ports, _ = ssh_ports(Tree(self.root), False)
+        self.assertEqual(ports, (2200, 2201, 2222, 2223, 2224, 2225))
+
+    def test_an_include_it_cannot_follow_is_unknown(self):
+        self.write("etc/ssh/sshd_config", "Include /opt/ssh/*.conf\n")
+        ports, why = ssh_ports(Tree(self.root), False)
+        self.assertEqual(ports, ())
+        self.assertIn("Include /opt/ssh/*.conf", why)
+
+    def test_live_asks_sshd_and_the_socket(self):
+        run = Answers({
+            "sshd": (0, "port 22\nlistenaddress [::]:2222 rdomain x\n"
+                        "listenaddress 0.0.0.0:22\naddressfamily any\n"),
+            "systemctl": (0, "ActiveState=active\n"
+                             "Listen=[::]:2230 (Stream) 0.0.0.0:22 (Stream)"
+                             "\n"),
+        })
+        ports, source = ssh_ports(Tree(self.root), True, run)
+        self.assertEqual(ports, (22, 2222, 2230))
+        self.assertEqual(source, "sshd -T, ssh.socket")
+        self.assertEqual(run.calls[:2], [
+            ("sshd", "-T"),
+            ("systemctl", "show", "ssh.socket", "-p", "ActiveState",
+             "-p", "Listen")])
+
+    def test_an_inactive_socket_adds_nothing(self):
+        run = Answers({"sshd": (0, "port 22\n"),
+                       "systemctl": (0, "ActiveState=inactive\n"
+                                        "Listen=[::]:2230 (Stream)\n")})
+        self.assertEqual(ssh_ports(Tree(self.root), True, run),
+                         ((22,), "sshd -T"))
+
+    def test_an_active_socket_without_a_stream_adds_nothing(self):
+        run = Answers({"sshd": (0, "port 22\n"),
+                       "systemctl": (0, "ActiveState=active\nListen=\n")})
+        self.assertEqual(ssh_ports(Tree(self.root), True, run),
+                         ((22,), "sshd -T"))
+
+    def test_live_without_sshd_t_falls_back_to_the_files(self):
+        self.write("etc/ssh/sshd_config", "Port 2222\n")
+        run = Answers({"systemctl": (1, "")})
+        ports, source = ssh_ports(Tree(self.root), True, run)
+        self.assertEqual(ports, (2222,))
         self.assertIn("sshd_config", source)
+
+    def test_the_host_s_bridges(self):
+        for name in ("lxcbr0", "docker0"):
+            os.makedirs(join(self.root, "sys/class/net", name, "bridge"))
+        os.makedirs(join(self.root, "sys/class/net/eth0"))
+        self.assertEqual(observe_firewall(Tree(self.root), False).bridges,
+                         ("docker0", "lxcbr0"))
 
     def test_the_live_table_s_digest(self):
         listing = 'table inet keel {\n\tcomment "keel-manifest 0123"\n'

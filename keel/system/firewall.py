@@ -32,6 +32,7 @@ from keel.manifest.resolve import Resolved
 from keel.network import wireguard
 from keel.system.actions import (
     Action,
+    InstallRuleset,
     Note,
     Refuse,
     RemoveFile,
@@ -84,7 +85,7 @@ def on(doc: dict, resolved: Resolved, state: FirewallState, live: bool,
        available: frozenset[str]) -> tuple[Action, ...]:
     wg = ((doc.get("network") or {}).get("overlay") or {}).get("wireguard")
     ruleset = render(resolved, doc.get("overlays") or {},
-                     wg if isinstance(wg, dict) else None)
+                     wg if isinstance(wg, dict) else None, state.bridges)
     refusal = guard(ruleset, state, live, available)
     if refusal is not None:
         return (refusal,)
@@ -96,19 +97,22 @@ def on(doc: dict, resolved: Resolved, state: FirewallState, live: bool,
             " apply again then"),)
     actions: list[Action] = [Note(note) for note in ruleset.notes]
     written = state.file.text != ruleset.text
-    if written:
-        actions.append(WriteFile(PATH, ruleset.text, MODE, None,
-                                 f"write /{PATH}: {opened(ruleset, wg)}"))
+    summary = f"write /{PATH}: {opened(ruleset, wg, state.bridges)}"
+    load = Run(("nft", "-f", f"/{PATH}"),
+               "load it in one transaction, replacing table inet keel only")
     if not live:
+        if written:
+            actions.append(WriteFile(PATH, ruleset.text, MODE, None,
+                                     summary))
         actions.append(Note("not loaded: not the live system;"
                             " keel-firewall.service loads it at boot"))
-    elif written or state.loaded != ruleset.digest:
+    elif written:
+        actions += [InstallRuleset(PATH, ruleset.text, summary), load]
+    elif state.loaded != ruleset.digest:
         actions += [
             Run(("nft", "-c", "-f", f"/{PATH}"),
                 "check the ruleset; a file nft refuses changes nothing"),
-            Run(("nft", "-f", f"/{PATH}"),
-                "load it in one transaction, replacing table inet keel"
-                " only"),
+            load,
         ]
     if all(isinstance(action, Note) for action in actions):
         actions.append(Note(f"unchanged (/{PATH}, loaded as table inet"
@@ -119,6 +123,11 @@ def on(doc: dict, resolved: Resolved, state: FirewallState, live: bool,
 def guard(ruleset: Ruleset, state: FirewallState, live: bool,
           available: frozenset[str]) -> Refuse | None:
     """Why nothing may be written or loaded, or None"""
+    if not state.ssh_ports:
+        return Refuse(
+            f"the ports sshd listens on cannot be determined"
+            f" ({state.ssh_source}): no firewall is applied, since one"
+            " could close SSH; nothing is written or loaded")
     closed = [port for port in state.ssh_ports
               if (port, "tcp") not in ruleset.public]
     if closed:
@@ -137,7 +146,7 @@ def guard(ruleset: Ruleset, state: FirewallState, live: bool,
     return None
 
 
-def opened(ruleset: Ruleset, wg) -> str:
+def opened(ruleset: Ruleset, wg, bridges: tuple[str, ...] = ()) -> str:
     """What the ruleset opens, in one phrase"""
     def ports(found, protocol):
         return ", ".join(str(port) for port, proto in found
@@ -152,4 +161,6 @@ def opened(ruleset: Ruleset, wg) -> str:
                             for protocol in ("tcp", "udp")
                             if ports(ruleset.mesh, protocol))
         phrase += f", mesh {mesh} on {iface}"
+    if bridges:
+        phrase += f", DHCP and DNS for the guests of {', '.join(bridges)}"
     return phrase

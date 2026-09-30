@@ -22,6 +22,7 @@ import yaml
 from keel.inspect.report import Finding, inferred, missing
 from keel.inspect.tree import Tree
 from keel.inspect.units import overlay_state, read_units
+from keel.manifest import firewall
 from keel.manifest.catalog import Catalog
 from keel.manifest.constants import APPLIANCE
 from keel.manifest.facts import gather
@@ -66,6 +67,12 @@ def probe_appliance_sections(tree: Tree) -> tuple[dict, list[Finding]]:
             f" spec the installer emitted says it at {where}")))
     sections["overlays"], found = overlay_states(tree, facts.resolved,
                                                  emitted, where)
+    ruleset = tree.read(firewall.PATH)
+    enabled = (ruleset.text or "").startswith(firewall.HEADER)
+    sections["firewall"] = {"enabled": enabled}
+    found.append(inferred("firewall.enabled", str(enabled).lower(), (
+        f"{ruleset.path}, keel's ruleset" if enabled
+        else f"{ruleset.path}: no ruleset of keel's")))
     return sections, findings + found
 
 

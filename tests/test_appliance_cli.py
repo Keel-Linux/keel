@@ -195,6 +195,23 @@ class TestFirewall(ApplianceCliCase):
     """Optional, cloud advanced only: written under --root, compared by
     diff, and removed again when the spec turns it off"""
 
+    def setUp(self):
+        super().setUp()
+        # the ports sshd listens on are read, never guessed
+        os.makedirs(join(self.root, "etc/ssh"))
+        with open(join(self.root, "etc/ssh/sshd_config"), "w") as fob:
+            fob.write("Port 22\n")
+        # a host bridge, whose guests keep their DHCP and DNS
+        os.makedirs(join(self.root, "sys/class/net/lxcbr0/bridge"))
+
+    def test_without_sshd_s_config_nothing_is_written(self):
+        os.remove(join(self.root, "etc/ssh/sshd_config"))
+        self.write(self.firewall(True))
+        code, out, _ = self.apply()
+        self.assertEqual(code, 16)
+        self.assertIn("the ports sshd listens on cannot be determined", out)
+        self.assertFalse(os.path.exists(join(self.root, FIREWALL)))
+
     def firewall(self, enabled: bool, mode: str = "cloud_advanced") -> str:
         return (spec_text().replace("mode: simple", f"mode: {mode}")
                 + f"firewall: {{enabled: {str(enabled).lower()}}}\n")
@@ -204,7 +221,8 @@ class TestFirewall(ApplianceCliCase):
         code, out, err = self.apply()
         self.assertEqual(code, 0, out + err)
         self.assertIn(f"derived.firewall: write /{FIREWALL}: public tcp 22,"
-                      " 12320, 12321 (mode 0600): done", out)
+                      " 12320, 12321, DHCP and DNS for the guests of lxcbr0"
+                      " (mode 0600): done", out)
         self.assertIn("derived.firewall: not loaded: not the live system",
                       out)
         code, out, _ = self.diff()
@@ -245,6 +263,20 @@ class TestFirewall(ApplianceCliCase):
                 found = {field.field: field for field in
                          appliance_fields(declared, self.root)}
             self.assertEqual(found["derived.firewall.loaded"].status, status)
+
+    def test_inspect_keeps_the_opt_in(self):
+        """a re-emitted spec (0027) keeps firewall.enabled"""
+        self.write(self.firewall(True))
+        self.apply()
+        code, out, err = self.cli("inspect")
+        self.assertEqual(yaml.safe_load(out)["firewall"], {"enabled": True})
+        self.assertIn(f"firewall.enabled: true (from {self.root}/"
+                      f"{FIREWALL}, keel's ruleset)", err)
+        self.write(self.firewall(False))
+        self.apply()
+        code, out, err = self.cli("inspect")
+        self.assertEqual(yaml.safe_load(out)["firewall"],
+                         {"enabled": False})
 
     def test_refused_outside_cloud_advanced(self):
         self.write(self.firewall(True, "simple"))

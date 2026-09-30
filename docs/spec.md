@@ -916,7 +916,7 @@ firewall:
 
 | Field | State | Notes |
 | --- | --- | --- |
-| `firewall.enabled` | system | `true` or `false`; absent is off. `true` needs `appliance.name` and `installation.mode: cloud_advanced`, and is refused otherwise. `apply --system` writes `/etc/keel/firewall/keel-manifest.nft` and loads it when true, and removes keel's file and table when false ([docs/apply.md](apply.md)). A spec without the section leaves an earlier firewall as it is |
+| `firewall.enabled` | system | `true` or `false`; absent is off. `true` needs `appliance.name` and `installation.mode: cloud_advanced`, and is refused otherwise. `apply --system` writes `/etc/keel/firewall/keel-manifest.nft` and loads it when true, and removes keel's file and table when false ([docs/apply.md](apply.md)). A spec without the section leaves an earlier firewall as it is. `keel inspect` writes it from keel's ruleset file, so a re-emitted spec keeps the opt-in |
 
 ## Not in the spec yet
 

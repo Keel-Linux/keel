@@ -39,12 +39,15 @@ keel (0.13.0) unstable; urgency=medium
     ports on the WireGuard interface only), writes it to
     /etc/keel/firewall/keel-manifest.nft and loads it as the table inet
     keel, which the new keel-firewall.service loads again at boot. It
-    always lets in the loopback, established traffic, ICMPv6 and the DHCP
-    client replies; it is refused unless it opens every port sshd listens
-    on, left alone while a network change waits for its confirmation,
-    and checked with nft -c before it is loaded. enabled: false removes
-    keel's file and table. diff compares the file and, on the live
-    system, the table the kernel holds. Suggests nftables.
+    always lets in the loopback, established traffic, ICMPv6, the DHCP
+    client replies, and DNS and DHCP from the guests of the host's
+    bridges; it is refused unless it opens every port sshd listens on,
+    read from sshd -T and an active ssh.socket and never guessed, left
+    alone while a network change waits for its confirmation, and checked
+    with nft -c as a copy that only then replaces the file. enabled:
+    false removes keel's file and table. inspect writes firewall.enabled
+    back; diff compares the file and, on the live system, the table the
+    kernel holds. Suggests nftables.
 
  -- Marcos Mendez <mendez.foto@gmail.com>  Wed, 30 Sep 2026 20:00:00 +0000
 

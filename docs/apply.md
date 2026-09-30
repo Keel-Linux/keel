@@ -1069,7 +1069,13 @@ drop, and these rules:
   (`network.overlay.wireguard.listen_port`, 51820 by default);
 - every `mesh` port of an enabled overlay, on the WireGuard interface
   only, and none (the step says which) while the spec declares no
-  overlay.
+  overlay;
+- on each of the machine's bridges (`/sys/class/net/*/bridge`: lxcbr0,
+  docker0, a vmbr), DNS on 53 and DHCP on 67 and 547: what lxc-net's or
+  libvirt's dnsmasq serves the guests there, which a drop policy would
+  otherwise cut, so every container lost its lease. The bridges are read
+  at every apply; one created later is drift in `keel diff` until the
+  next apply adds it.
 
 `loopback` opens nothing. The table's comment carries a digest of the
 rules, which is how apply and diff tell whether the table the kernel
@@ -1077,16 +1083,26 @@ holds is the one the file says.
 
 **What keeps it from locking anyone out.** Before anything is written:
 
-- every port sshd is configured to listen on (`Port` and `ListenAddress`
-  in `/etc/ssh/sshd_config` and `sshd_config.d/`, 22 when none is set)
-  must be a `public` TCP port the ruleset opens, or the step is refused
-  and nothing is written or loaded;
+- every port sshd listens on must be a `public` TCP port the ruleset
+  opens, or the step is refused and nothing is written or loaded. The
+  ports are never guessed: on the live system they are what `sshd -T`
+  says (its `port` and `listenaddress` lines), plus the `Listen` of
+  `ssh.socket` while that socket is active; where `sshd -T` cannot
+  answer, and under `--root`, `/etc/ssh/sshd_config` and
+  `sshd_config.d/*.conf` are read the way sshd reads them (`Port 22`,
+  `Port=22`, `ListenAddress [::1]:22 rdomain x`). A file that sets no
+  port is sshd's documented default, 22; a file that cannot be read, or
+  an `Include` of anything but `sshd_config.d/*.conf`, leaves the ports
+  unknown, and the step is refused;
 - while a network change waits for `keel network confirm` (decision
   0018), the firewall is left exactly as it is: the confirmation comes
   over a new session, and a ruleset changed inside the window could be
   what refuses it;
-- `nft -c -f` checks the file, then `nft -f` loads it in one
-  transaction, so a file nft refuses changes nothing;
+- a new ruleset is written to a copy beside the file, `nft -c -f`
+  checks the copy, and only a copy nft accepts is renamed into place; a
+  refused one is removed, so the file the boot unit loads is always one
+  nft accepted. `nft -f` then loads it in one transaction, so a ruleset
+  nft refuses changes nothing;
 - a file at that path keel did not write is refused, never replaced.
 
 `keel-firewall.service`, shipped enabled, loads the file at every boot
@@ -1095,8 +1111,7 @@ false` removes keel's file and deletes the `inet keel` table; a spec
 without the section leaves both as they are.
 
 ```
-derived.firewall: write /etc/keel/firewall/keel-manifest.nft: public tcp 22, 12320, 12321 (mode 0600): done
-derived.firewall: check the ruleset; a file nft refuses changes nothing (nft -c -f /etc/keel/firewall/keel-manifest.nft): done
+derived.firewall: write /etc/keel/firewall/keel-manifest.nft: public tcp 22, 12320, 12321, DHCP and DNS for the guests of lxcbr0; checked by nft -c as a copy first, so a file nft refuses is never put in place (mode 0600): done
 derived.firewall: load it in one transaction, replacing table inet keel only (nft -f /etc/keel/firewall/keel-manifest.nft): done
 ```
 

@@ -3,8 +3,18 @@
 
 keel's ruleset file as it was last written, the digest in the comment of
 the `inet keel` table the kernel holds (asked of nft on the live system
-only), the ports sshd listens on, which the ruleset must open, and
-whether a network change waits for its confirmation (decision 0018).
+only), the ports sshd listens on, which the ruleset must open, the
+machine's bridge interfaces, whose guests the host serves DHCP and DNS,
+and whether a network change waits for its confirmation (decision 0018).
+
+The SSH ports are never guessed. On the live system `sshd -T`, sshd's
+own reading of its configuration, is the source, and an active
+`ssh.socket` adds the ports it listens on for socket activation. Where
+`sshd -T` cannot answer, and under --root, the files are read the way
+sshd reads them (`Port 22`, `Port=22`, `ListenAddress [::1]:22 rdomain
+x`); a file that sets no port is sshd's documented default, 22, but a
+file that cannot be read, or an Include of anything but the drop-in
+directory, leaves the ports unknown, and the plan refuses.
 """
 
 import re
@@ -17,11 +27,19 @@ from keel.network import marker
 
 SSHD_CONFIG = "etc/ssh/sshd_config"
 SSHD_DROP_INS = "etc/ssh/sshd_config.d/*.conf"
+DROP_IN_INCLUDE = "/etc/ssh/sshd_config.d/*.conf"
 SSH_DEFAULT = 22
-PORT_RE = re.compile(r"^\s*port\s+(\d+)\s*$", re.IGNORECASE)
-# ListenAddress host:port, [v6]:port; an address alone keeps Port's
-LISTEN_RE = re.compile(r"^\s*listenaddress\s+(?:\[[^]]+\]|[^\s:]+):(\d+)\s*$",
-                       re.IGNORECASE)
+BRIDGES = "sys/class/net/*/bridge"
+SSHD_T = ("sshd", "-T")
+SOCKET = ("systemctl", "show", "ssh.socket", "-p", "ActiveState", "-p",
+          "Listen")
+# keyword and value are separated by whitespace or `=` (sshd_config(5))
+PORT_RE = re.compile(r"^\s*port[\s=]+(\d+)\s*$", re.IGNORECASE)
+LISTEN_RE = re.compile(
+    r"^\s*listenaddress[\s=]+(?:\[[^]]*\]|[^\s:\[\]]+):(\d+)"
+    r"(?:\s+rdomain\s+\S+)?\s*$", re.IGNORECASE)
+INCLUDE_RE = re.compile(r"^\s*include[\s=]+(.+?)\s*$", re.IGNORECASE)
+STREAM_RE = re.compile(r"(\S+) \(Stream\)")
 
 
 @dataclass(frozen=True)
@@ -30,33 +48,94 @@ class FirewallState:
     # the digest of the table the kernel holds; None when there is none,
     # or when nothing was asked (--root)
     loaded: str | None
+    # empty when they cannot be determined; ssh_source then says why
     ssh_ports: tuple[int, ...]
     ssh_source: str
     pending: bool
+    bridges: tuple[str, ...] = ()
 
 
-def ssh_ports(tree: Tree) -> tuple[tuple[int, ...], str]:
-    """The ports sshd listens on, from its configuration; 22 by default"""
-    files = [tree.read(SSHD_CONFIG)] + [tree.read(name) for name
-                                        in tree.glob(SSHD_DROP_INS)]
-    ports = set()
-    for file in files:
-        for line in file.lines():
-            found = PORT_RE.match(line) or LISTEN_RE.match(line)
-            if found:
-                ports.add(int(found.group(1)))
-    return tuple(sorted(ports or {SSH_DEFAULT})), files[0].path
+def ports_in(lines: list[str]) -> set[int]:
+    found = set()
+    for line in lines:
+        match = PORT_RE.match(line) or LISTEN_RE.match(line)
+        if match:
+            found.add(int(match.group(1)))
+    return found
+
+
+def ports_from_files(tree: Tree) -> tuple[tuple[int, ...], str]:
+    main = tree.read(SSHD_CONFIG)
+    if not main.readable:
+        return (), f"{main.path} {main.problem}"
+    for line in main.lines():
+        include = INCLUDE_RE.match(line)
+        if include and include.group(1) != DROP_IN_INCLUDE:
+            return (), (f"{main.path} says Include {include.group(1)},"
+                        " which keel does not follow")
+    lines = main.lines()
+    for name in tree.glob(SSHD_DROP_INS):
+        lines += tree.read(name).lines()
+    ports = ports_in(lines)
+    if not ports:
+        return (SSH_DEFAULT,), (f"{main.path} sets no Port: sshd's default"
+                                f" {SSH_DEFAULT}")
+    return tuple(sorted(ports)), main.path
+
+
+def ssh_ports(tree: Tree, live: bool,
+              run=None) -> tuple[tuple[int, ...], str]:
+    """The ports sshd listens on and where they were read; () and why
+    when they cannot be determined"""
+    if not live:
+        return ports_from_files(tree)
+    run = run or subprocess.run
+    ports: set[int] = set()
+    sources = []
+    daemon = ask(run, SSHD_T)
+    if daemon is not None and ports_in(daemon.splitlines()):
+        ports |= ports_in(daemon.splitlines())
+        sources.append("sshd -T")
+    else:
+        found, source = ports_from_files(tree)
+        if not found:
+            return (), f"sshd -T did not answer, and {source}"
+        ports |= set(found)
+        sources.append(source)
+    socket = ask(run, SOCKET) or ""
+    if "ActiveState=active" in socket.splitlines():
+        listened = {int(address.rsplit(":", 1)[-1])
+                    for address in STREAM_RE.findall(socket)
+                    if address.rsplit(":", 1)[-1].isdigit()}
+        if listened:
+            ports |= listened
+            sources.append("ssh.socket")
+    return tuple(sorted(ports)), ", ".join(sources)
+
+
+def ask(run, argv: tuple[str, ...]) -> str | None:
+    try:
+        out = run(list(argv), capture_output=True, text=True, check=False)
+    except OSError:
+        return None
+    return out.stdout if out.returncode == 0 else None
 
 
 def observe_firewall(tree: Tree, live: bool) -> FirewallState:
-    ports, source = ssh_ports(tree)
+    ports, source = ssh_ports(tree, live)
     return FirewallState(
         file=tree.read(PATH),
         loaded=table_digest() if live else None,
         ssh_ports=ports,
         ssh_source=source,
         pending=tree.exists(marker.PENDING),
+        bridges=bridges_of(tree),
     )
+
+
+def bridges_of(tree: Tree) -> tuple[str, ...]:
+    """The bridge interfaces, as /sys/class/net shows them"""
+    return tuple(sorted(name.split("/")[-2] for name in tree.glob(BRIDGES)))
 
 
 def table_digest() -> str | None:

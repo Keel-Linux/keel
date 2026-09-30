@@ -53,6 +53,11 @@ ALWAYS = (
     "udp dport 68 accept",
 )
 ENABLED = "enabled"
+# What a host serves the guests on its bridges (lxcbr0, docker0, a
+# Proxmox vmbr): lxc-net's and libvirt's dnsmasq answer DNS, DHCPv4 and
+# DHCPv6 there, and a drop policy would make every guest lose its lease.
+# Router advertisements are ICMPv6, which ALWAYS lets in.
+BRIDGE_SERVICES = ((53, "tcp"), (53, "udp"), (67, "udp"), (547, "udp"))
 
 Port = tuple[int, str]
 
@@ -66,10 +71,12 @@ class Ruleset:
     digest: str
 
 
-def render(resolved: Resolved, states: dict,
-           wireguard: dict | None) -> Ruleset:
+def render(resolved: Resolved, states: dict, wireguard: dict | None,
+           bridges: tuple[str, ...] = ()) -> Ruleset:
     """`states` are the spec's overlays, `wireguard` its
-    network.overlay.wireguard, None when it declares none"""
+    network.overlay.wireguard, None when it declares none, and `bridges`
+    the machine's bridge interfaces, whose guests get their leases and
+    names from the host (BRIDGE_SERVICES)"""
     public: set[Port] = set()
     mesh: dict[str, set[Port]] = {}
     for owned in resolved.processes:
@@ -96,6 +103,9 @@ def render(resolved: Resolved, states: dict,
     rules = list(ALWAYS) + _rules("", sorted(public))
     if iface:
         rules += _rules(f'iifname "{iface}" ', opened_mesh)
+    if bridges:
+        rules += _rules(_iifname(sorted(set(bridges))) + " ",
+                        list(BRIDGE_SERVICES))
     body = "".join(f"\t\t{rule}\n" for rule in rules)
     digest = hashlib.sha256(body.encode()).hexdigest()[:DIGEST_LENGTH]
     family, name = TABLE
@@ -113,6 +123,12 @@ def render(resolved: Resolved, states: dict,
     )
     return Ruleset(text, tuple(sorted(public)), tuple(opened_mesh),
                    tuple(notes), digest)
+
+
+def _iifname(names: list[str]) -> str:
+    if len(names) == 1:
+        return f'iifname "{names[0]}"'
+    return "iifname { " + ", ".join(f'"{name}"' for name in names) + " }"
 
 
 def _named(ports: list[Port]) -> list[str]:

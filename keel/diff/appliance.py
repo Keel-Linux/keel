@@ -17,7 +17,7 @@ from keel.manifest import firewall as fw
 from keel.manifest import monit
 from keel.manifest.facts import gather
 from keel.manifest.resolve import overlay_units
-from keel.system.fwstate import table_digest
+from keel.system.fwstate import bridges_of, table_digest
 from keel.system.monitor import NOTIFY
 
 LIVE_ROOT = "/"
@@ -77,7 +77,7 @@ def firewall_fields(declared: dict, resolved, states: dict,
     wg = ((declared.get("network") or {}).get("overlay") or {}).get(
         "wireguard")
     ruleset = fw.render(resolved, states, wg if isinstance(wg, dict)
-                        else None)
+                        else None, bridges_of(tree))
     if file.text == ruleset.text:
         fields = [FieldDiff("derived.firewall", SAME, RULESET, RULESET)]
     else:

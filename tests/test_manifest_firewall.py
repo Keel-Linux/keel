@@ -120,6 +120,23 @@ class TestRender(FirewallCase):
         self.assertIn("\t\tudp dport { 2380, 51820 } accept\n", found.text)
         self.assertNftAccepts(found.text)
 
+    def test_the_host_s_bridges_keep_their_dhcp_and_dns(self):
+        """containers on lxcbr0 or docker0 get their leases and names
+        from the host's dnsmasq: DHCPv4 67, DHCPv6 547, DNS 53"""
+        catalog = Catalog(self.root)
+        resolved, _ = resolve(catalog, catalog.read(APPLIANCE, "core"))
+        found = render(resolved, CORE_OFF, None, ("lxcbr0", "docker0"))
+        self.assertIn('\t\tiifname { "docker0", "lxcbr0" } udp dport'
+                      " { 53, 67, 547 } accept\n", found.text)
+        self.assertIn('\t\tiifname { "docker0", "lxcbr0" } tcp dport 53'
+                      " accept\n", found.text)
+        one = render(resolved, CORE_OFF, None, ("lxcbr0",))
+        self.assertIn('\t\tiifname "lxcbr0" udp dport { 53, 67, 547 }'
+                      " accept\n", one.text)
+        self.assertNotEqual(one.digest, found.digest)
+        self.assertNotIn("dport 67", self.render(CORE_OFF).text)
+        self.assertNftAccepts(found.text)
+
     def test_the_digest_is_in_the_table_and_read_back(self):
         found = self.render(CORE_OFF)
         self.assertEqual(len(found.digest), 16)
