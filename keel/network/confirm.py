@@ -29,7 +29,9 @@ class Probes:
 
     `holder` names the interface that holds an address now, or None when
     no interface of this machine does. `route_dev` names the interface
-    the route to an address leaves through, or None when there is none.
+    the route to an address leaves through, or None when `ip` gave no
+    answer. `gateways` are the gateways of the default routes in place
+    now, IPv6 first, or None when `ip` gave no answer.
     """
 
     boot_id: Callable[[], str | None]
@@ -37,6 +39,7 @@ class Probes:
     route_via: Callable[[str], str | None]
     holder: Callable[[str], str | None] = lambda address: None
     route_dev: Callable[[str], str | None] = lambda address: None
+    gateways: Callable[[], list[str] | None] = lambda: []
 
 
 def confirm(root: str, origin: session.Origin, probes: Probes,
@@ -52,7 +55,7 @@ def confirm(root: str, origin: session.Origin, probes: Probes,
         if refusal:
             return False, [refusal]
         overlay = pending.kind == marker.OVERLAY
-        refusal = captured(pending, probes.route_dev) or (
+        refusal = captured(pending, origin, probes) or (
             overlay_not_proof if overlay else not_proof)(
             pending, origin, probes)
         if refusal:
@@ -169,30 +172,65 @@ def overlay_not_proof(pending: marker.Pending, origin: session.Origin,
             " of this machine holds")
 
 
-def captured(pending: marker.Pending,
-             route_dev: Callable[[str], str | None]) -> str | None:
-    """An overlay change that routes the uplink's gateway into itself
+LEFT_TO_REVERT = (
+    "it is left to revert when its window ends, or now with keel network"
+    " revert"
+)
+
+
+def captured(pending: marker.Pending, origin: session.Origin,
+             probes: Probes) -> str | None:
+    """An overlay change that routes the uplink into itself
 
     Whoever confirms, a console included, would keep a change that cuts
-    the uplink off: a peer's allowed_ips, or the overlay's own prefix,
-    that covers a gateway takes every reply that goes through it.
-    Validation refuses what the spec shows; this asks the machine, for
-    what it cannot show (an uplink the host or DHCP configures, another
-    route). Each declared gateway, IPv6 first; one without a route is
-    not taken as captured.
+    the uplink off. Validation refuses the routes the spec shows (a /0,
+    a public prefix, an overlap with what network.interfaces declares);
+    this asks the machine where the routes that matter leave through now:
+    to each gateway the spec declared, to each gateway of a default route
+    in place (what DHCP, SLAAC or a container's host configured, which
+    the spec does not show, and what --skip-uplink left), IPv6 first, and
+    back to the client of an SSH session that came over the uplink. One
+    through the overlay refuses; so does one `ip` gives no answer for,
+    since an unknown route is not a clean one.
     """
     if pending.kind != marker.OVERLAY:
         return None
-    for gateway in sorted(pending.uplink_gateways, reverse=True,
-                          key=lambda one: ipaddress.ip_address(one).version):
-        if route_dev(gateway) == pending.iface:
-            return (f"refused: the route to the uplink gateway {gateway}"
-                    f" leaves through {pending.iface}, so the change routes"
-                    " the uplink's traffic into the overlay; it is left to"
-                    " revert when its window ends, or now with keel network"
-                    " revert. Narrow the peers' allowed_ips, then apply"
-                    " again")
+    live_gateways = probes.gateways()
+    if live_gateways is None:
+        return ("refused: `ip route show default` gave no answer, so it"
+                " cannot be told whether the change routes the uplink into"
+                f" the overlay; {LEFT_TO_REVERT}")
+    for address, what in route_targets(pending, origin, live_gateways):
+        dev = probes.route_dev(address)
+        if dev is None:
+            return (f"refused: `ip route get {address}` ({what}) gave no"
+                    " answer, so it cannot be told whether the change"
+                    f" routes the uplink into the overlay; {LEFT_TO_REVERT}")
+        if dev == pending.iface:
+            return (f"refused: the route to {what} {address} leaves through"
+                    f" {pending.iface}, so the change routes the uplink's"
+                    f" traffic into the overlay; {LEFT_TO_REVERT}. Narrow"
+                    " the peers' allowed_ips, then apply again")
     return None
+
+
+def route_targets(pending: marker.Pending, origin: session.Origin,
+                  live_gateways: list[str]) -> list[tuple[str, str]]:
+    """(address, what it is) to ask the route of, gateways IPv6 first
+
+    A session that came over the overlay is answered through it, as it
+    should be, so only one that came over the uplink has its client
+    asked.
+    """
+    gateways = sorted(dict.fromkeys((*pending.uplink_gateways,
+                                     *live_gateways)),
+                      key=lambda one: ipaddress.ip_address(one).version,
+                      reverse=True)
+    found = [(gateway, "the uplink gateway") for gateway in gateways]
+    if origin.kind == session.SSH and origin.peer and origin.local and \
+            not same_address(origin.local, pending.addresses):
+        found.append((origin.peer, "this session's client"))
+    return found
 
 
 def overlay_lines(pending: marker.Pending, origin: session.Origin,

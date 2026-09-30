@@ -82,8 +82,31 @@ def route_via(peer: str) -> str | None:
     return None
 
 
+def default_gateways() -> list[str] | None:
+    """The gateways of the default routes now, IPv6 first; None when
+    `ip` gave no answer for a family"""
+    found: list[str] = []
+    for family in ("-6", "-4"):
+        text = output(("ip", family, "route", "show", "default"))
+        if text is None:
+            return None
+        found += gateways_in(text)
+    return found
+
+
+def gateways_in(text: str) -> list[str]:
+    """`ip route show default` output: the address after each `via`"""
+    found = []
+    for line in text.splitlines():
+        fields = line.split()
+        if "via" in fields and fields.index("via") + 1 < len(fields):
+            found.append(fields[fields.index("via") + 1])
+    return found
+
+
 def route_dev(address: str) -> str | None:
-    """The interface the route to `address` leaves through, or None"""
+    """The interface the route to `address` leaves through, or None
+    when `ip` gave no answer (no route, or it could not run)"""
     return route_dev_in(output(("ip", "route", "get", address)) or "")
 
 
@@ -110,4 +133,5 @@ def link_up_in(text: str) -> bool:
 
 def probes() -> Probes:
     return Probes(boot_id=marker.boot_id, addresses=addresses,
-                  route_via=route_via, holder=holder, route_dev=route_dev)
+                  route_via=route_via, holder=holder, route_dev=route_dev,
+                  gateways=default_gateways)

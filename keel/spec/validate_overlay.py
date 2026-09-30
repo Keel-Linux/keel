@@ -8,13 +8,14 @@ error, because apply makes it on the machine at the first converge.
 
 wg-quick adds a route for the overlay's own prefixes and for each peer's
 allowed_ips, so a prefix that covers the uplink would send the uplink's
-replies into the overlay (keel#49). The overlay's addresses are
-therefore private ones (fc00::/7; RFC 1918 or 100.64.0.0/10), and
-neither they nor any allowed_ips may overlap what network.interfaces
-declares (an address's prefix, a gateway) or a peer's endpoint address;
-a route to every address (/0) is refused outright. An endpoint given by
-name, or an uplink left to DHCP or SLAAC, cannot be checked here:
-`keel network confirm` checks the gateways' routes on the machine.
+replies into the overlay (keel#49). The overlay's addresses and every
+allowed_ips prefix are therefore private (fc00::/7; RFC 1918 or
+100.64.0.0/10), which also keeps out a public /1 pair that would take
+all off-link traffic as a /0 does, and none of them may overlap what
+network.interfaces declares (an address's prefix, a gateway) or a
+peer's endpoint address. An endpoint given by name, or an uplink on a
+private prefix left to DHCP or SLAAC, cannot be checked here: `keel
+network confirm` asks the machine's routes.
 """
 
 import ipaddress
@@ -296,6 +297,12 @@ def captured(key: str, prefix: Network, reserved: Reserved) -> list[str]:
     if prefix.prefixlen == 0:
         return [f"{key}: {prefix} routes every address to this peer, the"
                 " uplink's replies included; list the peer's overlay"
+                " addresses instead"]
+    ranges, private = PRIVATE[prefix.version]
+    if not any(prefix.subnet_of(one) for one in ranges):
+        return [f"{key}: {prefix} is not inside the private ranges an"
+                f" overlay routes ({private}); a public prefix would take"
+                " the uplink's traffic to it, list the peer's overlay"
                 " addresses instead"]
     return [f"{key}: {prefix} covers {label}, which would then be routed"
             " into the overlay" for label in overlaps(prefix, reserved)]

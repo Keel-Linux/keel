@@ -308,10 +308,15 @@ HOLDERS = {"2001:db8:1::20": "eth0", "fd00:1::9": "wg0", "fd00:1::7": "wg0",
            "2001:db8:1::21": "eth0"}
 
 
-def probes(boot="b1", routes=None):
+def probes(boot="b1", routes=None, gateways=()):
+    """`routes` None: every route leaves through eth0; a mapping: only
+    the addresses it names have a route, the others get no answer"""
     return Probes(boot_id=lambda: boot, addresses=lambda iface: [],
                   route_via=lambda peer: None, holder=HOLDERS.get,
-                  route_dev=(routes or {}).get)
+                  route_dev=(lambda address: "eth0") if routes is None
+                  else routes.get,
+                  gateways=lambda: None if gateways is None
+                  else list(gateways))
 
 
 def ssh(local, peer="2001:db8:9::5", started=60.0):
@@ -395,10 +400,20 @@ class TestCapturedUplink(RootCase):
         marker.write(self.root, pending(
             absent=True, uplink_gateways=GATEWAYS).up("b1", 50.0))
 
-    def confirm(self, origin, routes):
+    def confirm(self, origin, routes, gateways=()):
         run = Recorder()
         return netconfirm.confirm(self.root, origin,
-                                  probes(routes=routes), run), run
+                                  probes(routes=routes, gateways=gateways),
+                                  run), run
+
+    def refused(self, origin, routes, words, gateways=()):
+        (confirmed, lines), run = self.confirm(origin, routes, gateways)
+        self.assertFalse(confirmed)
+        self.assertEqual(len(lines), 1)
+        self.assertIn(words, lines[0])
+        self.assertIn("left to revert", lines[0])
+        self.assertEqual(run.calls, [])
+        self.assertTrue(marker.exists(self.root))
 
     def test_a_captured_gateway_refuses_every_origin(self):
         routes = {"2001:db8:1::1": "wg0", "192.0.2.1": "eth0"}
@@ -419,28 +434,63 @@ class TestCapturedUplink(RootCase):
                 self.assertTrue(marker.exists(self.root))
 
     def test_the_ipv6_gateway_is_asked_first(self):
+        console = session.Origin(session.CONSOLE_KIND, "the console")
+        self.refused(console, {"2001:db8:1::1": "wg0", "192.0.2.1": "wg0"},
+                     "gateway 2001:db8:1::1 leaves")
+        self.refused(console, {"2001:db8:1::1": "eth0", "192.0.2.1": "wg0"},
+                     "gateway 192.0.2.1 leaves")
+
+    def test_gateways_through_the_uplink_confirm(self):
         (confirmed, lines), _ = self.confirm(
             session.Origin(session.CONSOLE_KIND, "the console"),
-            {"2001:db8:1::1": "wg0", "192.0.2.1": "wg0"})
-        self.assertFalse(confirmed)
-        self.assertIn("2001:db8:1::1", lines[0])
-        self.assertIn("gateway 192.0.2.1 leaves", netconfirm.captured(
-            marker.read(self.root), {"192.0.2.1": "wg0"}.get))
+            {"2001:db8:1::1": "eth0", "192.0.2.1": "eth0"})
+        self.assertTrue(confirmed, lines)
 
-    def test_gateways_through_the_uplink_or_unknown_confirm(self):
-        for routes in ({"2001:db8:1::1": "eth0", "192.0.2.1": "eth0"}, {}):
-            with self.subTest(routes=routes):
-                self.setUp()
-                (confirmed, lines), _ = self.confirm(
-                    session.Origin(session.CONSOLE_KIND, "the console"),
-                    routes)
-                self.assertTrue(confirmed, lines)
+    def test_a_gateway_ip_does_not_answer_for_is_refused(self):
+        """The probe fails closed: no answer is not a clean route"""
+        self.refused(session.Origin(session.CONSOLE_KIND, "the console"),
+                     {"2001:db8:1::1": "eth0"},
+                     "`ip route get 192.0.2.1` (the uplink gateway) gave no"
+                     " answer")
+
+    def test_the_live_default_gateways_are_asked_too(self):
+        """What DHCP, SLAAC or the host configured, which the spec does
+        not declare, and what --skip-uplink left in place"""
+        console = session.Origin(session.CONSOLE_KIND, "the console")
+        routes = {"2001:db8:1::1": "eth0", "192.0.2.1": "eth0",
+                  "fe80::1": "wg0", "10.0.3.1": "eth0"}
+        self.refused(console, routes, "gateway fe80::1 leaves through wg0",
+                     gateways=("10.0.3.1", "fe80::1", "192.0.2.1"))
+        self.refused(console, routes, "`ip route show default` gave no"
+                     " answer", gateways=None)
+        routes["fe80::1"] = "eth0"
+        (confirmed, lines), _ = self.confirm(
+            console, routes, ("10.0.3.1", "fe80::1"))
+        self.assertTrue(confirmed, lines)
+
+    def test_the_route_back_to_an_uplink_session_is_asked(self):
+        routes = {"2001:db8:1::1": "eth0", "192.0.2.1": "eth0",
+                  "2001:db8:9::5": "wg0"}
+        self.refused(ssh("2001:db8:1::20"), routes, "the route to this"
+                     " session's client 2001:db8:9::5 leaves through wg0")
+        del routes["2001:db8:9::5"]
+        self.refused(ssh("2001:db8:1::20"), routes, "`ip route get"
+                     " 2001:db8:9::5` (this session's client) gave no"
+                     " answer")
+
+    def test_a_session_over_the_overlay_is_answered_through_it(self):
+        routes = {"2001:db8:1::1": "eth0", "192.0.2.1": "eth0",
+                  "fd00:1::2": "wg0"}
+        (confirmed, lines), _ = self.confirm(ssh("fd00:1::9", "fd00:1::2"),
+                                             routes)
+        self.assertTrue(confirmed, lines)
 
     def test_an_uplink_change_is_not_asked(self):
         uplink = marker.Pending(iface="eth0",
                                 path="etc/network/interfaces", window=120,
                                 uplink_gateways=GATEWAYS)
-        self.assertIsNone(netconfirm.captured(uplink, lambda gw: "eth0"))
+        self.assertIsNone(netconfirm.captured(
+            uplink, ssh("2001:db8:1::20"), probes(routes={})))
 
 
 class TestMarkerFields(RootCase):
@@ -482,6 +532,28 @@ class TestRouteDev(unittest.TestCase):
         with mock.patch.object(live, "output", return_value=None):
             self.assertIsNone(live.route_dev("192.0.2.1"))
         self.assertIs(live.probes().route_dev, live.route_dev)
+
+    def test_the_default_routes_gateways(self):
+        self.assertEqual(live.gateways_in(
+            "default via fe80::1 dev eth0 proto ra metric 1024 pref medium\n"
+            "default dev ppp0 scope link\n"
+            "default via 192.0.2.1 dev eth1 onlink\n"
+            "default via\n"), ["fe80::1", "192.0.2.1"])
+        self.assertEqual(live.gateways_in(""), [])
+
+    def test_the_live_default_gateways_ask_both_families(self):
+        answers = {"-6": "default via fe80::1 dev eth0\n", "-4": ""}
+        with mock.patch.object(live, "output", side_effect=lambda argv:
+                               answers[argv[1]]) as out:
+            self.assertEqual(live.default_gateways(), ["fe80::1"])
+        self.assertEqual([call.args[0] for call in out.call_args_list], [
+            ("ip", "-6", "route", "show", "default"),
+            ("ip", "-4", "route", "show", "default")])
+        answers["-4"] = None
+        with mock.patch.object(live, "output", side_effect=lambda argv:
+                               answers[argv[1]]):
+            self.assertIsNone(live.default_gateways())
+        self.assertIs(live.probes().gateways, live.default_gateways)
 
 
 class TestHolder(unittest.TestCase):

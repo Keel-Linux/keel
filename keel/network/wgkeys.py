@@ -18,6 +18,7 @@ from the file and written to the other, never printed or passed on.
 
 import os
 import subprocess
+import tempfile
 
 from keel.network.wireguard import is_key
 from keel.spec.secretstore import secret_file_error
@@ -87,14 +88,36 @@ def adopt(conf: str, path: str) -> str | None:
         return same_key(path, key, conf)
     os.makedirs(os.path.dirname(path), mode=DIR_MODE, exist_ok=True)
     try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, KEY_MODE)
+        fd, staged = tempfile.mkstemp(dir=os.path.dirname(path),
+                                      prefix=".keel-key-")
     except OSError as e:
         return f"cannot create {path}: {e.strerror or e}"
-    with os.fdopen(fd, "w") as fob:
-        os.fchmod(fob.fileno(), KEY_MODE)
-        fob.write(key + "\n")
-        fob.flush()
-        os.fsync(fob.fileno())
+    try:
+        return linked(fd, staged, path, key, conf)
+    finally:
+        os.remove(staged)
+
+
+def linked(fd: int, staged: str, path: str, key: str, conf: str) -> (
+    str | None
+):
+    """Write the key to `staged` (mkstemp's, 0600), then link it at `path`
+
+    The key file appears whole or not at all: a write that fails (a full
+    disk) leaves nothing a later run would take for another key, and a
+    link never replaces a file that appeared meanwhile.
+    """
+    try:
+        with os.fdopen(fd, "w") as fob:
+            os.fchmod(fob.fileno(), KEY_MODE)
+            fob.write(key + "\n")
+            fob.flush()
+            os.fsync(fob.fileno())
+        os.link(staged, path)
+    except FileExistsError:
+        return same_key(path, key, conf)
+    except OSError as e:
+        return f"cannot write {path}: {e.strerror or e}"
     return None
 
 

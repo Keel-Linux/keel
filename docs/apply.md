@@ -707,8 +707,9 @@ goes through the same window, marker, lock, timers and boot unit, with
   root's and 0600 is refused.
 - **An inline key is kept, not replaced.** A file written by hand may
   hold its key in a `PrivateKey` line. Before the file is rewritten
-  without it, the key is moved into the key file (created exclusively,
-  mode 0600, under `--root` too), so the node keeps the public key its
+  without it, the key is moved into the key file (written whole to a
+  temporary file beside it, mode 0600, then linked into place, so a full
+  disk leaves no truncated key; under `--root` too), so the node keeps the public key its
   peers know it by; no new key is made. The key is read from the one
   file and written to the other when the step runs: it is never in the
   plan, an argument or the output. A key file that already holds the
@@ -767,16 +768,19 @@ node's overlay carries nothing until the second node declares it too,
 and the first change would always revert. An agent of Keel Cloud that
 reaches the node again over the overlay confirms the same way.
 
-Whoever confirms, a console included, the uplink's gateways are asked
-first: `ip route get` for each gateway `network.interfaces` declares,
-IPv6 first. When one of those routes leaves through the overlay's
-interface, the change routes the uplink's traffic into the overlay, and
-confirm refuses (exit 21) and leaves the change to revert when its
-window ends, or at once with `keel network revert`. Validation already
-refuses what the spec shows (docs/spec.md, "Routes"); this catches what
-it cannot, a route from elsewhere. A gateway with no route at all is not
-taken as captured, and an uplink with no declared gateway (DHCP, SLAAC,
-a container's host) has nothing to ask.
+Whoever confirms, a console included, the uplink's routes are asked
+first, with `ip route get`: to each gateway `network.interfaces`
+declares and each gateway of a default route in place now (`ip -6` and
+`ip -4 route show default`: what DHCP, SLAAC or a container's host
+configured, and what `--skip-uplink` left), IPv6 first, and, for an SSH
+session that came over the uplink, back to its client. When one of them
+leaves through the overlay's interface, the change routes the uplink's
+traffic into the overlay, and confirm refuses (exit 21) and leaves the
+change to revert when its window ends, or at once with `keel network
+revert`. It refuses too when `ip` gives no answer for one of them: an
+unknown route is not taken as a clean one. Validation already refuses
+what the spec shows (docs/spec.md, "Routes"); this catches what it
+cannot.
 
 ```
 $ ssh root@fd00:6b65:1::1        # from the other node, over the overlay

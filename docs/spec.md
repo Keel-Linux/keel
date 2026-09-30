@@ -297,20 +297,22 @@ network:
 | `network.overlay.wireguard.peers` | system | A list; may be empty. Each peer is known by its public key |
 | `...peers[].public_key` | system | Required. The peer's key as `wg pubkey` prints it (44 characters of base64). Each key once |
 | `...peers[].endpoint` | system | Optional: where to reach the peer, `host:port`. An IPv6 literal goes in brackets, `[2001:db8:2::20]:51820`, as wg writes it; a name or an IPv4 address without. Without it this node waits for the peer to reach it |
-| `...peers[].allowed_ips` | system | Required, at least one prefix: what is routed to this peer and accepted from it. For a node, its overlay address as a `/128` (and `/32`). A prefix with host bits set is an error, and so is a prefix given to two peers, since wg would silently keep it for the last one only. A `/0` (`::/0`, `0.0.0.0/0`) is refused, and so is a prefix that overlaps the uplink or a peer's endpoint (see "Routes" below) |
+| `...peers[].allowed_ips` | system | Required, at least one prefix: what is routed to this peer and accepted from it. For a node, its overlay address as a `/128` (and `/32`). A prefix with host bits set is an error, and so is a prefix given to two peers, since wg would silently keep it for the last one only. Each prefix must be inside the private ranges the overlay addresses use (`fc00::/7`; RFC 1918 or `100.64.0.0/10`): a `/0`, a public prefix (a `::/1` and `8000::/1` pair takes as much as `::/0`) and a prefix that overlaps the uplink or a peer's endpoint are refused (see "Routes" below) |
 | `...peers[].persistent_keepalive` | system | Optional, seconds between 1 and 65535: keeps a path through a NAT or a stateful firewall open. Leave it out for none |
 
 **Routes.** `wg-quick` adds a route for the overlay's own prefixes and
 for each peer's `allowed_ips`. A route that covers the uplink would send
 the uplink's replies into the overlay, and the machine would be cut off
-from the network it is managed over. So validation refuses an overlay
-address or an `allowed_ips` prefix that overlaps anything
+from the network it is managed over. So an overlay address and every
+`allowed_ips` prefix must be private (`fc00::/7`; RFC 1918 or
+`100.64.0.0/10`), which refuses a `/0` and any public prefix whatever the
+uplink is, and validation refuses one that overlaps anything
 `network.interfaces` declares (an address's prefix, a gateway) or the
-address of a peer's endpoint, and any `/0`. An endpoint given by name,
-and an uplink left to DHCP, SLAAC or the container's host, cannot be
-checked from the spec: `keel network confirm` checks on the machine that
-the declared gateways are not routed into the overlay
-([docs/apply.md](apply.md)).
+address of a peer's endpoint. An endpoint given by name, and an uplink
+on a private prefix left to DHCP, SLAAC or the container's host, cannot
+be checked from the spec: `keel network confirm` asks the machine where
+the routes to the gateways, declared and live, and to the confirming
+client leave through ([docs/apply.md](apply.md)).
 
 The overlay belongs to the appliance on either kind of machine (decision
 0018): its file is `/etc/wireguard/<interface>.conf`, which the host of a

@@ -320,6 +320,29 @@ class TestAdoptKey(KeyCase):
         os.mkdir(self.key)
         self.assertIn("cannot read", wgkeys.adopt(self.conf, self.key))
 
+    def test_a_write_that_fails_leaves_no_key_file_behind(self):
+        """A truncated key would later read as another key"""
+        with mock.patch.object(wgkeys.os, "fsync",
+                               side_effect=OSError(28, "No space left")):
+            problem = wgkeys.adopt(self.conf, self.key)
+        self.assertIn(f"cannot write {self.key}: No space left", problem)
+        self.assertNotIn(INLINE_KEY, problem)
+        self.assertFalse(os.path.exists(self.key))
+        self.assertEqual(os.listdir(os.path.dirname(self.key)), [])
+        self.assertIsNone(wgkeys.adopt(self.conf, self.key))
+        self.assertEqual(self.read_key(), INLINE_KEY + "\n")
+
+    def test_a_key_file_that_appears_meanwhile_is_compared(self):
+        real_link = os.link
+
+        def raced(source, target):
+            real_link(source, target)
+            raise FileExistsError(17, "File exists")
+
+        with mock.patch.object(wgkeys.os, "link", side_effect=raced):
+            self.assertIsNone(wgkeys.adopt(self.conf, self.key))
+        self.assertEqual(os.listdir(os.path.dirname(self.key)), ["wg0.key"])
+
 
 class TestRealKeys(KeyCase):
     """wg genkey and wg pubkey themselves"""

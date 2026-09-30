@@ -190,11 +190,12 @@ class TestInvalid(unittest.TestCase):
         self.assertEqual(len(found), 1, found)
 
 
+# an uplink on private prefixes, where an overlap is still possible
 UPLINK = {"eth0": {
-    "ipv6": {"method": "static", "address": "2001:db8:1::10/64",
-             "gateway": "2001:db8:ff::1"},
-    "ipv4": {"method": "static", "address": "192.0.2.10/24",
-             "gateway": "192.0.2.1"},
+    "ipv6": {"method": "static", "address": "fd12:3::10/64",
+             "gateway": "fd12:ff::1"},
+    "ipv4": {"method": "static", "address": "10.0.0.10/24",
+             "gateway": "10.0.0.1"},
 }}
 
 
@@ -207,14 +208,34 @@ class TestRouteCapture(unittest.TestCase):
                 one(self, document({"peers": [peer(allowed_ips=[prefix])]}),
                     f"{prefix} routes every address to this peer")
 
+    def test_a_public_prefix_is_refused_whatever_the_uplink(self):
+        """Half the internet each: they capture off-link traffic as a
+        /0 does, and a DHCP or SLAAC uplink declares nothing to compare"""
+        for prefix in ("::/1", "8000::/1", "0.0.0.0/1", "128.0.0.0/1",
+                       "2001:db8::/32", "192.0.2.0/24", "fc00::/6",
+                       "10.0.0.0/7"):
+            with self.subTest(prefix=prefix):
+                one(self, document({"peers": [peer(
+                    allowed_ips=["fd00:1::2/128", prefix])]},
+                    interfaces={"eth0": {"ipv6": {"method": "auto"},
+                                         "ipv4": {"method": "dhcp"}}}),
+                    f"{prefix} is not inside the private ranges")
+
+    def test_the_private_ranges_are_accepted(self):
+        for prefix in ("fd00:1::2/128", "fc00::/7", "10.66.0.2/32",
+                       "172.16.0.0/12", "192.168.4.0/24", "100.64.0.0/10"):
+            with self.subTest(prefix=prefix):
+                self.assertEqual(errors(document({"peers": [peer(
+                    allowed_ips=[prefix])]})), [])
+
     def test_a_prefix_over_the_uplink_is_refused(self):
         for prefix, words in (
-            ("2001:db8:1::5/128", "network.interfaces.eth0.ipv6.address"
-             " 2001:db8:1::10/64"),
-            ("2001:db8::/32", "network.interfaces.eth0.ipv6.address"),
-            ("2001:db8:ff::1/128", "network.interfaces.eth0.ipv6.gateway"
-             " 2001:db8:ff::1"),
-            ("192.0.2.128/25", "network.interfaces.eth0.ipv4.address"),
+            ("fd12:3::5/128", "network.interfaces.eth0.ipv6.address"
+             " fd12:3::10/64"),
+            ("fd12::/16", "network.interfaces.eth0.ipv6.address"),
+            ("fd12:ff::1/128", "network.interfaces.eth0.ipv6.gateway"
+             " fd12:ff::1"),
+            ("10.0.0.128/25", "network.interfaces.eth0.ipv4.address"),
         ):
             with self.subTest(prefix=prefix):
                 found = errors(document({"peers": [peer(
@@ -226,18 +247,20 @@ class TestRouteCapture(unittest.TestCase):
                 self.assertIn(words, " ".join(found))
 
     def test_a_prefix_over_an_endpoint_is_refused(self):
-        other = peer(public_key=OTHER_KEY, endpoint="192.0.2.77:51820",
-                     allowed_ips=["fd00:1::3/128", "2001:db8::/48"])
-        one(self, document({"peers": [peer(), other]}),
-            "network.overlay.wireguard.peers[0].endpoint 2001:db8::20")
-        own = peer(allowed_ips=["fd00:1::2/128", "2001:db8::20/128"])
+        first = peer(endpoint="[fd12:9::20]:51820")
+        other = peer(public_key=OTHER_KEY, endpoint="10.9.0.77:51820",
+                     allowed_ips=["fd00:1::3/128", "fd12:9::/48"])
+        one(self, document({"peers": [first, other]}),
+            "network.overlay.wireguard.peers[0].endpoint fd12:9::20")
+        own = peer(endpoint="[fd12:9::20]:51820",
+                   allowed_ips=["fd00:1::2/128", "fd12:9::20/128"])
         one(self, document({"peers": [own]}), "peers[0].endpoint")
 
     def test_a_named_endpoint_and_a_dynamic_uplink_leave_nothing_to_check(
             self):
         found = errors(document({"peers": [peer(
             endpoint="node2.example.org:51820",
-            allowed_ips=["fd00:1::2/128", "2001:db8::/32"])]},
+            allowed_ips=["fd00:1::2/128", "fd12::/16"])]},
             interfaces={"eth0": {"ipv6": {"method": "auto"}}}))
         self.assertEqual(found, [])
 

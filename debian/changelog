@@ -32,16 +32,18 @@ keel (0.11.0) unstable; urgency=medium
     random unique local /64 for the first node of a set).
   * Suggests: wireguard-tools.
   * From the review of #49: no route of the overlay may capture the
-    uplink. The overlay address must be unique local (fc00::/7), the IPv4
-    one RFC 1918 or 100.64.0.0/10, and neither they nor any allowed_ips
-    may overlap an address prefix or gateway of network.interfaces or a
-    peer's endpoint address; a /0 is refused. keel network confirm
-    refuses an overlay change, from a console too, while ip route get
-    sends a declared uplink gateway through the overlay.
+    uplink. The overlay addresses and every allowed_ips prefix must be
+    private (fc00::/7; RFC 1918 or 100.64.0.0/10), which refuses a /0
+    and a public /1 pair, and none may overlap an address prefix or
+    gateway of network.interfaces or a peer's endpoint address. keel
+    network confirm refuses an overlay change, from a console too, while
+    ip route get sends a declared or live default gateway, or an uplink
+    session's client, through the overlay, or gives no answer for one.
   * A wg0.conf with an inline PrivateKey keeps its identity: apply moves
-    the key into the key file (0600, created exclusively, never printed)
-    before rewriting the file, instead of making a new one, and refuses
-    when the key file holds another key.
+    the key into the key file (0600, written to a temporary file and
+    linked into place, never printed) before rewriting the file, instead
+    of making a new one, and refuses when the key file holds another
+    key.
   * A revert whose marker cannot be read restores the saved copy to the
     file recorded beside it (saved.json), and restores nothing when that
     is unknown, never an overlay's file over /etc/network/interfaces.
