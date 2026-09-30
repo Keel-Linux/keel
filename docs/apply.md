@@ -446,8 +446,10 @@ mode 0600 and owned by root, as apply runs:
 | `enabled: true` | both files already say what would be written | none: `unchanged (/etc/monit/conf.d/keel.conf, ...)` |
 | `enabled: true` | anything else | the files that differ written; when keel.conf changed, on the live system `monit -t`, then `systemctl try-reload-or-restart monit.service` |
 | `enabled: true` | a keel.conf keel did not write (its first line does not say so) | refused: it is not overwritten |
-| `enabled: false`, or no section | files keel wrote | both removed, then the same check and reload |
-| `enabled: false`, or no section | no file, or ones keel did not write | none |
+| `enabled: false`, or a section without `enabled: true` | files keel wrote | both removed, then the same check and reload |
+| `enabled: false`, or a section without `enabled: true` | no file, or ones keel did not write | none: `unchanged (off)` |
+| no `monitor` section (`monitor:` with no value included, which YAML reads as none) | files keel wrote | none, and the plan says so: `not declared`, left as an earlier apply set it (keel#46). A spec that only declares the network must not end the alerting another one turned on |
+| no `monitor` section | nothing keel wrote | no step |
 
 A token or URL file the channels name that is missing, or readable or
 writable by others, is a line in the plan, `...: secret file not found:

@@ -194,13 +194,25 @@ class TestOff(unittest.TestCase):
         self.assertEqual([a.argv[0] for a in found[2:]],
                          ["monit", "systemctl"])
 
-    def test_absent_removes_the_files_keel_wrote_too(self):
-        found = actions(None, current=File("/r/x", KEEL_FILE))
+    def test_absent_leaves_the_files_keel_wrote_and_says_so(self):
+        """keel#46: a spec that does not mention the monitor keeps it"""
+        for kwargs in ({"current": File("/r/x", KEEL_FILE)},
+                       {"settings": self.SETTINGS}):
+            found = actions(None, live=True, available=LIVE, **kwargs)
+            self.assertEqual(len(found), 1)
+            self.assertIsInstance(found[0], Note)
+            self.assertIn("not declared", found[0].describe())
+            self.assertIn("`monitor.enabled: false` turns it off",
+                          found[0].describe())
+
+    def test_absent_with_nothing_keel_wrote_is_no_step(self):
+        self.assertEqual(actions(None), [])
+
+    def test_declared_without_enabled_is_off(self):
+        found = actions({}, current=File("/r/x", KEEL_FILE))
         self.assertIsInstance(found[0], RemoveFile)
         self.assertEqual(found[1].describe(),
                          "monit not reloaded: not the live system")
-        found = actions(None, settings=self.SETTINGS)
-        self.assertEqual([a.path for a in found], [SETTINGS])
 
     def test_files_keel_did_not_write_are_left_alone(self):
         other = File("/r/x", "check system mine\n")

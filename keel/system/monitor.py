@@ -55,7 +55,9 @@ def plan_monitor(monitor: dict | None, doc: dict,
                  available: frozenset[str]) -> list[Step]:
     if state is None:
         return []
-    if not (monitor or {}).get("enabled"):
+    if monitor is None:
+        return not_declared(state)
+    if not monitor.get("enabled"):
         return off(monitor, state, live, available)
     if state.current.readable and not written_by_keel(state.current):
         return [Step(FIELD, (Refuse(
@@ -97,9 +99,25 @@ def plan_monitor(monitor: dict | None, doc: dict,
     return [Step(FIELD, tuple(actions))]
 
 
-def off(monitor: dict | None, state: MonitorState, live: bool,
+def not_declared(state: MonitorState) -> list[Step]:
+    """No `monitor` section: not managed by this spec, so nothing moves
+
+    Every other section reads absent as "leave it", and a spec that only
+    declares the network must not end the alerting another spec turned
+    on: a monitor that stops in silence is what decision 0021 is against.
+    Only `enabled: false` turns it off.
+    """
+    if not (written_by_keel(state.current)
+            or channelfile.written_by_keel(state.settings.text)):
+        return []
+    return [Step(FIELD, (Note(
+        "not declared: the monitor keel set up earlier is left as it is;"
+        " `monitor.enabled: false` turns it off"),))]
+
+
+def off(monitor: dict, state: MonitorState, live: bool,
         available: frozenset[str]) -> list[Step]:
-    """Absent or `enabled: false`: keel's files go, anybody else's stay"""
+    """`enabled: false`, or not true: keel's files go, anybody else's stay"""
     actions: list[Action] = []
     if channelfile.written_by_keel(state.settings.text):
         actions.append(RemoveFile(SETTINGS, f"remove /{SETTINGS}, which"
@@ -111,8 +129,7 @@ def off(monitor: dict | None, state: MonitorState, live: bool,
         actions += reload(live, available)
     if actions:
         return [Step(FIELD, tuple(actions))]
-    return [] if monitor is None else [Step(FIELD, (
-        Note("unchanged (off)"),))]
+    return [Step(FIELD, (Note("unchanged (off)"),))]
 
 
 def written_by_keel(current: File) -> bool:
