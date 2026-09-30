@@ -27,12 +27,24 @@ def unit_problem(root: str, unit: str) -> str | None:
     link to something outside it.
     """
     for directory in UNIT_DIRS:
-        if os.path.exists(under(root, f"{directory}/{unit}")):
-            return None
+        for name in unit_files(unit):
+            if os.path.exists(under(root, f"{directory}/{name}")):
+                return None
     script = under(root, f"{INIT_DIR}/{unit[:-len(UNIT_SUFFIX)]}")
     if _executable_inside(root, script):
         return None
     return f"{unit} has no unit file under {root}"
+
+
+def unit_files(unit: str) -> tuple[str, ...]:
+    """The files that define UNIT: its own, and for an instance
+    (`getty@tty1.service`) its template (`getty@.service`), which is how
+    instances ship"""
+    prefix, at, rest = unit.partition("@")
+    instance, dot, suffix = rest.rpartition(".")
+    if at and instance:
+        return unit, f"{prefix}@{dot}{suffix}"
+    return (unit,)
 
 
 def _executable_inside(root: str, path: str) -> bool:

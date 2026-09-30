@@ -46,6 +46,22 @@ class TestUnitNames(ManifestCase):
                 self.assertEqual(code, 0, err)
 
 
+class TestTemplateUnits(ManifestCase):
+    def test_an_instance_is_found_by_its_template(self):
+        with open(os.path.join(self.root, "usr/lib/systemd/system",
+                               "getty@.service"), "w"):
+            pass
+        self.edit("overlays", "etcd", "unit: etcd.service",
+                  "unit: getty@tty1.service")
+        code, _, err = self.cli("manifest", "validate", "etcd")
+        self.assertEqual(code, 0, err)
+
+    def test_an_instance_without_its_template(self):
+        self.edit("overlays", "etcd", "unit: etcd.service",
+                  "unit: getty@tty1.service")
+        self.refused("etcd", "getty@tty1.service has no unit file")
+
+
 class TestInitScript(ManifestCase):
     def setUp(self):
         super().setUp()
