@@ -23,6 +23,55 @@ class Run:
 
 
 @dataclass(frozen=True)
+class Attempt:
+    """Run a command whose failure the run survives, and say what then
+
+    For what a machine may not be able to do yet and does not need to
+    work: registering with CrowdSec's central API needs the network, and
+    the local API runs without it. A failure is printed with `otherwise`
+    and counts neither as a change nor as a failure of the step.
+    """
+
+    argv: tuple[str, ...]
+    summary: str
+    otherwise: str
+
+    def describe(self) -> str:
+        return f"{self.summary} ({shlex.join(self.argv)})"
+
+
+@dataclass(frozen=True)
+class AddBouncer:
+    """Register CrowdSec's firewall bouncer and store its key
+
+    Carried out by keel.system.crowdsec: `cscli bouncers add` prints the
+    key on its standard output, which is read into memory and written to
+    `config` with mode 0600, never to an argument vector or a line of
+    output (tracker#47). A bouncer this machine registered before, named
+    in `id_file`, is deleted first. `mode` is the bouncer's firewall
+    backend, written beside the key as the Debian package writes it.
+    `pending` is a registration the Debian package left unfinished,
+    removed once the new key is stored: the bouncer's unit does not
+    start while it is there.
+    """
+
+    config: str
+    id_file: str
+    mode: str
+    old_id: str | None
+    pending: str | None = None
+
+    def describe(self) -> str:
+        finished = (f", and remove /{self.pending}, the registration the"
+                    " Debian package left unfinished" if self.pending
+                    else "")
+        return (f"register CrowdSec's firewall bouncer (cscli bouncers add)"
+                f" and write its key to /{self.config} (mode 0600, never"
+                f" printed) and its name to /{self.id_file}, mode:"
+                f" {self.mode}{finished}")
+
+
+@dataclass(frozen=True)
 class WriteFile:
     """Write `content` to `path` (relative to the root) with mode and owner"""
 
@@ -296,7 +345,8 @@ class Refuse:
 
 Change = (Run | RunSql | WriteFile | RemoveFile | MakeDir | Symlink
           | SwitchNetwork | GenerateKey | AdoptKey | SeedReplica
-          | LockReplica | UnlockAccounts | PromoteReplica)
+          | LockReplica | UnlockAccounts | PromoteReplica | Attempt
+          | AddBouncer)
 Action = Change | Note | Refuse
 
 

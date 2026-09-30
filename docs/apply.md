@@ -32,7 +32,8 @@ keel spec apply --system --root /mnt/rootfs
 With `--system`, after the conf, `apply` converges the parts of the spec
 that describe system state rather than hook input: `instance.hostname`,
 `instance.fqdn`, `users`, `locale`, `security.alerts`, `tls.acme`,
-`database.server`, `monitor` and, last, `network` and its WireGuard
+`database.server`, `monitor`, the appliance's `overlays` and the Monit
+checks its manifests derive, and, last, `network` and its WireGuard
 `overlay`. With `--system-only` it converges them and does nothing
 else, for a machine whose conf phase has already run. Neither flag is on
 by default.
@@ -917,6 +918,114 @@ reported, never followed, since following it would carry the
 system's certificate authorities, every request has a timeout, and only
 the standard library is used.
 
+The checks the appliance manifests derive (below) call it with `--check
+service` or `--check restarts`, `--name` the process or check and
+`--unit` its unit. The message says which unit, where to look
+(`systemctl status`, `journalctl -u`) and, once a restart limit is
+reached, the `monit monitor` that watches it again.
+
+**overlays.\<name\>** (systemd units; handbook decision 0041)
+
+A spec that names an appliance (docs/spec.md, "appliance, installation
+and overlays") says of every overlay of its resolved chain whether it
+runs. The units are those of the overlay's processes, in its manifest's
+order:
+
+- `enabled`: `systemctl enable` for a unit that is not, then `systemctl
+  start` for one that is not running;
+- `disabled`: `systemctl stop` for a unit that runs, then `systemctl
+  disable` for one that is enabled, in the reverse order.
+
+Only what differs is done, so a second run changes nothing. Overlays go
+in the order `requires` gives: every overlay that goes down first, those
+that depend on another before it, then every one that comes up, what is
+required before what requires it. An overlay without a process (the
+installer, WireGuard) has nothing in systemd and no step.
+
+Nothing is masked or unmasked. The overlay packages keep their units
+disabled, never masked, so that `systemctl enable` is all turning one on
+takes (Keel-Linux/common, packages/README.md); a masked unit is someone's
+decision, and apply refuses it and says how to undo it. A `static` or
+generated unit is started, never enabled. Under `--root` the links are
+made with `systemctl --root=DIR enable` and nothing is started or
+stopped.
+
+```
+overlays.crowdsec: enable crowdsec.service: the overlay is enabled (systemctl enable crowdsec.service): done
+overlays.crowdsec: start crowdsec.service (systemctl start crowdsec.service): done
+```
+
+**CrowdSec's identity** (tracker#47). trixie's `crowdsec` registers the
+machine with its local API and with CrowdSec's central API in its
+postinst, and the bouncer adds itself and stores its key; in an image
+that happens once, and every machine made from it would share them. The
+Core image deletes them, and the first enable of the `crowdsec` overlay
+makes what is missing, before the units start:
+
+| Missing | Made by |
+| --- | --- |
+| `/etc/crowdsec/online_api_credentials.yaml` | an empty file, mode 0600: how the Debian package records "not registered", and what its unit needs to start |
+| the local API credentials | `cscli machines add --auto --force`, which writes the password to `/etc/crowdsec/local_api_credentials.yaml` itself |
+| the central API registration | `cscli capi register`, only when the file above was absent |
+| the bouncer's key, or a registration the Debian package left pending in `/var/lib/crowdsec/pending-registration` | `cscli bouncers add`: the key is read from its standard output into memory and written to `/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml.local`, mode 0600, with the `mode:` line the file had, or the Debian postinst's choice (`iptables` under iptables-legacy, else `nftables`); its name goes to the `.id` file, the bouncer this machine registered before is deleted, and the pending file is removed, since the bouncer's unit does not start while it is there |
+
+`cscli capi register` needs the network. Without it the step says so and
+goes on (`not done: ...; the local API runs without it`): the file stays
+empty, CrowdSec runs on its local API alone, the run does not fail, and
+later runs say that `cscli capi register` joins the central API. No
+secret reaches an argument vector, a plan line or an error. Nothing is
+made under `--root`: an image is where an identity must not be made.
+Turning the overlay off leaves the identity in place.
+
+**derived.monit** (`/etc/keel/monit/keel-manifest.conf`; handbook
+decisions 0040 and 0041)
+
+Monit's checks, derived from the manifests (keel.manifest.monit): every
+process and check of the appliance itself and of every overlay the spec
+has `enabled`, and nothing of a `disabled` one, so turning CrowdSec on
+adds exactly `keel-unit-crowdsec`, `keel-unit-firewall-bouncer` and
+`keel-check-crowdsec-lapi`, and turning it off removes them.
+
+- A process is a `check program` on `systemctl is-active --quiet
+  <unit>`, with `systemctl start` and `systemctl restart` as its programs:
+  Monit restarts through systemd, never around it. After two failed
+  cycles it restarts; after the manifest's restart limit (`3 restarts
+  within 5 cycles` unless the process says otherwise) it stops
+  (`unmonitor`) and says so, so a loop is reported rather than hidden.
+  `restart: never` only tells.
+- A check is a `check host` (`http`, `tcp` or a Monit protocol, at `::1`
+  or the literal the process binds, or at the overlay address for
+  `mesh`) or a `check program` (a `command`), which depends on its
+  process. `on_failure: restart` restarts that process's unit within its
+  limit; `alert` only tells. `every_cycles` is Monit's `every N cycles`.
+- Every failure, its hourly reminder, its recovery and a restart limit
+  reached run `keel notify`, as the checks of the monitor section do.
+- A `mesh` check without `network.overlay.wireguard.address`, or a
+  command with an argument Monit cannot quote (a space or a quote), is
+  left out, and the step says which and why.
+
+The file is always written, mode 0600 (0041, "Resolved"), and included
+from `/etc/monit/conf.d/` by a link, `keel-manifest.conf`, that exists
+only while `monitor.enabled` is true: turning the monitor on activates
+checks that already exist, and `keel diff` compares the file either way.
+A spec without a `monitor` section leaves the link as it is, as it leaves
+`keel.conf` (keel#46). While the file is included, a change to it, or to
+the link, is followed by `monit -t` and a reload, as for `keel.conf`; a
+file Monit refuses fails the step and the running daemon keeps what it
+had. Something at the link's path that is not keel's link is refused,
+never replaced.
+
+The step comes before the units: turning an overlay off removes its
+checks before its units stop, so Monit never restarts what the spec just
+stopped; turning one on adds checks Monit holds for two cycles, by which
+time the units run.
+
+```
+derived.monit: write /etc/keel/monit/keel-manifest.conf: 6 unit(s) and 4 probe(s) of core (mode 0600): done
+derived.monit: check monit's configuration (monit -t): done
+derived.monit: reload monit, where it runs (systemctl try-reload-or-restart monit.service): done
+```
+
 **network** (`/etc/network/interfaces`; handbook decision 0018)
 
 The one field whose converge can cut off the operator running it, so it
@@ -1149,7 +1258,10 @@ the same field are skipped (the keys file of an account that could not be create
 written into a home that does not exist), the other fields go on, and the
 summary counts what happened. The exit code is then 16 (`APPLY_FAILED`);
 the conf was written and every other change was made, so the run can
-simply be repeated after the cause is fixed.
+simply be repeated after the cause is fixed. One kind of action fails
+nothing: what a machine may not be able to do yet and does not need, the
+central API registration of CrowdSec offline, is printed as `not done:`
+with its reason and what follows, and the field goes on.
 
 | Code | Name | When |
 | --- | --- | --- |
@@ -1216,10 +1328,15 @@ blog.yaml --root /tmp/scratch` then reports `instance.fqdn` and every
   first boot hook does: the Hub is one optional backend (brief section
   5.6), and a converge that ran on every apply would subscribe the machine
   to somebody else's service each time.
-- Installing monit, or acting on what it finds: the file keel writes for
-  it only runs `keel notify`, so nothing grows a disk, restarts a service
-  or kills a process behind the operator's back. Growing a disk is the
-  operator's act on the host, and the message says how.
+- Installing monit, or acting on what the monitor section's checks find:
+  `keel.conf` only runs `keel notify`, so nothing grows a disk or kills a
+  process behind the operator's back. Growing a disk is the operator's
+  act on the host, and the message says how. What Monit restarts is what
+  the manifests say (decision 0040): their processes, through systemd,
+  within each one's restart limit, and only while the monitor is on.
+- Masking or unmasking a unit, writing an overlay's configuration, which
+  is its package's and the installer's, or making CrowdSec's identity
+  under `--root`.
 - Exposing monit's web interface, writing a token into monit's file or
   the notify settings, or setting monit's cycle.
 - Converging a container's network from inside, more than one
@@ -1337,6 +1454,21 @@ covers the planner, `tests/test_apply_monitor_cli.py` the round trip
 through `keel diff`, and `tests/test_monitor_notify.py` sends every channel
 to an HTTPS server on `[::1]` with a certificate made for the run, and
 checks that no token reaches what `keel notify` prints.
+
+The appliance sections (decision 0041) have theirs.
+`tests/test_spec_appliance.py` covers the three sections and rules 25 to
+27, against hand built facts and against the format's manifests through
+`keel spec validate --root`; `tests/test_manifest_monit.py` the derived
+Monit file, given to `monit -t` when a binary is at hand;
+`tests/test_inspect_units.py` the reading of systemd;
+`tests/test_system_appliance.py` the planner, with hand built states for
+the live branches, and its state reader; `tests/test_system_crowdsec.py`
+the bouncer's key, followed from `cscli`'s output to the file and nowhere
+else; and `tests/test_appliance_cli.py` the criterion of step 3 of 0041's
+plan in a tree: CrowdSec disabled, enabled, disabled, each converged, a
+second run changing nothing, `keel diff` clean and the file gaining and
+losing exactly CrowdSec's checks, with `systemctl` replaced by a fake that
+makes the links the real one makes under `--root`.
 
 The overlay has its own files too. `tests/test_spec_overlay.py` covers
 the fields, `tests/test_system_overlay.py` the planner and its state,

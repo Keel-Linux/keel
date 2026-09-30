@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from keel.inspect import constants as paths
 from keel.inspect.accounts import home_of, passwd_entries
 from keel.inspect.tree import File, Tree
+from keel.system.appstate import ApplianceState, observe_appliance
 from keel.system.dbstate import DatabaseState, observe_database
 from keel.system.monstate import MonitorState, observe_monitor
 from keel.system.netstate import NetworkState, observe_network
@@ -53,7 +54,7 @@ LOCALE_LIST = ("locale", "-a")
 COMMANDS = (
     "useradd", "usermod", "timedatectl", "locale-gen", "localedef", "newaliases",
     "hostnamectl", "hostname", "systemctl", "ifup", "ifdown", "ip",
-    "systemd-run", "monit", "wg", "wg-quick",
+    "systemd-run", "monit", "wg", "wg-quick", "cscli",
 )
 
 
@@ -87,6 +88,7 @@ class SystemState:
     network: NetworkState | None = None
     monitor: MonitorState | None = None
     overlay: OverlayState | None = None
+    appliance: ApplianceState | None = None
 
 
 def observe(root: str, doc: dict, start: bool = False) -> SystemState:
@@ -138,6 +140,7 @@ def observe(root: str, doc: dict, start: bool = False) -> SystemState:
         network=observe_network(root, doc),
         monitor=observe_monitor(root, doc),
         overlay=observe_overlay(root, doc),
+        appliance=observe_appliance(root, doc),
     )
 
 

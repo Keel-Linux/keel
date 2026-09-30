@@ -9,15 +9,33 @@ a request to generate a value at apply time.
 import os
 import secrets as secrets_module
 
-from keel.spec.constants import GENERATED_BYTES, SECRET_VARS
+from keel.spec.constants import (
+    GENERATED_BYTES,
+    MANIFEST_SECRET_PREFIX,
+    SECRET_VARS,
+)
 from keel.spec.errors import SpecError
+
+
+def secret_names(doc: dict) -> dict[str, str]:
+    """Every declared secret's name and its variable, the three first
+
+    A name a manifest declares (decision 0041) renders as
+    KEEL_SECRET_<NAME>; validation has already refused any other.
+    """
+    declared = doc.get("secrets") or {}
+    names = {name: var for name, var in SECRET_VARS.items()
+             if name in declared}
+    names.update({str(name): MANIFEST_SECRET_PREFIX + str(name).upper()
+                  for name in declared if name not in SECRET_VARS})
+    return names
 
 
 def resolve_secrets(doc: dict) -> dict[str, str]:
     """Read or generate every declared secret, keyed by variable name"""
     declared = doc.get("secrets") or {}
     resolved = {}
-    for name, var in SECRET_VARS.items():
+    for name, var in secret_names(doc).items():
         spec = declared.get(name)
         if isinstance(spec, dict):
             resolved[var] = resolve_secret(spec)

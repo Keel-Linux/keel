@@ -36,7 +36,10 @@ from keel.spec.validate_monitor import url_problem
 
 LEVELS = ("warn", "critical", "recovery")
 CHECKS = ("disk", "inodes", "memory", "swap", "cpu", "load", "link",
-          "throughput")
+          "throughput", "service", "restarts")
+# the checks the appliance manifests derive (keel.manifest.monit): a unit
+# or a probe failing, and a restart limit reached
+SERVICE_CHECKS = ("service", "restarts")
 DIRECTIONS = ("upload", "download")
 MASK = "[masked]"
 COMMAND_TIMEOUT = 5
@@ -60,6 +63,7 @@ class Event:
     event: str
     description: str
     direction: str = ""
+    unit: str = ""
 
     @property
     def value(self) -> str:
@@ -88,15 +92,43 @@ class Delivery:
 
 
 def event_from(level: str, check: str, target: str, threshold: str,
-               environ: dict[str, str], direction: str = "") -> Event:
+               environ: dict[str, str], direction: str = "",
+               unit: str = "") -> Event:
     return Event(level, check, target, threshold,
                  environ.get("MONIT_SERVICE", ""),
                  environ.get("MONIT_EVENT", ""),
-                 environ.get("MONIT_DESCRIPTION", ""), direction)
+                 environ.get("MONIT_DESCRIPTION", ""), direction, unit)
+
+
+def service_headline(event: Event) -> str:
+    """What happened to a check of the manifests, in one sentence"""
+    unit = f" ({event.unit})" if event.unit else ""
+    if event.level == "recovery":
+        return f"{event.target} passes its check again."
+    if event.check == "restarts":
+        return (f"{event.target} still fails after the restarts its"
+                f" manifest allows; monit stopped watching it{unit}.")
+    return f"{event.target} fails its check{unit}."
+
+
+def service_steps(event: Event) -> list[str]:
+    """Where to look; nothing is run, restarting is monit's already"""
+    if not event.unit:
+        return ["keel manifest show --resolved says what it asks."]
+    look = [f"  systemctl status {event.unit}",
+            f"  journalctl -u {event.unit} -n 50"]
+    if event.check == "restarts":
+        return ["Look at why:", *look,
+                f"Once it runs, watch it again: monit monitor"
+                f" {event.service}"]
+    return ["Monit restarts it through systemd where its manifest says"
+            " restart. Look at why:", *look]
 
 
 def headline(event: Event) -> str:
     """What happened, in one sentence"""
+    if event.check in SERVICE_CHECKS:
+        return service_headline(event)
     value, limit = event.value, event.threshold
     if event.check in ("disk", "inodes"):
         what = "full" if event.check == "disk" else "of its inodes used"
@@ -131,7 +163,9 @@ def compose(event: Event, host: str, address: str, details: bool,
     """
     label = f"{host} ({address})" if address else host
     lines = [f"{label}: {headline(event)}"]
-    if event.level != "recovery":
+    if event.level != "recovery" and event.check in SERVICE_CHECKS:
+        lines += service_steps(event)
+    elif event.level != "recovery":
         lines += advice.steps(event.check, event.target, event.threshold,
                               probe)
         if details:

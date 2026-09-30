@@ -16,7 +16,9 @@ from keel import system
 from keel.monitor import channelfile
 from keel.monitor import notify as notifier
 from keel.network import confirm as netconfirm
+from keel.manifest.facts import gather as gather_facts
 from keel.network import live, session, switch, wgkeys, wireguard
+from keel.spec.validate_appliance import is_name as is_manifest_name
 from keel.system.ovstate import overlay_of
 
 
@@ -29,7 +31,8 @@ def error(message: str) -> None:
 
 
 def read_spec(
-    path: str, check_secret_files: bool = True
+    path: str, check_secret_files: bool = True,
+    root: str = inspection.ROOT_DEFAULT,
 ) -> tuple[dict | None, int]:
     """Load and validate a spec file
 
@@ -39,6 +42,11 @@ def read_spec(
     passed to spec.validate(): a command that never reads a secret value
     passes False, so the spec is usable on a machine that does not hold
     the secret files.
+
+    A spec that names an appliance is held against the manifests
+    installed under `root` (decision 0041, rules 25 to 27), the root the
+    command works on: what apply converges or diff compares is what those
+    manifests say.
 
     A field under a deprecated name is warned about once, naming the
     current name, and the document every command works on is the
@@ -59,12 +67,26 @@ def read_spec(
         warn(f"{path}: {message}")
     doc = spec.canonical(doc)
 
-    errors = spec.validate(doc, check_secret_files=check_secret_files)
+    errors = spec.validate(doc, check_secret_files=check_secret_files,
+                           facts=manifest_facts(doc, root))
     if errors:
         for message in errors:
             error(f"{path}: {message}")
         return None, exits.SPEC_INVALID
     return doc, exits.OK
+
+
+def manifest_facts(doc: dict, root: str):
+    """What the manifests of the spec's appliance declare, or None
+
+    None when the spec names no appliance, or a name of the wrong shape,
+    which the structure check reports on its own.
+    """
+    appliance = doc.get("appliance")
+    name = appliance.get("name") if isinstance(appliance, dict) else None
+    if not is_manifest_name(name):
+        return None
+    return gather_facts(root, name)
 
 
 def spec_validate(args) -> int:
@@ -74,7 +96,8 @@ def spec_validate(args) -> int:
     validates a spec on a machine that does not hold the secrets.
     """
     check_secret_files = not getattr(args, "no_secret_files", False)
-    doc, code = read_spec(args.spec, check_secret_files)
+    doc, code = read_spec(args.spec, check_secret_files,
+                          getattr(args, "root", inspection.ROOT_DEFAULT))
     if doc is None:
         return code
     checked = "checked" if check_secret_files else "not checked"
@@ -117,7 +140,7 @@ def spec_apply(args) -> int:
     dry_run = getattr(args, "dry_run", False)
     root = getattr(args, "root", inspection.ROOT_DEFAULT)
     no_secrets = dry_run or system_only
-    doc, code = read_spec(args.spec, check_secret_files=not no_secrets)
+    doc, code = read_spec(args.spec, not no_secrets, root)
     if doc is None:
         return code
 
@@ -262,7 +285,7 @@ def network_wireguard_key(args) -> int:
     root = getattr(args, "root", inspection.ROOT_DEFAULT)
     overlay: dict = {}
     if os.path.exists(args.spec):
-        doc, code = read_spec(args.spec, check_secret_files=False)
+        doc, code = read_spec(args.spec, False, root)
         if doc is None:
             return code
         overlay = overlay_of(doc) or {}
@@ -320,8 +343,8 @@ def notify(args) -> int:
     is NOTIFY_FAILED, which is all monit could do anything with.
     """
     event = notifier.event_from(
-        args.level, args.check, args.path or args.iface, args.threshold,
-        dict(os.environ), args.direction,
+        args.level, args.check, args.name or args.path or args.iface,
+        args.threshold, dict(os.environ), args.direction, args.unit,
     )
     try:
         settings, reason = channelfile.load(args.settings), ""
@@ -361,7 +384,7 @@ def database_promote(args) -> int:
     """
     root = getattr(args, "root", inspection.ROOT_DEFAULT)
     dry_run = getattr(args, "dry_run", False)
-    doc, code = read_spec(args.spec, check_secret_files=False)
+    doc, code = read_spec(args.spec, False, root)
     if doc is None:
         return code
     if not dry_run:
@@ -508,7 +531,7 @@ def diff(args) -> int:
     json, and nothing is written anywhere. Drift decides the exit code
     before unknown fields do (docs/diff.md).
     """
-    doc, code = read_spec(args.spec, check_secret_files=False)
+    doc, code = read_spec(args.spec, False, args.root)
     if doc is None:
         return code
     comparison = drift.diff_root(doc, args.root)

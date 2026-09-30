@@ -12,8 +12,9 @@ This is not the layer manifest of keel.layers, the key-value file
 bt-layer writes beside a layer tarball: that one says how a layer was
 built, this one what an appliance is.
 
-Nothing else in keel reads it yet: `keel manifest validate` and `keel
-manifest show` are its only clients.
+Its clients are `keel manifest validate` and `keel manifest show`, and,
+through keel.manifest.facts and keel.manifest.monit, `keel spec
+validate`, `spec apply --system`, `inspect` and `diff`.
 """
 
 from keel.manifest.catalog import Catalog

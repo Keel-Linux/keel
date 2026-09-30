@@ -5,14 +5,17 @@ One line per action on stdout, in plan order. `label` is how the run was
 asked for (--system, --system-only), so the summary names it. A failed
 action fails its step: the actions after it in that step are skipped (a
 home directory is not populated for an account that was not created),
-the other steps go on, and the summary counts what happened. A refusal
+the other steps go on, and the summary counts what happened. An Attempt
+that fails is said with what follows from it and fails nothing: it is
+what a machine may not be able to do yet, such as registering with a
+central API while offline. A refusal
 fails its step the same way in a dry run, because a dry run that planned
 the actions behind a refusal would describe a run that cannot happen.
 """
 
 from dataclasses import dataclass
 
-from keel.system.actions import Note, Plan, Refuse
+from keel.system.actions import Attempt, Note, Plan, Refuse
 from keel.system.effects import Effects
 
 
@@ -58,6 +61,10 @@ def execute(
                 if problem is None:
                     lines.append(prefix + action.describe() + ": done")
                     changed += 1
+                elif isinstance(action, Attempt):
+                    lines.append(prefix + action.describe()
+                                 + f": not done: {problem};"
+                                 f" {action.otherwise}")
                 else:
                     lines.append(prefix + action.describe()
                                  + f": failed: {problem}")

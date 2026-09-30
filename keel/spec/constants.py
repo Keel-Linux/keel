@@ -30,6 +30,9 @@ TOP_LEVEL_KEYS = (
     "locale",
     "database",
     "monitor",
+    "appliance",
+    "installation",
+    "overlays",
 )
 SECRET_VARS = {
     "root_password": "ROOT_PASS",
@@ -57,3 +60,12 @@ SERVER_ROLES = ("standalone", "primary", "replica")
 # The port each engine listens on when the description names none.
 DEFAULT_PORTS = {"mariadb": 3306, "postgresql": 5432, "redis": 6379}
 MAX_PORT = 65535
+
+# What the appliance manifests make of the spec (decision 0041): the
+# installation modes of 0028 and the two states an overlay takes on a
+# machine. `ask` is the manifest's and never reaches a spec.
+INSTALLATION_MODES = ("simple", "cloud_simple", "cloud_advanced")
+OVERLAY_STATES = ("enabled", "disabled")
+# A secret a manifest declares, beyond SECRET_VARS, renders as this
+# prefix and its name upper cased (docs/manifest-v1.md, "Secrets")
+MANIFEST_SECRET_PREFIX = "KEEL_SECRET_"
