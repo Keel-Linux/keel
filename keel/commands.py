@@ -9,7 +9,7 @@ import dataclasses
 import os
 import sys
 
-from keel import exits, layers, spec
+from keel import exits, layers, manifest, spec
 from keel import diff as drift
 from keel import inspect as inspection
 from keel import system
@@ -378,6 +378,32 @@ def database_promote(args) -> int:
         print(line)
     print(outcome.summary())
     return exits.APPLY_FAILED if outcome.failed else exits.OK
+
+
+def manifest_validate(args) -> int:
+    """Check one manifest, the manifests of a name, or every installed one
+
+    Every error at once, with the exit codes of spec validate (decision
+    0041, docs/manifest.md). An appliance is resolved along its chain as
+    well, since most of what can go wrong between manifests shows there.
+    """
+    return manifest_report(manifest.validate_target(
+        args.root, args.target, args.kind))
+
+
+def manifest_show(args) -> int:
+    """Print a manifest as its file says it, or resolved along its chain"""
+    return manifest_report(manifest.show(
+        args.root, args.name, args.resolved, args.kind))
+
+
+def manifest_report(outcome: manifest.Outcome) -> int:
+    print(outcome.out, end="")
+    for note in outcome.notes:
+        print(note, file=sys.stderr)
+    for message in outcome.errors:
+        error(message)
+    return outcome.code
 
 
 def not_implemented(command: str, section: str, summary: str) -> int:

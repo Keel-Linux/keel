@@ -1,0 +1,11 @@
+# /usr/share/keel/appliances/web.yaml, from keel-web
+manifest_version: 1
+kind: appliance
+name: web
+title: Keel Web
+summary: Nginx, Coraza and Anubis, the base of every web appliance (0030)
+base: core
+overlays:
+  nginx:  {simple: enabled,  cloud_simple: enabled, cloud_advanced: enabled}
+  coraza: {simple: disabled, cloud_simple: enabled, cloud_advanced: enabled}
+  anubis: {simple: disabled, cloud_simple: enabled, cloud_advanced: enabled}

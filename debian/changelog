@@ -1,3 +1,31 @@
+keel (0.12.0) unstable; urgency=medium
+
+  * New module keel.manifest and commands keel manifest validate and keel
+    manifest show: the reader of the appliance manifest, version 1
+    (decision 0041, step 1 of its first implementation). One schema for
+    overlay manifests, /usr/share/keel/overlays/<name>.yaml, and
+    appliance manifests, /usr/share/keel/appliances/<name>.yaml, read
+    under --root; unknown keys are refused at every level and every
+    error is reported at once, with the exit codes of spec validate.
+  * validate checks rules 1 to 24 of the format, and resolves each
+    appliance along its base chain down to core: overlays once, every
+    (port, protocol) once whatever the states, requires enabled in every
+    mode, names once across the chain. A state written on, off, yes or
+    no reaches PyYAML as a boolean and is refused with that reason; a
+    key given twice in one mapping is refused rather than overwritten.
+    A unit name has the shape systemd.unit(5) gives it, so none climbs
+    out of the unit directories with "..", and an init script counts
+    only as a regular executable file inside the root. Names and values
+    are matched whole, so a trailing newline is refused. YAML nested past
+    the recursion limit cannot be read (exit 2).
+  * show prints a manifest, and with --resolved the overlays with their
+    state per installation mode, the ports with their loopback, mesh or
+    public exposure, the processes, checks, secrets and hooks of the
+    chain. On Keel Web its first two tables are the format's.
+  * Nothing else in keel reads a manifest yet.
+
+ -- Marcos Mendez <mendez.foto@gmail.com>  Wed, 30 Sep 2026 16:00:00 +0000
+
 keel (0.11.6) unstable; urgency=medium
 
   * apply makes the MariaDB server it converges answer before asking it

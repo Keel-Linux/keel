@@ -1,0 +1,12 @@
+# /usr/share/keel/overlays/installer.yaml, from keel-overlay-installer
+manifest_version: 1
+kind: overlay
+name: installer
+title: Installer
+summary: The simple and advanced installation, discovery, YAML emission (0028, 0026, 0027)
+hooks:
+  first_boot:
+    - /usr/lib/inithooks/firstboot.d/00declarative
+    - /usr/lib/inithooks/firstboot.d/10keel-system
+    - /usr/lib/inithooks/firstboot.d/75keel-role
+    - /usr/lib/inithooks/firstboot.d/80keel-cloud

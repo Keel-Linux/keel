@@ -27,6 +27,7 @@ from keel.layers import (
     STATE_DEFAULT,
     STATE_ENV,
 )
+from keel.manifest import KINDS as MANIFEST_KINDS
 from keel.monitor.channelfile import PATH as NOTIFY_SETTINGS
 from keel.monitor.notify import CHECKS as NOTIFY_CHECKS
 from keel.monitor.notify import DIRECTIONS as NOTIFY_DIRECTIONS
@@ -230,7 +231,59 @@ def build_parser() -> argparse.ArgumentParser:
         commands.assemble,
     )
     add_assemble_options(assemble_parser)
+    add_manifest_parser(subparsers)
     return parser
+
+
+def add_manifest_parser(subparsers) -> None:
+    """keel manifest: the appliance and overlay manifests (decision 0041)"""
+    manifest_parser = subparsers.add_parser(
+        "manifest",
+        help="check and print the appliance and overlay manifests under"
+        " /usr/share/keel (decision 0041); not the layer manifests",
+    )
+    manifest_actions = manifest_parser.add_subparsers(
+        dest="action", metavar="ACTION"
+    )
+    validate_parser = manifest_actions.add_parser(
+        "validate",
+        help="check one manifest, the manifests of a name, or with no"
+        " argument every installed one, and resolve each appliance along"
+        " its chain; every error at once",
+    )
+    validate_parser.add_argument(
+        "target", nargs="?", default=None, metavar="PATH|NAME",
+        help="a manifest file (a PATH has a / or ends in .yaml), or a NAME"
+        " looked up under --root (default: every installed manifest)",
+    )
+    add_manifest_options(validate_parser)
+    validate_parser.set_defaults(handler=commands.manifest_validate)
+    show_parser = manifest_actions.add_parser(
+        "show",
+        help="print a manifest as its file says it, or with --resolved its"
+        " appliance resolved along its chain, as tables",
+    )
+    show_parser.add_argument("name", metavar="NAME",
+                             help="the manifest to print")
+    show_parser.add_argument(
+        "--resolved", action="store_true",
+        help="print the overlays with their state in each mode, the ports"
+        " with their exposure, the processes, checks, secrets, options and"
+        " hooks the chain resolves to (appliances only)",
+    )
+    add_manifest_options(show_parser)
+    show_parser.set_defaults(handler=commands.manifest_show)
+
+
+def add_manifest_options(parser: argparse.ArgumentParser) -> None:
+    add_common_options(parser)
+    parser.add_argument(
+        "--kind", choices=MANIFEST_KINDS, default=None,
+        help="which kind a NAME is, when an overlay and an appliance share"
+        " it (default: either)",
+    )
+    add_root_option(parser, "read /usr/share/keel/{overlays,appliances}"
+                    " and the unit files and hooks the manifests name in")
 
 
 def add_wireguard_parser(network_actions) -> None:

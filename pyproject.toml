@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "keel"
-version = "0.11.6"
+version = "0.12.0"
 authors = [{name = "KeelLinux maintainers"}]
 description = "Declarative management of one appliance instance"
 readme = "README.md"
@@ -20,7 +20,7 @@ Homepage = "https://github.com/marcos-mendez/keel"
 
 [tool.setuptools]
 packages = ["keel", "keel.spec", "keel.layers", "keel.inspect", "keel.diff",
-            "keel.system", "keel.network", "keel.monitor"]
+            "keel.system", "keel.network", "keel.monitor", "keel.manifest"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

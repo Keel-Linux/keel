@@ -1,0 +1,67 @@
+# Not from the format: an application on Keel Web for the tests of the
+# application sections (docs/manifest-v1.md, appendix), every section used
+manifest_version: 1
+kind: appliance
+name: blog
+title: Blog
+summary: An application with every section of the appendix
+base: web
+overlays:
+  mariadb: {simple: enabled, cloud_simple: enabled, cloud_advanced: disabled,
+            version: ">= 1:11.8"}
+processes:
+  - name: blog
+    unit: blog.service
+    listen: [{port: 8090, protocol: tcp, expose: loopback}]
+    restart: never
+checks:
+  - {name: blog, process: blog, type: http, address: loopback, port: 8090,
+     path: /health, expect: 200, on_failure: restart}
+  - {name: blog-nginx, process: nginx, type: tcp, address: loopback,
+     port: 443, on_failure: alert}
+services:
+  database:
+    engine: mariadb
+    version: ">= 10.11"
+    required: true
+    placement: {simple: embedded, cloud_simple: embedded,
+                cloud_advanced: discovered}
+    durable: true
+    secret: db_password
+    defaults: {name: blog, user: blog}
+  search:
+    engine: [opensearch, elasticsearch]
+    required: false
+    placement: {simple: none, cloud_simple: none, cloud_advanced: discovered}
+    durable: false
+    rebuild: [/usr/lib/blog/reindex]
+state:
+  replicate:
+    - /var/www/blog/content
+    - {path: /var/www/blog/media, unless: search}
+  exclude:
+    - /var/www/blog/content/cache
+workers:
+  - {name: cron, unit: blog-cron.service, every: 5min, queue: database,
+     scaling: {default: 1, max: 1, singleton: true}}
+  - {name: mailer, unit: blog-mailer.service}
+web:
+  root: /var/www/blog
+  routes:
+    - {path: /, to: php}
+    - {path: /live, to: {port: 8090}, websocket: true}
+  max_body: 64M
+  health: {path: /health, expect: 200}
+secrets:
+  - {name: db_password, description: The database account,
+     generate: allowed, shared: true}
+  - {name: app_password, description: The administrator, generate: never}
+options:
+  - {name: site_title, type: string, default: Blog, pattern: '^.{1,80}$'}
+  - {name: posts, type: integer, default: 10}
+  - {name: comments, type: boolean, default: true}
+  - {name: theme, type: enum, values: [light, dark], default: light}
+  - {name: domain, type: string}
+hooks:
+  first_boot: [/usr/lib/inithooks/firstboot.d/40blog]
+  migrate: {command: [/usr/lib/blog/migrate], needs: [database]}

@@ -1,0 +1,18 @@
+# /usr/share/keel/overlays/etcd.yaml, from keel-overlay-etcd
+manifest_version: 1
+kind: overlay
+name: etcd
+title: etcd
+summary: The mesh registry (0025); control plane only, never application data
+requires: [wireguard]
+processes:
+  - name: etcd
+    unit: etcd.service
+    listen:
+      - {port: 2379, protocol: tcp, expose: mesh}
+      - {port: 2380, protocol: tcp, expose: mesh}
+checks:
+  - {name: etcd-health, process: etcd, type: http, address: mesh,
+     port: 2379, path: /health, expect: 200, on_failure: restart}
+data:
+  - {path: /var/lib/etcd, replication: native, backup: none}

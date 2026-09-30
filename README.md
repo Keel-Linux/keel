@@ -13,8 +13,10 @@ which means every operation runs headless from the same code path.
 Working today: `spec validate`, `spec render`, `spec apply` (see
 [docs/apply.md](docs/apply.md)), `notify`, `inspect`
 (see [docs/inspect.md](docs/inspect.md)), `diff` (see
-[docs/diff.md](docs/diff.md)), `pull`, `assemble`, and the layers half of
-`verify` (see [docs/layers.md](docs/layers.md)).
+[docs/diff.md](docs/diff.md)), `pull`, `assemble`, the layers half of
+`verify` (see [docs/layers.md](docs/layers.md)), and `manifest validate`
+and `manifest show` for the appliance and overlay manifests of decision
+0041 (see [docs/manifest.md](docs/manifest.md)).
 
 One stub prints what it will do, names the brief section covering it and
 exits 9: the packages half of `verify`. It never pretends to work.
@@ -45,6 +47,8 @@ in [docs/apply.md](docs/apply.md).
 | `keel verify` | Check the installed layers against their manifests, one line per layer (brief section 5.4; packages not implemented yet) |
 | `keel pull` | Fetch the layers of an appliance that the cache does not have yet, from a directory or an http(s) URL, checking every digest (brief section 5.1) |
 | `keel assemble` | Extract a cached chain into a rootfs, honouring whiteouts and opaque directories, and pack it as a Proxmox template with its sha512 (brief section 5.1; root only) |
+| `keel manifest validate` | Check the appliance and overlay manifests under `/usr/share/keel` (decision 0041): one file, the manifests of a name, or every installed one, each appliance resolved along its base chain; every error at once ([docs/manifest.md](docs/manifest.md)) |
+| `keel manifest show` | Print a manifest, or with `--resolved` its appliance resolved along the chain: overlays with their state in each installation mode, ports with their exposure, processes, checks, secrets, options and hooks ([docs/manifest.md](docs/manifest.md)) |
 
 Every command accepts the same three options, so a caller never has to branch:
 
@@ -85,6 +89,14 @@ Every command accepts the same three options, so a caller never has to branch:
 | `--report FILE` | Write the field by field report here. Default: stderr |
 | `--secrets-dir DIR` | Where the secret placeholders point. Default: `/etc/keel/secrets`. Never read or written |
 
+`keel manifest validate [PATH|NAME]` and `keel manifest show NAME` accept:
+
+| Option | Meaning |
+| --- | --- |
+| `--root DIR` | Where `/usr/share/keel/{overlays,appliances}` and the unit files and hooks the manifests name are: `/` (the default, the live system), a package build tree or a mounted rootfs |
+| `--kind overlay\|appliance` | Which kind a NAME is, when an overlay and an appliance share it |
+| `--resolved` | `show` only: the appliance resolved along its chain, as tables |
+
 `keel diff` accepts:
 
 | Option | Meaning |
@@ -113,8 +125,8 @@ Defined in one place, `keel/exits.py`, and reproduced here.
 | --- | --- | --- |
 | 0 | `OK` | Success, including the no-op cases: an absent spec file, and an `apply` that left a populated conf alone |
 | 1 | `USAGE` | Usage error: unknown command, option or argument |
-| 2 | `SPEC_UNREADABLE` | The spec file cannot be read, or is not valid YAML, or is not a mapping |
-| 3 | `SPEC_INVALID` | The spec file is valid YAML but fails validation; every error is printed |
+| 2 | `SPEC_UNREADABLE` | The spec file cannot be read, or is not valid YAML, or is not a mapping; for `keel manifest`, the same of an appliance or overlay manifest, or no manifest of that name |
+| 3 | `SPEC_INVALID` | The spec file is valid YAML but fails validation; every error is printed. For `keel manifest`, a manifest that fails validation or an appliance whose chain does not resolve |
 | 4 | `SECRET_ERROR` | A referenced secret is missing, or is readable by somebody other than its owner |
 | 5 | `CONF_ERROR` | The conf file, or the spec or report `inspect` writes, cannot be written |
 | 6 | `MANIFEST_INVALID` | A layer manifest cannot be read or fails validation; every problem is printed |

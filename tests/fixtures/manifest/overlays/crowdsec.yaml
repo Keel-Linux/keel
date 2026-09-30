@@ -1,0 +1,20 @@
+# /usr/share/keel/overlays/crowdsec.yaml, from keel-overlay-crowdsec
+manifest_version: 1
+kind: overlay
+name: crowdsec
+title: CrowdSec
+summary: Bans first, before anything else sees the request (0029, 0030)
+screen: /usr/lib/confconsole/plugins.d/Security/crowdsec.py
+processes:
+  - name: crowdsec
+    unit: crowdsec.service
+    listen:
+      - {address: 127.0.0.1, port: 8080, protocol: tcp, expose: loopback}
+      - {address: 127.0.0.1, port: 6060, protocol: tcp, expose: loopback}
+  - name: firewall-bouncer
+    unit: crowdsec-firewall-bouncer.service
+checks:
+  - {name: crowdsec-lapi, process: crowdsec, type: tcp, address: loopback,
+     port: 8080, on_failure: restart}
+data:
+  - {path: /var/lib/crowdsec/data, replication: none, backup: none}

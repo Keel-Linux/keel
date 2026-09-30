@@ -1,0 +1,37 @@
+# /usr/share/keel/appliances/core.yaml, from keel-core
+manifest_version: 1
+kind: appliance
+name: core
+title: Keel Core
+summary: Debian, the mesh, CrowdSec and the installer (0036)
+base: none
+overlays:
+  installer: {simple: enabled,  cloud_simple: enabled,  cloud_advanced: enabled}
+  wireguard: {simple: disabled, cloud_simple: enabled,  cloud_advanced: enabled}
+  etcd:      {simple: disabled, cloud_simple: disabled, cloud_advanced: enabled}
+  crowdsec:  {simple: disabled, cloud_simple: enabled, cloud_advanced: enabled}
+processes:
+  - name: sshd
+    unit: ssh.service
+    listen: [{port: 22, protocol: tcp, expose: public}]
+  - name: webmin
+    unit: webmin.service
+    listen: [{port: 12321, protocol: tcp, expose: public}]
+  - name: webshell
+    unit: shellinabox.service
+    listen: [{port: 12320, protocol: tcp, expose: public}]
+  - name: postfix
+    unit: postfix.service
+    listen: [{port: 25, protocol: tcp, expose: loopback}]
+checks:
+  - {name: sshd, process: sshd, type: protocol, protocol: ssh,
+     address: loopback, port: 22, on_failure: restart}
+  - {name: webmin, process: webmin, type: http, tls: true, address: loopback,
+     port: 12321, path: /, expect: 200, on_failure: restart}
+  - {name: postfix, process: postfix, type: protocol, protocol: smtp,
+     address: loopback, port: 25, on_failure: restart}
+secrets:
+  - name: root_password
+    description: The root password, for SSH and Webmin
+    generate: allowed
+    shared: false
