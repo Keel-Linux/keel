@@ -62,7 +62,7 @@ def validate(doc: dict, *, check_secret_files: bool = True) -> list[str]:
     errors.extend(_validate_hub(doc.get("hub"), check_secret_files))
     errors.extend(_validate_security(doc.get("security")))
     errors.extend(_validate_wizard(doc.get("first_login_wizard")))
-    errors.extend(validate_network(doc.get("network")))
+    errors.extend(validate_network(doc.get("network"), check_secret_files))
     errors.extend(_validate_tls(doc.get("tls")))
     errors.extend(_validate_preseed(doc.get("preseed")))
     errors.extend(validate_users(doc.get("users")))

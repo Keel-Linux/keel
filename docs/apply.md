@@ -32,7 +32,8 @@ keel spec apply --system --root /mnt/rootfs
 With `--system`, after the conf, `apply` converges the parts of the spec
 that describe system state rather than hook input: `instance.hostname`,
 `instance.fqdn`, `users`, `locale`, `security.alerts`, `tls.acme`,
-`database.server`, `monitor` and, last, `network`. With `--system-only` it converges them and does nothing
+`database.server`, `monitor` and, last, `network` and its WireGuard
+`overlay`. With `--system-only` it converges them and does nothing
 else, for a machine whose conf phase has already run. Neither flag is on
 by default.
 
@@ -62,7 +63,8 @@ exactly as `inspect` is.
 | `--defer-certificate` | With either flag: write `tls.acme` but ask no certificate authority for a certificate in this run. The first boot hook passes it. See "tls.acme" below |
 | `--destroy-local-database` | Confirm, for this run only, that making this node a replica may drop the databases this server holds. Without it apply refuses and changes nothing. See "database.server" below |
 | `--network-window SECONDS` | With either flag: how long a network change waits for `keel network confirm` before it reverts by itself; 120 by default, at least 30. See "network" below |
-| `--skip-network` | With either flag: leave the network alone in this run. The first boot hook passes it |
+| `--skip-network` | With either flag: leave the network alone in this run, the overlay included, except that a missing overlay key is still made. The first boot hook passes it |
+| `--skip-uplink` | With either flag: leave `network.interfaces` alone in this run (its step says so) and converge the overlay, under its window. For a caller that changes the overlay only, so a peer added from the console never moves the interface the operator came in on; confconsole's overlay screen passes it. With `--skip-network` too, the overlay is left alone as well |
 
 `--destroy-local-database` with neither flag is a usage error as well:
 it confirms one decision of phase 2, so asking for it without phase 2 is
@@ -678,6 +680,122 @@ running.
 `--boot` restores the file without touching the interface, for the boot
 unit. Both need root on the live system.
 
+Beside the saved copy, `saved.json` records which file it is a copy of
+(`/etc/network/interfaces`, or the overlay's file under
+`/etc/wireguard`), written apart from the marker. A marker that cannot
+be read is reverted onto that file, without restarting any interface.
+When the record is missing or names any other file, nothing is restored
+and revert says so and exits 16, leaving the marker and the copy for the
+operator: a guess could write an overlay's file over the uplink's.
+
+**network.overlay** (`/etc/wireguard/<interface>.conf`; handbook decisions
+0018 and 0020)
+
+The WireGuard interface the nodes of a replicated appliance share
+(docs/spec.md, "overlay"). It is the appliance's own interface on either
+kind of machine, so it is converged from inside a container too, where
+the uplink is the host's. It is the last step, after the uplink, and it
+goes through the same window, marker, lock, timers and boot unit, with
+`wg-quick` in place of ifupdown:
+
+- **The key first.** A missing private key is made with `wg genkey` into
+  its file, mode 0600, on the live system only; under `--root` the step
+  says it is made on the machine itself, never in an image (keel-core#8).
+  `--skip-network`, which the first boot passes, still makes the key, so
+  the pair exists from the first boot and the public key can be handed
+  out before the overlay is brought up. An existing key file that is not
+  root's and 0600 is refused.
+- **An inline key is kept, not replaced.** A file written by hand may
+  hold its key in a `PrivateKey` line. Before the file is rewritten
+  without it, the key is moved into the key file (written whole to a
+  temporary file beside it, mode 0600, then linked into place, so a full
+  disk leaves no truncated key; under `--root` too), so the node keeps the public key its
+  peers know it by; no new key is made. The key is read from the one
+  file and written to the other when the step runs: it is never in the
+  plan, an argument or the output. A key file that already holds the
+  same key is fine; one that holds another is refused and both are left
+  as they are, since keel cannot tell which one the peers know.
+- **keel owns the file.** It is rewritten whenever it is not exactly what
+  the spec renders. It holds no private key: a `PostUp` line gives the
+  key file to `wg set`.
+- **The interface is read too.** On the live system the file alone is
+  not the overlay: `ip link show dev <interface>` says whether it is up.
+  A right file whose change was confirmed (`wg-quick@<interface>`
+  enabled) but whose interface is down is drift, and the step is
+  `systemctl restart wg-quick@<interface>`. A right file that was never
+  brought up and confirmed on this machine (it came with an image, say)
+  is brought up as a change, under the window; its revert puts the file
+  back and leaves the interface down, as it was. A right file that is up
+  is left alone, and its unit enabled if it is not.
+- **Refused, with the reason:** without `wg`, `wg-quick`, `ip`,
+  `systemd-run` or `systemctl` (install `wireguard-tools`); in a container
+  whose host has not loaded the `wireguard` module (the message names
+  `modprobe wireguard` on the host; a VM loads it itself); while another
+  change waits for its confirmation; and in a run whose uplink changes,
+  since one change waits in the window at a time: confirm the uplink,
+  then apply again.
+- **The sequence**, both directions alike: `wg-quick down` on the
+  outgoing file (a failure is not fatal: an interface that is not up has
+  nothing to take down), the new file put in place, `wg-quick up` on it. A
+  change that created the file reverts by removing it, which leaves the
+  interface down, as it was. A change is dated on the clock a session's
+  start time is read on (the start of a thread, in seconds since the
+  host's boot), not `/proc/uptime`, which lxcfs counts from a container's
+  start.
+- **Enabled once confirmed.** `keel network confirm` enables
+  `wg-quick@<interface>` after it cancels the revert, so a reboot inside
+  the window of a first overlay leaves no interface behind, and a later
+  run enables it if that failed. At boot the revert unit runs before
+  `network-pre.target`, which every `wg-quick@` instance follows, so an
+  unconfirmed change is undone before the overlay comes up.
+
+Which sessions confirm an overlay change is the one rule that differs
+from the uplink's. What such a change can break is two paths: the
+overlay itself, and the uplink, whose replies the routes `wg-quick` adds
+for a peer's `allowed_ips` can capture (a peer given `::/0`, or the
+operator's own prefix). A new session over either proves that the path it
+used survived, so:
+
+| Run from | Accepted when |
+| --- | --- |
+| SSH, over the overlay | the session started after the change, came from another machine, and arrived at an address the overlay declares (`address`, `ipv4_address`). confirm says the overlay was tested |
+| SSH, over the uplink | the session started after the change, came from another machine, and arrived at an address another interface of this machine holds now. confirm says the overlay itself was not tested, and at which address a peer would test it |
+| A console, a process attached from a container's host | always, as for the uplink |
+| Anything else, a session older than the change, a session from this machine to itself, or one arriving at an address the overlay does not declare | refused (exit 21) |
+
+Requiring the overlay alone would make pairing impossible: the first
+node's overlay carries nothing until the second node declares it too,
+and the first change would always revert. An agent of Keel Cloud that
+reaches the node again over the overlay confirms the same way.
+
+Whoever confirms, a console included, the uplink's routes are asked
+first, with `ip route get`: to each gateway `network.interfaces`
+declares and each gateway of a default route in place now (`ip -6` and
+`ip -4 route show default`: what DHCP, SLAAC or a container's host
+configured, and what `--skip-uplink` left), IPv6 first, and, for an SSH
+session that came over the uplink, back to its client. When one of them
+leaves through the overlay's interface, the change routes the uplink's
+traffic into the overlay, and confirm refuses (exit 21) and leaves the
+change to revert when its window ends, or at once with `keel network
+revert`. It refuses too when `ip` gives no answer for one of them: an
+unknown route is not taken as a clean one. Validation already refuses
+what the spec shows (docs/spec.md, "Routes"); this catches what it
+cannot.
+
+```
+$ ssh root@fd00:6b65:1::1        # from the other node, over the overlay
+# keel network confirm
+confirmed from an SSH session
+the overlay was tested: this session arrived at fd00:6b65:1::1 on wg0, from fd00:6b65:1::2
+wg-quick@wg0 enabled: the overlay comes back up at boot
+the network change stays; the revert is cancelled
+```
+
+`keel network wireguard key` prints this node's public key, and makes the
+pair first when there is none (root, live system only); only the public
+key is printed. `keel network wireguard suggest-address` prints a fresh
+unique local address for the first node of a set.
+
 ### Failures and exit codes
 
 A failed action, and a refusal, fail their field: the actions after it in
@@ -761,6 +879,9 @@ blog.yaml --root /tmp/scratch` then reports `instance.fqdn` and every
 - Converging a container's network from inside, more than one
   interface, bridges, VLANs or interface names; or changing the network
   on the live system without the revert armed first.
+- Making a WireGuard private key anywhere but on the machine that uses
+  it, printing one, or writing one into a file keel renders; removing an
+  overlay the spec no longer declares; loading a kernel module.
 - Touching the conf when a populated one exists, or anything at all with
   `--dry-run`.
 
@@ -870,3 +991,18 @@ covers the planner, `tests/test_apply_monitor_cli.py` the round trip
 through `keel diff`, and `tests/test_monitor_notify.py` sends every channel
 to an HTTPS server on `[::1]` with a certificate made for the run, and
 checks that no token reaches what `keel notify` prints.
+
+The overlay has its own files too. `tests/test_spec_overlay.py` covers
+the fields, `tests/test_system_overlay.py` the planner and its state,
+`tests/test_network_overlay_window.py` the wg-quick sequence, its revert
+(a first overlay removed, a changed one restored, the boot revert) and
+which sessions confirm, and `tests/test_inspect_overlay.py` the file read
+back and compared by `keel diff`. The mocked command boundary once hid
+real defects, so `tests/test_network_wireguard.py` hands keel's output to
+the real tools when they are at hand (`wireguard-tools` on `PATH`, or
+its directory in `KEEL_WG_DIR`; CI installs it, and fails rather than
+skips without it): the key pair is made and read by `wg genkey` and `wg
+pubkey`, the rendered file is parsed by `wg-quick strip` and brought up
+by `wg-quick up` in a network namespace of its own (`unshare -n` as root,
+`unshare -rn`, or `sudo -n`), where `wg show` must report the declared
+key, port, peers, endpoints, allowed IPs and keepalive.

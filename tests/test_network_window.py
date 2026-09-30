@@ -331,16 +331,50 @@ class TestRevert(RootCase):
         self.assertEqual(run.calls, [])
         self.assertEqual(self.current(), OLD)
 
-    def test_an_unparseable_marker_restores_the_default_file(self):
-        marker.save(self.root, OLD)
+    def test_an_unparseable_marker_restores_the_recorded_file(self):
+        marker.save(self.root, OLD, marker.Target(INTERFACES))
         marker.write_private(self.root, marker.PENDING, "garbage")
         self.write(NEW)
         run = Recorder()
         worked, line = switch.revert(self.root, run)
         self.assertEqual(run.calls, [STOP])
         self.assertTrue(worked)
-        self.assertIn("no interface was restarted", line)
+        self.assertIn("restored /etc/network/interfaces; the pending change"
+                      " could not be read, so no interface was restarted",
+                      line)
         self.assertEqual(self.current(), OLD)
+        self.assertFalse(marker.exists(self.root))
+
+    def test_an_unparseable_marker_with_no_known_file_restores_nothing(self):
+        for target in (None, "garbage", json.dumps({"path": "etc/passwd"}),
+                       json.dumps({"path": INTERFACES, "kind": "overlay"}),
+                       json.dumps({"path": "etc/wireguard/wg0.conf"}),
+                       json.dumps({"kind": "uplink"})):
+            with self.subTest(target=target):
+                marker.save(self.root, OLD)
+                if target is not None:
+                    marker.write_private(self.root, marker.TARGET, target)
+                marker.write_private(self.root, marker.PENDING, "garbage")
+                self.write(NEW)
+                run = Recorder()
+                worked, line = switch.revert(self.root, run)
+                self.assertFalse(worked)
+                self.assertIn("does not say which file", line)
+                self.assertIn("/var/lib/keel/network/saved", line)
+                self.assertEqual(run.calls, [])
+                self.assertEqual(self.current(), NEW)
+                self.assertTrue(marker.exists(self.root))
+                marker.clear(self.root)
+
+    def test_the_change_records_its_file_beside_the_saved_copy(self):
+        with mock.patch.object(marker, "boot_id", return_value="b1"), \
+                mock.patch.object(marker, "uptime", return_value=50.0):
+            switch.change(self.root, pending(), NEW, Recorder())
+        self.assertEqual(marker.saved_target(self.root),
+                         marker.Target(INTERFACES))
+        marker.clear(self.root)
+        self.assertIsNone(marker.saved_target(self.root))
+        self.assertFalse(os.path.exists(join(self.root, marker.TARGET)))
 
     def test_a_missing_saved_copy_is_a_failure(self):
         marker.write(self.root, pending())

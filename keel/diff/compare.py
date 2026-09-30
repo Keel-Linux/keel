@@ -26,6 +26,7 @@ from keel.diff.report import (
     FieldDiff,
 )
 from keel.inspect.report import NOT_INFERRED, Finding, Inspection
+from keel.network import wireguard
 from keel.spec.constants import TOP_LEVEL_KEYS
 from keel.spec.origins import canonical as canonical_origin
 
@@ -49,6 +50,7 @@ SECRET_REASON = "a secret reference; values are never read"
 SECRET_PREFIXES = (
     "database.server.replication.secret",
     "database.client.primary.secret",
+    "network.overlay.wireguard.private_key",
 )
 # A feature the spec turns off with one field. Its other fields stay in
 # the file, ready for the day the switch is turned on, and are not
@@ -82,18 +84,21 @@ CONSENT_FIELDS = {
         " keeps no record of it, only of the account",
 }
 DOMAIN_LEAVES = ("hostname", "fqdn", "domains")
-ADDRESS_LEAVES = ("address",)
+ADDRESS_LEAVES = ("address", "ipv4_address")
 HOST_LEAVES = ("gateway", "nameservers", "host", "listen")
+# a WireGuard endpoint: host:port, an IPv6 literal in brackets
+ENDPOINT_LEAVES = ("endpoint",)
 # An origin an authorization names: an address, a prefix, a host pattern
 # or a name. The prefix and the pattern that authorize the same range are
 # one value in two spellings (keel.spec.origins). A name is never resolved
 # here, so a description that names a host and a server that holds an
 # address are drift and not a match, which is the whole reason for reading
 # the origins off the server (docs/spec.md).
-ORIGIN_LEAVES = ("allowed_from",)
+ORIGIN_LEAVES = ("allowed_from", "allowed_ips")
 # Lists whose order carries no meaning: group membership is a set, and so
-# are the addresses a server answers on and the origins it authorizes.
-UNORDERED_LEAVES = ("groups", "listen", "allowed_from")
+# are the addresses a server answers on and the origins it authorizes,
+# and the prefixes a WireGuard peer is routed.
+UNORDERED_LEAVES = ("groups", "listen", "allowed_from", "allowed_ips")
 # Fields inspect derives from another one, so they are unknown together.
 DERIVED_FROM = {"network.managed_by": "network.interfaces"}
 # A field that describes nothing unless the declared role is one of these.
@@ -170,7 +175,9 @@ def compare_section(
         # declared, as apply leaves it
         declared = {**declared, "enabled": False}
     if section == "network" and isinstance(declared, dict):
-        declared = with_slaac_default(declared)
+        declared = with_overlay_defaults(with_slaac_default(declared))
+    if section == "network":
+        declared, observed = peers_by_key(declared), peers_by_key(observed)
     wanted = dict(flatten(section, declared or {}))
     found = dict(flatten(section, observed or {}))
     skipped = not_compared(section, wanted)
@@ -209,6 +216,44 @@ def with_slaac_default(network: dict) -> dict:
             iface = {**iface, "ipv6": {**ipv6, "slaac": True}}
         completed[name] = iface
     return {**network, "interfaces": completed}
+
+
+def with_overlay_defaults(network: dict) -> dict:
+    """The overlay's interface and port as apply renders them when the
+    spec leaves them out, so a machine carrying them is not drift. A copy.
+    """
+    overlay = network.get("overlay")
+    wg = overlay.get("wireguard") if isinstance(overlay, dict) else None
+    if not isinstance(wg, dict):
+        return network
+    wg = {"interface": wireguard.DEFAULT_INTERFACE,
+          "listen_port": wireguard.DEFAULT_PORT, **wg}
+    return {**network, "overlay": {**overlay, "wireguard": wg}}
+
+
+def peers_by_key(network: object) -> object:
+    """The overlay's peers keyed by public key, on either side
+
+    A peer is known by its key and the order of the list means nothing,
+    so each peer's fields are compared with the same peer's on the
+    machine (`network.overlay.wireguard.peers.<key>.endpoint`), and a
+    peer on one side only is one line, not a shifted list. A copy.
+    """
+    if not isinstance(network, dict):
+        return network
+    overlay = network.get("overlay")
+    wg = overlay.get("wireguard") if isinstance(overlay, dict) else None
+    if not isinstance(wg, dict) or not isinstance(wg.get("peers"), list):
+        return network
+    peers = {
+        str(peer.get("public_key")): {
+            name: value for name, value in peer.items()
+            if name != "public_key"
+        }
+        for peer in wg["peers"] if isinstance(peer, dict)
+    }
+    wg = {**wg, "peers": peers}
+    return {**network, "overlay": {**overlay, "wireguard": wg}}
 
 
 def not_compared(section: str, wanted: dict[str, object]) -> dict[str, str]:
@@ -379,6 +424,8 @@ def normalize(path: str, value: object) -> object:
         return _address(text, ipaddress.ip_interface)
     if leaf in HOST_LEAVES:
         return _address(text, ipaddress.ip_address)
+    if leaf in ENDPOINT_LEAVES:
+        return wireguard.canonical_endpoint(text)
     if path.startswith(NUMERIC_PREFIXES):
         return _number(text)
     return text

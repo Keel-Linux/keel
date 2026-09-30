@@ -1,3 +1,63 @@
+keel (0.11.0) unstable; urgency=medium
+
+  * New field network.overlay.wireguard, the WireGuard overlay of a
+    replicated appliance (handbook decision 0020, step 2): interface
+    (default wg0), address (IPv6, required), ipv4_address, listen_port
+    (default 51820), private_key.file and peers (public_key, endpoint,
+    allowed_ips, persistent_keepalive).
+  * apply --system renders /etc/wireguard/<if>.conf and brings it up
+    under the confirmation window of decision 0018, also inside a
+    container whose uplink is managed_by: host: wg-quick down on the old
+    file, wg-quick up on the new one, both directions alike; a change
+    that created the file reverts by removing it. The boot unit restores
+    it before network-pre.target. wg-quick@<if> is enabled once the
+    change is confirmed. One change waits in the window at a time, so an
+    overlay change is refused in a run whose uplink moves.
+  * The private key is made with wg genkey on the machine itself, mode
+    0600, at the first converge (--skip-network included) or by keel
+    network wireguard key, never under --root (keel-core#8). It is never
+    printed and never in the file: PostUp gives the key file to wg set.
+  * keel network confirm accepts, for an overlay change, a new session
+    arriving at an overlay address the change declares, or at an address
+    another interface holds (the uplink), and says which path it tested.
+    It dates the change on the process start clock, which is right in a
+    container, where lxcfs's /proc/uptime is not.
+  * In a container whose host has not loaded the wireguard module, apply
+    refuses and names modprobe wireguard on the host; inspect reports it.
+  * keel inspect reads the overlay back from /etc/wireguard with the
+    public key wg pubkey gives, never the private key; keel diff compares
+    peers by public key.
+  * New commands: keel network wireguard key (this node's public key,
+    making the pair first) and keel network wireguard suggest-address (a
+    random unique local /64 for the first node of a set).
+  * Suggests: wireguard-tools.
+  * From the review of #49: no route of the overlay may capture the
+    uplink. The overlay addresses and every allowed_ips prefix must be
+    private (fc00::/7; RFC 1918 or 100.64.0.0/10), which refuses a /0
+    and a public /1 pair, and none may overlap an address prefix or
+    gateway of network.interfaces or a peer's endpoint address. keel
+    network confirm refuses an overlay change, from a console too, while
+    ip route get sends a declared or live default gateway, or an uplink
+    session's client, through the overlay, or gives no answer for one.
+    A zoned gateway (fe80::1%eth0) is asked without its zone, and a
+    default route via inet6 fe80::1 (RFC 5549) reads as fe80::1.
+  * A wg0.conf with an inline PrivateKey keeps its identity: apply moves
+    the key into the key file (0600, written to a temporary file and
+    linked into place, never printed) before rewriting the file, instead
+    of making a new one, and refuses when the key file holds another
+    key.
+  * A revert whose marker cannot be read restores the saved copy to the
+    file recorded beside it (saved.json), and restores nothing when that
+    is unknown, never an overlay's file over /etc/network/interfaces.
+  * apply reads the overlay interface as well as its file: a confirmed
+    overlay that is down is drift and is restarted; a right file never
+    brought up here comes up under the window, and its revert leaves it
+    down.
+  * New apply flag --skip-uplink: converge the overlay and leave
+    network.interfaces alone, for confconsole's overlay screen.
+
+ -- Marcos Mendez <mendez.foto@gmail.com>  Wed, 30 Sep 2026 05:47:51 +0000
+
 keel (0.10.2) unstable; urgency=medium
 
   * Declared nameservers are no longer dropped for their family. ifupdown

@@ -16,6 +16,12 @@ neither leaves an address or a DHCP client of the other behind:
    out before the interface is touched, and this step is a rename;
 4. `ifup` the interface (ifupdown-ng has no `ifreload`).
 
+The WireGuard overlay (decision 0020) has no ifdown: its sequence is
+`wg-quick down` on the outgoing file under /etc/wireguard, which deletes
+the interface with its addresses and routes, the new file put in place
+the same way, mode 0600, then `wg-quick up` on it; in both directions
+alike. A change that created the file is reverted by removing it.
+
 Two transient timers run the revert, both armed before step 1, so a run
 that dies half way still reverts:
 
@@ -44,7 +50,7 @@ UNITS = (WINDOW_UNIT, SAFETY_UNIT)
 # how long ifup may take on top of the window: ifupdown-ng waits for a
 # DHCP lease, and the safety timer must not fire before the window starts
 UP_ALLOWANCE = 60
-INTERFACES = "etc/network/interfaces"
+INTERFACES = marker.UPLINK_FILE
 
 # A command runner: argv in, None on success or what went wrong
 Runner = Callable[[tuple[str, ...]], str | None]
@@ -77,16 +83,20 @@ def disarm(run: Runner) -> None:
 
 
 FILE_MODE = 0o644
+# wg-quick warns about a file others can read, whatever it holds
+OVERLAY_MODE = 0o600
 
 
-def stage(root: str, relative: str, text: str) -> tuple[str | None, str | None]:
+def stage(root: str, relative: str, text: str, mode: int = FILE_MODE) -> (
+    tuple[str | None, str | None]
+):
     """Write `text` beside the file, synced; (its path, or the problem)"""
     target = marker.path(root, relative)
     staged = target + ".keel-new"
     try:
-        fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, FILE_MODE)
+        fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
         with os.fdopen(fd, "w") as fob:
-            os.fchmod(fob.fileno(), FILE_MODE)
+            os.fchmod(fob.fileno(), mode)
             fob.write(text)
             fob.flush()
             os.fsync(fob.fileno())
@@ -101,6 +111,28 @@ def put_file(root: str, relative: str, text: str) -> str | None:
     if problem:
         return problem
     return rename(staged, root, relative)
+
+
+def put_back(root: str, target: marker.Target, text: str) -> str | None:
+    """The saved file restored, or removed for a change that created it"""
+    if target.kind != marker.OVERLAY:
+        return put_file(root, target.path, text)
+    if target.absent:
+        return remove(root, target.path)
+    staged, problem = stage(root, target.path, text, OVERLAY_MODE)
+    if problem:
+        return problem
+    return rename(staged, root, target.path)
+
+
+def remove(root: str, relative: str) -> str | None:
+    try:
+        os.remove(marker.path(root, relative))
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        return f"cannot remove /{relative}: {e.strerror or e}"
+    return None
 
 
 def rename(staged: str, root: str, relative: str) -> str | None:
@@ -152,6 +184,57 @@ def bounce(root: str, iface: str, relative: str, text: str,
     return True, "; ".join(found) or None
 
 
+def bounce_overlay(root: str, iface: str, relative: str, text: str | None,
+                   run: Runner, up: bool = True) -> tuple[bool, str | None]:
+    """wg-quick down, the file put in place (or removed), wg-quick up
+
+    `text` None removes the file and leaves the interface down: the
+    revert of a change that created the overlay. `up` False puts the file
+    back and leaves it down too: the revert of a change to an overlay
+    that was down before it. `wg-quick down` failing is not fatal, an
+    interface that is not up has nothing to take down; it runs on the
+    outgoing file, which is how it finds the routes and hooks to undo.
+    """
+    staged = None
+    if text is not None:
+        staged, problem = stage(root, relative, text, OVERLAY_MODE)
+        if problem:
+            return False, problem
+    run(("wg-quick", "down", iface))
+    problem = (rename(staged, root, relative) if staged
+               else remove(root, relative))
+    if problem:
+        if up and os.path.exists(marker.path(root, relative)):
+            run(("wg-quick", "up", iface))
+        return False, problem
+    if text is None or not up:
+        return True, None
+    return True, run(("wg-quick", "up", iface))
+
+
+def move(root: str, pending: marker.Pending, text: str | None, run: Runner,
+         autoconf: str | None = None, back: bool = False) -> (
+             tuple[bool, str | None]):
+    """The sequence of the change's kind, in either direction
+
+    `back` is a revert: an overlay that was down before the change is
+    left down on the restored file.
+    """
+    if pending.kind == marker.OVERLAY:
+        return bounce_overlay(root, pending.iface, pending.path, text, run,
+                              not (back and pending.down_before))
+    return bounce(root, pending.iface, pending.path, text or "", run,
+                  autoconf)
+
+
+def stage_for(root: str, pending: marker.Pending, text: str) -> (
+    tuple[str | None, str | None]
+):
+    if pending.kind == marker.OVERLAY:
+        return stage(root, pending.path, text, OVERLAY_MODE)
+    return stage(root, pending.path, text)
+
+
 def baseline(current: str, iface: str) -> str | None:
     """The autoconf setting to give back to a file that keeps SLAAC
 
@@ -200,7 +283,7 @@ def change(root: str, pending: marker.Pending, text: str,
 def changed(root: str, pending: marker.Pending, text: str,
             run: Runner) -> str | None:
     boot_id = marker.boot_id()
-    if boot_id is None or marker.uptime() is None:
+    if boot_id is None or marker.clock(pending.kind) is None:
         return ("cannot read the boot id or the uptime under /proc, which"
                 " date the change for its confirmation; nothing changed")
     with marker.locked(root):
@@ -214,20 +297,19 @@ def changed(root: str, pending: marker.Pending, text: str,
         # a file that cannot even be staged is found out before a marker
         # or a timer exists, so nothing is left waiting on a change that
         # never started
-        _, problem = stage(root, pending.path, text)
+        _, problem = stage_for(root, pending, text)
         if problem:
             return f"{problem}; nothing changed"
-        pending = replace(pending, autoconf=baseline(current, pending.iface))
-        marker.save(root, current)
+        pending = prepared(root, pending, current)
+        marker.save(root, current, pending.target())
         marker.write(root, pending)
         problem = arm(SAFETY_UNIT, pending.window + UP_ALLOWANCE, run)
         if problem:
             marker.clear(root)
             return f"revert timer not armed, nothing changed: {problem}"
-        written, problem = bounce(root, pending.iface, pending.path, text,
-                                  run, pending.autoconf)
+        written, problem = move(root, pending, text, run, pending.autoconf)
         if written and problem is None:
-            up_at = marker.uptime()
+            up_at = marker.clock(pending.kind)
             if up_at is not None:
                 # left undated, the change cannot be confirmed and reverts
                 marker.write(root, pending.up(boot_id, up_at))
@@ -237,6 +319,26 @@ def changed(root: str, pending: marker.Pending, text: str,
         return rolled_back(root, pending, current, problem, run)
 
 
+def prepared(root: str, pending: marker.Pending, current: str) -> (
+    marker.Pending
+):
+    """What the marker records before the interface moves
+
+    An uplink records the autoconf setting its revert gives back; an
+    overlay whether its file existed, since a revert of the change that
+    created it removes the file rather than leaving an empty one.
+    """
+    if pending.kind == marker.OVERLAY:
+        return replace(pending, absent=not os.path.exists(
+            marker.path(root, pending.path)))
+    return replace(pending, autoconf=baseline(current, pending.iface))
+
+
+def previous(pending: marker.Pending, text: str) -> str | None:
+    """The file a revert goes back to; None when there was none"""
+    return None if pending.absent else text
+
+
 def rolled_back(root: str, pending: marker.Pending, current: str,
                 problem: str | None, run: Runner) -> str:
     """The new file did not come up: put the old one back at once
@@ -244,8 +346,8 @@ def rolled_back(root: str, pending: marker.Pending, current: str,
     The marker and the timers stay unless the old file is on disk again,
     so the timer, or the boot unit, still has something to restore.
     """
-    written, back = bounce(root, pending.iface, pending.path, current, run,
-                           pending.autoconf)
+    written, back = move(root, pending, previous(pending, current), run,
+                         pending.autoconf, back=True)
     if not written:
         return (f"{problem}; putting the previous file back failed too"
                 f" ({back}); the revert timer will try again")
@@ -265,33 +367,68 @@ def revert(root: str, run: Runner, boot: bool = False) -> tuple[bool, str]:
     the restored file. The marker goes only once the saved file is back
     on disk, so a revert that could not write it can be run again, and
     the boot unit still finds it.
+
+    A marker that cannot be read is restored to the file recorded beside
+    the saved copy (marker.Target); when that is unknown too, nothing is
+    restored rather than a guess: an overlay's file written over
+    /etc/network/interfaces would cut the uplink off.
     """
     with marker.locked(root):
         if not marker.exists(root):
             return True, "no network change is waiting; nothing to revert"
         pending = marker.read(root)
+        target = pending.target() if pending else marker.saved_target(root)
+        if target is None:
+            return False, UNKNOWN_TARGET
         text = marker.saved(root)
-        relative = pending.path if pending else INTERFACES
         if text is None:
             marker.clear(root)
-            return False, (f"the saved copy of /{relative} is missing;"
+            return False, (f"the saved copy of /{target.path} is missing;"
                            " nothing was restored")
         if boot or pending is None:
-            problem = put_file(root, relative, text)
+            problem = put_back(root, target, text)
             if problem:
                 return False, f"cannot restore: {problem}"
             marker.clear(root)
             if boot:
-                return True, f"restored /{relative} before networking starts"
+                return True, f"{restored(target)} before networking starts"
             disarm(run)
-            return True, (f"restored /{relative}; the pending change could"
+            return True, (f"{restored(target)}; the pending change could"
                           " not be read, so no interface was restarted")
-        written, problem = bounce(root, pending.iface, relative, text, run,
-                                  restored_autoconf(pending))
-        if not written:
-            return False, f"cannot restore: {problem}"
-        marker.clear(root)
-        disarm(run)
-        if problem:
-            return False, f"restored /{relative}, but {problem}"
-        return True, f"restored /{relative} and {pending.iface} is up on it"
+        return moved_back(root, pending, text, run)
+
+
+# what revert says of a marker that names no file it can restore
+UNKNOWN_TARGET = (
+    "the pending change cannot be read, and what is beside it does not"
+    f" say which file the saved copy /{marker.SAVED} belongs to; nothing"
+    " was restored. Put it back by hand where it belongs"
+    f" (/{marker.UPLINK_FILE} or a file under /etc/wireguard), then"
+    f" remove /{marker.PENDING}"
+)
+
+
+def moved_back(root: str, pending: marker.Pending, text: str,
+               run: Runner) -> tuple[bool, str]:
+    """The live revert of a readable marker: the interface moved back"""
+    autoconf = (None if pending.kind == marker.OVERLAY
+                else restored_autoconf(pending))
+    written, problem = move(root, pending, previous(pending, text), run,
+                            autoconf, back=True)
+    if not written:
+        return False, f"cannot restore: {problem}"
+    marker.clear(root)
+    disarm(run)
+    done = restored(pending.target())
+    if problem:
+        return False, f"{done}, but {problem}"
+    if pending.absent or pending.down_before:
+        return True, (f"{done}; {pending.iface} is down, as it was before"
+                      " the change")
+    return True, f"{done} and {pending.iface} is up on it"
+
+
+def restored(target: marker.Target) -> str:
+    if target.absent:
+        return f"removed /{target.path}, which the change had created"
+    return f"restored /{target.path}"

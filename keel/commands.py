@@ -16,7 +16,8 @@ from keel import system
 from keel.monitor import channelfile
 from keel.monitor import notify as notifier
 from keel.network import confirm as netconfirm
-from keel.network import live, session, switch
+from keel.network import live, session, switch, wgkeys, wireguard
+from keel.system.ovstate import overlay_of
 
 
 def warn(message: str) -> None:
@@ -142,6 +143,7 @@ def spec_apply(args) -> int:
         getattr(args, "defer_certificate", False),
         getattr(args, "network_window", system.DEFAULT_WINDOW),
         getattr(args, "skip_network", False),
+        getattr(args, "skip_uplink", False),
     )
 
 
@@ -177,6 +179,7 @@ def apply_system(
     doc: dict, root: str, dry_run: bool, label: str = "apply --system",
     confirmed: bool = False, defer_certificate: bool = False,
     network_window: int = system.DEFAULT_WINDOW, skip_network: bool = False,
+    skip_uplink: bool = False,
 ) -> int:
     """Observe, plan, then carry out or only print; one line per action
 
@@ -190,7 +193,7 @@ def apply_system(
     """
     state = system.observe(root, doc)
     plan = system.plan(doc, state, confirmed, defer_certificate,
-                       network_window, skip_network)
+                       network_window, skip_network, skip_uplink)
     if not plan.steps:
         print(f"{label}: nothing declared that this phase converges")
         return exits.OK
@@ -241,6 +244,65 @@ def network_revert(args) -> int:
     else:
         error(line)
     return exits.OK if worked else exits.APPLY_FAILED
+
+
+def network_wireguard_key(args) -> int:
+    """Print this node's WireGuard public key, making the key pair first
+
+    The key file is the one network.overlay.wireguard names, or the
+    default for its interface; without a spec, or without an overlay in
+    it, wg0's. A missing key is made here as apply would make it, on the
+    live system only (keel-core#8), so an operator can hand the public key
+    to the other nodes before declaring anything. Only the public key is
+    printed, on standard output, alone, for a caller to read.
+    """
+    root = getattr(args, "root", inspection.ROOT_DEFAULT)
+    overlay: dict = {}
+    if os.path.exists(args.spec):
+        doc, code = read_spec(args.spec, check_secret_files=False)
+        if doc is None:
+            return code
+        overlay = overlay_of(doc) or {}
+    key = wireguard.key_path(overlay)
+    path = os.path.join(os.path.abspath(root), key.lstrip("/"))
+    if not os.path.exists(path):
+        code = make_key(root, key, path)
+        if code != exits.OK:
+            return code
+    public, problem = wgkeys.public(path)
+    if public is None:
+        error(str(problem))
+        return exits.APPLY_FAILED
+    print(public)
+    return exits.OK
+
+
+def make_key(root: str, key: str, path: str) -> int:
+    if os.path.abspath(root) != inspection.ROOT_DEFAULT:
+        error(f"{key} is not made under --root: a private key is made on"
+              " the machine that uses it, never in an image (keel-core#8)")
+        return exits.APPLY_FAILED
+    refusal = system.needs_root(root, "network wireguard key")
+    if refusal:
+        error(refusal)
+        return exits.APPLY_NEEDS_ROOT
+    problem = wgkeys.generate(path)
+    if problem:
+        error(problem)
+        return exits.APPLY_FAILED
+    print(f"generated {key}, mode 0600", file=sys.stderr)
+    return exits.OK
+
+
+def network_wireguard_suggest(args) -> int:
+    """Print a fresh unique local address (RFC 4193) for a first node
+
+    Random, so two sets formed apart do not collide when joined later;
+    the other nodes take ::2, ::3 on the same /64.
+    """
+    print(wireguard.suggest_address(
+        os.urandom(wireguard.GLOBAL_ID_BYTES)))
+    return exits.OK
 
 
 def notify(args) -> int:

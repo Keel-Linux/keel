@@ -37,6 +37,8 @@ in [docs/apply.md](docs/apply.md).
 | `keel database promote` | Make this replica a primary: stop replicating and forget the primary it followed. Never something `apply` decides, and there is no failover in Keel, so only the operator knows the old primary should stop being one (decision 0013, docs/apply.md) |
 | `keel network confirm` | Keep the network change `apply --system` made; refused unless run from a session opened after it over the new configuration, or a console (decision 0018, docs/apply.md) |
 | `keel network revert` | Put back the interfaces file a pending network change replaced; what the revert timer runs. `--boot` restores the file only, for the boot unit |
+| `keel network wireguard key` | Print this node's WireGuard public key, making the key pair first when there is none (root, live system only); the private key is never printed (decision 0020, docs/spec.md) |
+| `keel network wireguard suggest-address` | Print a random unique local IPv6 address with its /64, for the first node of an overlay |
 | `keel notify` | What monit runs when a check of the `monitor` section fails, lasts or recovers: sends one message, saying what happened and what to do, to every channel the section declares (email, Telegram, ntfy, a webhook). It reads the channels from `/etc/keel/monitor.json`, which `apply --system` writes as root, never from the spec, reads the tokens from their secret files and prints no URL (decision 0021, docs/apply.md) |
 | `keel inspect` | Write a spec from the running machine, or from an offline root, and report every field with its source or why it was not inferred; secrets are never read (brief sections 5.2 and 7) |
 | `keel diff` | Report drift between the spec and the running machine, or an offline root, field by field, through the same collector `inspect` uses; secrets are never compared and their files need not exist, nothing is written (brief section 5.2) |
@@ -62,7 +64,7 @@ Every command accepts the same three options, so a caller never has to branch:
 
 | Option | Meaning |
 | --- | --- |
-| `--system` | After the conf, converge the system state the spec declares: the name, users with their authorized keys, timezone, locale, alerts, the ACME certificate, the database role, what monit watches and, last, the network, which reverts by itself unless `keel network confirm` arrives over the new configuration. Root on the live system. Off by default |
+| `--system` | After the conf, converge the system state the spec declares: the name, users with their authorized keys, timezone, locale, alerts, the ACME certificate, the database role, what monit watches and, last, the network and its WireGuard overlay, which revert by themselves unless `keel network confirm` arrives over the new configuration. Root on the live system. Off by default |
 | `--system-only` | That system state and nothing else: the conf is neither read nor written and no secret is resolved, so a generated password the hooks already applied is never regenerated ([docs/apply.md](docs/apply.md)) |
 | `--dry-run` | With `--system` or `--system-only`: print the plan and change nothing, not even the conf; reads no secret and needs no root |
 | `--root DIR` | The filesystem `--system` converges: `/` (the default, the live system) or a scratch tree. The conf path stays `--conf` |

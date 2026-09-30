@@ -14,7 +14,9 @@ from keel.inspect import constants as paths
 from keel.inspect.accounts import passwd_entries
 from keel.inspect.tree import Tree
 from keel.system.actions import (
+    AdoptKey,
     Change,
+    GenerateKey,
     MakeDir,
     RemoveFile,
     Run,
@@ -23,7 +25,7 @@ from keel.system.actions import (
     SwitchNetwork,
     WriteFile,
 )
-from keel.network import marker, switch
+from keel.network import marker, switch, wgkeys
 
 NOT_RUNNABLE = 127
 
@@ -48,6 +50,11 @@ class Effects:
                 return self.make_dir(action)
             if isinstance(action, SwitchNetwork):
                 return self.switch_network(action)
+            if isinstance(action, GenerateKey):
+                return wgkeys.generate(self.tree.path(action.path.lstrip("/")))
+            if isinstance(action, AdoptKey):
+                return wgkeys.adopt(self.tree.path(action.conf),
+                                    self.tree.path(action.path.lstrip("/")))
             return self.symlink(action)
         except OSError as e:
             return f"{e.strerror or e}"
@@ -90,7 +97,9 @@ class Effects:
         pending = marker.Pending(
             iface=action.iface, path=action.path, window=action.window,
             addresses=action.addresses, gateways=action.gateways,
-            old_gateways=action.old_gateways,
+            old_gateways=action.old_gateways, kind=action.kind,
+            down_before=action.down_before,
+            uplink_gateways=action.uplink_gateways,
         )
         return switch.change(self.tree.root, pending, action.content,
                              self.run)

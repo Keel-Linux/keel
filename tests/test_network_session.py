@@ -209,6 +209,7 @@ class TestCommands(unittest.TestCase):
             (["--network-window", "5"], "at least 30 seconds"),
             (["--network-window", "soon"], "not a number of seconds"),
             (["--skip-network"], "--skip-network requires"),
+            (["--skip-uplink"], "--skip-uplink requires"),
         ):
             err = io.StringIO()
             with self.assertRaises(SystemExit), \

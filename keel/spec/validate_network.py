@@ -10,19 +10,26 @@ from typing import Any
 
 from keel.spec.constants import IPV4_METHODS, IPV6_METHODS, MANAGED_BY
 from keel.spec.fields import is_unicast, list_error, mapping_error
+from keel.spec.validate_overlay import validate_overlay
 
 FAMILY_KEYS = ("method", "address", "gateway")
 
 
-def validate_network(network: Any) -> list[str]:
+def validate_network(network: Any, check_secret_files: bool = True) -> (
+    list[str]
+):
     error = mapping_error("network", network)
     if error or not network:
         return [error] if error else []
 
     errors = []
     for key in network:
-        if key not in ("managed_by", "interfaces", "nameservers"):
+        if key not in ("managed_by", "interfaces", "nameservers", "overlay"):
             errors.append(f"network.{key}: unknown key")
+    errors.extend(validate_overlay(
+        network.get("overlay"), network.get("interfaces"),
+        check_secret_files,
+    ))
 
     managed_by = network.get("managed_by")
     if managed_by is not None and str(managed_by) not in MANAGED_BY:

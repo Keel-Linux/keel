@@ -41,19 +41,24 @@ NAMESERVER_LIMIT = (
 
 def plan_network(network: dict, state: NetworkState | None, live: bool,
                  available: frozenset[str], window: int = DEFAULT_WINDOW,
-                 skip: bool = False) -> list[Step]:
+                 skip: bool = False, skipped_by: str = "--skip-network") -> (
+                     list[Step]):
+    """`skipped_by` names the flag that asked for `skip`"""
     if state is None:
         return []
     if skip:
         return [Step(FIELD, (Note(
-            "not converged in this run (--skip-network)"),))]
+            f"not converged in this run ({skipped_by})"),))]
     if state.owner == "host":
         return [Step(FIELD, (Note(
             "the host owns this container's interfaces: compared by keel"
             " diff, not converged from inside (decision 0018)"),))]
+    # the overlay is its own interface and its own step (keel.system.overlay)
+    uplink = {key: value for key, value in network.items()
+              if key != "overlay"}
     drift = [
         found.field for found in compare_section(
-            FIELD, network, state.observed, state.unknowns)
+            FIELD, uplink, state.observed, state.unknowns)
         if found.status == DRIFT
     ]
     if not drift:
