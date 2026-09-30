@@ -83,6 +83,19 @@ class TestOrigin(unittest.TestCase):
         self.assertEqual((found.kind, found.detail),
                          (session.CONSOLE_KIND, "the console /dev/ttyS0"))
 
+    def test_an_ssh_session_wins_over_a_console_descriptor(self):
+        # A keel under an SSH session whose standard input happens to be
+        # a console terminal (redirected from /dev/tty1 or /dev/lxc/tty1)
+        # is still judged as that SSH session: a console descriptor must
+        # never let an old session confirm.
+        for terminal in ("/dev/tty1", "/dev/lxc/tty1"):
+            proc = (FakeProc(self).add(1, "systemd", 0)
+                    .add(300, "sshd-session", 1, 90.0)
+                    .add(600, "keel", 300, 94.0, stdin=terminal))
+            found = session.origin(proc.path, 600, lambda: SOCKETS)
+            self.assertEqual((found.kind, found.started), (session.SSH, 90.0),
+                             terminal)
+
     def test_a_container_console_is_a_console(self):
         # In an LXC container (plain LXC and Proxmox) /dev/tty1 is a link
         # to lxc/tty1, so the first boot on the console, and a login from
