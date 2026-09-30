@@ -27,7 +27,12 @@ from keel.diff import (
     report_lines,
     to_json,
 )
-from keel.diff.compare import flatten, normalize, unknown_reason
+from keel.diff.compare import (
+    compare_section,
+    flatten,
+    normalize,
+    unknown_reason,
+)
 from keel.diff.report import show
 from keel.inspect import inspect_root
 from keel.inspect.report import Inspection, inferred, missing
@@ -451,6 +456,28 @@ class TestEmit(unittest.TestCase):
         self.assertEqual((document["drift"], document["incomplete"]),
                          (True, True))
         self.assertEqual(document["exit_code"], exits.DRIFT_FOUND)
+
+
+class TestMonitorSwitch(unittest.TestCase):
+    """keel#46: diff reads the monitor section the way apply acts on it"""
+
+    OBSERVED = {"enabled": True, "checks": {"disk": {"warn": 80}}}
+
+    def status(self, declared):
+        found = {f.field: f.status
+                 for f in compare_section("monitor", declared, self.OBSERVED,
+                                          {})}
+        return found["monitor.enabled"]
+
+    def test_a_section_without_enabled_is_off_and_so_drift(self):
+        self.assertEqual(self.status({"checks": {"disk": {"warn": 80}}}),
+                         DRIFT)
+
+    def test_no_section_is_not_declared_as_apply_leaves_it(self):
+        self.assertEqual(self.status(None), NOT_DECLARED)
+
+    def test_enabled_true_is_same(self):
+        self.assertEqual(self.status({"enabled": True}), SAME)
 
 
 if __name__ == "__main__":

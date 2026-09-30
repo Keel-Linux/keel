@@ -162,6 +162,13 @@ def compare_section(
         (declared or {}).get("api_key"), dict
     ):
         return [FieldDiff("hub.api_key", NOT_COMPARED, reason=SECRET_REASON)]
+    if section == "monitor" and isinstance(declared, dict) \
+            and "enabled" not in declared:
+        # apply turns off a declared section that does not say enabled:
+        # true (keel#46), so diff reads it the same way; a section that is
+        # not declared at all (None, a bare `monitor:` too) stays not
+        # declared, as apply leaves it
+        declared = {**declared, "enabled": False}
     wanted = dict(flatten(section, declared or {}))
     found = dict(flatten(section, observed or {}))
     skipped = not_compared(section, wanted)
