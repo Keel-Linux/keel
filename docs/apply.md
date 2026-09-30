@@ -1070,12 +1070,18 @@ drop, and these rules:
 - every `mesh` port of an enabled overlay, on the WireGuard interface
   only, and none (the step says which) while the spec declares no
   overlay;
-- on each of the machine's bridges (`/sys/class/net/*/bridge`: lxcbr0,
-  docker0, a vmbr), DNS on 53 and DHCP on 67 and 547: what lxc-net's or
-  libvirt's dnsmasq serves the guests there, which a drop policy would
-  otherwise cut, so every container lost its lease. The bridges are read
-  at every apply; one created later is drift in `keel diff` until the
-  next apply adds it.
+- on each of the machine's guest bridges, DNS on 53 and DHCP on 67 and
+  547: what lxc-net's or libvirt's dnsmasq serves the guests there,
+  which a drop policy would otherwise cut, so every container lost its
+  lease. A guest bridge is one that cannot carry the uplink: every port
+  enslaved to it (`/sys/class/net/<bridge>/brif/`) a veth or a tap, and
+  no default route through it (`/proc/net/route`,
+  `/proc/net/ipv6_route`), as lxcbr0, virbr0 and docker0 are. A Proxmox
+  vmbr0 or a br0 with a physical port, a VLAN or a bond enslaved, or
+  holding the default route, is the uplink and gets nothing: those
+  ports would be open to the internet. The bridges are read at every
+  apply; one created later is drift in `keel diff` until the next apply
+  adds it.
 
 `loopback` opens nothing. The table's comment carries a digest of the
 rules, which is how apply and diff tell whether the table the kernel

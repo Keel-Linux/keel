@@ -40,8 +40,9 @@ keel (0.13.0) unstable; urgency=medium
     /etc/keel/firewall/keel-manifest.nft and loads it as the table inet
     keel, which the new keel-firewall.service loads again at boot. It
     always lets in the loopback, established traffic, ICMPv6, the DHCP
-    client replies, and DNS and DHCP from the guests of the host's
-    bridges; it is refused unless it opens every port sshd listens on,
+    client replies, and DNS and DHCP from the guests of the host's NAT
+    bridges (veth and tap ports only, no default route; never an uplink
+    bridge such as a Proxmox vmbr0); it is refused unless it opens every port sshd listens on,
     read from sshd -T and an active ssh.socket and never guessed, left
     alone while a network change waits for its confirmation, and checked
     with nft -c as a copy that only then replaces the file. enabled:

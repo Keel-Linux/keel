@@ -30,6 +30,10 @@ SSHD_DROP_INS = "etc/ssh/sshd_config.d/*.conf"
 DROP_IN_INCLUDE = "/etc/ssh/sshd_config.d/*.conf"
 SSH_DEFAULT = 22
 BRIDGES = "sys/class/net/*/bridge"
+ROUTE4 = "proc/net/route"
+ROUTE6 = "proc/net/ipv6_route"
+ZERO4 = "00000000"
+ZERO6 = "0" * 32
 SSHD_T = ("sshd", "-T")
 SOCKET = ("systemctl", "show", "ssh.socket", "-p", "ActiveState", "-p",
           "Listen")
@@ -134,8 +138,52 @@ def observe_firewall(tree: Tree, live: bool) -> FirewallState:
 
 
 def bridges_of(tree: Tree) -> tuple[str, ...]:
-    """The bridge interfaces, as /sys/class/net shows them"""
-    return tuple(sorted(name.split("/")[-2] for name in tree.glob(BRIDGES)))
+    """The bridges whose guests the host serves DHCP and DNS
+
+    Only a bridge that cannot carry the uplink: every port enslaved to
+    it a veth or a tap, and no default route through it, which is what
+    lxc-net's lxcbr0, libvirt's virbr0 and docker0 are. A Proxmox vmbr0
+    or a br0 with a physical port, a VLAN or a bond enslaved, or with the
+    default route, is the uplink, and opening 53, 67 and 547 there would
+    open them to the internet.
+    """
+    defaults = default_route_devices(tree)
+    found = []
+    for path in tree.glob(BRIDGES):
+        name = path.split("/")[-2]
+        ports = [port.split("/")[-1]
+                 for port in tree.glob(f"sys/class/net/{name}/brif/*")]
+        if name not in defaults and all(guest_port(tree, port)
+                                        for port in ports):
+            found.append(name)
+    return tuple(sorted(found))
+
+
+def guest_port(tree: Tree, port: str) -> bool:
+    """A tap (tun_flags), or a veth: no device behind it and no DEVTYPE
+    (a VLAN, a bond, WireGuard and the others each say theirs)"""
+    base = f"sys/class/net/{port}"
+    if tree.exists(f"{base}/device"):
+        return False
+    if tree.exists(f"{base}/tun_flags"):
+        return True
+    uevent = tree.read(f"{base}/uevent")
+    return uevent.readable and not any(
+        line.startswith("DEVTYPE=") for line in uevent.lines())
+
+
+def default_route_devices(tree: Tree) -> set[str]:
+    """The interfaces a default route goes through, IPv4 and IPv6"""
+    devices = set()
+    for line in tree.read(ROUTE4).lines()[1:]:
+        fields = line.split()
+        if len(fields) > 7 and fields[1] == ZERO4 and fields[7] == ZERO4:
+            devices.add(fields[0])
+    for line in tree.read(ROUTE6).lines():
+        fields = line.split()
+        if len(fields) == 10 and fields[0] == ZERO6 and fields[1] == "00":
+            devices.add(fields[9])
+    return devices
 
 
 def table_digest() -> str | None:

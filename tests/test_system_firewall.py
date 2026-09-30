@@ -346,6 +346,65 @@ class TestObserve(FirewallCase):
         self.assertEqual(observe_firewall(Tree(self.root), False).bridges,
                          ("docker0", "lxcbr0"))
 
+    def port(self, bridge: str, name: str, device: bool = False,
+             devtype: str | None = None, tap: bool = False) -> None:
+        """An interface enslaved to BRIDGE, as /sys/class/net shows it"""
+        os.makedirs(join(self.root, "sys/class/net", bridge, "bridge"),
+                    exist_ok=True)
+        os.makedirs(join(self.root, "sys/class/net", bridge, "brif", name))
+        self.write(f"sys/class/net/{name}/uevent",
+                   f"INTERFACE={name}\n"
+                   + (f"DEVTYPE={devtype}\n" if devtype else ""))
+        if device:
+            os.symlink("../../../0000:01:00.0",
+                       join(self.root, "sys/class/net", name, "device"))
+        if tap:
+            self.write(f"sys/class/net/{name}/tun_flags", "0x1002\n")
+
+    def test_an_uplink_bridge_is_never_exempt(self):
+        """a Proxmox vmbr0 with a physical port reaches the internet:
+        opening 53, 67 and 547 on it would open them to everybody"""
+        self.port("vmbr0", "enp1s0", device=True)
+        self.port("vmbr0", "tap100i0", tap=True)
+        self.port("br1", "eno1.10", devtype="vlan")
+        self.port("br2", "bond0", devtype="bond")
+        self.assertEqual(observe_firewall(Tree(self.root), False).bridges,
+                         ())
+
+    def test_a_nat_bridge_of_veths_and_taps_is_exempt(self):
+        self.port("lxcbr0", "vethAbC123")
+        self.port("virbr0", "vnet0", tap=True)
+        os.makedirs(join(self.root, "sys/class/net/docker0/bridge"))
+        self.assertEqual(observe_firewall(Tree(self.root), False).bridges,
+                         ("docker0", "lxcbr0", "virbr0"))
+
+    def test_a_bridge_that_holds_a_default_route_is_not_exempt(self):
+        self.port("lxcbr0", "vethAbC123")
+        self.port("br6", "vethDeF456")
+        self.port("br7", "vethGhI789")
+        self.write("proc/net/route",
+                   "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric"
+                   "\tMask\tMTU\tWindow\tIRTT\n"
+                   "br7\t00000000\t0100000A\t0003\t0\t0\t0\t00000000\t0\t0"
+                   "\t0\n"
+                   "lxcbr0\t0003000A\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0"
+                   "\t0\t0\n")
+        self.write("proc/net/ipv6_route",
+                   "00000000000000000000000000000000 00 "
+                   "00000000000000000000000000000000 00 "
+                   "fe800000000000000000000000000001 00000400 00000001"
+                   " 00000000 00000003 br6\n"
+                   "00000000000000000000000000000000 00 "
+                   "00000000000000000000000000000000 00 "
+                   "00000000000000000000000000000000 ffffffff 00000001"
+                   " 00000000 00200200 lo\n"
+                   "fd420000000000b20000000000000001 40 "
+                   "00000000000000000000000000000000 00 "
+                   "00000000000000000000000000000000 00000100 00000001"
+                   " 00000000 00000001 lxcbr0\n")
+        self.assertEqual(observe_firewall(Tree(self.root), False).bridges,
+                         ("lxcbr0",))
+
     def test_the_live_table_s_digest(self):
         listing = 'table inet keel {\n\tcomment "keel-manifest 0123"\n'
 
