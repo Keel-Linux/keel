@@ -54,7 +54,7 @@ LOCALE_LIST = ("locale", "-a")
 COMMANDS = (
     "useradd", "usermod", "timedatectl", "locale-gen", "localedef", "newaliases",
     "hostnamectl", "hostname", "systemctl", "ifup", "ifdown", "ip",
-    "systemd-run", "monit", "wg", "wg-quick", "cscli",
+    "systemd-run", "monit", "wg", "wg-quick", "cscli", "nft",
 )
 
 

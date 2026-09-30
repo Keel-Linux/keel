@@ -22,6 +22,8 @@ from manifest_helpers import ManifestCase, fixture
 from keel import exits
 from keel.diff.appliance import appliance_fields
 from keel.system import effects
+from keel.manifest.firewall import PATH as FIREWALL
+from keel.manifest.firewall import loaded_digest
 from keel.system.appstate import MANIFEST_MONIT, MONIT_LINK
 
 WANTS = "etc/systemd/system/multi-user.target.wants"
@@ -187,6 +189,80 @@ class TestConverge(ApplianceCliCase):
                       out)
         self.assertEqual(self.systemctl, [])
         self.assertFalse(os.path.exists(join(self.root, MANIFEST_MONIT)))
+
+
+class TestFirewall(ApplianceCliCase):
+    """Optional, cloud advanced only: written under --root, compared by
+    diff, and removed again when the spec turns it off"""
+
+    def firewall(self, enabled: bool, mode: str = "cloud_advanced") -> str:
+        return (spec_text().replace("mode: simple", f"mode: {mode}")
+                + f"firewall: {{enabled: {str(enabled).lower()}}}\n")
+
+    def test_on_then_off(self):
+        self.write(self.firewall(True))
+        code, out, err = self.apply()
+        self.assertEqual(code, 0, out + err)
+        self.assertIn(f"derived.firewall: write /{FIREWALL}: public tcp 22,"
+                      " 12320, 12321 (mode 0600): done", out)
+        self.assertIn("derived.firewall: not loaded: not the live system",
+                      out)
+        code, out, _ = self.diff()
+        self.assertEqual(code, 0, out)
+        self.assertIn("derived.firewall: same (the ruleset apply renders"
+                      " from the manifests)", out)
+        self.assertIn("derived.firewall.loaded: not compared", out)
+        self.assertIn("0 change(s)", self.apply()[1])
+
+        with open(join(self.root, FIREWALL), "a") as fob:
+            fob.write("# mine\n")
+        code, out, _ = self.diff()
+        self.assertEqual(code, DRIFT)
+        self.assertIn("derived.firewall: drift", out)
+
+        self.write(self.firewall(False))
+        code, out, _ = self.apply()
+        self.assertIn(f"derived.firewall: remove /{FIREWALL}, which keel"
+                      " wrote: the firewall is off in the spec: done", out)
+        self.assertFalse(os.path.exists(join(self.root, FIREWALL)))
+        code, out, _ = self.diff()
+        self.assertEqual(code, 0, out)
+        self.assertIn("derived.firewall: same (nothing)", out)
+
+    def test_on_the_live_system_the_kernel_s_table_is_compared(self):
+        self.write(self.firewall(True))
+        self.apply()
+        with open(join(self.root, FIREWALL)) as fob:
+            digest = loaded_digest(fob.read())
+        declared = yaml.safe_load(self.firewall(True))
+        for held, status in ((digest, "same"), ("0000", "drift"),
+                             (None, "drift")):
+            with mock.patch("keel.diff.appliance.LIVE_ROOT", self.root), \
+                    mock.patch("keel.diff.appliance.table_digest",
+                               return_value=held), \
+                    mock.patch("keel.inspect.units.subprocess.run",
+                               side_effect=OSError(2, "none")):
+                found = {field.field: field for field in
+                         appliance_fields(declared, self.root)}
+            self.assertEqual(found["derived.firewall.loaded"].status, status)
+
+    def test_refused_outside_cloud_advanced(self):
+        self.write(self.firewall(True, "simple"))
+        code, _, err = self.apply()
+        self.assertEqual(code, 3)
+        self.assertIn("firewall.enabled: the firewall derived from the"
+                      " manifests is for cloud advanced installations only",
+                      err)
+        self.assertFalse(os.path.exists(join(self.root, FIREWALL)))
+
+    def test_off_with_keel_s_file_left_behind_is_drift(self):
+        self.write(self.firewall(True))
+        self.apply()
+        self.write(self.firewall(False))
+        code, out, _ = self.diff()
+        self.assertEqual(code, DRIFT)
+        self.assertIn("derived.firewall: drift (declared nothing, observed"
+                      " keel's ruleset)", out)
 
 
 class TestInspect(ApplianceCliCase):

@@ -18,6 +18,7 @@ from keel.manifest import monit
 from keel.manifest.facts import gather
 from keel.manifest.resolve import Resolved, overlay_units
 from keel.system.crowdsec import CrowdsecState, observe_crowdsec
+from keel.system.fwstate import FirewallState, observe_firewall
 
 MANIFEST_MONIT = monit.PATH
 MONIT_LINK = monit.LINK
@@ -39,6 +40,7 @@ class ApplianceState:
     cycle: Cycle
     crowdsec: CrowdsecState
     root: str
+    firewall: FirewallState | None = None
 
 
 def observe_appliance(root: str, doc: dict) -> ApplianceState | None:
@@ -63,4 +65,7 @@ def observe_appliance(root: str, doc: dict) -> ApplianceState | None:
         cycle=monit_cycle(tree),
         crowdsec=observe_crowdsec(tree),
         root=tree.root,
+        # nft is asked only when the spec speaks of the firewall
+        firewall=observe_firewall(tree, tree.root == ROOT_DEFAULT
+                                  and doc.get("firewall") is not None),
     )

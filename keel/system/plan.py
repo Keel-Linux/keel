@@ -4,6 +4,7 @@
 from keel.system.actions import Plan, Step, SwitchNetwork
 from keel.system.appliance import plan_appliance
 from keel.system.database import plan_database
+from keel.system.firewall import plan_firewall
 from keel.system.hostname import plan_hostname
 from keel.system.hosts import plan_hosts
 from keel.system.locale import plan_locale
@@ -22,7 +23,8 @@ def plan(
     skip_network: bool = False, skip_uplink: bool = False,
 ) -> Plan:
     """Steps: instance, users, locale, security, tls, database, monitor,
-    the appliance's overlays and Monit file (decision 0041), network
+    the appliance's overlays and Monit file (decision 0041), its firewall
+    where the spec enables it, network
 
     The database after the cheap fields because it is the only phase
     that restarts a database server and the only one that can lose data,
@@ -53,6 +55,11 @@ def plan(
                           state.live, state.available)
     steps += plan_appliance(doc, state.appliance, state.live,
                             state.available)
+    appliance = state.appliance
+    steps += plan_firewall(
+        doc, appliance.resolved if appliance else None,
+        appliance.firewall if appliance else None, state.live,
+        state.available)
     uplink = plan_network(doc.get("network") or {}, state.network,
                           state.live, state.available, network_window,
                           skip_network or skip_uplink,

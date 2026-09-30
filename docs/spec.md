@@ -46,7 +46,7 @@ version: 1
 
 The other top level keys are `instance`, `network`, `tls`, `secrets`, `app`,
 `hub`, `security`, `first_login_wizard`, `preseed`, `users`, `locale`,
-`database`, `monitor`, `appliance`, `installation` and `overlays`, each optional and each a mapping except `first_login_wizard`. A file with `version: 1` and nothing else is valid and renders to an
+`database`, `monitor`, `appliance`, `installation`, `overlays` and `firewall`, each optional and each a mapping except `first_login_wizard`. A file with `version: 1` and nothing else is valid and renders to an
 empty conf.
 
 ## instance
@@ -896,6 +896,27 @@ installer emitted at `/etc/keel/instance.yaml`, reporting them as not
 inferred otherwise. `keel diff` compares the name, each overlay's state
 with systemd, and Monit's derived file with what apply renders
 ([docs/diff.md](diff.md)).
+
+## firewall
+
+The firewall derived from the manifests (decision 0041): every `public`
+port of the appliance's processes and of its enabled overlays' processes
+opened on every interface, every `mesh` one on the WireGuard interface
+only, and the overlay's UDP port. Optional, and for cloud advanced
+installations only, as the maintainer scoped it on 2026-09-30: in the
+simple and cloud simple modes keel installs and changes no firewall
+rule.
+
+```yaml
+installation:
+  mode: cloud_advanced
+firewall:
+  enabled: true
+```
+
+| Field | State | Notes |
+| --- | --- | --- |
+| `firewall.enabled` | system | `true` or `false`; absent is off. `true` needs `appliance.name` and `installation.mode: cloud_advanced`, and is refused otherwise. `apply --system` writes `/etc/keel/firewall/keel-manifest.nft` and loads it when true, and removes keel's file and table when false ([docs/apply.md](apply.md)). A spec without the section leaves an earlier firewall as it is |
 
 ## Not in the spec yet
 

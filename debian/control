@@ -28,6 +28,7 @@ Breaks:
  inithooks (<< 2.3.6+keel9~),
 Suggests:
  monit,
+ nftables,
  wireguard-tools,
 Description: Declarative management of one appliance instance
  Keel describes one appliance instance in a single file and applies it
