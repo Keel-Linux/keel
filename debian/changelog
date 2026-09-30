@@ -1,3 +1,28 @@
+keel (0.11.4) unstable; urgency=medium
+
+  * Seeding a replica reads the primary's accounts before the dump, and
+    again after it, and refuses when the two readings differ. Read only
+    after the dump, a CREATE USER in between was applied twice and
+    stopped the replica; read only before, it was never applied.
+  * An account the replica holds with other grants than the primary's
+    is dropped and created as the primary has it, with sql_log_bin off,
+    before replication starts: the primary's next REVOKE of a grant the
+    replica lacked stopped it ("There is no such grant"). One held with
+    the same grants keeps the replica's password.
+  * A primary that holds roles, or grants privileges to PUBLIC, is
+    refused while apply observes the replica, before anything changes.
+    Roles are not copied: a user whose privileges come through a role
+    was copied with none, silently, and a change to a role stopped the
+    replica.
+  * The server id of a node with a WireGuard overlay is derived from its
+    machine-id, its overlay address(es) and the listen entries that name
+    it, leaving out wildcards and loopback: listen is :: on every node,
+    so two nodes built from one image took the same server id. A node
+    without an overlay keeps the server id it had. docs/apply.md says
+    what changes a server id and what that does to a running pair.
+
+ -- Marcos Mendez <mendez.foto@gmail.com>  Wed, 30 Sep 2026 10:40:00 +0000
+
 keel (0.11.3) unstable; urgency=medium
 
   * A new MariaDB replica is seeded with a copy of its primary before it

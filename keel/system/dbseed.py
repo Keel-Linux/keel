@@ -21,14 +21,18 @@ The order is what makes it safe to run against a machine holding data:
 
 1. ask the primary, as the replication account, which privileges it
    holds, which proves it answers and that the copy can read everything;
-2. dump it to a file of mode 0600 in a directory of mode 0700 under
+2. read its accounts (keel.system.dbaccounts), refusing roles;
+3. dump it to a file of mode 0600 in a directory of mode 0700 under
    /var/tmp, on disk and not in a tmpfs;
-3. read the GTID position the dump was taken at from its last lines;
-4. only then stop replication, forget the old primary and drop the
+4. read the GTID position the dump was taken at from its last lines,
+   check the room for the load, read the accounts again and refuse if
+   they changed, and read the replica's own;
+5. only then stop replication, forget the old primary and drop the
    local databases the operator confirmed;
-5. load the copy, set `gtid_slave_pos` to that position and start.
+6. load the copy, align the accounts, set `gtid_slave_pos` to that
+   position and start.
 
-A failure in steps 1 to 3 leaves the machine as it was. The password
+A failure in steps 1 to 4 leaves the machine as it was. The password
 reaches the clients in an options file (`--defaults-extra-file`) of mode
 0600, created exclusively and removed with its directory whatever
 happens, never in an argument vector, and no message here quotes it.
@@ -43,6 +47,7 @@ import subprocess
 import tempfile
 from contextlib import contextmanager
 
+from keel.system import dbaccounts
 from keel.system import dbmariadb as mariadb
 
 SPOOL = "var/tmp"
@@ -82,16 +87,6 @@ DATADIR = "var/lib/mysql"
 # Loading SQL builds tables and indexes about as large as its text; twice
 # the dump leaves the server room to work while it does.
 DISK_MARGIN = 2
-ACCOUNTS_SQL = "SELECT User, Host FROM mysql.user WHERE is_role = 'N'"
-# The server's own accounts and keel's: Debian's socket accounts, the
-# definer of the sys views, the old maintenance account, and the
-# replication account each node already holds with its own grant.
-EXCLUDED_USERS = frozenset(
-    ("root", "mysql", "mariadb.sys", "debian-sys-maint",
-     mariadb.REPLICATION_USER)
-)
-# What SHOW GRANTS prints about roles, which are not copied.
-SKIPPED = ("SET DEFAULT ROLE ",)
 
 KEPT = "nothing was dropped and replication was not started"
 UNREACHABLE = (
@@ -118,9 +113,9 @@ NO_ROOM = (
     " {need}"
 )
 ACCOUNTS_UNREADABLE = "the accounts of {where} could not be read ({detail})"
-UNEXPECTED = (
-    "the primary answered a question about an account with a statement"
-    " that is not one ({line})"
+CHANGED = (
+    "the primary's accounts changed while it was copied, so the copy"
+    " cannot be matched to them; run the same command again"
 )
 ACCOUNTS_FAILED = (
     "the copy of [{host}]:{port} is loaded and creating the primary's"
@@ -159,7 +154,8 @@ def reach(
     try:
         with spool(root) as directory:
             options = write_options(directory, host, port, password)
-            return _privileges(options, host, port, runner)
+            return (_privileges(options, host, port, runner)
+                    or _primary_accounts(options, runner)[1])
     except OSError as e:
         return f"cannot ask [{host}]:{port}: {e.strerror or e}"
 
@@ -169,6 +165,9 @@ def _seed(
 ) -> str | None:
     where = {"host": action.host, "port": action.port}
     problem = _privileges(options, action.host, action.port, runner)
+    if problem:
+        return f"{problem}; {KEPT}"
+    before, problem = _primary_accounts(options, runner)
     if problem:
         return f"{problem}; {KEPT}"
     dump = os.path.join(directory, DUMP)
@@ -181,7 +180,12 @@ def _seed(
     problem = _room(datadir, dump)
     if problem:
         return f"{problem}; {KEPT}"
-    copy, problem = _account_copy(options, runner)
+    after, problem = _primary_accounts(options, runner)
+    if problem:
+        return f"{problem}; {KEPT}"
+    if after != before:
+        return f"{CHANGED}; {KEPT}"
+    copy, problem = _alignment(before, runner)
     if problem:
         return f"{problem}; {KEPT}"
 
@@ -243,69 +247,61 @@ def _room(datadir: str, dump: str) -> str:
     return ""
 
 
-def _account_copy(options: str, runner) -> tuple[str, str]:
-    """The statements that give the replica the accounts it lacks
+def _primary_accounts(options: str, runner) -> tuple[dict, str]:
+    """The primary's accounts, each as it would create it; or why not
 
-    Read from the primary right after the dump and before anything is
-    dropped. Only accounts that are nobody's but the application's are
-    copied (not EXCLUDED_USERS, not the anonymous one, not roles), and
-    only those the replica does not hold: an account on both keeps the
-    replica's own password until the primary changes it through the
-    binary log. Returns the statements, or an empty string and why not.
+    Read once before the dump, which is the reading the replica gets, and
+    once after it: equal readings mean no account changed while the dump
+    was taken, so the copy and the accounts agree. Read only after, a
+    CREATE USER in between was applied twice and stopped the replica;
+    read only before, it was never applied at all. A primary with roles
+    or grants to PUBLIC is refused (keel.system.dbaccounts).
     """
-    primary = {}
-    problem = _run(runner, REMOTE + (f"--defaults-extra-file={options}",
-                                     CONNECT_TIMEOUT) + READ
-                   + ("--execute", ACCOUNTS_SQL), output=primary)
+    remote = REMOTE + (f"--defaults-extra-file={options}", CONNECT_TIMEOUT)
+    listed = {}
+    problem = _run(runner, remote + READ + ("--execute", dbaccounts.LIST_SQL),
+                   output=listed)
     if problem:
-        return "", ACCOUNTS_UNREADABLE.format(where="the primary",
+        return {}, ACCOUNTS_UNREADABLE.format(where="the primary",
                                               detail=problem)
-    local = {}
-    problem = _run(runner, REMOTE + READ + ("--execute", ACCOUNTS_SQL),
-                   output=local)
+    accounts, roles = dbaccounts.listing(listed["stdout"])
+    if roles:
+        return {}, dbaccounts.ROLES.format(roles=", ".join(roles))
+    answer = {}
+    problem = _run(runner, remote + READ,
+                   text=dbaccounts.primary_questions(accounts),
+                   output=answer)
+    if problem:
+        return {}, ACCOUNTS_UNREADABLE.format(where="the primary",
+                                              detail=problem)
+    return dbaccounts.primary_definitions(answer["stdout"], accounts)
+
+
+def _alignment(primary: dict, runner) -> tuple[str, str]:
+    """The statements that give this server the primary's accounts"""
+    listed = {}
+    problem = _run(runner, REMOTE + READ + ("--execute", dbaccounts.LIST_SQL),
+                   output=listed)
     if problem:
         return "", ACCOUNTS_UNREADABLE.format(where="this server",
                                               detail=problem)
-    held = {(user, host.lower()) for user, host in accounts(local["stdout"])}
-    missing = [
-        (user, host) for user, host in accounts(primary["stdout"])
-        if user and user not in EXCLUDED_USERS
-        and (user, host.lower()) not in held
-    ]
-    if not missing:
-        return "", ""
-    show = "".join(
-        f"SHOW CREATE USER {mariadb.literal(user)}@{mariadb.literal(host)};\n"
-        f"SHOW GRANTS FOR {mariadb.literal(user)}@{mariadb.literal(host)};\n"
-        for user, host in missing
-    )
-    answer = {}
-    problem = _run(runner, REMOTE + (f"--defaults-extra-file={options}",
-                                     CONNECT_TIMEOUT) + READ,
-                   text=show, output=answer)
-    if problem:
-        return "", ACCOUNTS_UNREADABLE.format(where="the primary",
-                                              detail=problem)
-    kept = []
-    for line in (one.strip() for one in answer["stdout"].splitlines()):
-        if not line or line.startswith(SKIPPED) or (
-            line.startswith("GRANT ") and " ON " not in line
-        ):
-            continue
-        if not line.startswith(("CREATE USER ", "GRANT ")):
-            return "", UNEXPECTED.format(line=line)
-        kept.append(line + ";\n")
-    return "SET SESSION sql_log_bin = 0;\n" + "".join(kept), ""
-
-
-def accounts(text: str) -> list[tuple[str, str]]:
-    """User and host pairs from a batch answer, one per line"""
-    pairs = []
-    for line in (text or "").splitlines():
-        user, sep, host = line.partition("\t")
-        if sep:
-            pairs.append((user, host))
-    return pairs
+    mine, _ = dbaccounts.listing(listed["stdout"])
+    wanted = {account.key() for account in primary}
+    held = [account for account in mine if account.key() in wanted]
+    local = {}
+    if held:
+        answer = {}
+        problem = _run(runner, REMOTE + READ,
+                       text=dbaccounts.local_questions(held), output=answer)
+        if problem:
+            return "", ACCOUNTS_UNREADABLE.format(where="this server",
+                                                  detail=problem)
+        local, problem = dbaccounts.local_grants(answer["stdout"], held)
+        if problem:
+            return "", problem
+    return dbaccounts.alignment(
+        primary, {account.key() for account in held}, local
+    ), ""
 
 
 def _dump(options: str, path: str, runner) -> str:

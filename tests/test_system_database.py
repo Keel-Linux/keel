@@ -185,6 +185,83 @@ class TestTheServerIsNotAskedOnAGuess(unittest.TestCase):
         self.assertIsNone(mariadb.server_id("  ", ["  "]))
 
 
+SHARED_ID = "0123456789abcdef0123456789abcdef"
+
+
+def with_overlay(doc: dict, address: str, ipv4: str | None = None) -> dict:
+    wireguard = {"address": address}
+    if ipv4:
+        wireguard["ipv4_address"] = ipv4
+    return dict(doc, network={"overlay": {"wireguard": wireguard}})
+
+
+class TestTheOverlayGivesTheServerIdItsIdentity(unittest.TestCase):
+    """listen is "::" on every node, so it told two nodes apart only when
+    a description named real addresses; the overlay address is unique to
+    each node and stable, so it is what a server id is made from"""
+
+    def test_a_node_without_an_overlay_keeps_the_server_id_it_had(self):
+        # The values keel 0.11.3 derived; a change would restart every
+        # server and give it a new identity for nothing.
+        self.assertEqual(mariadb.server_id(SHARED_ID, ["::", "::1"]),
+                         823627360)
+        self.assertEqual(mariadb.server_id(SHARED_ID, None, ()),
+                         380331519)
+
+    def test_two_nodes_listening_on_the_wildcard_differ_by_overlay(self):
+        first = mariadb.server_id(SHARED_ID, ["::"], ["fd3d:80b2:d0d7::1"])
+        second = mariadb.server_id(SHARED_ID, ["::"], ["fd3d:80b2:d0d7::2"])
+        self.assertNotEqual(first, second)
+
+    def test_wildcard_and_loopback_entries_are_left_out(self):
+        overlay = ["fd3d:80b2:d0d7::1"]
+        bare = mariadb.server_id(SHARED_ID, None, overlay)
+        for listen in (["::"], ["0.0.0.0", "*"], ["::1", "127.0.0.1"],
+                       ["localhost", "127.0.1.1"]):
+            self.assertEqual(
+                mariadb.server_id(SHARED_ID, listen, overlay), bare, listen
+            )
+
+    def test_a_real_listen_address_still_counts(self):
+        overlay = ["fd3d:80b2:d0d7::1"]
+        for listen in (["2001:db8::5"], ["db.example.org"]):
+            self.assertNotEqual(
+                mariadb.server_id(SHARED_ID, listen, overlay),
+                mariadb.server_id(SHARED_ID, None, overlay),
+            )
+
+    def test_the_plan_mixes_in_the_declared_overlay_address(self):
+        doc = with_overlay(
+            declaring(role="primary", listen=["::"]),
+            "fd3d:80b2:d0d7::1/64", "10.77.0.1/24",
+        )
+        text = written(steps(doc, state())["database.server"])
+        expected = mariadb.server_id(
+            MACHINE_ID, ["::"], ["fd3d:80b2:d0d7::1", "10.77.0.1"]
+        )
+        self.assertIn(f"server_id = {expected}\n", text)
+
+    def test_the_prefix_length_is_not_part_of_the_identity(self):
+        self.assertEqual(
+            mariadb.overlay_addresses(with_overlay({}, "fd3d::1/64")),
+            ["fd3d::1"],
+        )
+        self.assertEqual(
+            mariadb.overlay_addresses(with_overlay({}, "FD3D:0::1/48")),
+            ["fd3d::1"],
+        )
+
+    def test_a_description_without_an_overlay_has_no_addresses(self):
+        self.assertEqual(mariadb.overlay_addresses({}), [])
+        self.assertEqual(
+            mariadb.overlay_addresses({"network": {"overlay": None}}), []
+        )
+        self.assertEqual(
+            mariadb.overlay_addresses(with_overlay({}, "not an address")),
+            [],
+        )
+
+
 class TestTheConfiguration(unittest.TestCase):
     """What every role writes: the server id, the addresses, the log"""
 
