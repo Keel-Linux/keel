@@ -72,6 +72,11 @@ NOT_INSTALLED = (
     "the description declares a {engine} server and none is installed here"
     " ({role}); keel does not install packages, so nothing was configured"
 )
+DOWN = (
+    "the server is not answering ({problem}), so what it is cannot be"
+    " read; its configuration was not written and nothing was restarted,"
+    " and the field is left for the next keel spec apply --system"
+)
 NOT_ASKED = (
     "the server could not be asked what it is ({problem}), and a role is"
     " never changed on a guess"
@@ -239,6 +244,8 @@ def _cannot_act(state: DatabaseState, role: str) -> Action | None:
         return Refuse(
             NOT_INSTALLED.format(engine=state.engine, role=role)
         )
+    if state.down:
+        return Refuse(DOWN.format(problem=state.down))
     if not state.reading.role.known:
         return Refuse(
             NOT_ASKED.format(problem=state.reading.role.problem)

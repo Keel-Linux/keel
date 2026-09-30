@@ -29,10 +29,12 @@ from keel.spec.constants import DEFAULT_PORTS
 from keel.spec.errors import SpecError
 from keel.spec.origins import canonical
 from keel.spec.secretstore import resolve_secret
-from keel.system import dbseed
+from keel.system import dbready, dbseed
 from keel.system.dbmariadb import (
     DROPIN,
+    PING,
     SCHEMAS_QUESTION,
+    SERVICE,
     unquotable,
 )
 
@@ -81,6 +83,9 @@ class DatabaseState:
     # The primary's accounts this server holds too, which keep this
     # server's authentication when it is seeded (keel.system.dbaccounts).
     shared: tuple[str, ...] = ()
+    # Why the server did not answer within the bound, started or waited
+    # for (keel.system.dbready); empty when it answered or was not asked.
+    down: str = ""
 
     @property
     def installed(self) -> bool:
@@ -136,12 +141,19 @@ def declared_server(doc: dict) -> dict:
     return ((doc.get("database") or {}).get("server")) or {}
 
 
-def observe_database(root: str, doc: dict) -> DatabaseState | None:
+def observe_database(
+    root: str, doc: dict, start: bool = False,
+) -> DatabaseState | None:
     """Read everything the database plan for `doc` depends on
 
     None when the description declares no server: there is nothing to
     converge and nothing is asked of the machine, so a description without
     the section costs no command at all.
+
+    On the live system a MariaDB server is made to answer first
+    (keel.system.dbready): `start` is whether this run may start it, which
+    a dry run may not. One that does not answer within the bound is asked
+    nothing else, and `down` says why.
     """
     server = declared_server(doc)
     if not server:
@@ -154,6 +166,17 @@ def observe_database(root: str, doc: dict) -> DatabaseState | None:
         return DatabaseState(engine=name, live=live)
 
     binary = engine.installed(tree.glob)
+    if live and binary is not None and name == "mariadb":
+        down = dbready.ready(SERVICE, PING, start, dbready.READY_TIMEOUT)
+        if down:
+            return DatabaseState(
+                engine=name,
+                live=live,
+                binary=tree.path(binary),
+                machine_id=tree.read(MACHINE_ID),
+                dropin=tree.read(DROPIN),
+                down=down,
+            )
     answers = {} if binary is None else {
         key: run_command(tree, argv)
         for key, argv in engine.questions.items()

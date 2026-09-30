@@ -89,8 +89,13 @@ class SystemState:
     overlay: OverlayState | None = None
 
 
-def observe(root: str, doc: dict) -> SystemState:
-    """Read everything the plan for `doc` depends on under `root`"""
+def observe(root: str, doc: dict, start: bool = False) -> SystemState:
+    """Read everything the plan for `doc` depends on under `root`
+
+    `start` lets the observation start the database server the plan
+    converges, when it is stopped: a run that will change the machine
+    passes it, a dry run does not (keel.system.dbready).
+    """
     tree = Tree(root)
     live = tree.root == paths.ROOT_DEFAULT
     passwd = tree.read(paths.PASSWD)
@@ -114,7 +119,7 @@ def observe(root: str, doc: dict) -> SystemState:
         available=frozenset(
             name for name in COMMANDS if shutil.which(name)
         ) if live else frozenset(),
-        database=observe_database(root, doc),
+        database=observe_database(root, doc, start),
         aliases=tree.read(paths.ALIASES),
         cron_apt_config=tree.read(paths.CRON_APT_CONFIG),
         hostname=tree.read(paths.HOSTNAME),

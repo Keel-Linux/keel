@@ -322,6 +322,28 @@ Every role writes one file,
 **only when that file changed**, because `server_id`, `bind-address` and
 `log_bin` cannot be set while it runs.
 
+**The server is up first.** Every decision of this phase rests on what
+the server answers, so on the live system apply makes it answer before
+asking it anything (`SELECT 1`). A server that is starting is waited
+for; one that is stopped is started with `systemctl start mariadb`,
+which on a unit already activating joins the start systemd has queued.
+The start and the wait share one bound of 300 s. A server that does not
+answer within it, whose start fails, or that is active and still refuses
+the client, fails the field with the reason: nothing is written, nothing
+is restarted, the run exits non zero, and the next apply takes the field
+up again. A `--dry-run` never starts a server; it waits for one that is
+activating and otherwise names the unit's state. Under `--root` no
+server is asked, started or waited for.
+
+This is what a first boot needs. `inithooks.service` is ordered after
+the getty only, and `mariadb.service` starts beside it, so the hook
+`10keel-system` used to ask the server a second before it accepted
+connections: measured in a container built from Template B2, the hook
+ran from 11:07:30.8 to 11:07:32.6 and MariaDB was ready at 11:07:33.0.
+The field was refused, the hook logged it as a warning and carried on,
+as a first boot hook must, and the appliance kept the packaged
+`server_id = 1` until apply ran again.
+
 | Line | Where it comes from |
 | --- | --- |
 | `server_id` | Derived from `/etc/machine-id` **and** addresses of this node, never from the description alone: two appliances deployed from one description would collide, and two nodes with the same server id stop replicating. Both, because the published `core` layer ships a populated machine-id, so every appliance assembled from it holds the same value (docs/traps.md). With a WireGuard overlay (`network.overlay.wireguard`), the addresses are the overlay's (`address`, and `ipv4_address` when declared, without prefix length) and the `listen` entries that name this machine: wildcards (`::`, `0.0.0.0`, `*`) and loopback are left out, since they are the same on every node. Without an overlay, `listen` counts as written, as before 0.11.4, so such a node keeps its server id. A machine with neither a machine-id nor an address is refused rather than given an invented one |

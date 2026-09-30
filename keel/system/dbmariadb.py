@@ -29,6 +29,9 @@ from keel.spec.origins import host_pattern
 DROPIN = "etc/mysql/mariadb.conf.d/99-keel-database.cnf"
 CLIENT = ("mariadb", "--batch")
 QUIET_CLIENT = ("mariadb", "--batch", "--skip-column-names")
+# Whether the server answers at all, asked before anything else
+# (keel.system.dbready).
+PING = QUIET_CLIENT + ("--execute", "SELECT 1")
 SERVICE = "mariadb"
 # The account both ends of a pair name. It is a constant and not a field
 # of the description on purpose: the primary grants to it and the replica
