@@ -465,6 +465,121 @@ class TestServerSection(unittest.TestCase):
         self.assertIn("mariadb, redis", reason)
 
 
+READ_ONLY_FIELD = "database.server.read_only"
+
+
+def with_variables(extra: str, **answered) -> dict:
+    """MARIADB_STANDALONE with more global variables, and other answers"""
+    variables = MARIADB_STANDALONE["variables"] + extra
+    return dict(MARIADB_STANDALONE, variables=variables, **answered)
+
+
+class TestReadOnly(unittest.TestCase):
+    """read_only is asked of the server, and reported beside the role
+
+    It is not a field of the description: it follows the role, so the
+    section inspect writes does not carry it and the report does
+    (tracker#26: a writable replica diverged from its primary).
+    """
+
+    def one(self, answered: dict) -> Installed:
+        engine = next(e for e in ENGINES if e.name == "mariadb")
+        return Installed(
+            engine, "/usr/sbin/mariadbd",
+            answers(engine, answered), File("ss -lntH", SOCKETS),
+        )
+
+    def test_the_server_is_asked_for_read_only(self):
+        engine = next(one for one in ENGINES if one.name == "mariadb")
+        self.assertIn("'read_only'", engine.questions["variables"][-1])
+
+    def test_read_only_on_reads_as_true(self):
+        reading = mariadb_reading(with_variables("read_only\tON\n"), SOCKETS)
+        self.assertIs(reading.read_only.value, True)
+
+    def test_read_only_off_reads_as_false(self):
+        reading = mariadb_reading(with_variables("read_only\tOFF\n"), SOCKETS)
+        self.assertIs(reading.read_only.value, False)
+
+    def test_a_server_that_names_no_read_only_is_not_guessed(self):
+        reading = mariadb_reading(MARIADB_STANDALONE, SOCKETS)
+        self.assertIsNone(reading.read_only.value)
+        self.assertIn("names no read_only", reading.read_only.problem)
+
+    def test_the_accounts_that_write_through_it_are_read(self):
+        """READ_ONLY ADMIN, measured on MariaDB 11.8: SUPER alone is
+        refused with error 1290, READ_ONLY ADMIN writes"""
+        answered = with_variables(
+            "read_only\tON\n",
+            bypass="'root'@'localhost'\n'mysql'@'localhost'\n"
+                   "'admin'@'localhost'\n'admin'@'::1'\n",
+        )
+        reading = mariadb_reading(answered, SOCKETS)
+        self.assertEqual(
+            reading.bypass.value, ["'admin'@'localhost'", "'admin'@'::1'"]
+        )
+
+    def test_root_from_anywhere_is_not_the_servers_own(self):
+        """Debian's root is a socket account at localhost; a root that
+        connects from the network is somebody's, and is named"""
+        answered = with_variables(
+            "read_only\tON\n",
+            bypass="'root'@'localhost'\n'root'@'%'\n'mysql'@'::1'\n"
+                   "'mariadb.sys'@'127.0.0.1'\n",
+        )
+        reading = mariadb_reading(answered, SOCKETS)
+        self.assertEqual(reading.bypass.value, ["'root'@'%'"])
+
+    def test_the_bypass_question_names_read_only_admin(self):
+        engine = next(one for one in ENGINES if one.name == "mariadb")
+        self.assertIn("READ_ONLY ADMIN", engine.questions["bypass"][-1])
+
+    def test_an_unreadable_bypass_answer_is_not_guessed(self):
+        engine = next(e for e in ENGINES if e.name == "mariadb")
+        built = answers(engine, with_variables("read_only\tON\n"))
+        built["bypass"] = File("bypass", problem="exited 1")
+        reading = engine.read(built, File("ss -lntH", SOCKETS))
+        self.assertIsNone(reading.bypass.value)
+        self.assertIn("exited 1", reading.bypass.problem)
+
+    def test_it_is_reported_and_not_written_into_the_section(self):
+        answered = with_variables("read_only\tON\n")
+        section, findings = probe_server((self.one(answered),))
+        self.assertNotIn("read_only", section)
+        self.assertEqual(value_of(findings, READ_ONLY_FIELD), "true")
+
+    def test_the_report_names_the_accounts_that_write_through_it(self):
+        answered = with_variables(
+            "read_only\tON\n", bypass="'admin'@'localhost'\n"
+        )
+        _, findings = probe_server((self.one(answered),))
+        source = reason_of(findings, READ_ONLY_FIELD)
+        self.assertIn("'admin'@'localhost'", source)
+        self.assertIn("READ_ONLY ADMIN", source)
+
+    def test_no_account_but_the_servers_own_is_not_mentioned(self):
+        answered = with_variables(
+            "read_only\tOFF\n", bypass="'root'@'localhost'\n"
+        )
+        _, findings = probe_server((self.one(answered),))
+        self.assertNotIn(
+            "READ_ONLY ADMIN", reason_of(findings, READ_ONLY_FIELD)
+        )
+
+    def test_a_server_that_names_no_read_only_is_not_inferred(self):
+        _, findings = probe_server((self.one(MARIADB_STANDALONE),))
+        self.assertEqual(statuses(findings, READ_ONLY_FIELD), [NOT_INFERRED])
+
+    def test_other_engines_report_nothing_about_it(self):
+        engine = next(e for e in ENGINES if e.name == "redis")
+        installed = Installed(
+            engine, "/usr/bin/redis-server",
+            answers(engine, REDIS_MASTER), File("ss -lntH", SOCKETS),
+        )
+        _, findings = probe_server((installed,))
+        self.assertEqual(statuses(findings, READ_ONLY_FIELD), [])
+
+
 class TestClientSection(unittest.TestCase):
     def reader(self, application: str):
         return next(r for r in READERS if r.application == application)

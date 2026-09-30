@@ -54,12 +54,18 @@ class Reading:
     from, a mapping of host and port, and is only read when the role is
     replica. `allowed_from` is the list of origins the server holds an
     authorization for, which is not the list of replicas: see docs/spec.md.
+    `read_only` is whether the server refuses writes from ordinary
+    accounts, and `bypass` the accounts that write through it anyway,
+    the server's own left out; an engine that has neither leaves both
+    empty with no problem, and nothing about them is reported.
     """
 
     role: Value = field(default_factory=Value)
     primary: Value = field(default_factory=Value)
     allowed_from: Value = field(default_factory=Value)
     listen: Value = field(default_factory=Value)
+    read_only: Value = field(default_factory=Value)
+    bypass: Value = field(default_factory=Value)
 
 
 def field_lines(output: File) -> dict[str, str]:

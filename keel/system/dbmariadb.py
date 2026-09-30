@@ -58,6 +58,11 @@ SYSTEM_SCHEMAS = (
     "information_schema", "performance_schema", "mysql", "sys",
 )
 SERVER_ID_MODULUS = 2**31 - 1
+# A replica takes no writes but its primary's (tracker#26). The
+# replication thread and accounts holding READ_ONLY ADMIN, root among
+# them, write through it; an application's account holds privileges on
+# its own schema only and is refused with error 1290.
+READ_ONLY_LINE = "read_only = ON\n"
 # Listen entries that are not addresses and name no one machine.
 WILDCARDS = ("*", "localhost")
 HEADER = (
@@ -171,7 +176,32 @@ def dropin_text(
         lines.append("skip_name_resolve = ON\n")
     if role == "primary":
         lines.append(f"log_bin = {BINLOG}\nbinlog_format = ROW\n")
+    if role == "replica":
+        lines.append(READ_ONLY_LINE)
     return "".join(lines)
+
+
+def writable(text: str) -> str:
+    """The configuration file without its read_only line, for a promotion"""
+    return "".join(
+        line for line in text.splitlines(keepends=True)
+        if line != READ_ONLY_LINE
+    )
+
+
+def set_read_only(on: bool) -> Statements:
+    """Turn read_only on or off now, without waiting for a restart
+
+    SET GLOBAL waits for the running write transactions to finish, and
+    it needs no restart: the file carries the same value into the next.
+    """
+    value = "ON" if on else "OFF"
+    return Statements(
+        f"SET GLOBAL read_only = {value};\n",
+        f"set read_only {value}: "
+        + ("a replica takes no writes of its own" if on
+           else "this role takes the application's writes"),
+    )
 
 
 def user_schemas(lines: list[str]) -> list[str]:
@@ -273,6 +303,19 @@ def stop_replicating() -> Statements:
     return Statements(
         "STOP SLAVE;\nRESET SLAVE ALL;\n",
         "stop replicating and forget the primary",
+    )
+
+
+def promote() -> Statements:
+    """Stop replicating, forget the primary, then take writes
+
+    In that order: read_only goes off only once nothing arrives from the
+    old primary any more.
+    """
+    stop = stop_replicating()
+    return Statements(
+        stop.text + set_read_only(False).text,
+        stop.summary + ", then turn read_only off",
     )
 
 

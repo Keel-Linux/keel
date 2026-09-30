@@ -36,14 +36,18 @@ from keel.spec.origins import canonical, is_name, mariadb_problem
 from keel.system import dbmariadb as mariadb
 from keel.system.actions import (
     Action,
+    LockReplica,
     Note,
+    PromoteReplica,
     Refuse,
     Run,
     RunSql,
     SeedReplica,
     Step,
+    UnlockAccounts,
     WriteFile,
 )
+from keel.system.dbreadonly import STOPPED as UNDRAINABLE
 from keel.system.dbstate import (
     DatabaseState,
     declared_server,
@@ -143,6 +147,23 @@ SHARED = (
     " the application on this node (wp-config.php and its DB_PASS for"
     " WordPress) must then be given the new one"
 )
+READ_ONLY_FIELD = f"{FIELD}.read_only"
+# How long a promotion waits for the SQL thread to apply what the I/O
+# thread received. A WordPress replica holds seconds of backlog; one that
+# needs longer is refused and replicates on.
+DRAIN_TIMEOUT = 600
+LOCKED = (
+    "unchanged (no account but root, mysql and mariadb.sys at this machine"
+    " holds READ_ONLY ADMIN)"
+)
+UNLISTED = (
+    "the accounts that write through read_only could not be listed"
+    " ({problem}), so none had READ_ONLY ADMIN taken"
+)
+UNREAD = (
+    "the server names no read_only ({problem}), so it was not set on a"
+    " guess; the configuration file carries it into the next restart"
+)
 UNREACHABLE = (
     "{problem}. The replica cannot be seeded, so nothing was dropped, its"
     " configuration was not rewritten and the server was not restarted"
@@ -181,11 +202,35 @@ def plan_database(
         replication = _replication(server, state, observed, confirmed)
         if any(isinstance(one, Refuse) for one in replication.actions):
             return [replication]
-        return [_configuration(server, state, role, overlay), replication]
+        seeds = any(isinstance(one, SeedReplica)
+                    for one in replication.actions)
+        return [_configuration(server, state, role, overlay), replication,
+                _lock(state, seeds)]
     steps = [_configuration(server, state, role, overlay)]
     if role == PRIMARY:
         steps.append(_authorizations(server, state))
+    if state.revoked.readable:
+        steps.append(Step(READ_ONLY_FIELD, (UnlockAccounts(),)))
     return steps
+
+
+def _lock(state: DatabaseState, seeds: bool) -> Step:
+    """Take READ_ONLY ADMIN from the accounts that write through read_only
+
+    After the seed, which copies the primary's grants and with them the
+    privilege this takes away; and whenever a seed runs, since what it
+    brings was not observed. Asked of the server when it runs.
+    """
+    accounts = state.reading.bypass
+    if seeds or accounts.value:
+        return Step(READ_ONLY_FIELD, (
+            LockReplica(tuple(accounts.value or ())),
+        ))
+    if not accounts.known:
+        return Step(READ_ONLY_FIELD, (
+            Note(UNLISTED.format(problem=accounts.problem)),
+        ))
+    return Step(READ_ONLY_FIELD, (Note(LOCKED),))
 
 
 PROMOTE_FIELD = "database.server.role"
@@ -226,12 +271,44 @@ def plan_promote(doc: dict, state: DatabaseState | None) -> list[Step]:
         return [Step(PROMOTE_FIELD, (
             Refuse(NOT_A_REPLICA.format(observed=observed)),
         ))]
-    statements = mariadb.stop_replicating()
+    error = sql_stopped(state.status)
+    if error is not None:
+        return [Step(PROMOTE_FIELD, (
+            Refuse(UNDRAINABLE.format(error=error)),
+        ))]
     return [Step(PROMOTE_FIELD, (
-        RunSql(mariadb.CLIENT, statements.text, statements.summary),
+        PromoteReplica(DRAIN_TIMEOUT),
+    ) + _writable_file(state) + _give_back(state) + (
         Note(AFTER),
         Note(OLD_PRIMARY),
     ))]
+
+
+def _give_back(state: DatabaseState) -> tuple[Action, ...]:
+    """READ_ONLY ADMIN back to what the replica took it from, if anything
+
+    After the file is rewritten and never before: a GRANT that fails
+    stops the step, and a file still saying read_only = ON would bring
+    the new primary back read only at its next restart.
+    """
+    return (UnlockAccounts(),) if state.revoked.readable else ()
+
+
+def _writable_file(state: DatabaseState) -> tuple[Action, ...]:
+    """The configuration file without read_only, so a restart keeps the
+    new primary writable before the description is changed
+
+    Only the one line apply wrote for the replica goes; nothing restarts,
+    because SET GLOBAL already turned it off. A file that does not hold
+    the line, or no file at all, is left as it is.
+    """
+    text = state.dropin.text if state.dropin.readable else None
+    if text is None or mariadb.READ_ONLY_LINE not in text:
+        return ()
+    return (WriteFile(
+        mariadb.DROPIN, mariadb.writable(text), DROPIN_MODE, None,
+        f"remove read_only from {state.dropin.path}",
+    ),)
 
 
 def _cannot_act(state: DatabaseState, role: str) -> Action | None:
@@ -290,7 +367,7 @@ def _configuration(
     if state.dropin.readable and state.dropin.text == text:
         return Step(FIELD, tuple(notes) + (
             Note(f"unchanged ({state.dropin.path}, server id {identity})"),
-        ))
+        ) + _read_only_now(state, role))
     return Step(FIELD, tuple(notes) + (
         WriteFile(
             mariadb.DROPIN, text, DROPIN_MODE, None,
@@ -301,6 +378,24 @@ def _configuration(
             "restart the server, which is the only way these take effect",
         ),
     ))
+
+
+def _read_only_now(state: DatabaseState, role: str) -> tuple[Action, ...]:
+    """Bring the running server's read_only to what the role needs
+
+    Only when the file already says so, which is when no restart comes:
+    `SET GLOBAL read_only = OFF` by hand on a replica, or a promoted
+    replica returning to standalone, must not wait for the next restart.
+    A server that names no read_only is sent nothing on a guess.
+    """
+    running = state.reading.read_only
+    wanted = role == REPLICA
+    if not running.known:
+        return (Note(UNREAD.format(problem=running.problem)),)
+    if running.value == wanted:
+        return ()
+    statements = mariadb.set_read_only(wanted)
+    return (RunSql(mariadb.CLIENT, statements.text, statements.summary),)
 
 
 def _allowed_from(server: dict) -> list | None:
