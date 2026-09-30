@@ -19,6 +19,7 @@ the overlay on:
   memory and written to the bouncer's `.local` file, mode 0600. A
   registration the Debian package queued and never finished is replaced
   the same way, since its queue file keeps the bouncer from starting.
+  The bouncer's `mode:` is always nftables (NFTABLES below).
 
 No secret reaches an argument vector, a plan line or an error message.
 Only what is missing is made, so a second apply makes nothing; nothing
@@ -41,6 +42,7 @@ from keel.system.actions import (
     Note,
     Refuse,
     Run,
+    SetBouncerMode,
     WriteFile,
 )
 
@@ -49,7 +51,13 @@ LAPI = "etc/crowdsec/local_api_credentials.yaml"
 CAPI = "etc/crowdsec/online_api_credentials.yaml"
 BOUNCER = "etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml.local"
 BOUNCER_ID = "etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml.id"
-IPTABLES = "etc/alternatives/iptables"
+# The bouncer's backend, whatever the iptables alternative says. The
+# Debian postinst picks iptables under iptables-legacy, which TurnKey
+# selects for Webmin, and that mode needs ipset, which nothing installs:
+# the bouncer then dies with "unable to find ipset". nftables is trixie's
+# default, needs nothing more, and its tables live beside legacy
+# iptables rules, both evaluated at the same hooks.
+NFTABLES = "nftables"
 # where the bouncer's postinst queues its registration when crowdsec is
 # not configured yet; crowdsec's postinst skips the queue whenever its
 # unit is not active, and the bouncer's unit will not start while it is
@@ -68,8 +76,8 @@ class CrowdsecState:
 
     `capi` is `absent`, `empty` (created, not registered: offline, or an
     operator's choice) or `present`. `bouncer_mode` is the `mode:` line
-    of the bouncer's `.local` file, `bouncer_id` the name the `.id` file
-    records, and `iptables` where the iptables alternative points.
+    of the bouncer's `.local` file and `bouncer_id` the name the `.id`
+    file records.
     """
 
     lapi: bool
@@ -77,7 +85,6 @@ class CrowdsecState:
     bouncer_key: bool
     bouncer_mode: str | None
     bouncer_id: str | None
-    iptables: str | None
     pending: bool = False
 
 
@@ -100,7 +107,6 @@ def observe_crowdsec(tree: Tree) -> CrowdsecState:
         bouncer_key=value_of(bouncer, "api_key") is not None,
         bouncer_mode=value_of(bouncer, "mode"),
         bouncer_id=(tree.read(BOUNCER_ID).text or "").strip() or None,
-        iptables=tree.readlink(IPTABLES),
         pending=tree.exists(PENDING),
     )
 
@@ -113,18 +119,22 @@ def missing(state: CrowdsecState) -> bool:
 def plan_identity(state: CrowdsecState, live: bool,
                   available: frozenset[str]) -> list[Action]:
     """What the first enable makes, before the units start"""
+    mode: list[Action] = []
+    if (state.bouncer_key and not state.pending
+            and state.bouncer_mode != NFTABLES):
+        mode = [SetBouncerMode(BOUNCER, NFTABLES, state.bouncer_mode)]
     if not missing(state):
         if state.capi == "empty":
             return [Note(
                 f"/{CAPI} is empty: CrowdSec runs on its local API alone;"
                 " `cscli capi register` joins the central one, where the"
-                " machine reaches it")]
-        return []
+                " machine reaches it")] + mode
+        return mode
     if not live:
         return [Note(
             "CrowdSec's identity is not made under --root: an image would"
             " give every machine made from it the same one (tracker#47);"
-            " apply on the machine makes it")]
+            " apply on the machine makes it")] + mode
     if CSCLI not in available:
         return [Refuse("cscli not found: the crowdsec package is not"
                        " installed, and keel installs no package")]
@@ -150,19 +160,22 @@ def plan_identity(state: CrowdsecState, live: bool,
             "the local API runs without it; `cscli capi register` joins"
             " later, where the machine reaches api.crowdsec.net"))
     if not state.bouncer_key or state.pending:
-        actions.append(AddBouncer(BOUNCER, BOUNCER_ID, bouncer_mode(state),
+        actions.append(AddBouncer(BOUNCER, BOUNCER_ID, NFTABLES,
                                   state.bouncer_id,
                                   PENDING if state.pending else None))
-    return actions
+    return actions + mode
 
 
-def bouncer_mode(state: CrowdsecState) -> str:
-    """The `.local` file's mode, or the Debian postinst's choice for it:
-    iptables where the alternative is iptables-legacy, else nftables"""
-    if state.bouncer_mode:
-        return state.bouncer_mode
-    legacy = (state.iptables or "").endswith("iptables-legacy")
-    return "iptables" if legacy else "nftables"
+def set_mode(root: str, action: SetBouncerMode) -> str | None:
+    """Rewrite the `mode:` line of the bouncer's file, keeping the rest"""
+    path = os.path.join(root, action.config)
+    text = _read(path)
+    if text is None:
+        return f"/{action.config} cannot be read"
+    kept = [line for line in text.splitlines() if value_key(line) != "mode"]
+    _write(path, "".join(f"{line}\n" for line in
+                         [f"mode: {action.mode}", *kept]), KEY_MODE)
+    return None
 
 
 def add_bouncer(root: str, action: AddBouncer) -> str | None:

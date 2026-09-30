@@ -22,7 +22,7 @@ processes:
     listen: [{port: 12320, protocol: tcp, expose: public}]
   - name: postfix
     unit: postfix.service
-    listen: [{port: 25, protocol: tcp, expose: loopback}]
+    listen: [{address: 127.0.0.1, port: 25, protocol: tcp, expose: loopback}]
 checks:
   - {name: sshd, process: sshd, type: protocol, protocol: ssh,
      address: loopback, port: 22, on_failure: restart}

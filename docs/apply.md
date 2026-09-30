@@ -967,7 +967,17 @@ makes what is missing, before the units start:
 | `/etc/crowdsec/online_api_credentials.yaml` | an empty file, mode 0600: how the Debian package records "not registered", and what its unit needs to start |
 | the local API credentials | `cscli machines add --auto --force`, which writes the password to `/etc/crowdsec/local_api_credentials.yaml` itself |
 | the central API registration | `cscli capi register`, only when the file above was absent |
-| the bouncer's key, or a registration the Debian package left pending in `/var/lib/crowdsec/pending-registration` | `cscli bouncers add`: the key is read from its standard output into memory and written to `/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml.local`, mode 0600, with the `mode:` line the file had, or the Debian postinst's choice (`iptables` under iptables-legacy, else `nftables`); its name goes to the `.id` file, the bouncer this machine registered before is deleted, and the pending file is removed, since the bouncer's unit does not start while it is there |
+| the bouncer's key, or a registration the Debian package left pending in `/var/lib/crowdsec/pending-registration` | `cscli bouncers add`: the key is read from its standard output into memory and written to `/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml.local`, mode 0600, with `mode: nftables`; its name goes to the `.id` file, the bouncer this machine registered before is deleted, and the pending file is removed, since the bouncer's unit does not start while it is there |
+
+**The bouncer runs in nftables mode, always.** The Debian postinst picks
+`iptables` wherever the iptables alternative is iptables-legacy, which
+TurnKey selects for Webmin, and that mode needs `ipset`, which nothing
+installs: the bouncer dies with "unable to find ipset". nftables is
+trixie's default and needs nothing more, and its `crowdsec` tables live
+beside Webmin's legacy iptables rules, both evaluated at the same hooks.
+So an enabled overlay whose `.local` file says another mode has its
+`mode:` line set to `nftables`, the rest of the file (the key included)
+kept, and its units restarted.
 
 `cscli capi register` needs the network. Without it the step says so and
 goes on (`not done: ...; the local API runs without it`): the file stays

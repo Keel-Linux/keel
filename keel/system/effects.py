@@ -26,6 +26,7 @@ from keel.system.actions import (
     Run,
     RunSql,
     SeedReplica,
+    SetBouncerMode,
     Symlink,
     SwitchNetwork,
     UnlockAccounts,
@@ -48,6 +49,8 @@ class Effects:
                 return self.run(action.argv)
             if isinstance(action, AddBouncer):
                 return crowdsec.add_bouncer(self.tree.root, action)
+            if isinstance(action, SetBouncerMode):
+                return crowdsec.set_mode(self.tree.root, action)
             if isinstance(action, RunSql):
                 return self.run(action.argv, action.statements)
             if isinstance(action, WriteFile):

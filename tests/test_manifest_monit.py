@@ -110,6 +110,10 @@ class TestCore(RenderCase):
                       " status = 200 for 2 cycles then restart\n", text)
         self.assertIn("    if failed port 25 protocol smtp for 2 cycles then"
                       " restart\n", text)
+        # TurnKey's postfix has inet_interfaces = localhost, which Debian
+        # resolves to 127.0.0.1 alone (handbook errata to 0041)
+        self.assertIn("check host keel-check-postfix with address"
+                      " 127.0.0.1\n", text)
 
     def test_the_reminder_is_hourly_at_monit_s_cycle(self):
         text = self.render(CORE_OFF, "core", cycle=120).text
