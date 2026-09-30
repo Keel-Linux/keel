@@ -29,7 +29,8 @@ FIELD = "network"
 INTERFACES = "etc/network/interfaces"
 INTERFACES_MODE = 0o644
 DEFAULT_WINDOW = 120
-LIVE_COMMANDS = ("ifup", "ifdown", "ip", "systemd-run", "systemctl")
+LIVE_COMMANDS = ("ifup", "ifdown", "ip", "systemd-run", "systemctl",
+                 "sysctl")
 # drift under these changes the file; nameservers only when it can hold them
 INTERFACE_FIELDS = ("network.interfaces.", "network.managed_by")
 # keel.spec.render.nameserver_env places them

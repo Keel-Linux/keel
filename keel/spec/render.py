@@ -160,6 +160,8 @@ def one_of_each(nameservers: list[str]) -> list[str]:
     [2001:db8:1::53, 2001:db8:2::53, 192.0.2.53] keeps 2001:db8:1::53 and
     192.0.2.53; a list of one family keeps its first two.
     """
+    # a server declared twice must not displace the other family's
+    nameservers = list(dict.fromkeys(nameservers))
     firsts: dict[bool, str] = {}
     for server in nameservers:
         firsts.setdefault(is_ipv6(server), server)

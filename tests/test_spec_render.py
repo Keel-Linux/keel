@@ -286,6 +286,9 @@ class TestNetworkMapping(unittest.TestCase):
              ["2001:db8:1::53", "2001:db8:2::53"]),
             (["192.0.2.53"], ["192.0.2.53"]),
             ([], []),
+            # a duplicate does not displace the other family's server
+            (["2001:db8:1::53", "2001:db8:1::53", "192.0.2.53"],
+             ["2001:db8:1::53", "192.0.2.53"]),
         ):
             with self.subTest(servers=servers):
                 self.assertEqual(one_of_each(servers), kept)
