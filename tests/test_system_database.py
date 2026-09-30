@@ -1024,6 +1024,24 @@ class TestPromotion(unittest.TestCase):
         plan = self.promote(self.replicating(dropin=None))
         self.assertEqual(only(plan["database.server.role"], WriteFile), [])
 
+    def test_the_privilege_goes_back_only_after_the_file_is_rewritten(self):
+        """A failed GRANT stops its step; the file must be written by
+        then, or the new primary comes back read only at its restart"""
+        dropin = written(steps(self.DOC, state())["database.server"])
+        plan = plan_promote(self.DOC, self.replicating(
+            dropin=dropin, revoked="admin\tlocalhost\n",
+        ))
+        actions = [type(one) for step in plan for one in step.actions]
+        self.assertLess(actions.index(PromoteReplica),
+                        actions.index(WriteFile))
+        self.assertLess(actions.index(WriteFile),
+                        actions.index(UnlockAccounts))
+
+    def test_nothing_taken_is_nothing_given_back_on_promotion(self):
+        plan = plan_promote(self.DOC, self.replicating())
+        actions = [one for step in plan for one in step.actions]
+        self.assertEqual(only(actions, UnlockAccounts), [])
+
     def test_it_says_what_the_description_now_disagrees_with(self):
         plan = self.promote(self.replicating())
         notes = " ".join(

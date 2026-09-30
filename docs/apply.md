@@ -676,12 +676,14 @@ the one decision no machine here can make. In this order:
    again and nothing is promoted.
 2. It stops replication and forgets the primary (`STOP SLAVE`,
    `RESET SLAVE ALL`, not `STOP SLAVE` alone: a node that still held the
-   coordinates would follow its old primary again at the next restart),
-   turns `read_only` off, and grants `READ_ONLY ADMIN` back to the
-   accounts the replica took it from.
+   coordinates would follow its old primary again at the next restart)
+   and turns `read_only` off.
 3. It removes the `read_only = ON` line from the drop-in and restarts
    nothing, so a restart before the description is changed keeps the new
    primary writable.
+4. It grants `READ_ONLY ADMIN` back to the accounts the replica took it
+   from, last, so a GRANT that fails cannot keep the file from being
+   rewritten; the record stays and the next apply gives it back.
 
 A replica whose SQL thread already stopped on an error is refused before
 anything changes: what it received and did not apply would be lost. Fix
@@ -691,11 +693,12 @@ from it with `--destroy-local-database`. Then it says two things:
 
 ```
 $ keel database promote
-database.server.role: stop the I/O thread, wait up to 600 s for the SQL thread to apply everything it received, then stop replicating, forget the primary, turn read_only off and grant READ_ONLY ADMIN back to the accounts the replica took it from: done
+database.server.role: stop the I/O thread, wait up to 600 s for the SQL thread to apply everything it received, then stop replicating, forget the primary and turn read_only off: done
 database.server.role: remove read_only from /etc/mysql/mariadb.conf.d/99-keel-database.cnf (mode 0644): done
+database.server.role: grant READ_ONLY ADMIN back, with sql_log_bin off, to the accounts /var/lib/keel/database/read-only-admin records, and remove the record: done
 database.server.role: this node is a primary now and the description still says replica, which keel diff reports as drift and must not be corrected automatically. Change the description to primary and run `keel spec apply --system-only` to give it a binary log of its own
 database.server.role: nothing here stopped the old primary or told anybody else about this. There is no failover in Keel: two writable servers on one dataset is what this command can cause, and only the operator knows the old primary is gone
-database promote: 2 change(s), 0 failed
+database promote: 3 change(s), 0 failed
 ```
 
 It refuses anything that is not a replica, and `--dry-run` prints the

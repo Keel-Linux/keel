@@ -273,10 +273,20 @@ def plan_promote(doc: dict, state: DatabaseState | None) -> list[Step]:
         ))]
     return [Step(PROMOTE_FIELD, (
         PromoteReplica(DRAIN_TIMEOUT),
-    ) + _writable_file(state) + (
+    ) + _writable_file(state) + _give_back(state) + (
         Note(AFTER),
         Note(OLD_PRIMARY),
     ))]
+
+
+def _give_back(state: DatabaseState) -> tuple[Action, ...]:
+    """READ_ONLY ADMIN back to what the replica took it from, if anything
+
+    After the file is rewritten and never before: a GRANT that fails
+    stops the step, and a file still saying read_only = ON would bring
+    the new primary back read only at its next restart.
+    """
+    return (UnlockAccounts(),) if state.revoked.readable else ()
 
 
 def _writable_file(state: DatabaseState) -> tuple[Action, ...]:

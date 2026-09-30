@@ -304,13 +304,15 @@ class TestPromote(ReadOnlyTestCase):
             "STOP SLAVE;\nRESET SLAVE ALL;\nSET GLOBAL read_only = OFF;\n",
         )
 
-    def test_the_accounts_a_replica_took_it_from_get_it_back(self):
+    def test_giving_the_privilege_back_is_not_its_business(self):
+        """UnlockAccounts is its own action, planned after the drop-in
+        loses read_only, so a failed GRANT cannot keep the file from
+        being rewritten (keel.system.database)"""
         self.write_record("admin\tlocalhost\n")
         runner = Runner({"status": (0, status(), "")})
         self.assertIsNone(self.promote(runner))
-        self.assertIn("TO 'admin'@'localhost';", runner.sent("grant"))
-        self.assertLess(runner.keys().index("promote"),
-                        runner.keys().index("grant"))
+        self.assertNotIn("grant", runner.keys())
+        self.assertEqual(self.record(), "admin\tlocalhost\n")
 
     def test_a_stopped_sql_thread_is_refused_before_anything_changes(self):
         runner = Runner({"status": (0, status(
@@ -338,8 +340,31 @@ class TestPromote(ReadOnlyTestCase):
         problem = self.promote(runner)
         self.assertIn("did not apply", problem)
         self.assertIn("60 s", problem)
+        self.assertIn("The I/O thread was started again", problem)
         self.assertIn("resume", runner.keys())
         self.assertNotIn("promote", runner.keys())
+
+    def test_an_io_thread_that_does_not_start_again_is_said(self):
+        runner = Runner({"status": [
+            (0, status(), ""),
+            (0, status(read=900, executed=300), ""),
+        ], "resume": (1, "", "ERROR 1201 no master info")})
+        problem = self.promote(runner)
+        self.assertIn("did not apply", problem)
+        self.assertNotIn("was started again", problem)
+        self.assertIn("ERROR 1201", problem)
+        self.assertIn("START SLAVE IO_THREAD", problem)
+        self.assertNotIn("promote", runner.keys())
+
+    def test_an_io_thread_that_does_not_start_after_an_error_is_said(self):
+        runner = Runner({"status": [
+            (0, status(), ""),
+            (0, status(sql="No", error="Error 1062"), ""),
+        ], "resume": (1, "", "ERROR 1201")})
+        problem = self.promote(runner)
+        self.assertIn("Error 1062", problem)
+        self.assertNotIn("was started again", problem)
+        self.assertIn("ERROR 1201", problem)
 
     def test_a_status_that_cannot_be_read_is_refused(self):
         runner = Runner({"status": (1, "", "ERROR 2002")})

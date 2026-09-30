@@ -180,9 +180,8 @@ class PromoteReplica:
         return (
             "stop the I/O thread, wait up to"
             f" {self.timeout} s for the SQL thread to apply everything it"
-            " received, then stop replicating, forget the primary, turn"
-            " read_only off and grant READ_ONLY ADMIN back to the accounts"
-            " the replica took it from"
+            " received, then stop replicating, forget the primary and turn"
+            " read_only off"
         )
 
 

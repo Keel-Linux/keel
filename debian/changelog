@@ -27,8 +27,11 @@ keel (0.11.5) unstable; urgency=medium
     SQL thread to apply the relay log, and only then runs STOP SLAVE,
     RESET SLAVE ALL and turns read_only off. A SQL thread stopped on an
     error is refused with what to do, and one that stops or does not
-    catch up while draining starts the I/O thread again and promotes
-    nothing. The read_only line leaves the drop-in without a restart.
+    catch up while draining starts the I/O thread again, says whether
+    that worked, and promotes nothing. The read_only line leaves the
+    drop-in without a restart, before READ_ONLY ADMIN is granted back,
+    so a failed GRANT cannot leave the new primary read only at its
+    next restart.
   * keel inspect reports database.server.read_only, with the accounts
     that write through it, and keel diff compares it with the role the
     server has (decision 0020), not with a field of the description.

@@ -60,14 +60,18 @@ STOPPED = (
 )
 STOPPED_DRAINING = (
     "the SQL thread stopped while applying what it had received ({error})."
-    " The I/O thread was started again and nothing was promoted: fix what"
-    " stopped it, START SLAVE, and promote once it has caught up"
+    " Nothing was promoted: fix what stopped it, START SLAVE, and promote"
+    " once it has caught up"
 )
 SLOW = (
     "the SQL thread did not apply everything it had received within"
-    " {timeout} s. The I/O thread was started again and nothing was"
-    " promoted; run keel database promote again once Seconds_Behind_Master"
-    " is 0"
+    " {timeout} s. Nothing was promoted; run keel database promote again"
+    " once Seconds_Behind_Master is 0"
+)
+RESUMED = ". The I/O thread was started again"
+RESUME_FAILED = (
+    ". Starting the I/O thread again failed ({problem}), so this replica"
+    " receives nothing from its primary: run START SLAVE IO_THREAD"
 )
 
 
@@ -141,13 +145,21 @@ def promote(
             " changed"
     problem = _drain(runner, action.timeout, clock, sleep)
     if problem:
-        _send(runner, "START SLAVE IO_THREAD;\n")
-        return problem
+        return problem + _resume(runner)
     statements = mariadb.promote()
     problem = _send(runner, statements.text)
     if problem:
         return f"{statements.summary} failed: {problem}"
-    return unlock(root, runner)
+    return None
+
+
+def _resume(runner) -> str:
+    """Start the I/O thread again after a drain that promoted nothing,
+    and say whether it did"""
+    problem = _send(runner, "START SLAVE IO_THREAD;\n")
+    if problem:
+        return RESUME_FAILED.format(problem=problem)
+    return RESUMED
 
 
 def _drain(runner, timeout: int, clock, sleep) -> str:
