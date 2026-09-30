@@ -1,0 +1,29 @@
+# Load the firewall keel derived from the appliance manifests, at boot.
+#
+# keel spec apply --system writes /etc/keel/firewall/keel-manifest.nft
+# where the spec enables the firewall, which it may only in a cloud
+# advanced installation (handbook decision 0041), and loads it then; this
+# unit loads it again at every boot, before the network comes up, so the
+# table survives a reboot. The file replaces keel's own table `inet
+# keel` in one transaction and touches no other rule. Without the file,
+# nothing runs: every other installation keeps the firewall it has.
+#
+# After nftables.service, whose /etc/nftables.conf flushes the whole
+# ruleset where an administrator enabled it.
+[Unit]
+Description=Load the firewall keel derived from the appliance manifests
+DefaultDependencies=no
+RequiresMountsFor=/etc/keel
+After=local-fs.target nftables.service
+Wants=network-pre.target
+Before=network-pre.target shutdown.target
+Conflicts=shutdown.target
+ConditionPathExists=/etc/keel/firewall/keel-manifest.nft
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/keel/firewall/keel-manifest.nft
+
+[Install]
+WantedBy=multi-user.target

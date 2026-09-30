@@ -33,6 +33,7 @@ TOP_LEVEL_KEYS = (
     "appliance",
     "installation",
     "overlays",
+    "firewall",
 )
 SECRET_VARS = {
     "root_password": "ROOT_PASS",

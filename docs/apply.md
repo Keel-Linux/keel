@@ -1036,6 +1036,91 @@ derived.monit: check monit's configuration (monit -t): done
 derived.monit: reload monit, where it runs (systemctl try-reload-or-restart monit.service): done
 ```
 
+**derived.firewall** (`/etc/keel/firewall/keel-manifest.nft`; handbook
+decision 0041)
+
+Only where the spec says `firewall.enabled: true`, which validation
+allows in a cloud advanced installation only (docs/spec.md, "firewall");
+in every other installation keel installs and changes no firewall rule.
+
+**Why nftables.** trixie's `iptables` is the nftables backend
+(`iptables-nft`) by default, and nftables 1.1.3 is in the archive.
+TurnKey 19 switches the alternative to `iptables-legacy` only because
+Webmin's firewall module did not speak nftables, and its `webmin-fw`
+conf script carries "TODO: drop use of iptables-legacy and use nftables
+directly"; 0041 replaces the `WEBMIN_FW_TCP_INCOMING` rules that script
+writes. nftables gives keel a table of its own, replaced in one
+transaction, that touches no rule of iptables, of CrowdSec's bouncer or
+of the operator, and `nft -c` checks a file before anything is loaded.
+The kernel evaluates legacy iptables and nftables at the same hooks, so
+while a TurnKey image still loads its `rules.v4`, a packet must pass
+both: keel's table can only narrow what gets in, never widen it.
+
+The ruleset is one table, `inet keel`, one input chain whose policy is
+drop, and these rules:
+
+- always, whatever the manifests say: the loopback; established and
+  related traffic, so the session that runs apply lives through the
+  change; ICMPv6, which neighbour discovery and path MTU need; IPv4
+  echo; the DHCPv6 and DHCPv4 client replies, without which a lease
+  lapses;
+- every `public` port of a process of the appliance or of an enabled
+  overlay, on every interface; the overlay's UDP port
+  (`network.overlay.wireguard.listen_port`, 51820 by default);
+- every `mesh` port of an enabled overlay, on the WireGuard interface
+  only, and none (the step says which) while the spec declares no
+  overlay;
+- on each of the machine's guest bridges, DNS on 53 and DHCP on 67 and
+  547: what lxc-net's or libvirt's dnsmasq serves the guests there,
+  which a drop policy would otherwise cut, so every container lost its
+  lease. A guest bridge is one that cannot carry the uplink: every port
+  enslaved to it (`/sys/class/net/<bridge>/brif/`) a veth or a tap, and
+  no default route through it (`/proc/net/route`,
+  `/proc/net/ipv6_route`), as lxcbr0, virbr0 and docker0 are. A Proxmox
+  vmbr0 or a br0 with a physical port, a VLAN or a bond enslaved, or
+  holding the default route, is the uplink and gets nothing: those
+  ports would be open to the internet. The bridges are read at every
+  apply; one created later is drift in `keel diff` until the next apply
+  adds it.
+
+`loopback` opens nothing. The table's comment carries a digest of the
+rules, which is how apply and diff tell whether the table the kernel
+holds is the one the file says.
+
+**What keeps it from locking anyone out.** Before anything is written:
+
+- every port sshd listens on must be a `public` TCP port the ruleset
+  opens, or the step is refused and nothing is written or loaded. The
+  ports are never guessed: on the live system they are what `sshd -T`
+  says (its `port` and `listenaddress` lines), plus the `Listen` of
+  `ssh.socket` while that socket is active; where `sshd -T` cannot
+  answer, and under `--root`, `/etc/ssh/sshd_config` and
+  `sshd_config.d/*.conf` are read the way sshd reads them (`Port 22`,
+  `Port=22`, `ListenAddress [::1]:22 rdomain x`). A file that sets no
+  port is sshd's documented default, 22; a file that cannot be read, or
+  an `Include` of anything but `sshd_config.d/*.conf`, leaves the ports
+  unknown, and the step is refused;
+- while a network change waits for `keel network confirm` (decision
+  0018), the firewall is left exactly as it is: the confirmation comes
+  over a new session, and a ruleset changed inside the window could be
+  what refuses it;
+- a new ruleset is written to a copy beside the file, `nft -c -f`
+  checks the copy, and only a copy nft accepts is renamed into place; a
+  refused one is removed, so the file the boot unit loads is always one
+  nft accepted. `nft -f` then loads it in one transaction, so a ruleset
+  nft refuses changes nothing;
+- a file at that path keel did not write is refused, never replaced.
+
+`keel-firewall.service`, shipped enabled, loads the file at every boot
+before the network comes up, and only while the file exists. `enabled:
+false` removes keel's file and deletes the `inet keel` table; a spec
+without the section leaves both as they are.
+
+```
+derived.firewall: write /etc/keel/firewall/keel-manifest.nft: public tcp 22, 12320, 12321, DHCP and DNS for the guests of lxcbr0; checked by nft -c as a copy first, so a file nft refuses is never put in place (mode 0600): done
+derived.firewall: load it in one transaction, replacing table inet keel only (nft -f /etc/keel/firewall/keel-manifest.nft): done
+```
+
 **network** (`/etc/network/interfaces`; handbook decision 0018)
 
 The one field whose converge can cut off the operator running it, so it
@@ -1347,6 +1432,10 @@ blog.yaml --root /tmp/scratch` then reports `instance.fqdn` and every
 - Masking or unmasking a unit, writing an overlay's configuration, which
   is its package's and the installer's, or making CrowdSec's identity
   under `--root`.
+- Any firewall rule outside a cloud advanced installation whose spec
+  says `firewall.enabled: true`; any table but `inet keel`; a ruleset
+  that would not open the ports sshd listens on; a firewall change while
+  a network change waits for its confirmation.
 - Exposing monit's web interface, writing a token into monit's file or
   the notify settings, or setting monit's cycle.
 - Converging a container's network from inside, more than one
@@ -1478,7 +1567,12 @@ else; and `tests/test_appliance_cli.py` the criterion of step 3 of 0041's
 plan in a tree: CrowdSec disabled, enabled, disabled, each converged, a
 second run changing nothing, `keel diff` clean and the file gaining and
 losing exactly CrowdSec's checks, with `systemctl` replaced by a fake that
-makes the links the real one makes under `--root`.
+makes the links the real one makes under `--root`. The firewall has
+`tests/test_spec_firewall.py` (cloud advanced only),
+`tests/test_manifest_firewall.py` (the ruleset, given to `nft -c` in a
+network namespace of its own, made as for the WireGuard tests below,
+when an nft binary is on `PATH` or named by `KEEL_NFT`) and `tests/test_system_firewall.py`, one
+test per guard against a lockout.
 
 The overlay has its own files too. `tests/test_spec_overlay.py` covers
 the fields, `tests/test_system_overlay.py` the planner and its state,

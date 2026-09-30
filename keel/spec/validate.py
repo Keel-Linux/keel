@@ -36,6 +36,7 @@ from keel.spec.validate_appliance import (
     validate_appliance,
 )
 from keel.spec.validate_database import validate_database
+from keel.spec.validate_firewall import validate_firewall
 from keel.spec.validate_extras import validate_locale, validate_users
 from keel.spec.validate_monitor import validate_monitor
 from keel.spec.validate_network import validate_network
@@ -88,6 +89,7 @@ def validate(doc: dict, *, check_secret_files: bool = True,
     ))
     errors.extend(validate_appliance(doc))
     errors.extend(against_manifests(doc, facts))
+    errors.extend(validate_firewall(doc))
     return errors
 
 

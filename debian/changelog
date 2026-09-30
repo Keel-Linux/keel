@@ -1,3 +1,25 @@
+keel (0.14.0) unstable; urgency=medium
+
+  * The spec gains firewall.enabled, allowed in a cloud advanced
+    installation only (decision 0041, as the maintainer scoped it on
+    2026-09-30): apply --system then derives an nftables ruleset from the
+    manifests' exposure classes (public ports everywhere, mesh ports on
+    the WireGuard interface only), writes it to
+    /etc/keel/firewall/keel-manifest.nft and loads it as the table inet
+    keel, which the new keel-firewall.service loads again at boot. It
+    always lets in the loopback, established traffic, ICMPv6, the DHCP
+    client replies, and DNS and DHCP from the guests of the host's NAT
+    bridges (veth and tap ports only, no default route; never an uplink
+    bridge such as a Proxmox vmbr0). It is refused unless it opens every
+    port sshd listens on, read from sshd -T and an active ssh.socket and
+    never guessed; it is left alone while a network change waits for its
+    confirmation; and it is checked with nft -c as a copy that only then
+    replaces the file. enabled: false removes keel's file and table.
+    inspect writes firewall.enabled back; diff compares the file and, on
+    the live system, the table the kernel holds. Suggests nftables.
+
+ -- Marcos Mendez <mendez.foto@gmail.com>  Wed, 30 Sep 2026 21:00:00 +0000
+
 keel (0.13.0) unstable; urgency=medium
 
   * The instance spec gains appliance, installation and overlays (decision

@@ -72,6 +72,25 @@ class AddBouncer:
 
 
 @dataclass(frozen=True)
+class InstallRuleset:
+    """Write an nftables ruleset through a copy `nft -c` accepts
+
+    Carried out by keel.system.fwinstall: the content goes to a copy
+    beside `path`, mode 0600, nft checks the copy, and only a copy it
+    accepts is renamed over `path`; a refused one is removed, so the file
+    keel-firewall.service loads at boot is always one nft accepted.
+    """
+
+    path: str
+    content: str
+    summary: str
+
+    def describe(self) -> str:
+        return (f"{self.summary}; checked by nft -c as a copy first, so a"
+                " file nft refuses is never put in place (mode 0600)")
+
+
+@dataclass(frozen=True)
 class SetBouncerMode:
     """Set the `mode:` line of CrowdSec's bouncer file, keeping the rest
 
@@ -363,7 +382,7 @@ class Refuse:
 Change = (Run | RunSql | WriteFile | RemoveFile | MakeDir | Symlink
           | SwitchNetwork | GenerateKey | AdoptKey | SeedReplica
           | LockReplica | UnlockAccounts | PromoteReplica | Attempt
-          | AddBouncer | SetBouncerMode)
+          | AddBouncer | SetBouncerMode | InstallRuleset)
 Action = Change | Note | Refuse
 
 

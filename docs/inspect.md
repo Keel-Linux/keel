@@ -70,6 +70,7 @@ means running as root would have read it.
 | `appliance.name` | `/usr/share/keel/appliances/*.yaml` | The one installed appliance manifest that no other has as its `base`, the top of the chain (decision 0041). No appliance manifest, no section and no report line: a machine of before 0041. Several tops leave it not inferred |
 | `installation.mode` | `/etc/keel/instance.yaml` | The spec the installer emitted: a machine's units do not say which mode chose them, so without that file the mode is not inferred |
 | `overlays.<name>` | systemd: `systemctl is-enabled` and `is-active` on the live root; the `.wants` links under `/etc/systemd/system` of an offline one | For an overlay that owns units: `enabled` when every unit is enabled and, where it can be asked, runs; `disabled` when none is enabled and none runs; not inferred otherwise, naming each unit's state. An overlay that runs no unit (the installer, WireGuard) is read from `/etc/keel/instance.yaml`, as the mode is, and not inferred without it |
+| `firewall.enabled` | `/etc/keel/firewall/keel-manifest.nft` | `true` when keel's ruleset is there, `false` otherwise, so a spec emitted again keeps the opt-in. Written whenever an appliance manifest is installed |
 
 `users` and `locale` are the sections `keel spec apply --system` converges
 ([docs/apply.md](apply.md)); a spec inspect wrote applies clean into a
