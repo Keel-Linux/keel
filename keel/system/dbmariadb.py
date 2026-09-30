@@ -140,9 +140,12 @@ def grants(hosts: list[str], password: str) -> Statements | None:
 
     `REPLICATION SLAVE` streams the binary log. The rest (`SEED_GRANTS`)
     is what mariadb-dump needs to copy the data the primary held before a
-    replica existed (keel.system.dbseed): nothing is written with them,
-    and they read no more than the binary log already carries to the same
-    account. Idempotent: a re-run of apply alters the account it already
+    replica existed (keel.system.dbseed), and SELECT on *.* is also what
+    reads the primary's accounts so the replica can hold them. Nothing is
+    written with them, but they let `repl` read every table, the password
+    hashes of mysql.global_priv included, root's among them: docs/apply.md
+    says why this is the grant and not one per schema. Idempotent: a
+    re-run of apply alters the account it already
     created rather than failing, and GRANT only adds, so a primary set up
     by an older keel gains them at its next apply.
     """

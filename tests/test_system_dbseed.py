@@ -36,6 +36,28 @@ DUMP = (
     f"-- SET GLOBAL gtid_slave_pos='{POSITION}';\n"
     "-- Dump completed on 2026-09-30 10:00:00\n"
 )
+# The accounts of the primary: the application's own, the server's, the
+# replication account and one the replica already holds.
+PRIMARY_ACCOUNTS = (
+    "wp\t%\nroot\tlocalhost\nmysql\tlocalhost\nmariadb.sys\tlocalhost\n"
+    "debian-sys-maint\tlocalhost\nrepl\tfd42:b2:0:1:%\n"
+    "wordpress\tlocalhost\n\tlocalhost\n"
+)
+# Host names compare without case, as MariaDB compares them; users do not.
+REPLICA_ACCOUNTS = "root\tlocalhost\nmysql\tlocalhost\nwordpress\tLOCALHOST\n"
+DEFINITIONS = (
+    "CREATE USER `wp`@`%` IDENTIFIED BY PASSWORD '*0A1B'\n"
+    "GRANT USAGE ON *.* TO `wp`@`%` IDENTIFIED BY PASSWORD '*0A1B'\n"
+    "GRANT ALL PRIVILEGES ON `wordpress`.* TO `wp`@`%`\n"
+    "GRANT `editor` TO `wp`@`%`\n"
+    "SET DEFAULT ROLE `editor` FOR `wp`@`%`\n"
+)
+ANSWERS = {
+    "probe": GRANTED,
+    "accounts": PRIMARY_ACCOUNTS,
+    "local-accounts": REPLICA_ACCOUNTS,
+    "definitions": DEFINITIONS,
+}
 
 
 class Runner:
@@ -69,9 +91,8 @@ class Runner:
             call["stdin"] = kwargs["input"].decode()
         self.calls.append(call)
         key = self.key(argv, call.get("stdin", ""))
-        code, out, err = self.answers.get(key, (0, b"", b""))
-        if key == "probe" and not code and not out:
-            out = GRANTED.encode()
+        default = (0, ANSWERS.get(key, "").encode(), b"")
+        code, out, err = self.answers.get(key, default)
         if key == "dump" and not code:
             kwargs["stdout"].write(self.dump.encode())
             out = b""
@@ -81,10 +102,19 @@ class Runner:
     def key(argv, stdin: str) -> str:
         if argv[0] == "mariadb-dump":
             return "dump"
+        asked = argv[-1] if "--execute" in argv else ""
         if any(one.startswith("--defaults-") for one in argv):
-            return "probe"
+            if "USER_PRIVILEGES" in asked:
+                return "probe"
+            if "mysql.user" in asked:
+                return "accounts"
+            return "definitions"
+        if "mysql.user" in asked:
+            return "local-accounts"
         if "Seed post" in stdin:
             return "load"
+        if "sql_log_bin" in stdin:
+            return "copy"
         if "CHANGE MASTER" in stdin:
             return "start"
         return "stop"
@@ -98,6 +128,7 @@ class SeedTestCase(unittest.TestCase):
     def setUp(self):
         self.root = self.enterContext(tempfile.TemporaryDirectory())
         os.makedirs(os.path.join(self.root, "var/tmp"))
+        os.makedirs(os.path.join(self.root, "var/lib/mysql"))
 
     def seed(self, runner, drop=("wordpress",), port=3306):
         action = SeedReplica(HOST, port, PASSWORD, tuple(drop))
@@ -113,7 +144,10 @@ class TestTheCopy(SeedTestCase):
         self.assertIsNone(self.seed(runner))
         order = [Runner.key(one["argv"], one.get("stdin", ""))
                  for one in runner.calls]
-        self.assertEqual(order, ["probe", "dump", "stop", "load", "start"])
+        self.assertEqual(order, [
+            "probe", "dump", "accounts", "local-accounts", "definitions",
+            "stop", "load", "copy", "start",
+        ])
 
     def test_the_dump_is_one_consistent_snapshot_with_its_gtid(self):
         runner = Runner()
@@ -162,6 +196,114 @@ class TestTheCopy(SeedTestCase):
         self.seed(runner, port=3307)
         self.assertIn("port=3307", runner.named("dump")[0]["options"])
         self.assertIn("MASTER_PORT=3307", runner.named("start")[0]["stdin"])
+
+
+class TestTheAccounts(SeedTestCase):
+    """The primary's accounts come with the copy, or its first ALTER USER
+    stops the replica: they live in the mysql schema, which the dump
+    leaves out, and the binary log only carries later changes"""
+
+    def test_only_the_accounts_the_replica_lacks_are_asked_for(self):
+        runner = Runner()
+        self.seed(runner)
+        # Not root, mysql, mariadb.sys, debian-sys-maint or repl, which
+        # are the server's and keel's own; not the anonymous account; not
+        # wordpress, which the replica holds already.
+        self.assertEqual(
+            runner.named("definitions")[0]["stdin"],
+            "SHOW CREATE USER 'wp'@'%';\nSHOW GRANTS FOR 'wp'@'%';\n",
+        )
+
+    def test_they_are_created_outside_the_binary_log_before_it_starts(self):
+        runner = Runner()
+        self.seed(runner)
+        copy = runner.named("copy")[0]["stdin"]
+        self.assertTrue(copy.startswith("SET SESSION sql_log_bin = 0;\n"))
+        self.assertIn(
+            "CREATE USER `wp`@`%` IDENTIFIED BY PASSWORD '*0A1B';\n", copy
+        )
+        self.assertIn(
+            "GRANT ALL PRIVILEGES ON `wordpress`.* TO `wp`@`%`;\n", copy
+        )
+
+    def test_roles_are_left_out(self):
+        copy = Runner()
+        self.seed(copy)
+        text = copy.named("copy")[0]["stdin"]
+        self.assertNotIn("`editor`", text)
+
+    def test_an_account_the_replica_holds_is_left_as_it_is(self):
+        runner = Runner({"local-accounts": (
+            0, (REPLICA_ACCOUNTS + "wp\t%\n").encode(), b"",
+        )})
+        self.assertIsNone(self.seed(runner))
+        self.assertEqual(runner.named("definitions"), [])
+        self.assertEqual(runner.named("copy"), [])
+
+    def test_the_accounts_are_read_raw_and_without_names(self):
+        runner = Runner()
+        self.seed(runner)
+        for key in ("accounts", "definitions", "local-accounts"):
+            argv = runner.named(key)[0]["argv"]
+            self.assertIn("--raw", argv)
+            self.assertIn("--skip-column-names", argv)
+
+    def test_a_statement_that_is_not_an_account_is_refused(self):
+        runner = Runner({"definitions": (
+            0, DEFINITIONS.encode() + b"DROP DATABASE wordpress\n", b"",
+        )})
+        problem = self.seed(runner)
+        self.assertIn("DROP DATABASE wordpress", problem)
+        self.assertIn("nothing was dropped", problem)
+        self.assertEqual(runner.named("stop"), [])
+
+    def test_accounts_that_cannot_be_read_drop_nothing(self):
+        for key in ("accounts", "local-accounts", "definitions"):
+            runner = Runner({key: (1, b"", b"ERROR 1142 denied")})
+            problem = self.seed(runner)
+            self.assertIn("ERROR 1142 denied", problem)
+            self.assertIn("nothing was dropped", problem)
+            self.assertEqual(runner.named("stop"), [])
+
+    def test_a_failed_copy_of_the_accounts_starts_nothing(self):
+        runner = Runner({"copy": (1, b"", b"ERROR 1396")})
+        problem = self.seed(runner)
+        self.assertIn("ERROR 1396", problem)
+        self.assertIn("--destroy-local-database", problem)
+        self.assertEqual(runner.named("start"), [])
+
+    def test_parsing_the_account_lists(self):
+        self.assertEqual(
+            dbseed.accounts("wp\t%\nbroken\n\nroot\tlocalhost\n"),
+            [("wp", "%"), ("root", "localhost")],
+        )
+
+
+class TestDiskSpace(SeedTestCase):
+    def test_too_little_room_for_the_copy_drops_nothing(self):
+        small = os.statvfs_result((4096, 4096, 10, 0, 0, 10, 1, 1, 0, 255))
+        runner = Runner()
+        with mock.patch.object(dbseed.os, "statvfs", return_value=small):
+            problem = self.seed(runner)
+        self.assertIn("free", problem)
+        self.assertIn("nothing was dropped", problem)
+        self.assertEqual(runner.named("stop"), [])
+        self.assertEqual(self.leftovers(), [])
+
+    def test_the_room_is_measured_where_the_server_keeps_its_data(self):
+        runner = Runner()
+        real = os.statvfs
+        with mock.patch.object(dbseed.os, "statvfs",
+                               side_effect=real) as measured:
+            self.assertIsNone(self.seed(runner))
+        self.assertEqual(measured.call_args[0][0],
+                         os.path.join(self.root, "var/lib/mysql"))
+
+    def test_no_data_directory_is_reported(self):
+        os.rmdir(os.path.join(self.root, "var/lib/mysql"))
+        problem = self.seed(Runner())
+        self.assertIn("var/lib/mysql", problem)
+        self.assertIn("nothing was dropped", problem)
 
 
 class TestNoSecretInArgvOrLogs(SeedTestCase):

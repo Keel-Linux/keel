@@ -120,8 +120,9 @@ class SeedReplica:
         )
         return (
             f"copy [{self.host}]:{self.port} with mariadb-dump"
-            f" --single-transaction --gtid{dropped}, load the copy and"
-            " replicate from its GTID position (the credential in an"
+            f" --single-transaction --gtid{dropped}, load the copy and the"
+            " primary's accounts this server lacks, and replicate from"
+            " its GTID position (the credential in an"
             " options file of mode 0600, removed afterwards)"
         )
 

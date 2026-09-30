@@ -74,6 +74,24 @@ POSITION_VALUE = re.compile(r"^(\d+-\d+-\d+(,\d+-\d+-\d+)*)?$")
 OPTION_ESCAPES = {"\\": "\\\\", '"': '\\"', "\n": "\\n", "\r": "\\r",
                   "\t": "\\t"}
 LOCAL_CLIENT = ("mariadb", "--batch")
+REMOTE = ("mariadb",)
+# --raw so a value is printed as it is and not with batch escapes, which
+# would change a statement copied from one server to the other.
+READ = ("--batch", "--raw", "--skip-column-names")
+DATADIR = "var/lib/mysql"
+# Loading SQL builds tables and indexes about as large as its text; twice
+# the dump leaves the server room to work while it does.
+DISK_MARGIN = 2
+ACCOUNTS_SQL = "SELECT User, Host FROM mysql.user WHERE is_role = 'N'"
+# The server's own accounts and keel's: Debian's socket accounts, the
+# definer of the sys views, the old maintenance account, and the
+# replication account each node already holds with its own grant.
+EXCLUDED_USERS = frozenset(
+    ("root", "mysql", "mariadb.sys", "debian-sys-maint",
+     mariadb.REPLICATION_USER)
+)
+# What SHOW GRANTS prints about roles, which are not copied.
+SKIPPED = ("SET DEFAULT ROLE ",)
 
 KEPT = "nothing was dropped and replication was not started"
 UNREACHABLE = (
@@ -95,6 +113,20 @@ LOAD_FAILED = (
     " is incomplete and replication was not started: run the same command"
     " again with --destroy-local-database to start over"
 )
+NO_ROOM = (
+    "{datadir} has {free} bytes free and loading the copy needs about"
+    " {need}"
+)
+ACCOUNTS_UNREADABLE = "the accounts of {where} could not be read ({detail})"
+UNEXPECTED = (
+    "the primary answered a question about an account with a statement"
+    " that is not one ({line})"
+)
+ACCOUNTS_FAILED = (
+    "the copy of [{host}]:{port} is loaded and creating the primary's"
+    " accounts failed ({detail}). Replication was not started: run the"
+    " same command again with --destroy-local-database to start over"
+)
 START_FAILED = (
     "the copy of [{host}]:{port} is loaded and replication did not start"
     " ({detail})"
@@ -108,7 +140,8 @@ def seed(root: str, action, runner=subprocess.run) -> str | None:
             options = write_options(
                 directory, action.host, action.port, action.password
             )
-            return _seed(directory, options, action, runner)
+            return _seed(directory, os.path.join(root, DATADIR), options,
+                         action, runner)
     except OSError as e:
         # Not KEPT: the error may come after the drop, reading the copy.
         return f"cannot seed from [{action.host}]:{action.port}:" \
@@ -131,7 +164,9 @@ def reach(
         return f"cannot ask [{host}]:{port}: {e.strerror or e}"
 
 
-def _seed(directory: str, options: str, action, runner) -> str | None:
+def _seed(
+    directory: str, datadir: str, options: str, action, runner,
+) -> str | None:
     where = {"host": action.host, "port": action.port}
     problem = _privileges(options, action.host, action.port, runner)
     if problem:
@@ -143,6 +178,12 @@ def _seed(directory: str, options: str, action, runner) -> str | None:
     position = gtid_position(_tail(dump))
     if position is None:
         return NO_POSITION.format(**where) + f"; {KEPT}"
+    problem = _room(datadir, dump)
+    if problem:
+        return f"{problem}; {KEPT}"
+    copy, problem = _account_copy(options, runner)
+    if problem:
+        return f"{problem}; {KEPT}"
 
     stop = mariadb.stop_replicating().text
     if action.drop:
@@ -156,6 +197,10 @@ def _seed(directory: str, options: str, action, runner) -> str | None:
         problem = _run(runner, LOCAL_CLIENT, stdin=fob)
     if problem:
         return LOAD_FAILED.format(detail=problem, **where)
+    if copy:
+        problem = _run(runner, LOCAL_CLIENT, text=copy)
+        if problem:
+            return ACCOUNTS_FAILED.format(detail=problem, **where)
     start = mariadb.replicate_from(
         action.host, action.port, action.password, position
     )
@@ -178,6 +223,89 @@ def _privileges(options: str, host: str, port: int, runner) -> str:
     if missing:
         return NOT_GRANTED.format(missing=", ".join(missing), **where)
     return ""
+
+
+def _room(datadir: str, dump: str) -> str:
+    """Why the copy may not fit where the server keeps its data, if so
+
+    Checked with the copy on disk and nothing dropped yet: loading it
+    takes about as much room again as its text, and a server that runs
+    out of disk half way has lost the old data and not got the new.
+    """
+    try:
+        found = os.statvfs(datadir)
+    except OSError as e:
+        return f"cannot measure the free space of {datadir}: {e.strerror}"
+    free = found.f_bavail * found.f_frsize
+    need = os.path.getsize(dump) * DISK_MARGIN
+    if free < need:
+        return NO_ROOM.format(datadir=datadir, free=free, need=need)
+    return ""
+
+
+def _account_copy(options: str, runner) -> tuple[str, str]:
+    """The statements that give the replica the accounts it lacks
+
+    Read from the primary right after the dump and before anything is
+    dropped. Only accounts that are nobody's but the application's are
+    copied (not EXCLUDED_USERS, not the anonymous one, not roles), and
+    only those the replica does not hold: an account on both keeps the
+    replica's own password until the primary changes it through the
+    binary log. Returns the statements, or an empty string and why not.
+    """
+    primary = {}
+    problem = _run(runner, REMOTE + (f"--defaults-extra-file={options}",
+                                     CONNECT_TIMEOUT) + READ
+                   + ("--execute", ACCOUNTS_SQL), output=primary)
+    if problem:
+        return "", ACCOUNTS_UNREADABLE.format(where="the primary",
+                                              detail=problem)
+    local = {}
+    problem = _run(runner, REMOTE + READ + ("--execute", ACCOUNTS_SQL),
+                   output=local)
+    if problem:
+        return "", ACCOUNTS_UNREADABLE.format(where="this server",
+                                              detail=problem)
+    held = {(user, host.lower()) for user, host in accounts(local["stdout"])}
+    missing = [
+        (user, host) for user, host in accounts(primary["stdout"])
+        if user and user not in EXCLUDED_USERS
+        and (user, host.lower()) not in held
+    ]
+    if not missing:
+        return "", ""
+    show = "".join(
+        f"SHOW CREATE USER {mariadb.literal(user)}@{mariadb.literal(host)};\n"
+        f"SHOW GRANTS FOR {mariadb.literal(user)}@{mariadb.literal(host)};\n"
+        for user, host in missing
+    )
+    answer = {}
+    problem = _run(runner, REMOTE + (f"--defaults-extra-file={options}",
+                                     CONNECT_TIMEOUT) + READ,
+                   text=show, output=answer)
+    if problem:
+        return "", ACCOUNTS_UNREADABLE.format(where="the primary",
+                                              detail=problem)
+    kept = []
+    for line in (one.strip() for one in answer["stdout"].splitlines()):
+        if not line or line.startswith(SKIPPED) or (
+            line.startswith("GRANT ") and " ON " not in line
+        ):
+            continue
+        if not line.startswith(("CREATE USER ", "GRANT ")):
+            return "", UNEXPECTED.format(line=line)
+        kept.append(line + ";\n")
+    return "SET SESSION sql_log_bin = 0;\n" + "".join(kept), ""
+
+
+def accounts(text: str) -> list[tuple[str, str]]:
+    """User and host pairs from a batch answer, one per line"""
+    pairs = []
+    for line in (text or "").splitlines():
+        user, sep, host = line.partition("\t")
+        if sep:
+            pairs.append((user, host))
+    return pairs
 
 
 def _dump(options: str, path: str, runner) -> str:

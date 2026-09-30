@@ -384,7 +384,7 @@ the first UPDATE of an older post stopped its SQL thread.
 #### Seeding a replica
 
 The same `apply --system` that makes the node a replica does it, in this
-order, and a failure in the first three steps leaves the machine as it
+order, and a failure in the first four steps leaves the machine as it
 was:
 
 1. **Ask the primary.** While apply observes the machine, before it plans
@@ -403,17 +403,52 @@ was:
    disk where `/tmp` is a tmpfs on Debian 13.
 3. **Read its position.** The dump ends with the GTID position it was
    taken at, as a comment; a dump without one is refused.
-4. **Only then drop.** Replication is stopped and forgotten (`STOP SLAVE`,
+4. **Check the room, read the accounts.** Too little free space for the
+   load is refused, and the primary's accounts the replica lacks are
+   read (both below).
+5. **Only then drop.** Replication is stopped and forgotten (`STOP SLAVE`,
    `RESET SLAVE ALL`) and the databases `--destroy-local-database`
    confirmed are dropped.
-5. **Load and start.** The copy is loaded through the local client,
-   `gtid_slave_pos` is set to its position, and replication starts.
+6. **Load and start.** The copy is loaded through the local client, the
+   accounts are created, `gtid_slave_pos` is set to the dump's position,
+   and replication starts.
 
 A failure while loading leaves an incomplete copy and no replication; the
 next run sees databases it did not make and asks for
-`--destroy-local-database` again, which starts over. The accounts of the
-`mysql` schema are not copied: a replica keeps its own, and the grants
-the primary makes afterwards arrive through the binary log.
+`--destroy-local-database` again, which starts over.
+
+**The accounts come with the copy.** They live in the `mysql` schema,
+which the dump leaves out, and the binary log carries only what changes
+after the seed: without them the primary's first `ALTER USER` of an
+account made before the replica existed (the application's own
+database user) stops the replica's SQL thread. So, right after the dump
+and before anything is dropped, the replica lists the primary's accounts
+and its own, and for each account the primary holds and the replica does
+not, reads `SHOW CREATE USER` and `SHOW GRANTS` from the primary. After
+the data is loaded and before replication starts, it runs them with
+`sql_log_bin = 0`, so they never enter a binary log of the replica's or
+its GTID history (a keel replica has no binary log; the setting keeps it
+so on one given one by hand). Left out:
+
+- the server's accounts and keel's: `root`, `mysql`, `mariadb.sys`,
+  `debian-sys-maint` and `repl`, each node's own;
+- the anonymous account;
+- roles, and the grants and default roles that name them: a primary
+  that uses roles needs them created on the replica by hand first;
+- an account the replica already holds, such as the application user
+  its own first boot created: it keeps the replica's password until the
+  primary changes it, which then replicates like any other change.
+
+An account created or changed on the primary in the seconds between the
+dump and the reading of the accounts can be applied twice, once in the
+copy and once from the binary log; a `CREATE USER` in that window stops
+the replica, and `--destroy-local-database` starts over.
+
+**Room for the copy.** With the dump on disk and nothing dropped yet,
+the free space where the server keeps its data (`/var/lib/mysql`) is
+compared with twice the dump's size, since the tables and indexes the
+load builds are about as large as its text. Too little is refused, and
+the machine is left as it was.
 
 **Why a dump and not `mariadb-backup`.** Both are the documented ways to
 seed a MariaDB replica. The dump was chosen because `mariadb-dump` is in
@@ -432,11 +467,34 @@ keel does not do it.
 `EVENT`, measured against MariaDB 11.8 on Debian 13: with
 `--single-transaction` the server hands the dump a consistent binary log
 position without `FLUSH TABLES WITH READ LOCK`, so neither `RELOAD` nor
-`LOCK TABLES` is needed, and nothing is written with any of them. They
-let `repl` read every table, which is no more than the binary log
-already streams to the same account. `GRANT` only adds, so a primary set
-up by an older keel gains them at its next `apply --system-only`; until
-then the replica is refused, naming what is missing.
+`LOCK TABLES` is needed, and nothing is written with any of them.
+`GRANT` only adds, so a primary set up by an older keel gains them at
+its next `apply --system-only`; until then the replica is refused,
+naming what is missing.
+
+**What that exposes, plainly.** The four are granted on `*.*`, so `repl`
+can read every table of the primary, including the password hashes in
+`mysql.global_priv`, root's among them. Whoever holds the replication
+password can read them from any origin in `allowed_from`. That is the
+trade, and it was chosen over a grant per schema because the narrower
+one does not work: copying the accounts reads their hashes, which needs
+`SELECT` on the `mysql` schema (or `CREATE USER`, which is worse, since
+it writes), and a grant per application schema is made when apply runs
+on the primary, so a schema created after it would be invisible to the
+dump, which would then copy an incomplete primary without an error. What
+bounds the exposure instead:
+
+- `allowed_from` should name the replicas' overlay addresses (decision
+  0020), not a wide prefix, so only they can log in as `repl`;
+- the password is a file of mode 0600 that only root reads, on both
+  nodes (`replication.secret`);
+- MariaDB 11.8 encrypts the connection by default, so neither the dump
+  nor the hashes cross the network in clear;
+- a replica holds all of this anyway, being a copy: the binary log
+  streams every later change of data and accounts to the same account.
+
+Treat the replication password as equal to read access to the whole
+primary, and rotate it as such.
 
 **No secret in an argument or a log.** The password reaches `mariadb` and
 `mariadb-dump` in an options file (`--defaults-extra-file`, the first
@@ -450,7 +508,7 @@ $ keel spec apply --system-only --destroy-local-database
 database.server: write /etc/mysql/mariadb.conf.d/99-keel-database.cnf: replica, server id 1510108966 (mode 0644): done
 database.server: restart the server, which is the only way these take effect (systemctl restart mariadb): done
 database.server.replication.primary: confirmed with --destroy-local-database: becoming a replica replaces the local database with a copy of the primary, and this server holds 1 database(s) that are not its own (wordpress)
-database.server.replication.primary: copy [fd42:b2:0:1:2c2d:1cff:feeb:8756]:3306 with mariadb-dump --single-transaction --gtid, then drop wordpress, load the copy and replicate from its GTID position (the credential in an options file of mode 0600, removed afterwards): done
+database.server.replication.primary: copy [fd42:b2:0:1:2c2d:1cff:feeb:8756]:3306 with mariadb-dump --single-transaction --gtid, then drop wordpress, load the copy and the primary's accounts this server lacks, and replicate from its GTID position (the credential in an options file of mode 0600, removed afterwards): done
 apply --system-only: 3 change(s), 0 failed
 ```
 

@@ -20,6 +20,17 @@ keel (0.11.3) unstable; urgency=medium
     and EVENT beside REPLICATION SLAVE, which is what the dump needs and
     no more than the binary log already carries to it. GRANT only adds,
     so a primary set up by an older keel gains them at its next apply.
+  * The primary's accounts come with the copy: the ones the replica
+    lacks, other than root, mysql, mariadb.sys, debian-sys-maint, repl,
+    the anonymous account and roles, are read with SHOW CREATE USER and
+    SHOW GRANTS and created with sql_log_bin off before replication
+    starts, so an ALTER USER of the application's database user no
+    longer stops the replica.
+  * The seed is refused before anything is dropped when the data
+    directory has less free space than twice the dump.
+  * docs/apply.md states what the grant exposes: repl reads every table
+    of the primary, password hashes included, and why that is the grant
+    rather than one per schema.
   * A replica whose SQL thread stopped is refused with the server's
     error, and rebuilt from a fresh copy with --destroy-local-database:
     the way out for a replica 0.11.2 or older built empty.
