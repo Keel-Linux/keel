@@ -23,6 +23,8 @@ from keel.spec.origins import mariadb_problem
 
 SERVER = "database.server"
 CLIENT = "database.client"
+READ_ONLY = f"{SERVER}.read_only"
+BYPASS = "; READ_ONLY ADMIN lets {accounts} write through it"
 REPLICA = "replica"
 PRIMARY = "primary"
 # A field that describes nothing unless the server is in one of these
@@ -154,7 +156,25 @@ def probe_server(
         _add(replication, findings, path, name, value)
     if replication:
         section["replication"] = replication
+    findings += _read_only(reading)
     return section, findings
+
+
+def _read_only(reading: Reading) -> list[Finding]:
+    """What the report says about read_only, which the section never holds
+
+    Not a field of the description: it follows the role (decision 0020),
+    so keel diff compares it with the role the server has and inspect
+    writes no value an operator could set against it.
+    """
+    value = reading.read_only
+    if not value.known:
+        return [missing(READ_ONLY, value.problem)] if value.problem else []
+    source = value.source
+    accounts = reading.bypass.value or []
+    if accounts:
+        source += BYPASS.format(accounts=", ".join(accounts))
+    return [inferred(READ_ONLY, _shown(value.value).lower(), source)]
 
 
 def _unheld(engine: str, name: str, value: Value) -> str:

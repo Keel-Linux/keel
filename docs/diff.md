@@ -280,6 +280,23 @@ quietly, and a diff that resolved the declared name before comparing would
 report `same` for an authorization that matches nothing at all
 ([docs/spec.md](spec.md)).
 
+### read_only follows the role the server has
+
+`database.server.read_only` is no field of the description: a replica is read
+only and a primary or a standalone is writable. When the description declares
+a role and `inspect` read the variable (MariaDB), diff adds one line after the
+database section, comparing `read_only` with the **observed** role, as decision
+0020 has everything that depends on the role follow the role the machine
+holds. A replica promoted by hand is compared as the writable server it now
+is, and the role line alone says the description disagrees.
+
+```
+database.server.read_only: same (true)
+database.server.read_only: drift (declared true, observed false; the server is a replica and takes writes of its own, which its primary does not have: the first row both write stops replication. keel spec apply turns read_only on)
+```
+
+A server that names no `read_only` makes the line `unknown`.
+
 ### The rest of the section
 
 | Field | Compared against |

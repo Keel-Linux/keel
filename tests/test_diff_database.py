@@ -356,3 +356,79 @@ class TestSecretsAreNeverCompared(unittest.TestCase):
         self.assertEqual(
             found["database.server.replication.secret.file"], NOT_COMPARED
         )
+
+
+READ_ONLY = "database.server.read_only"
+REPLICA = declaring(
+    role="replica", replication={"primary": {"host": "2001:db8:1::10"}},
+)
+
+
+def variables(read_only: str) -> str:
+    return MARIADB_STANDALONE["variables"] + f"read_only\t{read_only}\n"
+
+
+def replica(read_only: str) -> Inspection:
+    return observe(dict(
+        MARIADB_STANDALONE, status=MARIADB_REPLICA_STATUS,
+        variables=variables(read_only),
+    ))
+
+
+def standalone(read_only: str) -> Inspection:
+    return observe(dict(MARIADB_STANDALONE, variables=variables(read_only)))
+
+
+class TestReadOnly(unittest.TestCase):
+    """read_only follows the role the server has, never a field of its own
+
+    Decision 0020: what depends on the role follows the role the machine
+    holds. So a replica promoted by hand is compared as the primary it is,
+    and the role line alone reports what the description disagrees with.
+    """
+
+    def test_a_read_only_replica_is_the_same(self):
+        found = verdicts(REPLICA, replica("ON"))
+        self.assertEqual(found[READ_ONLY], SAME)
+
+    def test_a_writable_replica_is_drift_and_says_what_it_costs(self):
+        text = line(REPLICA, replica("OFF"), READ_ONLY)
+        self.assertIn("drift (declared true, observed false", text)
+        self.assertIn("stops replication", text)
+        self.assertIn("keel spec apply", text)
+
+    def test_a_writable_standalone_is_the_same(self):
+        found = verdicts(declaring(role="standalone"), standalone("OFF"))
+        self.assertEqual(found[READ_ONLY], SAME)
+
+    def test_a_read_only_standalone_is_drift(self):
+        text = line(declaring(role="standalone"), standalone("ON"), READ_ONLY)
+        self.assertIn("drift (declared false, observed true", text)
+        self.assertIn("refuses the application's writes", text)
+
+    def test_a_promoted_replica_is_compared_as_the_primary_it_is(self):
+        found = verdicts(REPLICA, standalone("OFF"))
+        self.assertEqual(found[ROLE_FIELD], DRIFT)
+        self.assertEqual(found[READ_ONLY], SAME)
+
+    def test_a_read_only_that_could_not_be_read_is_unknown(self):
+        found = verdicts(REPLICA, observe(dict(
+            MARIADB_STANDALONE, status=MARIADB_REPLICA_STATUS,
+        )))
+        self.assertEqual(found[READ_ONLY], UNKNOWN)
+
+    def test_a_description_with_no_role_compares_nothing_of_it(self):
+        found = verdicts({"database": {"server": {"engine": "mariadb"}}},
+                         replica("OFF"))
+        self.assertNotIn(READ_ONLY, found)
+
+    def test_a_machine_reporting_nothing_about_it_compares_nothing(self):
+        inspection = Inspection("/", "test", {}, ())
+        found = verdicts(REPLICA, inspection)
+        self.assertNotIn(READ_ONLY, found)
+
+    def test_it_comes_right_after_the_database_section(self):
+        fields = [one.field for one in compare(REPLICA, replica("ON")).fields]
+        database = [n for n, one in enumerate(fields)
+                    if one.startswith("database.")]
+        self.assertEqual(fields.index(READ_ONLY), max(database))

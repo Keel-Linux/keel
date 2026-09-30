@@ -138,6 +138,13 @@ SHARED = (
     " the application on this node (wp-config.php and its DB_PASS for"
     " WordPress) must then be given the new one"
 )
+BYPASSED = (
+    "{accounts} hold READ_ONLY ADMIN and write through read_only on this"
+    " replica, as the replication thread and root do. An application"
+    " connecting as one of them would write rows its primary does not"
+    " have and stop replication: give the application an account with"
+    " privileges on its own schema only"
+)
 UNREACHABLE = (
     "{problem}. The replica cannot be seeded, so nothing was dropped, its"
     " configuration was not rewritten and the server was not restarted"
@@ -221,12 +228,30 @@ def plan_promote(doc: dict, state: DatabaseState | None) -> list[Step]:
         return [Step(PROMOTE_FIELD, (
             Refuse(NOT_A_REPLICA.format(observed=observed)),
         ))]
-    statements = mariadb.stop_replicating()
+    statements = mariadb.promote()
     return [Step(PROMOTE_FIELD, (
         RunSql(mariadb.CLIENT, statements.text, statements.summary),
+    ) + _writable_file(state) + (
         Note(AFTER),
         Note(OLD_PRIMARY),
     ))]
+
+
+def _writable_file(state: DatabaseState) -> tuple[Action, ...]:
+    """The configuration file without read_only, so a restart keeps the
+    new primary writable before the description is changed
+
+    Only the one line apply wrote for the replica goes; nothing restarts,
+    because SET GLOBAL already turned it off. A file that does not hold
+    the line, or no file at all, is left as it is.
+    """
+    text = state.dropin.text if state.dropin.readable else None
+    if text is None or mariadb.READ_ONLY_LINE not in text:
+        return ()
+    return (WriteFile(
+        mariadb.DROPIN, mariadb.writable(text), DROPIN_MODE, None,
+        f"remove read_only from {state.dropin.path}",
+    ),)
 
 
 def _cannot_act(state: DatabaseState, role: str) -> Action | None:
@@ -280,10 +305,13 @@ def _configuration(
     notes: list[Action] = []
     if names:
         notes.append(Note(NAME_ORIGIN.format(names=", ".join(names))))
+    accounts = state.reading.bypass.value or []
+    if role == REPLICA and accounts:
+        notes.append(Note(BYPASSED.format(accounts=", ".join(accounts))))
     if state.dropin.readable and state.dropin.text == text:
         return Step(FIELD, tuple(notes) + (
             Note(f"unchanged ({state.dropin.path}, server id {identity})"),
-        ))
+        ) + _read_only_now(state, role))
     return Step(FIELD, tuple(notes) + (
         WriteFile(
             mariadb.DROPIN, text, DROPIN_MODE, None,
@@ -294,6 +322,22 @@ def _configuration(
             "restart the server, which is the only way these take effect",
         ),
     ))
+
+
+def _read_only_now(state: DatabaseState, role: str) -> tuple[Action, ...]:
+    """Bring the running server's read_only to what the role needs
+
+    Only when the file already says so, which is when no restart comes:
+    `SET GLOBAL read_only = OFF` by hand on a replica, or a promoted
+    replica returning to standalone, must not wait for the next restart.
+    A server that names no read_only is sent nothing on a guess.
+    """
+    running = state.reading.read_only
+    wanted = role == REPLICA
+    if not running.known or running.value == wanted:
+        return ()
+    statements = mariadb.set_read_only(wanted)
+    return (RunSql(mariadb.CLIENT, statements.text, statements.summary),)
 
 
 def _allowed_from(server: dict) -> list | None:

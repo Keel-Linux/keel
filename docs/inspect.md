@@ -156,6 +156,19 @@ MariaDB primary holding a grant no description may declare, such as the
 `fd3d:80b2:d0d7:0:%` keel 0.11.0 made for an overlay /64: written into the
 description it would not validate, so the reason names it instead.
 
+`database.server.read_only` (MariaDB) is a line of the report and not a field
+of the description it writes: a replica is read only and every other role is
+writable, so it follows the role and nothing declares it. It is the server's
+`read_only` variable, `true` or `false`, and the line names the accounts that
+write through it anyway, those holding `READ_ONLY ADMIN` other than the
+server's own `root`, `mysql` and `mariadb.sys`:
+
+```
+database.server.read_only: true (from mariadb ... SHOW GLOBAL VARIABLES ...; READ_ONLY ADMIN lets 'admin'@'localhost', 'admin'@'::1', 'admin'@'127.0.0.1' write through it)
+```
+
+`keel diff` compares it with the role the server has ([docs/diff.md](diff.md)).
+
 ### The client side is the application's own configuration
 
 A server can be asked what it is. An application cannot be asked where it will

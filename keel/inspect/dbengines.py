@@ -53,10 +53,24 @@ MARIADB_SQL = {
     "status": ("SHOW REPLICA STATUS\\G", True),
     "replicas": ("SHOW REPLICA HOSTS", False),
     "variables": ("SHOW GLOBAL VARIABLES WHERE Variable_name IN"
-                  " ('wsrep_on', 'log_bin', 'server_id', 'port')", False),
+                  " ('wsrep_on', 'log_bin', 'server_id', 'port',"
+                  " 'read_only')", False),
     "grants": ("SELECT Host FROM mysql.user WHERE Repl_slave_priv = 'Y'",
                False),
+    # Who writes through read_only. Measured on MariaDB 11.8: an account
+    # with SUPER alone is refused with error 1290 and one with READ_ONLY
+    # ADMIN writes, so SUPER is not asked about.
+    "bypass": ("SELECT DISTINCT GRANTEE FROM"
+               " information_schema.USER_PRIVILEGES"
+               " WHERE PRIVILEGE_TYPE = 'READ_ONLY ADMIN'", False),
 }
+# The questions whose answers say what the server is. `bypass` is not one:
+# a server that cannot list who writes through read_only still has a role.
+MARIADB_ROLE_QUESTIONS = ("status", "replicas", "variables", "grants")
+# Accounts of the server itself, which hold every privilege by design:
+# root and mysql are Debian's socket accounts, mariadb.sys the definer of
+# the sys views. The replication thread is not an account at all.
+MARIADB_OWN_ACCOUNTS = ("root", "mysql", "mariadb.sys")
 POSTGRESQL_SQL = {
     "state": "SELECT pg_is_in_recovery(),"
              " (SELECT count(*) FROM pg_stat_replication),"
@@ -135,7 +149,9 @@ def read_mariadb(answers: dict[str, File], sockets: File) -> Reading:
     # Any output at all is a replica row: SHOW REPLICA STATUS prints
     # nothing on a server that replicates from nowhere.
     replicating = bool(status.lines())
-    role = _mariadb_role(variables, replicating, answers, allowed)
+    role = _mariadb_role(variables, replicating, {
+        name: answers[name] for name in MARIADB_ROLE_QUESTIONS
+    }, allowed)
     return Reading(
         role=role,
         primary=_primary_from(field_lines(status), status,
@@ -144,7 +160,29 @@ def read_mariadb(answers: dict[str, File], sockets: File) -> Reading:
         listen=listening_on(
             sockets, _port(variables.get("port"), 3306)
         ),
+        read_only=_mariadb_read_only(variables, answers["variables"]),
+        bypass=_mariadb_bypass(answers["bypass"]),
     )
+
+
+def _mariadb_read_only(variables: dict[str, str], answer: File) -> Value:
+    """Whether the server refuses writes from ordinary accounts"""
+    value = variables.get("read_only", "").upper()
+    if value not in ("ON", "OFF"):
+        return unknown(f"{answer.path} names no read_only")
+    return found(value == "ON", answer.path)
+
+
+def _mariadb_bypass(answer: File) -> Value:
+    """The accounts that write through read_only, the server's own aside"""
+    if not answer.readable:
+        return unknown(f"{answer.path} {answer.problem}")
+    accounts = [
+        row[0] for row in columns(answer)
+        if row and row[0].rpartition("@")[0].strip("'")
+        not in MARIADB_OWN_ACCOUNTS
+    ]
+    return found(accounts, answer.path)
 
 
 def _mariadb_role(

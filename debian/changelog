@@ -1,3 +1,30 @@
+keel (0.11.5) unstable; urgency=medium
+
+  * A MariaDB replica is read only (tracker#26). The replica's drop-in
+    says read_only = ON, so the application on a replica can no longer
+    write rows of its own: one WordPress page request inserted a
+    wp_navigation post, the primary's next write reused its id, and the
+    SQL thread stopped with error 1062. The replication thread and root
+    write through it (READ_ONLY ADMIN, measured on MariaDB 11.8, where
+    SUPER alone no longer does); the application's account holds
+    privileges on its own schema only and is refused with error 1290.
+    The restart that turns it on comes before the seed, whose load runs
+    as root.
+  * apply names the accounts other than the server's own that hold
+    READ_ONLY ADMIN on a replica, and sets read_only with SET GLOBAL
+    when the file already says so and the server does not (turned off
+    by hand, or a standalone that was a replica).
+  * keel database promote stops replication, then turns read_only off
+    and removes the line from the drop-in, without a restart, so the
+    new primary stays writable across one.
+  * keel inspect reports database.server.read_only, with the accounts
+    that write through it, and keel diff compares it with the role the
+    server has (decision 0020), not with a field of the description.
+  * docs/apply.md: a replica is a warm standby and must not receive
+    traffic until promoted, and what WordPress shows on one.
+
+ -- Marcos Mendez <mendez.foto@gmail.com>  Wed, 30 Sep 2026 12:00:00 +0000
+
 keel (0.11.4) unstable; urgency=medium
 
   * Seeding a replica reads the primary's accounts before the dump, and
