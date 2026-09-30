@@ -24,6 +24,8 @@ Depends:
  openssl,
  ${python3:Depends},
  ${misc:Depends},
+Breaks:
+ inithooks (<< 2.3.6+keel9~),
 Suggests:
  monit,
 Description: Declarative management of one appliance instance

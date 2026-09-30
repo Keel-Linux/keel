@@ -11,6 +11,7 @@ Two rules that the firstboot behaviour depends on:
 
 import os
 
+from keel.spec.render import unwritten_nameservers
 from keel.spec.runtime import live_ipv6, managed_by
 
 
@@ -32,10 +33,22 @@ def write_conf(text: str, path: str) -> None:
 
 
 def check_network(doc: dict) -> list[str]:
-    """Compare declared addresses with the live ones (host managed only)"""
+    """What the network section will not get, as warnings
+
+    Host managed: the declared addresses that are not live. File managed:
+    the declared nameservers the interfaces file 01ipconfig writes from
+    the conf cannot hold, which the day two plan names too (keel#45).
+    """
     network = doc.get("network") or {}
+    if managed_by(network) == "file":
+        lost = unwritten_nameservers(network)
+        return [
+            f"network.nameservers: {', '.join(lost)} cannot be written to"
+            " /etc/network/interfaces: ifupdown writes nameservers only in"
+            " a static stanza, two per stanza"
+        ] if lost else []
     if managed_by(network) != "host":
-        return []
+        return []  # a value validation refuses; nothing to compare
 
     messages = []
     for name, iface in (network.get("interfaces") or {}).items():

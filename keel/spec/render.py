@@ -132,22 +132,62 @@ def nameserver_env(nameservers: list[str], env: dict[str, str]) -> (
     lib/ipconfig.sh writes dns-nameservers only in a static stanza, two at
     most, and resolvconf takes them from any stanza whatever the server's
     family. So when one family is static and the other is not, the static
-    stanza carries every declared server, in the spec's order, and the
-    first two are kept: a dynamic family's servers are not dropped for
-    being of the other family (keel#45). When both are static, or neither,
-    each family's servers go to its own stanza, the first two of each;
-    with neither static, the file holds none of them.
+    stanza carries the declared servers of both families: a dynamic
+    family's servers are not dropped for being of the other family
+    (keel#45). Two are kept, the first of each family before a second of
+    either (one_of_each), so a broken upstream of one family still leaves
+    a resolver of the other; the static family's own second server can be
+    the one left out. When both are static, or neither, each family's
+    servers go to its own stanza, the first two of each; with neither
+    static, the file holds none of them.
     """
     ipv4_static = env.get("IP_CONFIG") == "static"
     ipv6_static = env.get("IP6_CONFIG") == "static"
     if ipv4_static and not ipv6_static:
-        return _dns_env("IP_DNS", nameservers)
+        return _dns_env("IP_DNS", one_of_each(nameservers))
     if ipv6_static and not ipv4_static:
-        return _dns_env("IP6_DNS", nameservers)
+        return _dns_env("IP6_DNS", one_of_each(nameservers))
     dns = _dns_env("IP_DNS", filter(is_ipv4, nameservers))
     if "IP6_CONFIG" in env:
         dns.update(_dns_env("IP6_DNS", filter(is_ipv6, nameservers)))
     return dns
+
+
+def one_of_each(nameservers: list[str]) -> list[str]:
+    """The two servers one stanza keeps, in the spec's order
+
+    The first server of each family comes before a second of either, so
+    [2001:db8:1::53, 2001:db8:2::53, 192.0.2.53] keeps 2001:db8:1::53 and
+    192.0.2.53; a list of one family keeps its first two.
+    """
+    firsts: dict[bool, str] = {}
+    for server in nameservers:
+        firsts.setdefault(is_ipv6(server), server)
+    kept = set(firsts.values())
+    for server in nameservers:
+        if len(kept) >= MAX_NAMESERVERS:
+            break
+        kept.add(server)
+    return [server for server in nameservers if server in kept]
+
+
+def unwritten_nameservers(network: Any) -> list[str]:
+    """The declared servers the interfaces file 01ipconfig writes lacks
+
+    Only a file managed network is written; the hook writes a nameserver
+    variable only into a static stanza, and its IPv4 method defaults to
+    dhcp when the spec declares none.
+    """
+    env = network_env(network)
+    if not isinstance(network, dict) or not env:
+        return []
+    written = [
+        value for key, value in env.items()
+        if (key.startswith("IP_DNS") and env.get("IP_CONFIG") == "static")
+        or (key.startswith("IP6_DNS") and env.get("IP6_CONFIG") == "static")
+    ]
+    return [str(server) for server in network.get("nameservers") or []
+            if str(server) not in written]
 
 
 def _prefixed(env: dict[str, str], prefix: str) -> dict[str, str]:

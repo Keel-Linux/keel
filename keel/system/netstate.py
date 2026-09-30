@@ -21,6 +21,7 @@ from keel.inspect.interfaces import Stanza, parse_interfaces
 from keel.inspect.tree import Tree
 from keel.network import marker
 from keel.network.render import LIBRARY, Rendered, render, slaac_off
+from keel.spec.fields import is_ipv4
 from keel.spec.render import nameserver_env, network_env
 
 
@@ -59,14 +60,32 @@ def observe_network(root: str, doc: dict) -> NetworkState | None:
     if len(interfaces) == 1 and owner == "file":
         iface = str(next(iter(interfaces)))
         env, problem = rendering_env(network, iface, current or "")
-        rendered = Rendered(problem=problem) if problem else render(
-            tree.path(LIBRARY), iface, hostname(tree, doc), env)
+        rendered = Rendered(problem=problem) if problem else old_dns_check(
+            render(tree.path(LIBRARY), iface, hostname(tree, doc), env), env)
         declared = interfaces.get(iface) or {}
         rendered = kept_auto(stale_library(rendered, declared, iface),
                              declared, iface, current or "")
     return NetworkState(observed, unknowns, in_container, owner,
                         os.path.exists(tree.path(marker.PENDING)), rendered,
                         current)
+
+
+def old_dns_check(rendered: Rendered, env: dict[str, str]) -> Rendered:
+    """Say "update inithooks" when an old library refused an IPv4 server
+
+    An inithooks older than 2.3.6+keel9 checks IP6_DNS* as IPv6 only, and
+    its message ("IPv4 goes in the IP_* keys") points at the spec, which
+    is right: the IPv4 server is in the static inet6 stanza on purpose.
+    """
+    moved = [value for key, value in env.items()
+             if key.startswith("IP6_DNS") and is_ipv4(value)]
+    if rendered.problem is None or not moved \
+            or "must be IPv6, not IPv4" not in rendered.problem:
+        return rendered
+    return Rendered(problem=(
+        f"the installed inithooks cannot write the IPv4 nameserver"
+        f" {', '.join(moved)} in the static inet6 stanza; update"
+        " inithooks"))
 
 
 def stale_library(rendered: Rendered, declared: dict, iface: str) -> (

@@ -26,6 +26,7 @@ from keel.network.confirm import Probes
 OLD = "iface eth0 inet6 static\n    address 2001:db8:1::10/64\n"
 NEW = "iface eth0 inet6 static\n    address 2001:db8:1::20/64\n"
 INTERFACES = "etc/network/interfaces"
+READ_AUTOCONF = marker.autoconf
 STOP = ("systemctl", "stop", "keel-network-window.timer",
         "keel-network-window-safety.timer")
 
@@ -60,11 +61,19 @@ def pending(**overrides):
 
 
 class RootCase(unittest.TestCase):
+    # the interface's IPv6 autoconf setting as /proc would give it; None
+    # is an interface without IPv6 settings, so no sysctl is issued
+    AUTOCONF = None
+
     def setUp(self):
         self.root = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.root)
         os.makedirs(join(self.root, "etc", "network"))
         self.write(OLD)
+        patcher = mock.patch.object(marker, "autoconf",
+                                    side_effect=lambda iface: self.AUTOCONF)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def write(self, text):
         with open(join(self.root, INTERFACES), "w") as fob:
@@ -372,6 +381,114 @@ class TestRevert(RootCase):
         self.assertFalse(worked)
         self.assertIn("cannot restore", line)
         self.assertTrue(marker.exists(self.root))
+
+
+NO_SLAAC = NEW + (
+    "    pre-up sysctl -q -w net/ipv6/conf/eth0/autoconf=0\n"
+    "    post-down sysctl -q -w net/ipv6/conf/eth0/autoconf=1\n"
+)
+AUTOCONF_ON = ("sysctl", "-q", "-w", "net/ipv6/conf/eth0/autoconf=1")
+
+
+class TestAutoconf(RootCase):
+    """keel#45: SLAAC comes back whatever ifupdown-ng did with post-down"""
+
+    AUTOCONF = "1"
+
+    def change(self, text, run):
+        with mock.patch.object(marker, "boot_id", return_value="b1"), \
+                mock.patch.object(marker, "uptime", return_value=50.0):
+            return switch.change(self.root, pending(), text, run)
+
+    def test_the_setting_is_recorded_before_the_change(self):
+        run = Recorder()
+        self.assertIsNone(self.change(NO_SLAAC, run))
+        self.assertEqual(marker.read(self.root).autoconf, "1")
+        # the incoming file turns it off itself, in pre-up
+        self.assertNotIn("sysctl", run.names())
+
+    def test_a_failed_up_on_a_slaac_off_file_gives_slaac_back(self):
+        """pre-up ran (autoconf=0), up failed, and ifdown then skips an
+        interface ifupdown-ng never recorded as up: no post-down"""
+        run = Recorder(fail={"ifup": 1})
+        problem = self.change(NO_SLAAC, run)
+        self.assertIn("reverted to the previous file", problem)
+        self.assertEqual(self.current(), OLD)
+        back = run.names().index("sysctl")
+        self.assertEqual(run.calls[back], AUTOCONF_ON)
+        self.assertEqual(run.names()[back:back + 2], ["sysctl", "ifup"])
+
+    def test_a_timed_revert_gives_slaac_back(self):
+        self.assertIsNone(self.change(NO_SLAAC, Recorder()))
+        run = Recorder()
+        worked, _ = switch.revert(self.root, run)
+        self.assertTrue(worked)
+        self.assertEqual(self.current(), OLD)
+        self.assertIn(AUTOCONF_ON, run.calls)
+        self.assertLess(run.calls.index(AUTOCONF_ON),
+                        run.names().index("ifup"))
+
+    def test_an_operator_setting_of_zero_is_what_comes_back(self):
+        self.AUTOCONF = "0"
+        self.assertIsNone(self.change(NO_SLAAC, Recorder()))
+        run = Recorder()
+        switch.revert(self.root, run)
+        self.assertIn(("sysctl", "-q", "-w",
+                       "net/ipv6/conf/eth0/autoconf=0"), run.calls)
+
+    def test_leaving_a_slaac_off_file_restores_one_not_its_zero(self):
+        self.write(NO_SLAAC)
+        self.AUTOCONF = "0"
+        run = Recorder()
+        self.assertIsNone(self.change(NEW, run))
+        self.assertEqual(marker.read(self.root).autoconf, "1")
+        self.assertIn(AUTOCONF_ON, run.calls)
+        # and going back to it leaves autoconf to its own pre-up
+        run = Recorder()
+        switch.revert(self.root, run)
+        self.assertEqual(self.current(), NO_SLAAC)
+        self.assertNotIn("sysctl", run.names())
+
+    def test_a_marker_without_a_setting_restores_the_default(self):
+        marker.save(self.root, OLD)
+        marker.write(self.root, pending().up("b1", 50.0))
+        self.write(NO_SLAAC)
+        run = Recorder()
+        switch.revert(self.root, run)
+        self.assertIn(AUTOCONF_ON, run.calls)
+
+    def test_no_ipv6_settings_means_no_sysctl(self):
+        self.AUTOCONF = None
+        marker.save(self.root, OLD)
+        marker.write(self.root, pending().up("b1", 50.0))
+        run = Recorder()
+        switch.revert(self.root, run)
+        self.assertNotIn("sysctl", run.names())
+
+    def test_a_sysctl_that_fails_is_reported(self):
+        run = Recorder(fail={"sysctl": 1})
+        problem = self.change(NEW, run)
+        self.assertIn("sysctl failed", problem)
+
+    def test_the_boot_revert_writes_no_sysctl(self):
+        """Before networking at boot autoconf is the kernel's default: a
+        pre-up's sysctl -w is not persisted, and keel writes no sysctl.d"""
+        self.assertIsNone(self.change(NO_SLAAC, Recorder()))
+        run = Recorder()
+        worked, _ = switch.revert(self.root, run, boot=True)
+        self.assertTrue(worked)
+        self.assertEqual(run.calls, [])
+
+    def test_autoconf_is_read_from_proc(self):
+        proc = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, proc)
+        self.assertIsNone(READ_AUTOCONF("eth0.45", proc))
+        conf = join(proc, "proc/sys/net/ipv6/conf/eth0.45")
+        os.makedirs(conf)
+        for text, expected in (("0\n", "0"), ("1\n", "1"), ("7\n", None)):
+            with open(join(conf, "autoconf"), "w") as fob:
+                fob.write(text)
+            self.assertEqual(READ_AUTOCONF("eth0.45", proc), expected)
 
 
 def probes(boot="b1", addresses=(), via=None):

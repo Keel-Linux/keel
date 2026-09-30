@@ -608,6 +608,17 @@ write. The rules:
   inithooks older than that option renders the stanza without it, and
   the step is refused ("the installed inithooks cannot write slaac:
   false; update inithooks") rather than writing a file that keeps SLAAC.
+  An IPv4 nameserver the static inet6 stanza must carry is refused the
+  same way by an older library, with the same advice.
+- **SLAAC comes back with the file that keeps it.** Before `ifup` on a
+  file without `slaac: false`, in a change and in its revert, the
+  interface's IPv6 `autoconf` is set back to what it was before the
+  change (1 when the file being left is the one that turned it off).
+  ifupdown-ng runs no `post-down` for an interface whose `up` failed
+  after its `pre-up` ran, so without this a failed change would leave
+  SLAAC off, and an operator reaching the machine over it locked out,
+  until a reboot. The boot revert writes nothing: nothing of a `pre-up`
+  survives a reboot (docs/spec.md).
 - **The file is inithooks' own.** It is rendered by the functions of
   `/usr/lib/inithooks/lib/ipconfig.sh` that `01ipconfig` uses, from the
   same variables, so a first boot and a day two write the same file for

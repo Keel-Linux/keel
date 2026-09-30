@@ -232,8 +232,8 @@ class TestRender(unittest.TestCase):
         self.assertTrue(found.text.endswith(
             "iface ens18 inet6 static\n    hostname blog\n"
             "    address 2001:db8:1::20/64\n"
-            "    pre-up sysctl -q -w net.ipv6.conf.ens18.autoconf=0\n"
-            "    post-down sysctl -q -w net.ipv6.conf.ens18.autoconf=1\n"))
+            "    pre-up sysctl -q -w net/ipv6/conf/ens18/autoconf=0\n"
+            "    post-down sysctl -q -w net/ipv6/conf/ens18/autoconf=1\n"))
         self.assertIn(slaac_off("ens18"), found.text.splitlines())
 
     def test_slaac_kept_writes_no_sysctl(self):
@@ -377,11 +377,41 @@ class TestObserve(unittest.TestCase):
         self.assertIsNotNone(observe_network(
             self.root, {"network": STATIC}).rendered.text)
 
+    def test_an_old_library_refusing_an_ipv4_server_says_update(self):
+        library = join(self.root, LIBRARY)
+        with open(IPCONFIG) as src, open(library, "w") as dst:
+            dst.write(src.read().replace("ipconfig_check_dns6 \"$3\"",
+                                         "ipconfig_check_ip6 \"$3\"")
+                      .replace("ipconfig_check_dns6 \"$4\"",
+                               "ipconfig_check_ip6 \"$4\""))
+        declared = {"managed_by": "file", "interfaces": {"eth0": {
+            "ipv4": {"method": "dhcp"},
+            "ipv6": STATIC["interfaces"]["eth0"]["ipv6"]}},
+            "nameservers": ["2001:db8:1::53", "192.0.2.53"]}
+        found = observe_network(self.root, {"network": declared})
+        self.assertEqual(found.rendered.problem, (
+            "the installed inithooks cannot write the IPv4 nameserver"
+            " 192.0.2.53 in the static inet6 stanza; update inithooks"))
+        # with the current library it is written
+        shutil.copy(IPCONFIG, library)
+        found = observe_network(self.root, {"network": declared})
+        self.assertIn("dns-nameservers 2001:db8:1::53 192.0.2.53\n",
+                      found.rendered.text)
+
+    def test_other_render_problems_are_left_as_they_are(self):
+        self.assertEqual(
+            netstate.old_dns_check(Rendered(problem="x"), {
+                "IP6_DNS1": "192.0.2.53"}).problem, "x")
+        self.assertEqual(
+            netstate.old_dns_check(Rendered(problem="must be IPv6, not"
+                                            " IPv4"), {}).problem,
+            "must be IPv6, not IPv4")
+
     def test_an_undeclared_static_ipv6_keeps_its_slaac_off(self):
         self.interfaces(
             "auto eth0\niface eth0 inet dhcp\niface eth0 inet6 static\n"
             "    address 2001:db8:1::10/64\n"
-            "    pre-up sysctl -q -w net.ipv6.conf.eth0.autoconf=0\n")
+            "    pre-up sysctl -q -w net/ipv6/conf/eth0/autoconf=0\n")
         ipv4_only = {"managed_by": "file", "interfaces": {"eth0": {
             "ipv4": STATIC["interfaces"]["eth0"]["ipv4"]}}}
         found = observe_network(self.root, {"network": ipv4_only})

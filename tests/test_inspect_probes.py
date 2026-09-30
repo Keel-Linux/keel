@@ -318,8 +318,8 @@ class TestNetwork(unittest.TestCase):
         section, findings = self.probe(
             "iface ens18 inet6 static\n"
             "    address 2001:db8:1::10/64\n"
-            "    pre-up sysctl -q -w net.ipv6.conf.ens18.autoconf=0\n"
-            "    post-down sysctl -q -w net.ipv6.conf.ens18.autoconf=1\n"
+            "    pre-up sysctl -q -w net/ipv6/conf/ens18/autoconf=0\n"
+            "    post-down sysctl -q -w net/ipv6/conf/ens18/autoconf=1\n"
         )
         self.assertIs(section["interfaces"]["ens18"]["ipv6"]["slaac"], False)
         self.assertIn("without SLAAC",
@@ -327,8 +327,10 @@ class TestNetwork(unittest.TestCase):
 
     def test_slaac_is_read_by_its_words(self):
         for line, expected in (
-            ("pre-up /usr/sbin/sysctl -w net.ipv6.conf.eth0.autoconf=0",
+            ("pre-up /usr/sbin/sysctl -w net/ipv6/conf/eth0/autoconf=0",
              False),
+            ("pre-up sysctl -q -w net.ipv6.conf.eth0.autoconf=0", False),
+            ("pre-up sysctl -q -w net/ipv6/conf/eth1/autoconf=0", True),
             ("pre-up sysctl -q -w net.ipv6.conf.eth1.autoconf=0", True),
             ("pre-up sysctl -q -w net.ipv6.conf.eth0.autoconf=1", True),
             ("post-down sysctl -q -w net.ipv6.conf.eth0.autoconf=0", True),
@@ -346,7 +348,7 @@ class TestNetwork(unittest.TestCase):
     def test_slaac_is_reported_only_for_a_static_ipv6_stanza(self):
         section, _ = self.probe(
             "iface eth0 inet6 auto\n"
-            "    pre-up sysctl -q -w net.ipv6.conf.eth0.autoconf=0\n"
+            "    pre-up sysctl -q -w net/ipv6/conf/eth0/autoconf=0\n"
             "iface eth0 inet static\n    address 192.0.2.10/24\n"
         )
         self.assertNotIn("slaac", section["interfaces"]["eth0"]["ipv6"])

@@ -107,20 +107,30 @@ What "read" means per case:
   `dns-nameservers` only in a static stanza, two per stanza, and resolvconf
   takes them from any stanza whatever the server's family. So:
   - when one family is `static` and the other is not (or is not declared,
-    which leaves it dynamic), the static stanza carries every declared
-    server, in the spec's order, and the first two are kept: a spec that
-    lists `2001:db8:1::53` first with IPv4 static and IPv6 `auto` exports
-    `IP_DNS1=2001:db8:1::53`. A dynamic family's servers are never dropped
-    for being of the other family;
+    which leaves it dynamic), the static stanza carries servers of both
+    families, two of them, in the spec's order: the first server of each
+    family before a second of either. With IPv4 static, IPv6 `auto` and
+    `2001:db8:1::53`, `2001:db8:2::53`, `192.0.2.53` declared, the stanza
+    gets `2001:db8:1::53 192.0.2.53`: an upstream of one family that fails
+    still leaves a resolver of the other, which matters because `inet6
+    auto` adds none to resolv.conf. The price is said here: the static
+    family's own second server can be the one left out, as `192.0.2.54`
+    would be after `192.0.2.53` and `2001:db8:1::53`;
   - when both are static, or neither, they are split by family: the first
     two IPv4 addresses become `IP_DNS1` and `IP_DNS2`, the first two IPv6
     addresses `IP6_DNS1` and `IP6_DNS2`. With neither static the file holds
     none of them.
 
-  A server beyond those two is not written. `apply --system` names every
-  declared server the file cannot hold ([docs/apply.md](apply.md)).
-  `IP6_*` variables are exported only when an interface declares an `ipv6`
-  block.
+  A server left out is never dropped in silence: `keel spec apply` warns
+  with the servers the file will not hold, and `apply --system` names them
+  in its plan ([docs/apply.md](apply.md)). `IP6_*` variables are exported
+  only when an interface declares an `ipv6` block.
+
+  At first boot the conf is written by inithooks' own reader
+  (`00declarative`), not by keel, and that reader exports no `IP6_*`
+  variable and refuses `ipv6.method: static` with `managed_by: file`; so
+  what this section says about IPv6 in the conf applies to `keel spec
+  apply` and to `apply --system` on a running machine.
 
 | Spec value | Conf variables |
 | --- | --- |
@@ -150,18 +160,33 @@ iface eth0 inet6 static
     hostname blog
     address 2001:db8:1::10/64
     gateway fe80::1
-    pre-up sysctl -q -w net.ipv6.conf.eth0.autoconf=0
-    post-down sysctl -q -w net.ipv6.conf.eth0.autoconf=1
+    pre-up sysctl -q -w net/ipv6/conf/eth0/autoconf=0
+    post-down sysctl -q -w net/ipv6/conf/eth0/autoconf=1
 ```
 
 `accept_ra` stays on, so the routes the router advertises are kept;
 ifupdown-ng has no option of its own for this (its `ipv6-ra` setting
-toggles `accept_ra`, which would drop them). The lines are written by
-inithooks' `lib/ipconfig.sh` from `IP6_SLAAC=no`, at first boot and on a
-running machine alike; an inithooks older than that option cannot write
-them, and `apply --system` then refuses instead of writing a file that
+toggles `accept_ra`, which would drop them). The key is written with
+slashes, so an interface name with a dot (a VLAN such as `eth0.45`) stays
+one part of it. The lines are written by inithooks' `lib/ipconfig.sh` from
+`IP6_SLAAC=no`, by `01ipconfig` from a conf `keel spec apply` rendered and
+by `apply --system` on a running machine; inithooks' first boot reader
+accepts the field but, as said above, does not render static IPv6 for a
+file managed network yet. An inithooks older than the option cannot write
+the lines, and `apply --system` then refuses instead of writing a file that
 keeps SLAAC. `slaac` with any other method is a validation error: `auto`
 and `dhcp` already take the advertisements, and `manual` configures nothing.
+
+A change on a running machine, and its revert, give the interface's
+`autoconf` setting back before `ifup` on a file that keeps SLAAC: the
+value it had before the change, or 1 when the file being left is the one
+that turned it off. ifupdown-ng runs `post-down` only for an interface it
+recorded as up, and it records that only after `post-up`, so a file whose
+`pre-up` ran and whose `up` then failed would otherwise leave SLAAC off
+until a reboot. The `sysctl -w` of `pre-up` is not persisted and keel
+writes nothing under `sysctl.d`, so a reboot starts from the kernel's
+default (or the image's own `sysctl.d`), and the boot revert, which runs
+before networking, writes nothing.
 
 ### auto and dhcp are two things
 
@@ -230,8 +255,12 @@ the same rules as the spec (an IPv6 address, a prefix length on `IP6_ADDRESS`,
 no multicast, loopback or link local address as the address itself; a
 nameserver of either family), so a value the spec accepted is never rejected
 at first boot. An IPv4 nameserver in `IP6_DNS*`, which a static IPv6 beside
-IPv4 on DHCP exports, needs an inithooks that accepts it (2.3.6+keel9 or
-later); an older hook stops the first boot with a fatal error naming it.
+IPv4 on DHCP exports, and `IP6_SLAAC` need an inithooks that reads them
+(2.3.6+keel9 or later): an older `01ipconfig` stops with a fatal error on
+the first, before it touches the file, so the image's file stays and the
+declared address is not applied, and it ignores the second. The keel
+package therefore declares `Breaks: inithooks (<< 2.3.6+keel9~)`: it does
+not depend on inithooks, but it cannot be installed beside an older one.
 
 ## tls
 

@@ -1,4 +1,4 @@
-# Copied from Keel-Linux/inithooks lib/ipconfig.sh at 95b8b88, for
+# Copied from Keel-Linux/inithooks lib/ipconfig.sh at d46c106, for
 # keel.network.render's tests; the package runs the installed copy.
 # Decisions and rendering for firstboot.d/01ipconfig.
 #
@@ -230,8 +230,10 @@ ipconfig_render_static6() {
 # which would also drop the router's routes), so autoconf is set in the
 # pre-up phase, before the address, and given back when the stanza goes
 # down, so bringing the interface up on another file restores SLAAC.
+# The key is written with slashes, which sysctl reads as a path, so an
+# interface name with a dot (a VLAN such as eth0.45) stays one component.
 ipconfig_render_slaac6() {
     [[ "$2" == "no" ]] || return 0
-    echo "    pre-up sysctl -q -w net.ipv6.conf.$1.autoconf=0"
-    echo "    post-down sysctl -q -w net.ipv6.conf.$1.autoconf=1"
+    echo "    pre-up sysctl -q -w net/ipv6/conf/$1/autoconf=0"
+    echo "    post-down sysctl -q -w net/ipv6/conf/$1/autoconf=1"
 }

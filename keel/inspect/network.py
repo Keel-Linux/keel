@@ -134,17 +134,28 @@ def slaac_enabled(stanza: Stanza) -> bool:
     """False when the stanza turns autoconf off before it comes up
 
     The option lib/ipconfig.sh writes for IP6_SLAAC=no (keel#45),
-    `pre-up sysctl -q -w net.ipv6.conf.IFACE.autoconf=0`, read by its
-    words, so other spacing, other flags or a full path to sysctl still
-    count. Without it a static inet6 stanza keeps SLAAC, as ifupdown-ng
-    leaves it.
+    `pre-up sysctl -q -w net/ipv6/conf/IFACE/autoconf=0`, read by its
+    words, so other spacing, other flags, a full path to sysctl or the
+    dotted form of the key still count. Without it a static inet6 stanza
+    keeps SLAAC, as ifupdown-ng leaves it.
     """
-    setting = f"net.ipv6.conf.{stanza.iface}.autoconf=0"
+    settings = (f"net/ipv6/conf/{stanza.iface}/autoconf=0",
+                f"net.ipv6.conf.{stanza.iface}.autoconf=0")
     return not any(
         len(fields) > 2 and fields[0] == "pre-up"
         and fields[1].rsplit("/", 1)[-1] == "sysctl"
-        and setting in fields[2:]
+        and any(setting in fields[2:] for setting in settings)
         for fields in stanza.options
+    )
+
+
+def slaac_off_in(text: str, iface: str) -> bool:
+    """Whether an interfaces file turns SLAAC off on `iface`"""
+    stanzas, _ = parse_interfaces(text)
+    return any(
+        one.iface == iface and one.family == "inet6"
+        and not slaac_enabled(one)
+        for one in stanzas
     )
 
 

@@ -298,10 +298,11 @@ class TestRoundTrip(unittest.TestCase):
         )
         self.assertEqual(env["IP_CONFIG"], "static")
         self.assertEqual(env["IP_ADDRESS"], "192.0.2.10")
-        # IPv6 is dynamic, so the static inet stanza carries the first two
-        # nameservers in the spec's order, IPv6 first (keel#45)
+        # IPv6 is dynamic, so the static inet stanza carries the servers
+        # of both families, the first of each before a second of either
+        # (keel#45): 2001:db8:1::54 is the one left out
         self.assertEqual(env["IP_DNS1"], "2001:db8:1::53")
-        self.assertEqual(env["IP_DNS2"], "2001:db8:1::54")
+        self.assertEqual(env["IP_DNS2"], "192.0.2.53")
         self.assertEqual(env["IP6_CONFIG"], "dhcp")
         self.assertNotIn("IP6_DNS1", env)
         self.assertNotIn("IP6_ADDRESS", env)

@@ -9,7 +9,11 @@ from os.path import join
 from helpers import doc, env, errors, spec
 
 from keel.spec.fields import is_ipv4, is_ipv6  # noqa: E402
-from keel.spec.render import nameserver_env  # noqa: E402
+from keel.spec.render import (  # noqa: E402
+    nameserver_env,
+    one_of_each,
+    unwritten_nameservers,
+)
 
 
 class TestMapping(unittest.TestCase):
@@ -269,6 +273,42 @@ class TestNetworkMapping(unittest.TestCase):
         ])
         self.assertEqual(exported["IP6_DNS1"], "2001:db8:1::53")
         self.assertEqual(exported["IP6_DNS2"], "192.0.2.53")
+
+    def test_one_of_each_keeps_a_resolver_of_each_family(self):
+        """keel#45 review: IPv6 listed first must not push every IPv4
+        server out, since inet6 auto adds no resolver to resolv.conf"""
+        for servers, kept in (
+            (["2001:db8:1::53", "2001:db8:2::53", "192.0.2.53"],
+             ["2001:db8:1::53", "192.0.2.53"]),
+            (["192.0.2.53", "192.0.2.54", "2001:db8:1::53"],
+             ["192.0.2.53", "2001:db8:1::53"]),
+            (["2001:db8:1::53", "2001:db8:2::53", "2001:db8:3::53"],
+             ["2001:db8:1::53", "2001:db8:2::53"]),
+            (["192.0.2.53"], ["192.0.2.53"]),
+            ([], []),
+        ):
+            with self.subTest(servers=servers):
+                self.assertEqual(one_of_each(servers), kept)
+
+    def test_unwritten_nameservers_names_what_the_file_cannot_hold(self):
+        def network(ipv4, ipv6, servers, managed_by="file"):
+            return {"managed_by": managed_by, "interfaces": {"eth0": {
+                "ipv4": ipv4, "ipv6": ipv6}}, "nameservers": servers}
+        static4 = {"method": "static", "address": "192.0.2.10/24"}
+        static6 = {"method": "static", "address": "2001:db8:1::10/64"}
+        servers = ["2001:db8:1::53", "2001:db8:2::53", "192.0.2.53"]
+        for ipv4, ipv6, lost in (
+            (static4, {"method": "auto"}, ["2001:db8:2::53"]),
+            (static4, static6, []),
+            ({"method": "dhcp"}, {"method": "auto"}, servers),
+            (None, {"method": "auto"}, servers),
+        ):
+            with self.subTest(ipv4=ipv4, ipv6=ipv6):
+                self.assertEqual(unwritten_nameservers(
+                    network(ipv4, ipv6, servers)), lost)
+        self.assertEqual(unwritten_nameservers(network(
+            static4, None, servers, managed_by="host")), [])
+        self.assertEqual(unwritten_nameservers(None), [])
 
     def test_nameserver_env_places_servers_by_the_static_stanza(self):
         servers = ["2001:db8:1::53", "192.0.2.53", "2001:db8:2::53",

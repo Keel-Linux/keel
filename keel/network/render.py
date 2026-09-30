@@ -66,7 +66,7 @@ def slaac_off(iface: str) -> str:
     SCRIPT above does not fail for its absence: the caller looks for this
     line instead, and refuses a file that would silently keep SLAAC.
     """
-    return f"    pre-up sysctl -q -w net.ipv6.conf.{iface}.autoconf=0"
+    return f"    pre-up sysctl -q -w net/ipv6/conf/{iface}/autoconf=0"
 
 
 @dataclass(frozen=True)

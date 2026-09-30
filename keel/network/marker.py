@@ -28,6 +28,7 @@ DIR_MODE = 0o700
 FILE_MODE = 0o600
 BOOT_ID = "proc/sys/kernel/random/boot_id"
 UPTIME = "proc/uptime"
+AUTOCONF = "proc/sys/net/ipv6/conf/{iface}/autoconf"
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,9 @@ class Pending:
     the new file declares; `gateways` the new gateways and `old_gateways`
     the ones they replaced, so confirm can say whether it tested them.
     `changed_at` is None until the interface is up on the new file.
+    `autoconf` is the interface's IPv6 autoconf setting when no file of
+    keel turns SLAAC off, read before the change (keel.network.switch
+    writes it back), or None when the interface has no IPv6 settings.
     """
 
     iface: str
@@ -49,6 +53,7 @@ class Pending:
     old_gateways: tuple[str, ...] = ()
     boot_id: str | None = None
     changed_at: float | None = None
+    autoconf: str | None = None
 
     def up(self, boot_id: str, uptime: float) -> "Pending":
         return replace(self, boot_id=boot_id, changed_at=uptime)
@@ -91,6 +96,7 @@ def read(root: str) -> Pending | None:
             old_gateways=tuple(data.get("old_gateways") or ()),
             boot_id=data.get("boot_id"),
             changed_at=data.get("changed_at"),
+            autoconf=data.get("autoconf"),
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -146,6 +152,16 @@ def boot_id(proc_root: str = "/") -> str | None:
             return fob.read().strip() or None
     except OSError:
         return None
+
+
+def autoconf(iface: str, proc_root: str = "/") -> str | None:
+    """The interface's IPv6 autoconf setting now, or None without one"""
+    try:
+        with open(path(proc_root, AUTOCONF.format(iface=iface))) as fob:
+            value = fob.read().strip()
+    except OSError:
+        return None
+    return value if value in ("0", "1") else None
 
 
 def uptime(proc_root: str = "/") -> float | None:
