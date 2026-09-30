@@ -210,6 +210,30 @@ exit 13, with that reason), runs the system phase, and diffs again
 (`same`, exit 0), then checks that editing the file behind the spec is
 `drift` and not an excused field.
 
+## The appliance sections
+
+Handbook decision 0041 (docs/spec.md, "appliance, installation and
+overlays"). `appliance.name` is compared with the one installed
+appliance manifest no other is built on, as inspect reads it. The rest
+is compared with the machine directly, by the code apply uses, and
+listed after every other section:
+
+| Line | Declared | Observed |
+| --- | --- | --- |
+| `overlays.<name>` | `enabled` or `disabled` | from systemd (`is-enabled`, `is-active`; under `--root`, the `.wants` links): `enabled` when every unit of the overlay is enabled and runs, `disabled` when none is enabled and none runs, and otherwise each unit's state, which is drift |
+| `derived.monit` | the Monit file apply renders from the manifests and the spec | `/etc/keel/monit/keel-manifest.conf`, compared whole: absent, or a file that differs (a hand edit, or an overlay turned on or off behind the spec), is drift |
+| `derived.monit.included` | `monitor.enabled` | whether `/etc/monit/conf.d/keel-manifest.conf` is keel's link to that file |
+
+Not compared: `installation`, chosen once and recorded nowhere on the
+machine; an overlay that runs no unit (the installer, WireGuard), which
+has nothing in systemd to say whether it is on; and the include while
+the spec has no `monitor` section, which apply leaves as it is.
+
+```
+overlays.crowdsec: drift (declared enabled, observed crowdsec.service enabled and active, crowdsec-firewall-bouncer.service disabled and inactive)
+derived.monit: drift (declared the file apply renders from the manifests, observed a file that differs from it)
+```
+
 ## The database section
 
 Compared like every other observed section, with three rules of its own.
@@ -415,7 +439,10 @@ It never exits 3 because of a secret file.
 
 ## Tests
 
-`tests/test_diff_database.py` covers the database section: the role, the
+`tests/test_appliance_cli.py` covers the appliance sections: the states
+and the derived file after every apply of CrowdSec disabled, enabled and
+disabled, a unit turned off by hand, a hand edit of the file, and the
+include. `tests/test_diff_database.py` covers the database section: the role, the
 warning on the drift that must never be corrected, the fields another role
 has no use for, and the set comparison that never resolves a name.
 `tests/test_diff.py` covers the model and the comparison as pure

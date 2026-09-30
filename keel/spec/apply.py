@@ -125,4 +125,10 @@ def unsupported(doc: dict, system: bool = False) -> list[str]:
             "monitor: monit's configuration is written by the system phase"
             " (--system, --system-only) only, not in this run"
         )
+    if doc.get("appliance"):
+        messages.append(
+            "overlays: the units and Monit's file of the appliance are"
+            " converged by the system phase (--system, --system-only)"
+            " only, not in this run"
+        )
     return messages

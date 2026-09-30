@@ -22,6 +22,7 @@ from keel.inspect.ipv6 import Runtime
 from keel.inspect.locale import probe_locale
 from keel.inspect.monitor import monit_cycle, probe_monitor
 from keel.inspect.network import probe_network
+from keel.inspect.overlays import probe_appliance_sections
 from keel.inspect.report import Finding, Inspection
 from keel.inspect.secrets import probe_hub, probe_secrets
 from keel.inspect.security import probe_security
@@ -127,6 +128,11 @@ def inspect_root(
                                    monit_cycle(tree))
     findings += found
     _add(spec, "monitor", monitor)
+
+    sections, found = probe_appliance_sections(tree)
+    findings += found
+    for key, section in sections.items():
+        _add(spec, key, section)
 
     # The channel this instance follows is not part of the spec: it is
     # not something an operator declares, it is what the machine was

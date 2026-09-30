@@ -46,7 +46,7 @@ version: 1
 
 The other top level keys are `instance`, `network`, `tls`, `secrets`, `app`,
 `hub`, `security`, `first_login_wizard`, `preseed`, `users`, `locale`,
-`database` and `monitor`, each optional and each a mapping except `first_login_wizard`. A file with `version: 1` and nothing else is valid and renders to an
+`database`, `monitor`, `appliance`, `installation` and `overlays`, each optional and each a mapping except `first_login_wizard`. A file with `version: 1` and nothing else is valid and renders to an
 empty conf.
 
 ## instance
@@ -394,6 +394,12 @@ secrets:
 `first_login_wizard` is true, because otherwise nobody can ever log in with
 the generated value.
 
+A spec that names an appliance also accepts every secret its manifests
+declare (see "appliance, installation and overlays"), rendered as
+`KEEL_SECRET_<NAME>`, the name upper cased, and masked like the three
+above; `generate: true` is refused for one whose manifest says `generate:
+never`, since a person must choose it. Any other name is an error.
+
 Values are shell quoted, so a password containing spaces, quotes or `$`
 survives being sourced.
 
@@ -443,7 +449,7 @@ app:
 | --- | --- | --- | --- |
 | `app.email` | read | `APP_EMAIL` | |
 | `app.domain` | read | `APP_DOMAIN` | |
-| `app.options.<key>` | read | `APP_<KEY>` | The key is upper cased and prefixed. It must be a valid shell variable name. This is where appliance specific inithook parameters go |
+| `app.options.<key>` | read | `APP_<KEY>` | The key is upper cased and prefixed. It must be a valid shell variable name. This is where appliance specific inithook parameters go. In a spec that names an appliance the keys are the options its manifests declare, each of its declared type (`string`, matching its `pattern` when there is one; `integer`; `boolean`; `enum`, one of its `values`), and an option declared without a default must be given |
 
 ## hub
 
@@ -839,6 +845,57 @@ configuration, an argument vector or a line of output.
 file, and never the channels: a URL can be a credential, so diff neither
 compares nor repeats them, not even in its JSON ([docs/diff.md](diff.md)).
 Without `--system`, `apply` warns that the section was left alone.
+
+## appliance, installation and overlays
+
+What this machine runs, as the appliance manifests of handbook decision
+0041 describe it (docs/manifest-v1.md in the handbook; docs/manifest.md
+here). The manifest holds the facts (which overlays an appliance
+carries, their default in each mode, what each runs and listens on); the
+spec holds this machine's choices.
+
+```yaml
+appliance:
+  name: core
+installation:
+  mode: simple              # simple, cloud_simple or cloud_advanced (0028)
+overlays:                   # every overlay of the chain, written out (0027)
+  installer: enabled
+  wireguard: disabled
+  etcd: disabled
+  crowdsec: disabled
+```
+
+| Field | State | Notes |
+| --- | --- | --- |
+| `appliance.name` | system | The appliance manifest this machine runs, `[a-z][a-z0-9-]*`, at most 32 characters. It must be installed under `/usr/share/keel/appliances/` of the root the command works on, valid, and resolve along its `base` chain |
+| `installation.mode` | read | `simple`, `cloud_simple` or `cloud_advanced`. Chosen once, at installation: it picks the column of defaults the installer starts from, and nothing converges it. Moving a machine between modes is out of scope |
+| `overlays.<name>` | system | `enabled` or `disabled`, for every overlay of the resolved chain, none left out and none added. `apply --system` enables and starts, or stops and disables, the overlay's units, and derives Monit's checks from what is enabled ([docs/apply.md](apply.md)) |
+
+The words are `enabled` and `disabled`: YAML reads an unquoted `on`,
+`off`, `yes` or `no` as a boolean, and such a value is refused with that
+reason. `ask` is the manifest's, a question the installer asks, and never
+reaches a spec. `overlays` without `appliance` is an error.
+
+**Held against the manifests** (rules 25 to 27 of the format). A spec
+that names an appliance is checked against the manifests installed under
+the root of the command: `/` for `spec validate`, `spec render` and
+`network wireguard key`, `--root` for `spec validate --root`, `apply`,
+`diff` and `database promote`. The appliance must be installed and
+resolve; `overlays` names exactly the overlays of the chain; an `enabled`
+overlay has every overlay it `requires` enabled; a secret is one of the
+three above or a name a manifest declares, and `generate: true` is
+refused where the manifest says `never`; `app.options` are declared
+options of their type, a required one present. A spec that names no
+appliance is checked as before, and needs no manifest at all.
+
+`keel inspect` writes `appliance.name` from the one installed appliance
+manifest no other is built on, the overlays that own units from systemd,
+and `installation.mode` and the overlays without a unit from the spec the
+installer emitted at `/etc/keel/instance.yaml`, reporting them as not
+inferred otherwise. `keel diff` compares the name, each overlay's state
+with systemd, and Monit's derived file with what apply renders
+([docs/diff.md](diff.md)).
 
 ## Not in the spec yet
 

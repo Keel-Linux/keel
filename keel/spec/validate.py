@@ -18,7 +18,6 @@ from typing import Any
 from keel.spec.compat import canonical
 from keel.spec.constants import (
     SCHEMA_VERSION,
-    SECRET_VARS,
     TOP_LEVEL_KEYS,
     WIZARD_ONLY_GENERATE,
 )
@@ -29,6 +28,13 @@ from keel.spec.fields import (
     list_error,
     mapping_error,
 )
+from keel.spec.validate_appliance import (
+    ManifestFacts,
+    against_manifests,
+    allowed_secret,
+    unknown_secret,
+    validate_appliance,
+)
 from keel.spec.validate_database import validate_database
 from keel.spec.validate_extras import validate_locale, validate_users
 from keel.spec.validate_monitor import validate_monitor
@@ -36,11 +42,18 @@ from keel.spec.validate_network import validate_network
 from keel.spec.validate_secret import validate_secret
 
 
-def validate(doc: dict, *, check_secret_files: bool = True) -> list[str]:
+def validate(doc: dict, *, check_secret_files: bool = True,
+             facts: ManifestFacts | None = None) -> list[str]:
     """Return a list of error messages, empty when the document is valid
 
     With `check_secret_files` false, a `file:` secret reference is still
     checked for structure, but the file itself is not looked at.
+
+    `facts` are what the manifests of the spec's appliance declare
+    (keel.manifest.facts), which a caller that knows the root gathers:
+    with them the spec is also held against the manifests, rules 25 to
+    27 of the format, and a secret a manifest declares is a known name.
+    Without them only the structure of the three sections is checked.
 
     The document is canonicalised first (keel.spec.compat), so a spec
     that still uses a deprecated field name is validated under the name
@@ -57,7 +70,7 @@ def validate(doc: dict, *, check_secret_files: bool = True) -> list[str]:
             errors.append(f"{key}: unknown top level key")
 
     errors.extend(_validate_instance(doc.get("instance")))
-    errors.extend(_validate_secrets(doc, check_secret_files))
+    errors.extend(_validate_secrets(doc, check_secret_files, facts))
     errors.extend(_validate_app(doc.get("app")))
     errors.extend(_validate_hub(doc.get("hub"), check_secret_files))
     errors.extend(_validate_security(doc.get("security")))
@@ -73,6 +86,8 @@ def validate(doc: dict, *, check_secret_files: bool = True) -> list[str]:
     errors.extend(validate_monitor(
         doc.get("monitor"), doc.get("security"), check_secret_files
     ))
+    errors.extend(validate_appliance(doc))
+    errors.extend(against_manifests(doc, facts))
     return errors
 
 
@@ -93,7 +108,8 @@ def _validate_instance(instance: Any) -> list[str]:
     return errors
 
 
-def _validate_secrets(doc: dict, check_secret_files: bool) -> list[str]:
+def _validate_secrets(doc: dict, check_secret_files: bool,
+                      facts: ManifestFacts | None) -> list[str]:
     declared = doc.get("secrets")
     error = mapping_error("secrets", declared)
     if error or not declared:
@@ -103,8 +119,8 @@ def _validate_secrets(doc: dict, check_secret_files: bool) -> list[str]:
     errors = []
     for name, spec in declared.items():
         key = f"secrets.{name}"
-        if name not in SECRET_VARS:
-            errors.append(f"{key}: unknown secret")
+        if not allowed_secret(name, facts):
+            errors.append(unknown_secret(key, facts))
             continue
         errors.extend(validate_secret(key, spec, check_secret_files))
         if not isinstance(spec, dict):

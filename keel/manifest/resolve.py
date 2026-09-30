@@ -66,6 +66,12 @@ class Resolved:
     application: Owned | None
 
 
+def overlay_units(resolved: Resolved, overlay: str) -> tuple[str, ...]:
+    """The units of an overlay's processes, in its manifest's order"""
+    return tuple(owned.item["unit"] for owned in resolved.processes
+                 if owned.overlay == overlay)
+
+
 def application_of(doc: dict) -> dict:
     """The application sections a manifest declares, hooks.migrate too"""
     found = {key: doc[key] for key in APP_SECTIONS if key in doc}

@@ -354,6 +354,52 @@ class TestMessage(unittest.TestCase):
                                       environ, *direction)
             self.assertEqual(notify.headline(event), expected, args)
 
+    def test_a_manifest_check_names_its_unit_and_what_to_look_at(self):
+        """Decision 0041: the checks of the manifests tell through notify"""
+        event = notify.event_from(
+            "critical", "service", "crowdsec-lapi", "",
+            {"MONIT_SERVICE": "keel-check-crowdsec-lapi",
+             "MONIT_DESCRIPTION": "failed protocol test [DEFAULT]"},
+            unit="crowdsec.service")
+        message = self.compose(event, "core", "", True, probe_from({}))
+        self.assertEqual(message.text.splitlines(), [
+            "core: crowdsec-lapi fails its check (crowdsec.service).",
+            "Monit restarts it through systemd where its manifest says"
+            " restart. Look at why:",
+            "  systemctl status crowdsec.service",
+            "  journalctl -u crowdsec.service -n 50",
+            "monit: failed protocol test [DEFAULT]",
+        ])
+        self.assertEqual(message.title,
+                         "[critical] core: service crowdsec-lapi")
+
+    def test_a_restart_loop_says_monit_stopped_and_how_to_resume(self):
+        event = notify.event_from(
+            "critical", "restarts", "crowdsec", "",
+            {"MONIT_SERVICE": "keel-unit-crowdsec"}, unit="crowdsec.service")
+        message = self.compose(event, "core", "", True, probe_from({}))
+        self.assertEqual(message.text.splitlines(), [
+            "core: crowdsec still fails after the restarts its manifest"
+            " allows; monit stopped watching it (crowdsec.service).",
+            "Look at why:",
+            "  systemctl status crowdsec.service",
+            "  journalctl -u crowdsec.service -n 50",
+            "Once it runs, watch it again: monit monitor keel-unit-crowdsec",
+        ])
+
+    def test_a_check_without_a_unit_and_its_recovery(self):
+        event = notify.event_from("critical", "service", "waf-blocks", "",
+                                  {})
+        message = self.compose(event, "web", "", True, probe_from({}))
+        self.assertEqual(message.text.splitlines(), [
+            "web: waf-blocks fails its check.",
+            "keel manifest show --resolved says what it asks.",
+        ])
+        recovery = notify.event_from("recovery", "service", "waf-blocks",
+                                     "", {})
+        self.assertEqual(notify.headline(recovery),
+                         "waf-blocks passes its check again.")
+
     def test_process_details_for_memory_and_none_for_the_network(self):
         memory = self.compose(self.event("warn", "memory", "", "85"),
                               "blog", "", True, probe_from(self.PROBE))
@@ -790,6 +836,19 @@ class TestCommand(ChannelTestCase):
         hook = json.loads(hook_request[2])
         self.assertEqual((hook["check"], hook["level"], hook["value"]),
                          ("disk", "critical", "92.3"))
+
+    def test_a_manifest_check_as_monit_runs_it(self):
+        path = self.write_settings(dict(self.doc(
+            webhook={"url": f"{self.server.url}/hook"}), host="core"))
+        code, out, err = self.notify(path, "--check", "service", "--name",
+                                     "crowdsec-lapi", "--unit",
+                                     "crowdsec.service")
+        self.assertEqual((code, out, err), (exits.OK, "webhook: sent\n", ""))
+        hook = json.loads(self.server.requests[0][2])
+        self.assertEqual((hook["check"], hook["target"]),
+                         ("service", "crowdsec-lapi"))
+        self.assertIn("core: crowdsec-lapi fails its check"
+                      " (crowdsec.service).", hook["text"])
 
     def test_every_channel_failing_is_the_last_resort_and_22(self):
         path = self.write_settings(self.doc(

@@ -10,9 +10,16 @@ import ipaddress
 import shlex
 from typing import Any
 
-from keel.spec.constants import KEYWORDS, MASK, MASKED_VARS, SECRET_VARS
+from keel.spec.constants import (
+    KEYWORDS,
+    MANIFEST_SECRET_PREFIX,
+    MASK,
+    MASKED_VARS,
+    SECRET_VARS,
+)
 from keel.spec.fields import is_ipv4, is_ipv6
 from keel.spec.runtime import managed_by
+from keel.spec.secretstore import secret_names
 
 MAX_NAMESERVERS = 2
 # ifupdown has no SLAAC method of its own: `inet6 dhcp` is what the hook
@@ -31,6 +38,9 @@ def render_env(doc: dict, secrets: dict[str, str]) -> str:
 
     for var in SECRET_VARS.values():
         _set(env, var, secrets.get(var))
+    for var, value in secrets.items():
+        if var.startswith(MANIFEST_SECRET_PREFIX):
+            _set(env, var, value)
 
     app = doc.get("app") or {}
     _set(env, "APP_EMAIL", app.get("email"))
@@ -68,7 +78,8 @@ def mask(text: str) -> str:
     masked = []
     for line in text.splitlines():
         key, _, value = line[len("export "):].partition("=")
-        if key in MASKED_VARS and value not in KEYWORDS:
+        secret = key in MASKED_VARS or key.startswith(MANIFEST_SECRET_PREFIX)
+        if secret and value not in KEYWORDS:
             line = f"export {key}={MASK}"
         masked.append(line)
     return "".join(f"{line}\n" for line in masked)
@@ -80,10 +91,7 @@ def masked_secrets(doc: dict) -> dict[str, str]:
     Rendering for display must never read or generate a secret, so the
     caller passes these instead of the real values.
     """
-    declared = doc.get("secrets") or {}
-    secrets = {
-        var: MASK for name, var in SECRET_VARS.items() if name in declared
-    }
+    secrets = {var: MASK for var in secret_names(doc).values()}
     if isinstance((doc.get("hub") or {}).get("api_key"), dict):
         secrets["HUB_APIKEY"] = MASK
     return secrets

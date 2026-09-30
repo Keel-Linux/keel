@@ -120,6 +120,7 @@ def build_parser() -> argparse.ArgumentParser:
         " the file exists with the right owner and mode; for a machine"
         " that does not hold the secrets (default: check the files)",
     )
+    add_root_option(validate_parser, "read the appliance manifests of")
     _add_spec_action(
         spec_actions, "render",
         "print the conf that apply would write, secrets masked",
@@ -575,6 +576,15 @@ def add_notify_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--iface", default="", metavar="NAME",
         help="the interface, for link and throughput",
+    )
+    parser.add_argument(
+        "--name", default="", metavar="NAME",
+        help="the process or check of the appliance manifests, for service"
+        " and restarts",
+    )
+    parser.add_argument(
+        "--unit", default="", metavar="UNIT",
+        help="the systemd unit that process or check belongs to",
     )
     parser.add_argument(
         "--threshold", default="", metavar="N",

@@ -32,7 +32,7 @@ from keel.spec.origins import canonical as canonical_origin
 
 OBSERVED_SECTIONS = (
     "instance", "network", "tls", "security", "hub", "users", "locale",
-    "database", "monitor",
+    "database", "monitor", "appliance",
 )
 NOT_COMPARED_REASONS = {
     "secrets": "values are never read, on either side",
@@ -42,6 +42,8 @@ NOT_COMPARED_REASONS = {
     " running machine",
     "preseed": "raw hook variables that leave no trace on the running"
     " machine",
+    "installation": "the mode is chosen once, at installation, and"
+    " nothing on the machine records it (decision 0041)",
 }
 SECRET_REASON = "a secret reference; values are never read"
 # Where a secret reference can stand outside the `secrets` section. Each is

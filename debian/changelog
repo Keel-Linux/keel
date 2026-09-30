@@ -1,3 +1,41 @@
+keel (0.13.0) unstable; urgency=medium
+
+  * The instance spec gains appliance, installation and overlays (decision
+    0041, step 3 of its first implementation). A spec that names an
+    appliance is held against the manifests installed under the root:
+    every overlay of the resolved chain is written out, enabled or
+    disabled, and the requires of an enabled overlay are enabled (rule
+    25); a secret a manifest declares is a known name, rendered as
+    KEEL_SECRET_<NAME>, and generate is refused where the manifest says
+    never (rule 26); app.options are the declared options, of their
+    type, with every required one present (rule 27). on, off and ask are
+    refused with the reason. spec validate takes --root.
+  * apply --system converges each overlay's units: enabled enables and
+    starts them, disabled stops and disables them, in requires order.
+    Nothing is masked or unmasked; a masked unit is refused. CrowdSec's
+    identity is made on its first enable (tracker#47): cscli machines
+    add, an empty online_api_credentials.yaml, cscli capi register, whose
+    failure offline is said and survived since the local API runs
+    without it, and cscli bouncers add, whose key goes from its standard
+    output to the bouncer's .local file, mode 0600, and nowhere else. No
+    identity is made under --root. The bouncer always runs in nftables
+    mode: its iptables mode, which the Debian postinst picks under
+    TurnKey's iptables-legacy, needs ipset, which nothing installs.
+  * apply --system writes Monit's checks derived from the manifests to
+    /etc/keel/monit/keel-manifest.conf: the appliance's own processes and
+    checks and those of every enabled overlay, restarted through systemd
+    within each process's restart limit, and told through keel notify,
+    whose new checks service and restarts name the unit and where to
+    look. The file is always written and included from /etc/monit/conf.d
+    only while monitor.enabled is true, then checked with monit -t and
+    monit reloaded.
+  * inspect writes appliance.name, installation.mode (from the spec the
+    installer emitted) and the overlays' states from systemd. diff
+    compares the states with systemd and the derived Monit file and its
+    include with what apply renders, so a hand edit of either is drift.
+
+ -- Marcos Mendez <mendez.foto@gmail.com>  Wed, 30 Sep 2026 20:00:00 +0000
+
 keel (0.12.0) unstable; urgency=medium
 
   * New module keel.manifest and commands keel manifest validate and keel

@@ -14,7 +14,9 @@ from keel.inspect import constants as paths
 from keel.inspect.accounts import passwd_entries
 from keel.inspect.tree import Tree
 from keel.system.actions import (
+    AddBouncer,
     AdoptKey,
+    Attempt,
     Change,
     GenerateKey,
     LockReplica,
@@ -24,13 +26,14 @@ from keel.system.actions import (
     Run,
     RunSql,
     SeedReplica,
+    SetBouncerMode,
     Symlink,
     SwitchNetwork,
     UnlockAccounts,
     WriteFile,
 )
 from keel.network import marker, switch, wgkeys
-from keel.system import dbreadonly, dbseed
+from keel.system import crowdsec, dbreadonly, dbseed
 
 NOT_RUNNABLE = 127
 
@@ -42,8 +45,12 @@ class Effects:
     def apply(self, action: Change) -> str | None:
         """Carry out one action; None on success, else what went wrong"""
         try:
-            if isinstance(action, Run):
+            if isinstance(action, Run | Attempt):
                 return self.run(action.argv)
+            if isinstance(action, AddBouncer):
+                return crowdsec.add_bouncer(self.tree.root, action)
+            if isinstance(action, SetBouncerMode):
+                return crowdsec.set_mode(self.tree.root, action)
             if isinstance(action, RunSql):
                 return self.run(action.argv, action.statements)
             if isinstance(action, WriteFile):

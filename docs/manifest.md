@@ -11,9 +11,13 @@ level. The format, with every field, the worked examples of Keel Core and
 Keel Web and the validation rules, is `docs/manifest-v1.md` in the
 handbook; this page says what keel does with it.
 
-This is step 1 of the first implementation of 0041: the reader and these
-two commands. Nothing else in keel reads a manifest yet: `spec validate`,
-`spec apply --system`, `inspect` and `diff` learn about them in step 3.
+Step 1 of the first implementation of 0041 made the reader and these two
+commands; step 3 made the rest of keel read the manifests. `spec
+validate` holds a spec that names an appliance against them (rules 25 to
+27, [docs/spec.md](spec.md)), `spec apply --system` converges the
+overlays' units and writes Monit's derived checks
+([docs/apply.md](apply.md)), and `inspect` and `diff` read both back
+([docs/inspect.md](inspect.md), [docs/diff.md](diff.md)).
 
 The appliance manifest is not the **layer manifest** of
 [docs/layers.md](layers.md), the key-value file `bt-layer` writes beside a
@@ -79,7 +83,8 @@ alone or with the manifests it names, rules 1 to 24:
 | 21 to 24 | The application sections of the appendix: engines, placements, `none` only for an optional service, and `embedded` only where an overlay providing the engine is `enabled`; the secret, `needs` and `queue` a manifest names are its own; replicated paths outside the system directories, not nested, not inside an overlay's `data`, excludes inside them, `unless` naming an optional service; a worker with a unit and no `writes`, `default` at most `max`, `singleton` with `max: 1` |
 
 Rules 25 to 27 check an instance spec against the manifests; `keel spec
-validate` runs them from step 3.
+validate` runs them, and so does every command that reads a spec naming
+an appliance, against the manifests under its root.
 
 **States are words.** A YAML 1.1 reader (PyYAML, which keel uses) reads an
 unquoted `on`, `off`, `yes` or `no` as a boolean, so a state written `on`
@@ -181,7 +186,10 @@ the thing. `loopback, IPv4` is a port whose process binds `127.0.0.1` only
 | `--root DIR` | Where `/usr/share/keel` is. Default `/` |
 
 `show --derived`, which prints what `apply` would write for Monit, the
-firewall, the backup and replication, comes with the renderers of step 3.
+firewall, the backup and replication, is not there yet. The Monit file
+has its renderer (keel.manifest.monit), and `keel spec apply --system
+--dry-run` names what it would write; the others come with their
+renderers.
 
 ## Exit codes
 
