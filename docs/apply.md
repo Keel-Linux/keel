@@ -331,7 +331,9 @@ Every role writes one file,
 
 A **primary** then holds its authorizations. Each entry of
 `allowed_from` becomes `CREATE USER`, `ALTER USER` and `GRANT REPLICATION
-SLAVE` for the account `repl` at that origin, written in the spelling
+SLAVE, SELECT, SHOW VIEW, TRIGGER, EVENT` for the account `repl` at that
+origin (the last four are what seeding a replica needs, below), written
+in the spelling
 MariaDB has for it, so `2804:710:d0:5::/64` becomes `2804:710:d0:5:%`
 and an address is written compressed, `fd3d:80b2:d0d7::2` for
 `fd3d:80b2:d0d7:0:0:0:0:2` (`keel.spec.origins`). An origin the
@@ -372,19 +374,97 @@ name the same account, and a field each operator sets on their own
 machine is a way to end up with two machines that cannot talk, while
 decision 0013 keeps every screen to the machine it runs on.
 
-A **replica** then replicates from `replication.primary`, with
-`MASTER_USE_GTID=slave_pos` and an empty `gtid_slave_pos`, which means
-from the beginning of the primary's binary log. That is the only seeding
-this version does, and it is honest only because of the refusal below: a
-node whose database is empty and a primary whose binary log has not been
-purged are equal at that moment. Seeding a replica from a backup of a
-primary that already held data is the operator's step and keel does not
-do it.
+A **replica** is first seeded with a copy of its primary, and then
+replicates from `replication.primary` with `MASTER_USE_GTID=slave_pos`
+from the GTID position that copy was taken at. Before 0.11.3 it started
+from an empty `gtid_slave_pos` and no copy, so only what the primary
+wrote afterwards arrived: a WordPress replica had no `wp_*` tables, and
+the first UPDATE of an older post stopped its SQL thread.
+
+#### Seeding a replica
+
+The same `apply --system` that makes the node a replica does it, in this
+order, and a failure in the first three steps leaves the machine as it
+was:
+
+1. **Ask the primary.** While apply observes the machine, before it plans
+   anything, the replica connects to the primary as `repl` and reads the
+   account's own privileges. An unreachable primary, or one that does not
+   grant what the copy needs, is refused there, before the replica's
+   configuration is rewritten, the server restarted or anything dropped.
+   A replica already replicating healthily from the declared primary is
+   never dialled. `--dry-run` asks too, so it says whether the seed would
+   be refused; `--root` asks nothing.
+2. **Copy it.** `mariadb-dump --single-transaction --gtid
+   --master-data=2 --routines --events --triggers --all-databases
+   --ignore-database=mysql --ignore-database=sys`, pulled over the
+   network (the WireGuard overlay, where the pair has one) into a file of
+   mode 0600, in a directory of mode 0700 under `/var/tmp`, which is on
+   disk where `/tmp` is a tmpfs on Debian 13.
+3. **Read its position.** The dump ends with the GTID position it was
+   taken at, as a comment; a dump without one is refused.
+4. **Only then drop.** Replication is stopped and forgotten (`STOP SLAVE`,
+   `RESET SLAVE ALL`) and the databases `--destroy-local-database`
+   confirmed are dropped.
+5. **Load and start.** The copy is loaded through the local client,
+   `gtid_slave_pos` is set to its position, and replication starts.
+
+A failure while loading leaves an incomplete copy and no replication; the
+next run sees databases it did not make and asks for
+`--destroy-local-database` again, which starts over. The accounts of the
+`mysql` schema are not copied: a replica keeps its own, and the grants
+the primary makes afterwards arrive through the binary log.
+
+**Why a dump and not `mariadb-backup`.** Both are the documented ways to
+seed a MariaDB replica. The dump was chosen because `mariadb-dump` is in
+the client every appliance with a server already has, where
+`mariadb-backup` is a package the images do not ship; because it needs
+nothing started on the primary and no port but the one replication
+already uses, where a streamed physical backup needs a listener or an
+SSH hop on the primary and a `--prepare` on the replica; and because a
+WordPress database is small enough that a logical copy costs seconds.
+It stops being the right tool for a database of tens of gigabytes, where
+loading SQL takes hours and the file needs as much room on the replica's
+disk; seeding that with `mariadb-backup` is the operator's step, and
+keel does not do it.
+
+**What the primary grants for it.** `SELECT`, `SHOW VIEW`, `TRIGGER` and
+`EVENT`, measured against MariaDB 11.8 on Debian 13: with
+`--single-transaction` the server hands the dump a consistent binary log
+position without `FLUSH TABLES WITH READ LOCK`, so neither `RELOAD` nor
+`LOCK TABLES` is needed, and nothing is written with any of them. They
+let `repl` read every table, which is no more than the binary log
+already streams to the same account. `GRANT` only adds, so a primary set
+up by an older keel gains them at its next `apply --system-only`; until
+then the replica is refused, naming what is missing.
+
+**No secret in an argument or a log.** The password reaches `mariadb` and
+`mariadb-dump` in an options file (`--defaults-extra-file`, the first
+argument, as the clients require) of mode 0600, created exclusively and
+removed with its directory whatever happens. The statements that carry
+it locally go on standard input, and no line of the plan or of a failure
+quotes it.
+
+```
+$ keel spec apply --system-only --destroy-local-database
+database.server: write /etc/mysql/mariadb.conf.d/99-keel-database.cnf: replica, server id 1510108966 (mode 0644): done
+database.server: restart the server, which is the only way these take effect (systemctl restart mariadb): done
+database.server.replication.primary: confirmed with --destroy-local-database: becoming a replica replaces the local database with a copy of the primary, and this server holds 1 database(s) that are not its own (wordpress)
+database.server.replication.primary: copy [fd42:b2:0:1:2c2d:1cff:feeb:8756]:3306 with mariadb-dump --single-transaction --gtid, then drop wordpress, load the copy and replicate from its GTID position (the credential in an options file of mode 0600, removed afterwards): done
+apply --system-only: 3 change(s), 0 failed
+```
 
 A replica already replicating from the declared endpoint is left alone,
 which matters more here than anywhere else in keel: apply runs at every
-boot, and restarting replication from the beginning of the log on a
-machine that had caught up would throw that away.
+boot, and copying the primary again on a machine that had caught up
+would throw that away. `--destroy-local-database` does not change that.
+
+A replica whose SQL thread **stopped** is another matter: it stopped on a
+row it does not hold, so it has diverged, and it is what a replica 0.11.2
+or older built empty became. Apply refuses it, quoting the server's
+error, and rebuilds it from a fresh copy when the same command is given
+`--destroy-local-database`. Only an explicit `Slave_SQL_Running: No`
+counts; a status that does not say is left alone.
 
 #### Becoming a replica destroys the local database
 

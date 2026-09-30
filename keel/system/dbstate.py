@@ -17,11 +17,19 @@ from dataclasses import dataclass, field
 
 from keel.inspect import constants as paths
 from keel.inspect.collect import run_command
-from keel.inspect.dbengines import ENGINES, Engine
-from keel.inspect.dbreading import Reading
+from keel.inspect.dbengines import (
+    ENGINES,
+    PRIMARY_HOST_KEYS,
+    PRIMARY_PORT_KEYS,
+    Engine,
+)
+from keel.inspect.dbreading import Reading, field_lines
 from keel.inspect.tree import File, Tree
+from keel.spec.constants import DEFAULT_PORTS
 from keel.spec.errors import SpecError
+from keel.spec.origins import canonical
 from keel.spec.secretstore import resolve_secret
+from keel.system import dbseed
 from keel.system.dbmariadb import (
     DROPIN,
     SCHEMAS_QUESTION,
@@ -64,10 +72,60 @@ class DatabaseState:
     machine_id: File = field(default_factory=lambda: File(MACHINE_ID))
     dropin: File = field(default_factory=lambda: File(""))
     credential: Credential = field(default_factory=Credential)
+    # SHOW REPLICA STATUS as the server printed it, for the one thing the
+    # reading does not keep: whether the SQL thread still runs.
+    status: File = field(default_factory=lambda: File(""))
+    # Why the declared primary cannot be copied from, asked only when a
+    # copy would be made (needs_copy); empty when it can, or was not asked.
+    reach: str = ""
 
     @property
     def installed(self) -> bool:
         return bool(self.binary)
+
+
+def endpoint(server: dict) -> tuple[str, int]:
+    """The declared primary of a replica, as a host and a port"""
+    primary = (server.get("replication") or {}).get("primary") or {}
+    host = str(primary.get("host") or "")
+    return host, int(primary.get("port") or DEFAULT_PORTS["mariadb"])
+
+
+def sql_stopped(status: File) -> str | None:
+    """The reason the SQL thread stopped, or None while it runs
+
+    None too when the status does not say: only an explicit `No` counts,
+    because a replica is never rebuilt on a guess.
+    """
+    values = field_lines(status)
+    if values.get("Slave_SQL_Running", "").lower() != "no":
+        return None
+    return values.get("Last_SQL_Error") or "no error was recorded"
+
+
+def replicates_from(status: File, host: str, port: int) -> bool:
+    """Whether the status names this endpoint as the primary"""
+    values = field_lines(status)
+    was_host = next((values[k] for k in PRIMARY_HOST_KEYS if k in values), "")
+    was_port = next((values[k] for k in PRIMARY_PORT_KEYS if k in values), "")
+    return canonical(was_host) == canonical(host) and was_port == str(port)
+
+
+def needs_copy(server: dict, status: File) -> bool:
+    """Whether apply would seed this node from its primary
+
+    A declared replica that replicates from nowhere, from another
+    endpoint, or with its SQL thread stopped. A healthy replica of the
+    declared primary is never dialled, let alone copied again.
+    """
+    if str(server.get("role") or "") != "replica":
+        return False
+    host, port = endpoint(server)
+    if not host:
+        return False
+    if not replicates_from(status, host, port):
+        return True
+    return sql_stopped(status) is not None
 
 
 def declared_server(doc: dict) -> dict:
@@ -100,6 +158,8 @@ def observe_database(root: str, doc: dict) -> DatabaseState | None:
     sockets = File("") if binary is None else run_command(
         tree, paths.LISTENING_COMMAND
     )
+    status = answers.get("status", File(""))
+    secret = credential(server)
     return DatabaseState(
         engine=name,
         live=live,
@@ -110,8 +170,28 @@ def observe_database(root: str, doc: dict) -> DatabaseState | None:
         ),
         machine_id=tree.read(MACHINE_ID),
         dropin=tree.read(DROPIN),
-        credential=credential(server),
+        credential=secret,
+        status=status,
+        reach=_reach(
+            tree, server, status, secret,
+            live and bool(binary) and name == "mariadb",
+        ),
     )
+
+
+def _reach(
+    tree: Tree, server: dict, status: File, secret: Credential, asks: bool,
+) -> str:
+    """Ask the declared primary whether it can be copied from, if it would be
+
+    Only on the live system with a server installed, with a credential,
+    and only when a copy would follow: dialling another machine at every
+    boot of a healthy replica would be a question nobody needs answered.
+    """
+    if not (asks and secret.known and needs_copy(server, status)):
+        return ""
+    host, port = endpoint(server)
+    return dbseed.reach(tree.root, host, port, secret.value)
 
 
 def _engine(name: str) -> Engine | None:

@@ -8,7 +8,7 @@ code that runs a command or writes a file.
 """
 
 import shlex
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
@@ -93,6 +93,36 @@ class RunSql:
         return (
             f"{self.summary} ({shlex.join(self.argv)}, {count} statement(s)"
             " on standard input)"
+        )
+
+
+@dataclass(frozen=True)
+class SeedReplica:
+    """Copy the primary into this server, then replicate from the copy
+
+    Carried out by keel.system.dbseed: the primary is dialled and dumped
+    with mariadb-dump in one consistent snapshot, and only once the copy
+    is on disk are `drop` and the old replication settings discarded, the
+    copy loaded and replication started at the dump's GTID position. The
+    password reaches the clients in an options file of mode 0600 that is
+    removed afterwards, never an argument vector, and neither `repr` nor
+    `describe` holds it.
+    """
+
+    host: str
+    port: int
+    password: str = field(repr=False)
+    drop: tuple[str, ...] = ()
+
+    def describe(self) -> str:
+        dropped = (
+            f", then drop {', '.join(self.drop)}" if self.drop else ""
+        )
+        return (
+            f"copy [{self.host}]:{self.port} with mariadb-dump"
+            f" --single-transaction --gtid{dropped}, load the copy and"
+            " replicate from its GTID position (the credential in an"
+            " options file of mode 0600, removed afterwards)"
         )
 
 
@@ -206,7 +236,7 @@ class Refuse:
 
 
 Change = (Run | RunSql | WriteFile | RemoveFile | MakeDir | Symlink
-          | SwitchNetwork | GenerateKey | AdoptKey)
+          | SwitchNetwork | GenerateKey | AdoptKey | SeedReplica)
 Action = Change | Note | Refuse
 
 

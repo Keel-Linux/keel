@@ -15,10 +15,13 @@ from unittest import mock
 
 from helpers import spec  # noqa: F401
 
+from keel.inspect.tree import File
+from keel.system import dbseed
 from keel.system.dbstate import (
     Credential,
     credential,
     declared_server,
+    needs_copy,
     observe_database,
 )
 
@@ -149,3 +152,100 @@ class TestDeclaredServer(unittest.TestCase):
         self.assertEqual(declared_server({}), {})
         self.assertEqual(declared_server({"database": None}), {})
         self.assertEqual(declared_server({"database": {"client": {}}}), {})
+
+
+REPLICA_OF = (
+    "*************************** 1. row ***************************\n"
+    "                   Master_Host: 2001:db8:1::10\n"
+    "                   Master_Port: 3306\n"
+    "            Slave_SQL_Running: {running}\n"
+)
+
+
+class TestTheCopyIsAskedForOnlyWhenOneWouldBeMade(unittest.TestCase):
+    """The primary is dialled before a seed, and never for a healthy one"""
+
+    SERVER = {
+        "engine": "mariadb", "role": "replica",
+        "replication": {"primary": {"host": "2001:db8:1::10"}},
+    }
+
+    def needs(self, status: str = "", **server) -> bool:
+        return needs_copy(
+            dict(self.SERVER, **server), File("status", status)
+        )
+
+    def test_a_node_that_replicates_from_nowhere_needs_one(self):
+        self.assertTrue(self.needs(""))
+
+    def test_a_healthy_replica_of_the_declared_primary_does_not(self):
+        self.assertFalse(self.needs(REPLICA_OF.format(running="Yes")))
+
+    def test_a_replica_whose_sql_thread_stopped_does(self):
+        self.assertTrue(self.needs(REPLICA_OF.format(running="No")))
+
+    def test_a_replica_of_another_primary_does(self):
+        self.assertTrue(self.needs(
+            REPLICA_OF.format(running="Yes").replace("::10", "::20")
+        ))
+
+    def test_another_port_is_another_primary(self):
+        self.assertTrue(self.needs(
+            REPLICA_OF.format(running="Yes"),
+            replication={"primary": {"host": "2001:db8:1::10",
+                                     "port": 3307}},
+        ))
+
+    def test_a_primary_or_a_standalone_never_does(self):
+        self.assertFalse(self.needs("", role="primary"))
+        self.assertFalse(self.needs("", role="standalone"))
+
+    def test_a_replica_with_no_primary_declared_does_not(self):
+        self.assertFalse(self.needs("", replication={}))
+
+
+class TestThePrimaryIsAskedOnTheLiveSystem(unittest.TestCase):
+    def observe(self, status: str, secret: bool = True):
+        root = self.enterContext(
+            __import__("tempfile").TemporaryDirectory()
+        )
+        os.makedirs(os.path.join(root, "usr/sbin"))
+        open(os.path.join(root, "usr/sbin/mariadbd"), "w").close()
+        path = os.path.join(root, "secret")
+        with open(path, "w") as fob:
+            fob.write(PASSWORD)
+        os.chmod(path, 0o600)
+        server = dict(TestTheCopyIsAskedForOnlyWhenOneWouldBeMade.SERVER)
+        if secret:
+            server["replication"] = dict(
+                server["replication"], secret={"file": path}
+            )
+
+        def ran(argv, **kwargs):
+            if "SHOW REPLICA STATUS\\G" in argv:
+                return answer(status)
+            return answer("")
+        with mock.patch("keel.inspect.constants.ROOT_DEFAULT", root), \
+                mock.patch.object(subprocess, "run", side_effect=ran), \
+                mock.patch.object(dbseed, "reach",
+                                  return_value="refused") as reach:
+            found = observe_database(root, {"database": {"server": server}})
+        return found, reach, root
+
+    def test_a_node_about_to_be_seeded_asks_the_primary(self):
+        found, reach, root = self.observe("")
+        reach.assert_called_once_with(
+            os.path.abspath(root), "2001:db8:1::10", 3306, PASSWORD
+        )
+        self.assertEqual(found.reach, "refused")
+        self.assertEqual(found.status.text, "")
+
+    def test_a_healthy_replica_asks_nobody(self):
+        found, reach, _ = self.observe(REPLICA_OF.format(running="Yes"))
+        reach.assert_not_called()
+        self.assertEqual(found.reach, "")
+        self.assertIn("Slave_SQL_Running: Yes", found.status.text)
+
+    def test_no_credential_asks_nobody(self):
+        found, reach, _ = self.observe("", secret=False)
+        reach.assert_not_called()
