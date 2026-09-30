@@ -30,6 +30,7 @@ from keel.spec.errors import SpecError
 from keel.spec.origins import canonical
 from keel.spec.secretstore import resolve_secret
 from keel.system import dbseed
+from keel.system.actions import READ_ONLY_RECORD
 from keel.system.dbmariadb import (
     DROPIN,
     SCHEMAS_QUESTION,
@@ -78,6 +79,9 @@ class DatabaseState:
     # Why the declared primary cannot be copied from, asked only when a
     # copy would be made (needs_copy); empty when it can, or was not asked.
     reach: str = ""
+    # The accounts a replica took READ_ONLY ADMIN from, recorded by
+    # keel.system.dbreadonly; present means some are owed it back.
+    revoked: File = field(default_factory=lambda: File(""))
     # The primary's accounts this server holds too, which keep this
     # server's authentication when it is seeded (keel.system.dbaccounts).
     shared: tuple[str, ...] = ()
@@ -177,6 +181,7 @@ def observe_database(root: str, doc: dict) -> DatabaseState | None:
         ),
         machine_id=tree.read(MACHINE_ID),
         dropin=tree.read(DROPIN),
+        revoked=tree.read(READ_ONLY_RECORD),
         credential=secret,
         status=status,
         reach=found.problem,

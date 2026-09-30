@@ -328,6 +328,52 @@ Every role writes one file,
 | `bind-address` | `database.server.listen`, written as the literal list it is. Absent from the description means the file says nothing and the packaged setting stands |
 | `skip_name_resolve` | `ON`, unless an entry of `allowed_from` is a name: MariaDB matches a grant whose host is a name only while it resolves client addresses. The line of the plan says so, because docs/spec.md calls a name fragile for exactly this reason |
 | `log_bin`, `binlog_format` | On a primary alone. A replica reads the primary's log and needs none of its own |
+| `read_only` | `ON` on a replica alone (below). Absent on a primary and a standalone, which leaves the packaged `OFF` |
+
+**A replica is read only** (since 0.11.5, tracker#26). Before, a
+WordPress page served from a replica inserted a `wp_navigation` post of
+its own, the primary's next write reused the same id, and the replica's
+SQL thread stopped with error 1062. With `read_only = ON`, measured on
+MariaDB 11.8 (Debian 13):
+
+- the replication thread writes, as it always does;
+- an account holding `READ_ONLY ADMIN` writes: `root` and the other
+  accounts with `ALL PRIVILEGES ON *.*`. `SUPER` alone no longer does
+  since MariaDB 10.11, and is refused with error 1290 like any account;
+- the application's account is refused with error 1290. The WordPress
+  image's `wordpress` account holds `ALL PRIVILEGES ON wordpress.*` and
+  nothing global, so it has no way through.
+
+**No account but root writes through it.** The image's `admin` and, on
+the LAMP appliances, Adminer's `adminer` hold `ALL PRIVILEGES ON *.*`,
+so Adminer on port 12322 could write to a replica through them. On a
+replica, after the seed (which copies the primary's grants), apply runs
+`SET SESSION sql_log_bin = 0` and `REVOKE READ_ONLY ADMIN ON *.* FROM`
+every account that holds it, matched by user and host exactly, except
+`root`, `mysql` and `mariadb.sys` at `localhost`, `127.0.0.1` or `::1`
+(`'root'@'%'` is somebody's and loses it). Each account is recorded in
+`/var/lib/keel/database/read-only-admin` before the REVOKE, and
+`keel database promote`, or an apply that makes the node standalone or
+primary, grants it back to those accounts only, again with
+`sql_log_bin` off, and removes the record. An account dropped since is
+not created again. A `GRANT ALL ON *.*` on the primary replicates and
+gives the privilege back; the next apply on the replica takes it again.
+
+**root still writes, and so does anything that connects as root**:
+Webmin's MySQL module among them. MariaDB 11.8 has no setting that
+stops an account holding every privilege (it has no `super_read_only`),
+and root can grant itself anything it lacks. A write by root on a
+replica diverges it the way tracker#26 did, so nobody administers a
+replica's data by hand: do it on the primary.
+
+The order is safe for the seed: the file is written and the server
+restarted with `read_only = ON` before the copy is loaded, and the load,
+the accounts and `CHANGE MASTER` run as `root` through the socket, which
+writes through it. Nothing the application does between the two lands
+in the copy. When the file already says what the role needs and the
+running server does not (`SET GLOBAL read_only = OFF` by hand, or a
+promoted replica that returns to standalone), apply sends
+`SET GLOBAL read_only` and restarts nothing.
 
 **What changes a server id.** A new machine-id, a new overlay address,
 declaring an overlay on a node that had none, or a new real address in
@@ -618,17 +664,41 @@ never be corrected automatically is drift apply will not correct.
 #### `keel database promote`
 
 Promotion is the one thing keel makes the operator type, because it is
-the one decision no machine here can make. It stops replication and
-forgets the primary (`STOP SLAVE`, `RESET SLAVE ALL`, not `STOP SLAVE`
-alone: a node that still held the coordinates would follow its old
-primary again at the next restart), and then says two things:
+the one decision no machine here can make. In this order:
+
+1. It stops the I/O thread (`STOP SLAVE IO_THREAD`) and waits, for at
+   most 600 seconds, until the SQL thread has applied everything the I/O
+   thread received: `Relay_Master_Log_File` equals `Master_Log_File` and
+   `Exec_Master_Log_Pos` equals `Read_Master_Log_Pos`. `RESET SLAVE ALL`
+   discards the relay log, so without the wait whatever was received and
+   not yet applied would be lost. If the SQL thread stops on an error
+   while it drains, or the wait runs out, the I/O thread is started
+   again and nothing is promoted.
+2. It stops replication and forgets the primary (`STOP SLAVE`,
+   `RESET SLAVE ALL`, not `STOP SLAVE` alone: a node that still held the
+   coordinates would follow its old primary again at the next restart)
+   and turns `read_only` off.
+3. It removes the `read_only = ON` line from the drop-in and restarts
+   nothing, so a restart before the description is changed keeps the new
+   primary writable.
+4. It grants `READ_ONLY ADMIN` back to the accounts the replica took it
+   from, last, so a GRANT that fails cannot keep the file from being
+   rewritten; the record stays and the next apply gives it back.
+
+A replica whose SQL thread already stopped on an error is refused before
+anything changes: what it received and did not apply would be lost. Fix
+what stopped it and `START SLAVE` until `Seconds_Behind_Master` is 0,
+then promote; or, while the old primary is there, rebuild the replica
+from it with `--destroy-local-database`. Then it says two things:
 
 ```
 $ keel database promote
-database.server.role: stop replicating and forget the primary (mariadb --batch, 2 statement(s) on standard input): done
+database.server.role: stop the I/O thread, wait up to 600 s for the SQL thread to apply everything it received, then stop replicating, forget the primary and turn read_only off: done
+database.server.role: remove read_only from /etc/mysql/mariadb.conf.d/99-keel-database.cnf (mode 0644): done
+database.server.role: grant READ_ONLY ADMIN back, with sql_log_bin off, to the accounts /var/lib/keel/database/read-only-admin records, and remove the record: done
 database.server.role: this node is a primary now and the description still says replica, which keel diff reports as drift and must not be corrected automatically. Change the description to primary and run `keel spec apply --system-only` to give it a binary log of its own
 database.server.role: nothing here stopped the old primary or told anybody else about this. There is no failover in Keel: two writable servers on one dataset is what this command can cause, and only the operator knows the old primary is gone
-database promote: 1 change(s), 0 failed
+database promote: 3 change(s), 0 failed
 ```
 
 It refuses anything that is not a replica, and `--dry-run` prints the
@@ -640,6 +710,37 @@ the node a primary in keel's eyes as well as MariaDB's.
 another machine. Replication without failover is not high availability,
 and when it is wanted the packaged answers are Galera for MariaDB and
 Patroni for PostgreSQL.
+
+#### A replica is a warm standby: send it no traffic
+
+A replica holds a current copy of its primary so it can be promoted. It
+is not a second web server. The application on it must not receive
+visitors until `keel database promote` has run on it: DNS, a proxy or a
+load balancer point at the primary only. Decision 0020 has the web
+tier's read-only mode follow the elected role; that mode does not exist
+yet, and until it does the database is what refuses the writes.
+
+What WordPress, as the image ships it with the block theme Twenty
+Twenty-Five, does on a read-only replica, measured on two Template B2
+containers with keel
+0.11.5 (the pages were loaded on the replica several times, and the
+primary written to afterwards):
+
+| Request | What the visitor sees |
+| --- | --- |
+| Home page, a post | `200`, the normal page, the same size every time. WordPress tries to write the `wp_navigation` post of tracker#26, the transient `wp_styles_for_blocks` and `theme_mods_twentytwentyfive`; each INSERT is refused with error 1290, logged as a PHP notice in Apache's error log, and not shown (WP_DEBUG is off). The next request tries again |
+| `wp-login.php` | `200`, the login form |
+| Logging in | The right password is accepted with a `302` to `/wp-admin/`, but the session token cannot be stored in `wp_usermeta`, so `/wp-admin/` sends the visitor back to `wp-login.php?reauth=1`. Nobody can log in on a replica, so nothing can be published, commented or changed there |
+| `wp-cron.php` | `200`, empty. A due event cannot record that it ran, so it is tried again on the next request and does nothing |
+| Transients | Not stored: `wp transient set` fails with `Transient could not be set`, and every page recomputes what a transient would have cached, which makes a replica slower than its primary |
+
+The copy is not changed by any of it: the replica held the same 3 posts
+before and after, and replication stayed `Slave_SQL_Running: Yes`. The
+primary then served its own home page (inserting its `wp_navigation`,
+id 4, the write that collided in tracker#26), created a post, updated
+post 1 (a revision, id 6), an option and a transient; all of it reached
+the replica, which still reported `Slave_SQL_Running: Yes`,
+`Last_SQL_Errno: 0` and the primary's GTID position.
 
 **monitor** (`/etc/monit/conf.d/keel.conf`, `/etc/keel/monitor.json`;
 handbook decision 0021)

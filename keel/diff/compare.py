@@ -133,6 +133,20 @@ NEVER_CORRECTED = {
 }
 
 
+READ_ONLY_FIELD = "database.server.read_only"
+READ_ONLY_NOTES = {
+    True: (
+        "the server is a replica and takes writes of its own, which its"
+        " primary does not have: the first row both write stops"
+        " replication. keel spec apply turns read_only on"
+    ),
+    False: (
+        "the server is a {role}, and read only it refuses the"
+        " application's writes. keel spec apply turns read_only off"
+    ),
+}
+
+
 def compare(declared: dict, inspection: Inspection) -> Comparison:
     """Every observable field of `declared` against `inspection.spec`"""
     unknowns = not_inferred(inspection.findings)
@@ -143,12 +157,45 @@ def compare(declared: dict, inspection: Inspection) -> Comparison:
                 section, declared.get(section), inspection.spec.get(section),
                 unknowns,
             )
+            if section == "database":
+                fields += read_only(declared, inspection)
         elif section in declared and section in NOT_COMPARED_REASONS:
             fields.append(
                 FieldDiff(section, NOT_COMPARED,
                           reason=NOT_COMPARED_REASONS[section])
             )
     return Comparison(inspection.root, tuple(fields))
+
+
+def read_only(declared: dict, inspection: Inspection) -> list[FieldDiff]:
+    """Whether read_only agrees with the role the server has
+
+    Not a field of the description: a replica is read only and every
+    other role is writable, so the value is derived and not declared.
+    From the observed role and not the declared one, as decision 0020
+    has everything that depends on the role follow the role the machine
+    holds: a replica promoted by hand is a writable primary, and the
+    role line already says the description disagrees.
+    """
+    server = (declared.get("database") or {}).get("server") or {}
+    if server.get("role") is None:
+        return []
+    finding = next((
+        one for one in inspection.findings if one.field == READ_ONLY_FIELD
+    ), None)
+    if finding is None:
+        return []
+    observed_server = (inspection.spec.get("database") or {}).get("server")
+    role = str((observed_server or {}).get("role"))
+    wanted = role == "replica"
+    if finding.status == NOT_INFERRED:
+        return [FieldDiff(READ_ONLY_FIELD, UNKNOWN, wanted, None,
+                          finding.source)]
+    found = finding.value == "true"
+    if found == wanted:
+        return [FieldDiff(READ_ONLY_FIELD, SAME, wanted, found)]
+    return [FieldDiff(READ_ONLY_FIELD, DRIFT, wanted, found,
+                      note=READ_ONLY_NOTES[wanted].format(role=role))]
 
 
 def not_inferred(findings: tuple[Finding, ...]) -> dict[str, str]:
