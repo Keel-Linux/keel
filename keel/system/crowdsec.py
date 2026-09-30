@@ -27,6 +27,7 @@ not be made. The planner here is pure; add_bouncer is carried out for
 keel.system.effects, its only caller.
 """
 
+import contextlib
 import os
 import secrets
 import subprocess
@@ -128,17 +129,18 @@ def plan_identity(state: CrowdsecState, live: bool,
         return [Refuse("cscli not found: the crowdsec package is not"
                        " installed, and keel installs no package")]
     actions: list[Action] = []
-    if state.capi == "absent":
-        actions.append(WriteFile(
-            CAPI, "", KEY_MODE, None,
-            f"create /{CAPI} empty, which CrowdSec's unit needs and which"
-            " says not registered yet"))
     if not state.lapi:
         actions.append(Run(
             (CSCLI, "--error", "machines", "add", "--auto", "--force"),
             f"register this machine with CrowdSec's local API; cscli writes"
             f" the password to /{LAPI}"))
     if state.capi == "absent":
+        # after the local registration: a run that fails there leaves the
+        # file absent, so the next one still tries the central API
+        actions.append(WriteFile(
+            CAPI, "", KEY_MODE, None,
+            f"create /{CAPI} empty, which CrowdSec's unit needs and which"
+            " says not registered yet"))
         actions.append(Attempt(
             (CSCLI, "--error", "capi", "register"),
             "register with CrowdSec's central API",
@@ -164,7 +166,7 @@ def add_bouncer(root: str, action: AddBouncer) -> str | None:
     """Register a new bouncer, then store its key; None when done"""
     if action.old_id:
         # a bouncer this machine made before; gone already is fine
-        subprocess.run([CSCLI, "--error", "bouncers", "delete",
+        subprocess.run([CSCLI, "--error", "bouncers", "delete", "--",
                         action.old_id], capture_output=True, text=True,
                        check=False)
     name = BOUNCER_PREFIX + secrets.token_hex(16)
@@ -180,15 +182,17 @@ def add_bouncer(root: str, action: AddBouncer) -> str | None:
     key = out.stdout.strip()
     if not key or len(key.split()) != 1:
         return f"{CSCLI} bouncers add printed no key"
+    # the name first: a bouncer registered is one the next run can delete
+    _write(os.path.join(root, action.id_file), f"{name}\n", ID_MODE)
     path = os.path.join(root, action.config)
     kept = [line for line in (_read(path) or "").splitlines()
             if value_key(line) not in ("mode", "api_key")]
     _write(path, "".join(f"{line}\n" for line in
                          [f"mode: {action.mode}", f"api_key: {key}", *kept]),
            KEY_MODE)
-    _write(os.path.join(root, action.id_file), f"{name}\n", ID_MODE)
     if action.pending:
-        os.remove(os.path.join(root, action.pending))
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(os.path.join(root, action.pending))
     return None
 
 

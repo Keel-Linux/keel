@@ -96,13 +96,14 @@ def ask(run: Run, verb: str, unit: str,
 def overlay_state(units: list[UnitState]) -> tuple[str | None, str]:
     """`enabled`, `disabled`, or None and what each unit says
 
-    Enabled is every unit enabled and, where it can be asked, running;
-    disabled is none enabled and none running. Anything between is not a
+    Enabled is every unit enabled, or static as apply leaves it, and,
+    where it can be asked, running; disabled is none enabled and none
+    running. Anything between is not a
     state of the manifest, and the units are named so the reader sees
     which one is off.
     """
-    if all(unit.is_enabled and unit.active in (None, *RUNNING)
-           for unit in units):
+    if all((unit.is_enabled or unit.is_fixed)
+           and unit.active in (None, *RUNNING) for unit in units):
         return "enabled", ""
     if all(not unit.is_enabled and not unit.is_running for unit in units):
         return "disabled", ""

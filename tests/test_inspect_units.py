@@ -112,6 +112,11 @@ class TestOverlayState(unittest.TestCase):
         self.assertEqual(overlay_state([self.OFF, self.BOUNCER_OFF]),
                          ("disabled", ""))
 
+    def test_a_static_unit_that_runs_is_enabled_as_apply_leaves_it(self):
+        self.assertEqual(overlay_state([
+            self.ON, UnitState("b.service", "static", "active")]),
+            ("enabled", ""))
+
     def test_under_a_root_the_links_decide(self):
         self.assertEqual(overlay_state([
             UnitState("etcd.service", "enabled", None)]), ("enabled", ""))

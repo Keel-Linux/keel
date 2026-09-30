@@ -84,7 +84,8 @@ class TestAddBouncer(unittest.TestCase):
         cscli = Cscli()
         self.assertIsNone(self.add(cscli, "FirewallBouncer-old", "iptables"))
         self.assertEqual(cscli.calls[0], ("cscli", "--error", "bouncers",
-                                          "delete", "FirewallBouncer-old"))
+                                          "delete", "--",
+                                          "FirewallBouncer-old"))
         self.assertEqual(self.read(BOUNCER), (
             f"mode: iptables\napi_key: {KEY}\nlog_level: debug\n"))
 
@@ -96,7 +97,9 @@ class TestAddBouncer(unittest.TestCase):
         action = AddBouncer(BOUNCER, BOUNCER_ID, "nftables", None, PENDING)
         with mock.patch("keel.system.crowdsec.subprocess.run", Cscli()):
             self.assertIsNone(Effects(self.root).apply(action))
-        self.assertFalse(os.path.exists(pending))
+            self.assertFalse(os.path.exists(pending))
+            # gone already, by the time the key is stored, is fine
+            self.assertIsNone(Effects(self.root).apply(action))
         with mock.patch("keel.system.crowdsec.subprocess.run",
                         Cscli(1, "", "locked\n")):
             with open(pending, "w") as fob:

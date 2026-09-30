@@ -75,10 +75,13 @@ def converge_order(resolved: Resolved, states: dict) -> list[str]:
     requires = {state.name: tuple(state.manifest.get("requires") or ())
                 for state in resolved.overlays}
     ordered: list[str] = []
+    seen: set[str] = set()
 
     def visit(name: str) -> None:
-        if name in ordered:
+        # rule 10 refuses a cycle; `seen` keeps one from recursing anyway
+        if name in seen:
             return
+        seen.add(name)
         for required in requires.get(name, ()):
             visit(required)
         ordered.append(name)
@@ -100,6 +103,12 @@ def plan_overlay(name: str, wanted: str | None, units: tuple[str, ...],
     systemctl = ("systemctl",) if live else (
         "systemctl", f"--root={state.root}")
     on = wanted == ENABLED
+    masked = [unit for unit in units if on and state.units[unit].is_masked]
+    if masked:
+        # refused before anything is made, CrowdSec's identity included
+        return Step(field, tuple(Refuse(
+            f"{unit} is masked, and keel never unmasks a unit: systemctl"
+            f" unmask {unit}, then apply again") for unit in masked))
     actions: list[Action] = []
     identity: list[Action] = []
     if on and name == CROWDSEC:
@@ -108,11 +117,6 @@ def plan_overlay(name: str, wanted: str | None, units: tuple[str, ...],
     made = any(not isinstance(action, Note) for action in identity)
     for unit in (units if on else tuple(reversed(units))):
         found = state.units[unit]
-        if on and found.is_masked:
-            actions.append(Refuse(
-                f"{unit} is masked, and keel never unmasks a unit:"
-                f" systemctl unmask {unit}, then apply again"))
-            continue
         if on:
             actions += start(systemctl, unit, found, live, made)
         else:

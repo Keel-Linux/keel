@@ -80,17 +80,27 @@ def render(resolved: Resolved, states: dict, mesh: str | None,
     """
     writer = _Writer(notify, reminder(cycle))
     processes = {owned.item["name"]: owned.item
-                 for owned in resolved.processes}
+                 for owned in resolved.processes if watched(owned, states)}
+    owners = {owned.item["name"]: owned.overlay
+              for owned in resolved.processes}
     blocks, services, notes = [HEADER + "\n"], [], []
-    for owned in resolved.processes:
-        if watched(owned, states):
-            blocks.append(writer.process(owned.item))
-            services.append(unit_service(owned.item["name"]))
+    for process in processes.values():
+        blocks.append(writer.process(process))
+        services.append(unit_service(process["name"]))
     address = mesh.split("/")[0] if mesh else None
     for owned in resolved.checks:
         if not watched(owned, states):
             continue
         check = owned.item
+        process = check.get("process")
+        if process is not None and process not in processes:
+            # a check of the appliance's own on an overlay's process:
+            # depending on a service the file does not hold would make
+            # monit refuse the whole file
+            notes.append(f"{check['name']} not watched: its process"
+                         f" {process} belongs to the overlay"
+                         f" {owners[process]}, which is disabled")
+            continue
         block, why = writer.check(check, processes, resolved, address)
         if block is None:
             notes.append(f"{check['name']} not watched: {why}")

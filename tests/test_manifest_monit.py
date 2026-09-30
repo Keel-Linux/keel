@@ -218,6 +218,17 @@ class TestApplication(RenderCase):
                       " spaces, and an argument holds a space or a quote",
                       found.notes)
 
+    def test_a_check_of_a_process_that_is_not_watched_is_left_out(self):
+        """blog-nginx is the blog's own check, on the nginx overlay's
+        process: with nginx off, depending on it would make monit refuse
+        the whole file"""
+        found = self.render({**self.states, "nginx": "disabled"}, "blog")
+        self.assertNotIn("keel-check-blog-nginx", found.services)
+        self.assertNotIn("keel-unit-nginx", found.text)
+        self.assertIn("blog-nginx not watched: its process nginx belongs"
+                      " to the overlay nginx, which is disabled",
+                      found.notes)
+
     def test_a_disabled_embedded_overlay_is_not_watched(self):
         found = self.render({**WEB_OFF, "mariadb": "disabled"}, "blog")
         self.assertNotIn("keel-unit-mariadb", found.services)

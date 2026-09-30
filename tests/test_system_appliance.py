@@ -150,6 +150,29 @@ class TestUnits(PlanCase):
         self.assertEqual(self.runs(OFF, state, field="overlays.crowdsec"),
                          [])
 
+    def test_a_masked_unit_makes_no_identity(self):
+        state = self.state(
+            units=units(**{"crowdsec.service": UnitState(
+                "crowdsec.service", "masked", "inactive")}),
+            crowdsec=TestCrowdsecIdentity.NONE)
+        found = self.actions(ON, state, field="overlays.crowdsec")
+        self.assertEqual([type(a).__name__ for a in found], ["Refuse"])
+
+    def test_a_requires_cycle_does_not_recurse(self):
+        resolved = gather(self.root, "core").resolved
+        looped = dataclasses.replace(resolved, overlays=tuple(
+            dataclasses.replace(state, manifest={
+                **state.manifest, "requires": ["crowdsec"]})
+            if state.name == "etcd" else
+            dataclasses.replace(state, manifest={
+                **state.manifest, "requires": ["etcd"]})
+            if state.name == "crowdsec" else state
+            for state in resolved.overlays))
+        fields = [step.field for step in self.plan(
+            OFF, self.state(resolved=looped))]
+        self.assertEqual(sorted(fields), ["derived.monit", "overlays.crowdsec",
+                                          "overlays.etcd"])
+
     def test_a_static_unit_is_started_and_never_enabled(self):
         state = self.state(units=units(**{"crowdsec.service": UnitState(
             "crowdsec.service", "static", "inactive")}))
@@ -208,11 +231,14 @@ class TestCrowdsecIdentity(PlanCase):
     def test_a_first_enable_makes_the_identity_before_the_units(self):
         found = self.actions(ON, self.state(crowdsec=self.NONE),
                              field="overlays.crowdsec")
-        self.assertIsInstance(found[0], WriteFile)
-        self.assertEqual((found[0].path, found[0].content, found[0].mode),
-                         (CAPI, "", 0o600))
-        self.assertEqual(found[1].argv, ("cscli", "--error", "machines",
+        # the empty CAPI file only once the machine is registered: a
+        # registration that fails leaves it absent, so the next run
+        # still registers with the central API
+        self.assertEqual(found[0].argv, ("cscli", "--error", "machines",
                                          "add", "--auto", "--force"))
+        self.assertIsInstance(found[1], WriteFile)
+        self.assertEqual((found[1].path, found[1].content, found[1].mode),
+                         (CAPI, "", 0o600))
         self.assertIsInstance(found[2], Attempt)
         self.assertEqual(found[2].argv, ("cscli", "--error", "capi",
                                          "register"))
