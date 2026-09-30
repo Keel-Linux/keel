@@ -1,3 +1,27 @@
+keel (0.11.1) unstable; urgency=medium
+
+  * A MariaDB primary no longer grants an IPv6 prefix as a host pattern
+    that refuses part of it. MariaDB matches the text of the client's
+    address, which compresses zero groups, so the /64 keel network
+    wireguard suggest-address prints (fd3d:80b2:d0d7::/64) became
+    fd3d:80b2:d0d7:0:% and the replica at fd3d:80b2:d0d7::2 was refused
+    (Template B smoke test, 2026-09-30). MariaDB 11.8 has no IPv6
+    netmask or CIDR host, so a prefix whose last group is zero, or with
+    two zero groups in a row, is refused now, naming an address the
+    pattern would have missed; write each replica's address instead.
+    Prefixes whose groups are all written keep their pattern.
+  * An address in allowed_from is granted compressed and lower cased:
+    MariaDB refused fd3d:80b2:d0d7::2 on a grant to
+    fd3d:80b2:d0d7:0:0:0:0:2.
+  * A replica apply declines to build (it holds databases and
+    --destroy-local-database was not given, its credential is missing,
+    and the like) keeps its configuration file and is not restarted:
+    the check comes before any change, so the refusal's "left as it
+    was" is true. Before, the file was rewritten and MariaDB restarted
+    first, and the refusal said nothing was changed.
+
+ -- Marcos Mendez <mendez.foto@gmail.com>  Wed, 30 Sep 2026 07:19:23 +0000
+
 keel (0.11.0) unstable; urgency=medium
 
   * New field network.overlay.wireguard, the WireGuard overlay of a

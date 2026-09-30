@@ -33,7 +33,7 @@ and keel.system.effects acts.
 """
 
 from keel.spec.constants import DEFAULT_PORTS
-from keel.spec.origins import canonical, is_name
+from keel.spec.origins import canonical, compressed_address, is_name
 from keel.system import dbmariadb as mariadb
 from keel.system.actions import (
     Action,
@@ -100,9 +100,12 @@ DESTRUCTION = (
 )
 # What to do instead, said only when apply is declining. The confirmed
 # line repeats the reason and not the remedy: a run that went ahead
-# telling the operator that nothing was changed would be a lie.
+# telling the operator that the server was left alone would be a lie.
+# Declining comes before the configuration is written (plan_database),
+# which is what makes the first sentence true.
 REMEDY = (
-    ". Nothing was changed. Move the data elsewhere, or run the same"
+    ". The server was left as it was: its configuration was not rewritten"
+    " and it was not restarted. Move the data elsewhere, or run the same"
     " command again with --destroy-local-database to drop them and build"
     " the replica"
 )
@@ -115,7 +118,18 @@ NO_PATTERN = (
     "{origin} names no whole group of the address, so MariaDB has no host"
     " pattern for it; authorizing a wider or a narrower range than the"
     " description asked for is not something apply decides. Write a prefix"
-    " that stops on a group boundary, a /64 or a /48"
+    " that stops on a group boundary, or each replica's address"
+)
+COMPRESSED = (
+    "{origin} has no host pattern MariaDB can match: the server compares"
+    " the text of a client's address, that text writes a run of zero"
+    " groups as ::, and here the run can take in a group of the prefix,"
+    " so a pattern of its groups would refuse {address}, which the prefix"
+    " holds. MariaDB has no netmask for IPv6, and authorizing a wider or a"
+    " narrower range than the description asked for is not something"
+    " apply decides."
+    " Write each replica's address instead (on an overlay, the address of"
+    " each peer)"
 )
 NAME_ORIGIN = (
     "an origin is a name ({names}), so the server must keep resolving"
@@ -149,11 +163,17 @@ def plan_database(
     if stop:
         return [Step(FIELD, (Refuse(stop),))]
 
+    if role == REPLICA:
+        # Asked before anything is written: a replica apply declines to
+        # build keeps the server it had, configuration and restart
+        # included, so the refusal can say nothing was touched.
+        replication = _replication(server, state, observed, confirmed)
+        if any(isinstance(one, Refuse) for one in replication.actions):
+            return [replication]
+        return [_configuration(server, state, role), replication]
     steps = [_configuration(server, state, role)]
     if role == PRIMARY:
         steps.append(_authorizations(server, state))
-    if role == REPLICA:
-        steps.append(_replication(server, state, observed, confirmed))
     return steps
 
 
@@ -285,7 +305,7 @@ def _authorizations(server: dict, state: DatabaseState) -> Step:
     for origin in (str(one) for one in declared):
         host = mariadb.as_host(origin)
         if host is None:
-            actions.append(Refuse(NO_PATTERN.format(origin=origin)))
+            actions.append(Refuse(_no_host(origin)))
             continue
         hosts.append(host)
     wanted = {canonical(host) for host in hosts}
@@ -304,6 +324,14 @@ def _authorizations(server: dict, state: DatabaseState) -> Step:
             Note("unchanged (no origin is declared and none is held)"),
         ))
     return Step(AUTHORIZATIONS, tuple(actions))
+
+
+def _no_host(origin: str) -> str:
+    """Why an origin has no host a grant could hold"""
+    address = compressed_address(origin)
+    if address is None:
+        return NO_PATTERN.format(origin=origin)
+    return COMPRESSED.format(origin=origin, address=address)
 
 
 def _replication(
