@@ -1,4 +1,4 @@
-# Copied from Keel-Linux/inithooks lib/ipconfig.sh at 11f7196, for
+# Copied from Keel-Linux/inithooks lib/ipconfig.sh at d46c106, for
 # keel.network.render's tests; the package runs the installed copy.
 # Decisions and rendering for firstboot.d/01ipconfig.
 #
@@ -154,15 +154,47 @@ ipconfig_check_ip6_prefix() {
         || { echo "$what must not be link-local: '$address'"; return 1; }
 }
 
+# ipconfig_ip4_syntax ADDRESS
+# Succeeds when ADDRESS is a dotted quad of four decimal octets (0-255).
+ipconfig_ip4_syntax() {
+    local octet
+    [[ "$1" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
+    local IFS=.
+    for octet in $1; do
+        [[ $((10#$octet)) -le 255 ]] || return 1
+    done
+}
+
+# ipconfig_check_dns6 VALUE WHAT
+# Succeeds when VALUE is a nameserver an inet6 stanza can carry: a plain
+# IPv6 unicast address, or an IPv4 address. resolvconf takes
+# dns-nameservers from any stanza whatever the server's family, so a static
+# inet6 stanza holds the resolvers of an IPv4 left on dhcp.
+ipconfig_check_dns6() {
+    if [[ "$1" =~ ^[0-9]+(\.[0-9]+){3}$ ]]; then
+        ipconfig_ip4_syntax "$1" \
+            || { echo "$2 is not a valid IPv4 address: '$1'"; return 1; }
+        return 0
+    fi
+    ipconfig_check_ip6 "$1" "$2"
+}
+
 # ipconfig_check_static6 ADDRESS [GATEWAY [DNS1 [DNS2]]]
 # Succeeds when the IP6_* values of a static stanza are usable; otherwise
 # prints why not and fails. The address is required, the rest optional.
+# The address and the gateway are IPv6; a nameserver may be of either family.
 ipconfig_check_static6() {
     [[ -n "$1" ]] || { echo "IP6_CONFIG=static requires IP6_ADDRESS"; return 1; }
     ipconfig_check_ip6_prefix "$1" IP6_ADDRESS || return 1
     [[ -z "$2" ]] || ipconfig_check_ip6 "$2" IP6_GW || return 1
-    [[ -z "$3" ]] || ipconfig_check_ip6 "$3" IP6_DNS1 || return 1
-    [[ -z "$4" ]] || ipconfig_check_ip6 "$4" IP6_DNS2 || return 1
+    [[ -z "$3" ]] || ipconfig_check_dns6 "$3" IP6_DNS1 || return 1
+    [[ -z "$4" ]] || ipconfig_check_dns6 "$4" IP6_DNS2 || return 1
+}
+
+# ipconfig_valid_slaac VALUE
+# Succeeds when VALUE is a value IP6_SLAAC accepts.
+ipconfig_valid_slaac() {
+    [[ "$1" == "yes" || "$1" == "no" ]]
 }
 
 # ipconfig_render_inet6 IFACE HOSTNAME [CONFIG]
@@ -189,4 +221,19 @@ ipconfig_render_static6() {
     [[ -z "$gateway" ]] || echo "    gateway $gateway"
     dns=$(echo "$3 $4" | xargs)
     [[ -z "$dns" ]] || echo "    dns-nameservers $dns"
+}
+
+# ipconfig_render_slaac6 IFACE SLAAC
+# Prints the options that turn SLAAC off on IFACE when SLAAC is no, and
+# nothing when it is yes: a static inet6 stanza keeps SLAAC by default.
+# ifupdown-ng has no option for it (its ipv6-ra executor toggles accept_ra,
+# which would also drop the router's routes), so autoconf is set in the
+# pre-up phase, before the address, and given back when the stanza goes
+# down, so bringing the interface up on another file restores SLAAC.
+# The key is written with slashes, which sysctl reads as a path, so an
+# interface name with a dot (a VLAN such as eth0.45) stays one component.
+ipconfig_render_slaac6() {
+    [[ "$2" == "no" ]] || return 0
+    echo "    pre-up sysctl -q -w net/ipv6/conf/$1/autoconf=0"
+    echo "    post-down sysctl -q -w net/ipv6/conf/$1/autoconf=1"
 }

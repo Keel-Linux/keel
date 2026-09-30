@@ -75,7 +75,7 @@ class TestDiffCommand(DiffTestCase):
                       " (observed dhcp)", lines)
         self.assertEqual(
             lines[-1],
-            "diff: 7 same, 0 drift, 0 unknown, 18 not declared,"
+            "diff: 8 same, 0 drift, 0 unknown, 18 not declared,"
             " 1 not compared; no drift",
         )
 
@@ -126,7 +126,7 @@ class TestDiffCommand(DiffTestCase):
         self.assertEqual(document["spec"], path)
         self.assertEqual(document["root"], TURNKEY)
         self.assertEqual(document["exit_code"], exits.OK)
-        self.assertEqual(document["counts"]["same"], 7)
+        self.assertEqual(document["counts"]["same"], 8)
         self.assertEqual(document["counts"]["not_compared"], 1)
         first = document["fields"][0]
         self.assertEqual(first, {

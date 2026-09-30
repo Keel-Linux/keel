@@ -27,6 +27,7 @@ source "$1"
 IP_IFACE=$2 HOST_NAME=$3 IP_CONFIG=$4 IP6_CONFIG=$5
 IP_ADDRESS=$6 IP_NETMASK=$7 IP_GW=$8 IP_DNS1=$9 IP_DNS2=${10}
 IP6_ADDRESS=${11} IP6_GW=${12} IP6_DNS1=${13} IP6_DNS2=${14}
+IP6_SLAAC=${15}
 fatal() { echo "$*" >&2; exit 1; }
 IP_CONFIG=${IP_CONFIG:-dhcp}
 ipconfig_valid_config "$IP_CONFIG" \
@@ -46,12 +47,26 @@ fi
 ipconfig_render_inet6 "$IP_IFACE" "$HOST_NAME" "$IP6_CONFIG"
 if [[ "$IP6_CONFIG" == "static" ]]; then
     ipconfig_render_static6 "$IP6_ADDRESS" "$IP6_GW" "$IP6_DNS1" "$IP6_DNS2"
+    if declare -F ipconfig_render_slaac6 >/dev/null; then
+        ipconfig_render_slaac6 "$IP_IFACE" "${IP6_SLAAC:-yes}"
+    fi
 fi
 """
 VARIABLES = (
     "IP_CONFIG", "IP6_CONFIG", "IP_ADDRESS", "IP_NETMASK", "IP_GW",
     "IP_DNS1", "IP_DNS2", "IP6_ADDRESS", "IP6_GW", "IP6_DNS1", "IP6_DNS2",
+    "IP6_SLAAC",
 )
+
+
+def slaac_off(iface: str) -> str:
+    """The option lib/ipconfig.sh writes for IP6_SLAAC=no (keel#45)
+
+    A library older than that option renders the stanza without it, and
+    SCRIPT above does not fail for its absence: the caller looks for this
+    line instead, and refuses a file that would silently keep SLAAC.
+    """
+    return f"    pre-up sysctl -q -w net/ipv6/conf/{iface}/autoconf=0"
 
 
 @dataclass(frozen=True)

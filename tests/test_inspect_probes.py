@@ -62,6 +62,10 @@ def reason(findings: list[Finding], field: str) -> str:
     return next(f.source for f in findings if f.field == field)
 
 
+def value(findings: list[Finding], field: str) -> str:
+    return next(str(f.value) for f in findings if f.field == field)
+
+
 class TestReport(unittest.TestCase):
     def test_each_status_has_its_own_line_shape(self):
         self.assertEqual(inferred("a.b", 1, "/etc/x").line(),
@@ -301,13 +305,54 @@ class TestNetwork(unittest.TestCase):
         )
         self.assertEqual(section["interfaces"]["eth0"]["ipv6"], {
             "method": "static", "address": "2001:db8:1::10/64",
-            "gateway": "fe80::1",
+            "gateway": "fe80::1", "slaac": True,
         })
         self.assertEqual(section["interfaces"]["eth0"]["ipv4"],
                          {"method": "dhcp"})
         self.assertEqual(section["managed_by"], "file")
         self.assertIn("interfaces file owns",
                       reason(findings, "network.managed_by"))
+
+    def test_slaac_off_is_read_back_from_the_pre_up_line(self):
+        """keel#45: what lib/ipconfig.sh writes for IP6_SLAAC=no"""
+        section, findings = self.probe(
+            "iface ens18 inet6 static\n"
+            "    address 2001:db8:1::10/64\n"
+            "    pre-up sysctl -q -w net/ipv6/conf/ens18/autoconf=0\n"
+            "    post-down sysctl -q -w net/ipv6/conf/ens18/autoconf=1\n"
+        )
+        self.assertIs(section["interfaces"]["ens18"]["ipv6"]["slaac"], False)
+        self.assertIn("without SLAAC",
+                      value(findings, "network.interfaces.ens18.ipv6"))
+
+    def test_slaac_is_read_by_its_words(self):
+        for line, expected in (
+            ("pre-up /usr/sbin/sysctl -w net/ipv6/conf/eth0/autoconf=0",
+             False),
+            ("pre-up sysctl -q -w net.ipv6.conf.eth0.autoconf=0", False),
+            ("pre-up sysctl -q -w net/ipv6/conf/eth1/autoconf=0", True),
+            ("pre-up sysctl -q -w net.ipv6.conf.eth1.autoconf=0", True),
+            ("pre-up sysctl -q -w net.ipv6.conf.eth0.autoconf=1", True),
+            ("post-down sysctl -q -w net.ipv6.conf.eth0.autoconf=0", True),
+            ("pre-up echo net.ipv6.conf.eth0.autoconf=0", True),
+            ("pre-up sysctl", True),
+        ):
+            with self.subTest(line=line):
+                section, _ = self.probe(
+                    "iface eth0 inet6 static\n"
+                    f"    address 2001:db8:1::10/64\n    {line}\n"
+                )
+                self.assertIs(
+                    section["interfaces"]["eth0"]["ipv6"]["slaac"], expected)
+
+    def test_slaac_is_reported_only_for_a_static_ipv6_stanza(self):
+        section, _ = self.probe(
+            "iface eth0 inet6 auto\n"
+            "    pre-up sysctl -q -w net/ipv6/conf/eth0/autoconf=0\n"
+            "iface eth0 inet static\n    address 192.0.2.10/24\n"
+        )
+        self.assertNotIn("slaac", section["interfaces"]["eth0"]["ipv6"])
+        self.assertNotIn("slaac", section["interfaces"]["eth0"]["ipv4"])
 
     def test_ipv4_netmask_is_turned_into_a_prefix_length(self):
         section, _ = self.probe(

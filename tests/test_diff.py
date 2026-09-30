@@ -357,7 +357,7 @@ class TestCompareAgainstFixture(unittest.TestCase):
         result = compare(self.matching(), self.observed)
         self.assertEqual(result.count(DRIFT), 0)
         self.assertEqual(result.count(UNKNOWN), 0)
-        self.assertEqual(result.count(SAME), 15)
+        self.assertEqual(result.count(SAME), 16)
         self.assertEqual(
             [f.field for f in result.fields if f.status == NOT_COMPARED],
             ["security.updates_at_first_boot"],
@@ -478,6 +478,48 @@ class TestMonitorSwitch(unittest.TestCase):
 
     def test_enabled_true_is_same(self):
         self.assertEqual(self.status({"enabled": True}), SAME)
+
+
+class TestSlaacDefault(unittest.TestCase):
+    """keel#45: a static ipv6 block without `slaac` means SLAAC kept"""
+
+    STATIC = {"method": "static", "address": "2001:db8:1::10/64"}
+    FIELD = "network.interfaces.eth0.ipv6.slaac"
+
+    def status(self, declared_ipv6, observed_slaac):
+        declared = {"interfaces": {"eth0": {"ipv6": declared_ipv6}}}
+        observed = {"interfaces": {"eth0": {"ipv6": dict(
+            self.STATIC, slaac=observed_slaac)}}}
+        found = {f.field: f.status
+                 for f in compare_section("network", declared, observed, {})}
+        return found.get(self.FIELD)
+
+    def test_an_undeclared_slaac_is_compared_as_true(self):
+        self.assertEqual(self.status(self.STATIC, True), SAME)
+        self.assertEqual(self.status(self.STATIC, False), DRIFT)
+
+    def test_a_declared_slaac_is_compared_as_declared(self):
+        self.assertEqual(self.status(dict(self.STATIC, slaac=False), False),
+                         SAME)
+        self.assertEqual(self.status(dict(self.STATIC, slaac=False), True),
+                         DRIFT)
+
+    def test_no_default_for_another_method(self):
+        self.assertEqual(self.status({"method": "auto"}, True),
+                         NOT_DECLARED)
+
+    def test_the_spec_is_not_changed(self):
+        declared = {"interfaces": {"eth0": {"ipv6": dict(self.STATIC)},
+                                   "eth1": None}}
+        compare_section("network", declared, None, {})
+        self.assertNotIn("slaac", declared["interfaces"]["eth0"]["ipv6"])
+
+    def test_a_malformed_section_is_left_to_validation(self):
+        for declared in ({"interfaces": ["eth0"]},
+                         {"interfaces": {"eth0": "dhcp"}},
+                         {"interfaces": {"eth0": {"ipv6": "auto"}}}):
+            with self.subTest(declared=declared):
+                compare_section("network", declared, None, {})
 
 
 if __name__ == "__main__":

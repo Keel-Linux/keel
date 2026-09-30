@@ -33,7 +33,9 @@ import os
 import signal
 import sys
 from collections.abc import Callable
+from dataclasses import replace
 
+from keel.inspect.network import slaac_off_in
 from keel.network import marker
 
 WINDOW_UNIT = "keel-network-window"
@@ -114,12 +116,23 @@ def rename(staged: str, root: str, relative: str) -> str | None:
 
 
 def bounce(root: str, iface: str, relative: str, text: str,
-           run: Runner) -> tuple[bool, str | None]:
+           run: Runner, autoconf: str | None = None) -> (
+               tuple[bool, str | None]):
     """Down, flush, put `text` in place, up: (whether it is in place, problem)
 
     A file that cannot even be staged leaves the interface untouched. One
     that stages but cannot be renamed (rare: the same directory) still
     gets `ifup`, on the file that is there, rather than a dead interface.
+
+    `autoconf` is the IPv6 autoconf setting the interface has when no
+    file turns SLAAC off (Pending.autoconf). A file with `slaac: false`
+    turns it off in pre-up and on in post-down, but ifupdown-ng records
+    an interface as up only once post-up succeeds: a pre-up that ran
+    before a failed `up` (a DHCP timeout on the other family) leaves
+    autoconf at 0 and no post-down to undo it, since `ifdown` skips an
+    interface it does not think is up. So before `ifup` on a file that
+    does not turn SLAAC off, the setting is written back, whatever the
+    outgoing file did (keel#45).
     """
     staged, problem = stage(root, relative, text)
     if problem:
@@ -127,6 +140,9 @@ def bounce(root: str, iface: str, relative: str, text: str,
     run(("ifdown", iface))
     problems = [run(("ip", "address", "flush", "dev", iface))]
     run(("ip", "link", "set", iface, "down"))
+    if autoconf is not None and not slaac_off_in(text, iface):
+        problems.append(run(("sysctl", "-q", "-w",
+                             f"net/ipv6/conf/{iface}/autoconf={autoconf}")))
     problem = rename(staged, root, relative)
     if problem:
         run(("ifup", iface))
@@ -134,6 +150,28 @@ def bounce(root: str, iface: str, relative: str, text: str,
     problems.append(run(("ifup", iface)))
     found = [one for one in problems if one]
     return True, "; ".join(found) or None
+
+
+def baseline(current: str, iface: str) -> str | None:
+    """The autoconf setting to give back to a file that keeps SLAAC
+
+    What the interface has now, unless the outgoing file is the one that
+    turned it off: that file's post-down writes 1, so 1 is its baseline.
+    None when the interface has no IPv6 settings, and nothing is written.
+    """
+    now = marker.autoconf(iface)
+    if now is None:
+        return None
+    return "1" if slaac_off_in(current, iface) else now
+
+
+def restored_autoconf(pending: marker.Pending) -> str | None:
+    """The setting a revert writes back; 1, the kernel's default, for a
+    marker written before keel recorded one, when the interface has IPv6
+    """
+    if pending.autoconf is not None:
+        return pending.autoconf
+    return "1" if marker.autoconf(pending.iface) is not None else None
 
 
 def read_current(root: str, relative: str) -> str:
@@ -179,6 +217,7 @@ def changed(root: str, pending: marker.Pending, text: str,
         _, problem = stage(root, pending.path, text)
         if problem:
             return f"{problem}; nothing changed"
+        pending = replace(pending, autoconf=baseline(current, pending.iface))
         marker.save(root, current)
         marker.write(root, pending)
         problem = arm(SAFETY_UNIT, pending.window + UP_ALLOWANCE, run)
@@ -186,7 +225,7 @@ def changed(root: str, pending: marker.Pending, text: str,
             marker.clear(root)
             return f"revert timer not armed, nothing changed: {problem}"
         written, problem = bounce(root, pending.iface, pending.path, text,
-                                  run)
+                                  run, pending.autoconf)
         if written and problem is None:
             up_at = marker.uptime()
             if up_at is not None:
@@ -205,7 +244,8 @@ def rolled_back(root: str, pending: marker.Pending, current: str,
     The marker and the timers stay unless the old file is on disk again,
     so the timer, or the boot unit, still has something to restore.
     """
-    written, back = bounce(root, pending.iface, pending.path, current, run)
+    written, back = bounce(root, pending.iface, pending.path, current, run,
+                           pending.autoconf)
     if not written:
         return (f"{problem}; putting the previous file back failed too"
                 f" ({back}); the revert timer will try again")
@@ -246,7 +286,8 @@ def revert(root: str, run: Runner, boot: bool = False) -> tuple[bool, str]:
             disarm(run)
             return True, (f"restored /{relative}; the pending change could"
                           " not be read, so no interface was restarted")
-        written, problem = bounce(root, pending.iface, relative, text, run)
+        written, problem = bounce(root, pending.iface, relative, text, run,
+                                  restored_autoconf(pending))
         if not written:
             return False, f"cannot restore: {problem}"
         marker.clear(root)

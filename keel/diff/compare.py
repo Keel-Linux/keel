@@ -169,6 +169,8 @@ def compare_section(
         # not declared at all (None, a bare `monitor:` too) stays not
         # declared, as apply leaves it
         declared = {**declared, "enabled": False}
+    if section == "network" and isinstance(declared, dict):
+        declared = with_slaac_default(declared)
     wanted = dict(flatten(section, declared or {}))
     found = dict(flatten(section, observed or {}))
     skipped = not_compared(section, wanted)
@@ -186,6 +188,27 @@ def compare_section(
         if path not in wanted
     ]
     return fields
+
+
+def with_slaac_default(network: dict) -> dict:
+    """A static ipv6 block without `slaac` keeps SLAAC (keel#45)
+
+    The default is what apply writes, so a machine whose file turns SLAAC
+    off is drift against a spec that does not say `slaac: false`, and
+    removing that line from a spec gives SLAAC back. A copy; the spec is
+    not changed.
+    """
+    interfaces = network.get("interfaces")
+    if not isinstance(interfaces, dict):
+        return network
+    completed = {}
+    for name, iface in interfaces.items():
+        ipv6 = (iface or {}).get("ipv6") if isinstance(iface, dict) else None
+        if isinstance(ipv6, dict) and ipv6.get("method") == "static" \
+                and "slaac" not in ipv6:
+            iface = {**iface, "ipv6": {**ipv6, "slaac": True}}
+        completed[name] = iface
+    return {**network, "interfaces": completed}
 
 
 def not_compared(section: str, wanted: dict[str, object]) -> dict[str, str]:

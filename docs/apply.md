@@ -591,10 +591,34 @@ write. The rules:
   the machine's IPv4 stanza, and one declaring no nameservers keeps the
   file's, rather than the library's defaults replacing them.
 - **Nothing is bounced for a difference the file cannot hold.**
-  ifupdown writes nameservers only in a static stanza of their family, so
-  nameservers declared for a DHCP family are reported and left alone; and
-  a file that already says exactly what would be written is never
-  rewritten, whatever else differs.
+  ifupdown writes nameservers only in a static stanza, two per stanza.
+  A dynamic family's servers go into the other family's static stanza
+  when there is one (docs/spec.md), but with neither family static, or
+  more than two servers, some cannot be written: a difference in the
+  nameservers alone is then reported and the interface left alone, and a
+  change that rewrites the file for another field says which servers it
+  cannot hold rather than dropping them silently. A file that already
+  says exactly what would be written is never rewritten, whatever else
+  differs.
+- **The file's words are kept where they mean the same.** A file that
+  says `inet6 auto` for a spec's `method: auto` keeps it, rather than
+  becoming `inet6 dhcp`, keel's own word for the same thing.
+- **`slaac: false` needs the inithooks that writes it.** The library's
+  `IP6_SLAAC` option is what turns SLAAC off (docs/spec.md); an installed
+  inithooks older than that option renders the stanza without it, and
+  the step is refused ("the installed inithooks cannot write slaac:
+  false; update inithooks") rather than writing a file that keeps SLAAC.
+  An IPv4 nameserver the static inet6 stanza must carry is refused the
+  same way by an older library, with the same advice.
+- **SLAAC comes back with the file that keeps it.** Before `ifup` on a
+  file without `slaac: false`, in a change and in its revert, the
+  interface's IPv6 `autoconf` is set back to what it was before the
+  change (1 when the file being left is the one that turned it off).
+  ifupdown-ng runs no `post-down` for an interface whose `up` failed
+  after its `pre-up` ran, so without this a failed change would leave
+  SLAAC off, and an operator reaching the machine over it locked out,
+  until a reboot. The boot revert writes nothing: nothing of a `pre-up`
+  survives a reboot (docs/spec.md).
 - **The file is inithooks' own.** It is rendered by the functions of
   `/usr/lib/inithooks/lib/ipconfig.sh` that `01ipconfig` uses, from the
   same variables, so a first boot and a day two write the same file for
@@ -636,13 +660,15 @@ works:
 
 | Run from | Accepted when |
 | --- | --- |
-| SSH | the session (its `sshd-session` process) started after the interface came up on the new file, arrived at an address the new file declares or the interface now holds, and came from another machine: `ssh` to the new address from the old session proves nothing |
+| SSH | the session (its `sshd-session` process) started after the interface came up on the new file, and came from another machine (`ssh` to the new address from the old session proves nothing), and arrived at a static address the new file declares for the session's family; for a family the file leaves to DHCP or SLAAC, at an address of the new file or one the interface now holds. With SLAAC kept beside a static address, a session over the SLAAC address does not show the static one works, so it is refused |
 | A console (`tty1`, `ttyS0`, `hvc0`, `console`) | always: a person there has seen the machine |
 | A process attached from a container's host | always, as a console |
 | Anything else: a shell that survived the change in tmux, a service | refused |
 
 The session is read from the process tree, not from `SSH_CONNECTION`,
-which `sudo` resets. When the gateway changed, confirm says whether the
+which `sudo` resets. A session tests one family, so when the change
+declares a static address of the other family too, confirm says that
+address was not tested. When the gateway changed, confirm says whether the
 route back to the client used it: a client on the same link reaches the
 machine without the gateway, and saying the gateway was tested would be
 false. A refusal exits 21 (`NETWORK_NOT_CONFIRMED`) and leaves the timer

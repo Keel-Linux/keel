@@ -147,6 +147,28 @@ class TestCheckNetwork(unittest.TestCase):
             self.assertEqual(spec.check_network(doc(text)), [])
         live.assert_not_called()
 
+    def test_file_managed_nameservers_the_file_cannot_hold_are_warned(self):
+        """keel#45 review: the conf phase says what the day two plan says"""
+        text = (
+            "version: 1\n"
+            "network:\n"
+            "  managed_by: file\n"
+            "  interfaces:\n"
+            "    eth0:\n"
+            "      ipv6:\n"
+            "        method: auto\n"
+            "  nameservers:\n"
+            "    - 2606:4700:4700::1111\n"
+            "    - 192.0.2.53\n"
+        )
+        with mock.patch.object(apply, "live_ipv6") as live:
+            found = spec.check_network(doc(text))
+        live.assert_not_called()
+        self.assertEqual(found, [
+            "network.nameservers: 2606:4700:4700::1111, 192.0.2.53 cannot"
+            " be written to /etc/network/interfaces: ifupdown writes"
+            " nameservers only in a static stanza, two per stanza"])
+
     def test_interfaces_without_a_declared_address_are_skipped(self):
         text = (
             "version: 1\n"
@@ -210,6 +232,32 @@ class TestApplyWarnings(unittest.TestCase):
         self.assertTrue(os.path.exists(self.conf))
         self.assertIn("Warning: network.interfaces.eth0", err)
         self.assertIn("Warning: tls.acme", err)
+
+    def test_nameservers_the_conf_cannot_hold_are_a_warning(self):
+        text = (
+            "version: 1\n"
+            "network:\n"
+            "  managed_by: file\n"
+            "  interfaces:\n"
+            "    eth0:\n"
+            "      ipv4:\n"
+            "        method: static\n"
+            "        address: 192.0.2.10/24\n"
+            "      ipv6:\n"
+            "        method: auto\n"
+            "  nameservers:\n"
+            "    - 2001:db8:1::53\n"
+            "    - 2001:db8:2::53\n"
+            "    - 192.0.2.53\n"
+        )
+        code, err = self.apply(text, [])
+        self.assertEqual(code, exits.OK)
+        self.assertIn("Warning: network.nameservers: 2001:db8:2::53 cannot"
+                      " be written", err)
+        with open(self.conf) as fob:
+            conf = fob.read()
+        self.assertIn("export IP_DNS1=2001:db8:1::53\n", conf)
+        self.assertIn("export IP_DNS2=192.0.2.53\n", conf)
 
     def test_live_address_produces_no_warning(self):
         code, err = self.apply(HOST_MANAGED, ["2001:db8:1::10"])

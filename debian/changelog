@@ -1,3 +1,41 @@
+keel (0.10.2) unstable; urgency=medium
+
+  * Declared nameservers are no longer dropped for their family. ifupdown
+    writes them only in a static stanza, two per stanza, and resolvconf
+    takes them from any stanza, so when one family is static and the
+    other is not, the static stanza carries the servers of both families,
+    two of them, the first of each family before a second of either. A
+    VM with IPv4 static and IPv6 auto lost 2606:4700:4700::1111 this way.
+    This changes the conf keel spec apply renders; the first boot conf is
+    inithooks' 00declarative's. The servers the file cannot hold are
+    named by keel spec apply as a warning and by apply --system in its
+    plan (keel#45).
+  * Breaks: inithooks (<< 2.3.6+keel9~). An older 01ipconfig is fatal on
+    an IPv4 nameserver in IP6_DNS* and ignores IP6_SLAAC; keel still does
+    not depend on inithooks.
+  * A network change and its revert give the interface's IPv6 autoconf
+    setting back before ifup on a file that keeps SLAAC: ifupdown-ng runs
+    no post-down for an interface whose up failed, so a slaac: false file
+    that failed to come up would leave SLAAC off until a reboot. The
+    setting before the change is recorded in the pending marker.
+  * The sysctl key is written with slashes, so a VLAN name such as eth0.45
+    is one component; inspect reads either form.
+  * apply --system keeps a file's "inet6 auto" for a spec's method: auto
+    instead of rewriting it as "inet6 dhcp".
+  * New field network.interfaces.<if>.ipv6.slaac (default true, only with
+    method: static). slaac: false renders IP6_SLAAC=no, which inithooks
+    2.3.6+keel9 writes as pre-up and post-down sysctl lines turning
+    autoconf off, so the static address is the only one; inspect reads it
+    back, and diff compares an absent slaac as true. With an older
+    inithooks, apply refuses rather than write a file that keeps SLAAC.
+  * keel network confirm: a session of a family with a declared static
+    address must arrive at that address, not merely at one the interface
+    holds, since with SLAAC kept a confirm could arrive over the SLAAC
+    address while the static one is broken. A static address of the other
+    family is reported as not tested.
+
+ -- Marcos Mendez <mendez.foto@gmail.com>  Wed, 30 Sep 2026 01:35:34 +0000
+
 keel (0.10.1) unstable; urgency=medium
 
   * A spec with no monitor section leaves the monitor an earlier apply set
