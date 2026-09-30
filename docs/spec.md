@@ -611,7 +611,7 @@ monitor:
 
 | Field | State | Notes |
 | --- | --- | --- |
-| `monitor.enabled` | system | `true` or `false`; absent is off. `apply --system` writes `/etc/monit/conf.d/keel.conf` and `/etc/keel/monitor.json` when true and removes them, if keel wrote them, otherwise ([docs/apply.md](apply.md)). `true` without a working channel under `notify` is an error: a monitor with nobody to tell looks like one and is not |
+| `monitor.enabled` | system | `true` or `false`; absent inside a declared `monitor` section is off. `apply --system` writes `/etc/monit/conf.d/keel.conf` and `/etc/keel/monitor.json` when true and removes them, if keel wrote them, otherwise ([docs/apply.md](apply.md)). A spec with no `monitor` section at all leaves the monitor as an earlier apply set it, as every other section does when absent, and says so: only `enabled: false` turns it off (keel#46). `true` without a working channel under `notify` is an error: a monitor with nobody to tell looks like one and is not |
 | `monitor.checks.disk.warn`, `.critical` | system | Percent of the space used, above 0 and below 100, `warn` below `critical`. Default 80 and 90. Watched on every filesystem that holds data, as two separate checks |
 | `monitor.checks.inodes.critical` | system | Percent of the inodes used. Default 90 |
 | `monitor.checks.memory.warn`, `.for_minutes` | system | Default 85 percent for 5 minutes |

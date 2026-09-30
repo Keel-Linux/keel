@@ -1,3 +1,13 @@
+keel (0.10.1) unstable; urgency=medium
+
+  * A spec with no monitor section leaves the monitor an earlier apply set
+    up, and the plan says so; only monitor.enabled: false turns it off.
+    Absent read as off, so a spec that only declared the network ended
+    the alerting in silence, which decision 0021 is written against.
+    Found on the keel#42 VM (keel#46).
+
+ -- Marcos Mendez <mendez.foto@gmail.com>  Wed, 30 Sep 2026 00:34:32 +0000
+
 keel (0.10.0) unstable; urgency=medium
 
   * A monitor section of the spec, handbook decision 0021 (keel#43):
