@@ -227,8 +227,9 @@ listed after every other section:
 | `derived.firewall.loaded` | the digest of that ruleset | on the live system, the digest in the comment of the `inet keel` table the kernel holds (`nft list table inet keel`), so a table flushed or edited by hand is drift; not compared under `--root` |
 
 Not compared: `installation`, chosen once and recorded nowhere on the
-machine; an overlay that runs no unit (the installer, WireGuard), which
-has nothing in systemd to say whether it is on; and the include while
+machine; an overlay that runs no unit (the installer, WireGuard, and
+Coraza, whose state hook apply runs, docs/apply.md), which has nothing
+in systemd to say whether it is on; and the include while
 the spec has no `monitor` section, which apply leaves as it is.
 
 ```

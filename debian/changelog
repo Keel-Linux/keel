@@ -1,3 +1,19 @@
+keel (0.15.0) unstable; urgency=medium
+
+  * apply --system runs an overlay's state hooks (keel#62, item 1; step 7
+    of decision 0041): /usr/lib/keel/overlays/<name>/state, then every
+    executable of /usr/lib/keel/overlays/<name>/state.d/ in name order,
+    each with enabled or disabled, after the overlay's units come up and
+    before they go down. An overlay with no unit but a hook, Coraza's
+    module, now gets a step: before, turning it on wrote Monit's
+    waf-blocks check and loaded nothing. keel records the state in
+    /var/lib/keel/overlays/<name> once every hook passed and runs them
+    again only when the spec's state differs from the record, so a
+    second apply changes nothing; a failed hook fails the step and
+    records nothing. Under --root no hook runs.
+
+ -- Marcos Mendez <mendez.foto@gmail.com>  Thu, 01 Oct 2026 20:00:00 +0000
+
 keel (0.14.0) unstable; urgency=medium
 
   * The spec gains firewall.enabled, allowed in a cloud advanced

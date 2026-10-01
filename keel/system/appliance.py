@@ -8,6 +8,8 @@ comes up before it and goes down after it. Nothing is ever masked or
 unmasked, so what `systemctl enable` undoes stays what an operator,
 Webmin and keel all expect (Keel-Linux/common, packages/README.md).
 CrowdSec's identity is made on its first enable (keel.system.crowdsec).
+An overlay's state hooks, Coraza's for one, which has no unit, run after
+its units come up and before they go down (keel.system.hooks).
 
 Monit's file, /etc/keel/monit/keel-manifest.conf, is always written
 (0041, "Resolved"): the appliance's own processes and checks, and those
@@ -43,11 +45,13 @@ from keel.system.appstate import (
 )
 from keel.system.crowdsec import OVERLAY as CROWDSEC
 from keel.system.crowdsec import plan_identity
+from keel.system.hooks import plan_hooks
 from keel.system.monitor import NOTIFY, reload
 
 MONIT_FIELD = "derived.monit"
 MODE = 0o600
 ENABLED = "enabled"
+DISABLED = "disabled"
 
 __all__ = ["MANIFEST_MONIT", "MONIT_LINK", "plan_appliance"]
 
@@ -63,7 +67,7 @@ def plan_appliance(doc: dict, state: ApplianceState | None, live: bool,
     steps = [plan_monit(doc, states, state, live, available)]
     for name in converge_order(state.resolved, states):
         units = overlay_units(state.resolved, name)
-        if units:
+        if units or state.hooks.get(name):
             steps.append(plan_overlay(name, states.get(name), units, state,
                                       live, available))
     return steps
@@ -97,12 +101,15 @@ def plan_overlay(name: str, wanted: str | None, units: tuple[str, ...],
                  state: ApplianceState, live: bool,
                  available: frozenset[str]) -> Step:
     field = f"overlays.{name}"
-    if live and "systemctl" not in available:
+    if units and live and "systemctl" not in available:
         return Step(field, (Refuse(
             "systemctl not found: the units cannot be converged"),))
     systemctl = ("systemctl",) if live else (
         "systemctl", f"--root={state.root}")
     on = wanted == ENABLED
+    hooks = state.hooks.get(name, ())
+    hooked = plan_hooks(name, ENABLED if on else DISABLED, hooks,
+                        state.recorded.get(name), live)
     masked = [unit for unit in units if on and state.units[unit].is_masked]
     if masked:
         # refused before anything is made, CrowdSec's identity included
@@ -115,14 +122,20 @@ def plan_overlay(name: str, wanted: str | None, units: tuple[str, ...],
         identity = plan_identity(state.crowdsec, live, available)
         actions += identity
     made = any(not isinstance(action, Note) for action in identity)
+    if not on:
+        # what reacts to the overlay lets go of it before its units stop
+        actions += hooked
     for unit in (units if on else tuple(reversed(units))):
         found = state.units[unit]
         if on:
             actions += start(systemctl, unit, found, live, made)
         else:
             actions += stop(systemctl, unit, found, live)
+    if on:
+        actions += hooked
     if all(isinstance(action, Note) for action in actions):
-        actions.append(Note(f"unchanged ({wanted}: {', '.join(units)})"))
+        actions.append(Note(f"unchanged ({wanted or DISABLED}:"
+                            f" {', '.join(units + hooks)})"))
     return Step(field, tuple(actions))
 
 

@@ -939,8 +939,36 @@ order:
 Only what differs is done, so a second run changes nothing. Overlays go
 in the order `requires` gives: every overlay that goes down first, those
 that depend on another before it, then every one that comes up, what is
-required before what requires it. An overlay without a process (the
-installer, WireGuard) has nothing in systemd and no step.
+required before what requires it. An overlay without a process and
+without a state hook (the installer, WireGuard) has nothing to converge
+and no step.
+
+**State hooks** (keel#62). An overlay that is not a unit, Coraza for
+one (an Nginx module), ships an executable
+`/usr/lib/keel/overlays/<name>/state`, and another package may react to
+an overlay's state with executables in
+`/usr/lib/keel/overlays/<name>/state.d/` (Keel Web routes its default
+site through Anubis that way). Each runs with `enabled` or `disabled`:
+the overlay's own first, then the directory's in name order, where only
+plain names count (letters, digits, `_` and `-`, as run-parts(8) has
+it, so a `.dpkg-old` is not run). They run after the overlay's units
+come up and before they go down. A hook does what it says and checks it
+(Coraza's tests and reloads Nginx, checks that its probe gets 403, and
+rolls back otherwise), so keel only runs them and reports.
+
+A hook is not a unit keel can ask, so once every hook passed keel
+records the state in `/var/lib/keel/overlays/<name>`, and runs them
+again only when the spec's state differs from that record, or when
+there is none: a second run changes nothing, and the first run on a new
+machine runs every hook once, `disabled` ones included. A hook that
+fails fails the step with its output, and nothing is recorded, so the
+next run tries again. Under `--root` no hook runs and nothing is
+recorded (the step says so): a hook acts on running services.
+
+```
+overlays.coraza: run /usr/lib/keel/overlays/coraza/state: the overlay is enabled (/usr/lib/keel/overlays/coraza/state enabled): done
+overlays.coraza: record enabled in /var/lib/keel/overlays/coraza (mode 0644): done
+```
 
 Nothing is masked or unmasked. The overlay packages keep their units
 disabled, never masked, so that `systemctl enable` is all turning one on
