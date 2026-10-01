@@ -101,5 +101,12 @@ APP_SECTIONS = ("services", "state", "workers", "web")
 APPLIANCE_KEYS = ("base", "overlays", "processes", "checks", "secrets",
                   "options", "hooks") + APP_SECTIONS
 KIND_KEYS = {OVERLAY: OVERLAY_KEYS, APPLIANCE: APPLIANCE_KEYS}
-HOOK_KEYS = {OVERLAY: ("first_boot",), APPLIANCE: ("first_boot", "migrate")}
+HOOK_KEYS = {OVERLAY: ("first_boot", "state"),
+             APPLIANCE: ("first_boot", "migrate")}
+# hooks.state of an overlay (keel#62): the hook apply runs with enabled or
+# disabled, always at this path, and how long it may take
+STATE_HOOK = "/usr/lib/keel/overlays/{name}/state"
+STATE_HOOK_KEYS = ("path", "timeout")
+STATE_TIMEOUT_DEFAULT = 120
+STATE_TIMEOUT_MAX = 600
 MIGRATE = "migrate"

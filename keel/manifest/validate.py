@@ -55,6 +55,7 @@ from keel.manifest.fields import (
 from keel.manifest.load import ManifestError
 from keel.manifest.validate_app import validate_app
 from keel.manifest.validate_process import validate_checks, validate_processes
+from keel.manifest.validate_state import state_hook_errors
 
 SECRET_KEYS = ("name", "description", "generate", "shared")
 OPTION_KEYS = ("name", "type", "default", "pattern", "values")
@@ -80,6 +81,9 @@ def validate(doc: dict, stem: str | None, catalog) -> list[str]:
     found, secrets = _secrets_errors(doc.get("secrets"))
     errors.extend(found)
     errors.extend(_hooks_errors(doc.get("hooks"), kind, catalog.root))
+    if kind == OVERLAY and isinstance(doc.get("hooks"), dict):
+        errors.extend(state_hook_errors(doc["hooks"].get("state"),
+                                        str(doc.get("name")), catalog.root))
     if kind == OVERLAY:
         return errors + _overlay_errors(doc, catalog)
     errors.extend(_appliance_errors(doc))
@@ -177,6 +181,9 @@ def _hooks_errors(value: Any, kind: str, root: str) -> list[str]:
         if key in HOOK_KEYS[APPLIANCE] and key not in HOOK_KEYS[kind]:
             errors.append(f"hooks.{key}: a key of an appliance manifest,"
                           " not of an overlay")
+        elif key in HOOK_KEYS[OVERLAY] and key not in HOOK_KEYS[kind]:
+            errors.append(f"hooks.{key}: a key of an overlay manifest,"
+                          " not of an appliance")
         else:
             errors.extend(keys_errors("hooks", {key: None}, HOOK_KEYS[kind]))
     hooks = value.get("first_boot")

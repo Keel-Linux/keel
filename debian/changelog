@@ -1,3 +1,29 @@
+keel (0.15.0) unstable; urgency=medium
+
+  * The overlay manifest gains hooks.state: {path, timeout} (keel#62, the
+    handbook's erratum of 0041): path is the overlay's
+    /usr/lib/keel/overlays/<name>/state, which manifest validate checks
+    exists, is executable, root's and not writable by group or others;
+    timeout is 1 to 600 seconds, 120 by default. An appliance has none.
+  * apply --system runs an overlay's state hooks (keel#62, item 1; step 7
+    of decision 0041): the declared hooks.state, then every executable of
+    /usr/lib/keel/overlays/<name>/state.d/ in name order, each with
+    enabled or disabled and within its timeout (killed with its session
+    and failing the step on expiry), after the overlay's units come up
+    and before they go down. An overlay with no unit but a hook, Coraza's
+    module, now gets a step: before, turning it on wrote Monit's
+    waf-blocks check and loaded nothing. A hook or its directory that is
+    not root's, is writable by group or others, or is a link out of
+    /usr/lib/keel/overlays refuses the step; an undeclared state file is
+    not run. keel records the state and a digest of the hooks (paths and
+    content hashes) in /var/lib/keel/overlays/<name> once every hook
+    passed and runs them again when either differs, so a second apply
+    changes nothing and a hook installed later still runs; a failed hook
+    fails the step and records nothing. Under --root no hook runs, and
+    the step says only that.
+
+ -- Marcos Mendez <mendez.foto@gmail.com>  Thu, 01 Oct 2026 20:00:00 +0000
+
 keel (0.14.0) unstable; urgency=medium
 
   * The spec gains firewall.enabled, allowed in a cloud advanced
