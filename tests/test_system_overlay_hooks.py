@@ -338,6 +338,15 @@ class TestObserve(ManifestCase):
             f"{FRONT} is a link to /tmp/elsewhere, outside"
             " /usr/lib/keel/overlays: it is not run",))
 
+    def test_a_dangling_link_is_refused_not_a_crash(self):
+        os.makedirs(join(self.root, "usr/lib/keel/overlays/anubis/state.d"))
+        os.symlink(join(self.root, "usr/lib/keel/overlays/anubis/gone"),
+                   join(self.root, FRONT.lstrip("/")))
+        found = self.observe({}, name="anubis")
+        self.assertEqual(found.problems, (
+            f"{FRONT} cannot be read: No such file or directory: it is not"
+            " run",))
+
     def test_a_link_inside_the_overlays_directory_is_followed(self):
         target = executable(self.root, "/usr/lib/keel/overlays/anubis/real")
         os.makedirs(join(self.root, "usr/lib/keel/overlays/anubis/state.d"))

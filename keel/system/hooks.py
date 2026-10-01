@@ -119,15 +119,19 @@ def _executable(root: str, path: str) -> bool:
 def _unsafe(root: str, path: str, directory: bool = False) -> list[str]:
     """Why PATH may not be run (or hold what is run), as root would"""
     full = _under(root, path)
-    info = os.lstat(full)
-    if stat.S_ISLNK(info.st_mode):
-        real = os.path.realpath(full)
-        base = os.path.realpath(_under(root, BASE))
-        if os.path.commonpath([real, base]) != base:
-            shown = "/" + os.path.relpath(real, os.path.realpath(root))
-            return [f"{path} is a link to {shown}, outside {BASE}: it is"
-                    " not run"]
-        info = os.stat(real)
+    try:
+        info = os.lstat(full)
+        if stat.S_ISLNK(info.st_mode):
+            real = os.path.realpath(full)
+            base = os.path.realpath(_under(root, BASE))
+            if os.path.commonpath([real, base]) != base:
+                shown = "/" + os.path.relpath(real, os.path.realpath(root))
+                return [f"{path} is a link to {shown}, outside {BASE}: it"
+                        " is not run"]
+            info = os.stat(real)
+    except OSError as e:
+        # a dangling link, or a file gone meanwhile: refused, never a crash
+        return [f"{path} cannot be read: {e.strerror}: it is not run"]
     problems = []
     if not directory and not stat.S_ISREG(info.st_mode):
         problems.append(f"{path} is not a regular file: it is not run")
