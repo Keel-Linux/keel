@@ -107,9 +107,12 @@ def plan_overlay(name: str, wanted: str | None, units: tuple[str, ...],
     systemctl = ("systemctl",) if live else (
         "systemctl", f"--root={state.root}")
     on = wanted == ENABLED
-    hooks = state.hooks.get(name, ())
-    hooked = plan_hooks(name, ENABLED if on else DISABLED, hooks,
-                        state.recorded.get(name), live)
+    hooks = state.hooks.get(name)
+    if hooks and hooks.problems:
+        # a hook that is not safe to run as root stops the whole step
+        return Step(field, tuple(Refuse(problem)
+                                 for problem in hooks.problems))
+    hooked = plan_hooks(name, ENABLED if on else DISABLED, hooks, live)
     masked = [unit for unit in units if on and state.units[unit].is_masked]
     if masked:
         # refused before anything is made, CrowdSec's identity included
@@ -134,8 +137,12 @@ def plan_overlay(name: str, wanted: str | None, units: tuple[str, ...],
     if on:
         actions += hooked
     if all(isinstance(action, Note) for action in actions):
-        actions.append(Note(f"unchanged ({wanted or DISABLED}:"
-                            f" {', '.join(units + hooks)})"))
+        # under --root a hook was not run, which is not "unchanged"
+        listed = units + tuple(hook.path for hook in hooks.hooks
+                               if live) if hooks else units
+        if listed or live:
+            what = f": {', '.join(listed)}" if listed else ""
+            actions.append(Note(f"unchanged ({wanted or DISABLED}{what})"))
     return Step(field, tuple(actions))
 
 

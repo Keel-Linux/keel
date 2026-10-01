@@ -8,6 +8,7 @@ on with the next field.
 """
 
 import os
+import signal
 import subprocess
 
 from keel.inspect import constants as paths
@@ -46,7 +47,9 @@ class Effects:
     def apply(self, action: Change) -> str | None:
         """Carry out one action; None on success, else what went wrong"""
         try:
-            if isinstance(action, Run | Attempt):
+            if isinstance(action, Run):
+                return self.run(action.argv, timeout=action.timeout)
+            if isinstance(action, Attempt):
                 return self.run(action.argv)
             if isinstance(action, AddBouncer):
                 return crowdsec.add_bouncer(self.tree.root, action)
@@ -82,17 +85,19 @@ class Effects:
         except OSError as e:
             return f"{e.strerror or e}"
 
-    def run(self, argv: tuple[str, ...], stdin: str | None = None) -> (
-        str | None
-    ):
+    def run(self, argv: tuple[str, ...], stdin: str | None = None,
+            timeout: float | None = None) -> str | None:
         """Run a command, with `stdin` when the action carries statements
 
         The statements never reach the argument vector, which is world
         readable in the process list, and never reach the message on
         failure either: the client quotes the statement it choked on, so
         the reason is taken from the stream and the statements are not
-        echoed back by keel.
+        echoed back by keel. A command that runs past `timeout` is killed
+        and fails.
         """
+        if timeout is not None:
+            return self.run_within(argv, timeout)
         try:
             out = subprocess.run(
                 list(argv), capture_output=True, text=True, check=False,
@@ -103,6 +108,31 @@ class Effects:
         if out.returncode != 0:
             detail = out.stderr.strip() or out.stdout.strip()
             return f"{argv[0]} exited {out.returncode}: {detail}"
+        return None
+
+    def run_within(self, argv: tuple[str, ...], timeout: float) -> (
+        str | None
+    ):
+        """Run a command in a session of its own, so that on expiry the
+        whole of it is killed: a hook's children would otherwise keep its
+        output open, and the wait with it"""
+        try:
+            proc = subprocess.Popen(
+                list(argv), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, start_new_session=True,
+            )
+        except OSError as e:
+            return f"cannot run {argv[0]}: {e.strerror}"
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate()
+            return (f"{argv[0]} did not finish within {timeout:g} s and was"
+                    " killed")
+        if proc.returncode != 0:
+            detail = stderr.strip() or stdout.strip()
+            return f"{argv[0]} exited {proc.returncode}: {detail}"
         return None
 
     def write(self, action: WriteFile) -> str | None:

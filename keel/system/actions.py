@@ -13,10 +13,16 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class Run:
-    """Run a command; `argv` is a list, never a shell string"""
+    """Run a command; `argv` is a list, never a shell string
+
+    `timeout`, in seconds, kills a command that runs longer and fails the
+    action; None waits as long as it takes, as every command keel ran
+    before the overlays' state hooks.
+    """
 
     argv: tuple[str, ...]
     summary: str
+    timeout: float | None = None
 
     def describe(self) -> str:
         return f"{self.summary} ({shlex.join(self.argv)})"
