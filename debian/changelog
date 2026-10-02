@@ -1,3 +1,15 @@
+keel (0.15.3) unstable; urgency=medium
+
+  * inspect keeps overlays.wireguard from /etc/keel/instance.yaml when
+    the interface and its unit disagree, inside a 0018 window for one (a
+    change up and waiting for its confirmation). 0.15.2 reported it not
+    inferred and skipped the emitted spec, so the spec inspect writes
+    lost a key every overlay of the chain must have. The report line
+    names both the file and the disagreement; with no emitted value the
+    key is still not inferred (review of #65).
+
+ -- Marcos Mendez <mendez.foto@gmail.com>  Fri, 02 Oct 2026 16:00:00 +0000
+
 keel (0.15.2) unstable; urgency=medium
 
   * inspect reads overlays.wireguard from the machine. The WireGuard

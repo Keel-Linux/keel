@@ -154,18 +154,28 @@ def overlay_states(tree: Tree, resolved, emitted: dict, where: str,
         names = overlay_units(resolved, state.name)
         found = (wireguard_state(tree, live, link_up)
                  if not names and state.name == WIREGUARD else None)
+        emitted_value = declared.get(state.name) if isinstance(
+            declared, dict) else None
         if found is not None:
             value, why = found
-            if value is None:
-                findings.append(missing(key, (
-                    f"its interface and its unit disagree: {why}")))
-            else:
+            if value is not None:
                 overlays[state.name] = value
                 findings.append(inferred(key, value, why))
+            elif emitted_value in OVERLAY_STATES:
+                # inside a 0018 window, say: the machine is between two
+                # states, so the spec the installer emitted still gives
+                # the key, and the spec inspect writes keeps it
+                overlays[state.name] = emitted_value
+                findings.append(inferred(key, emitted_value, (
+                    f"{where}; its interface and its unit disagree:"
+                    f" {why}")))
+            else:
+                findings.append(missing(key, (
+                    f"its interface and its unit disagree: {why}, and no"
+                    f" spec the installer emitted says it at {where}")))
             continue
         if not names:
-            value = declared.get(state.name) if isinstance(
-                declared, dict) else None
+            value = emitted_value
             if value in OVERLAY_STATES:
                 overlays[state.name] = value
                 findings.append(inferred(key, value,
