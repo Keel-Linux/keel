@@ -180,6 +180,7 @@ class TestChange(RootCase):
         self.assertEqual(self.current(), OLD)
         self.assertFalse(marker.exists(self.root))
         self.assertEqual(run.calls[-1], STOP)
+        self.assertEqual(marker.last(self.root).outcome, marker.REVERTED)
 
     def test_the_old_file_back_but_down_is_said(self):
         run = Recorder(fail={"ifup": 2})
@@ -310,6 +311,15 @@ class TestRevert(RootCase):
         self.assertEqual(switch.revert(self.root, Recorder()),
                          (True, "no network change is waiting; nothing"
                           " to revert"))
+        self.assertIsNone(marker.last(self.root))
+
+    def test_every_revert_that_restored_the_file_is_recorded(self):
+        self.prepared()
+        self.assertTrue(switch.revert(self.root, Recorder(), boot=True)[0])
+        self.assertEqual(marker.last(self.root).outcome, marker.REVERTED)
+        self.assertEqual(marker.last(self.root).path, INTERFACES)
+        mode = os.stat(join(self.root, marker.LAST)).st_mode & 0o777
+        self.assertEqual(mode, 0o600)
 
     def test_live_revert_bounces_onto_the_saved_file(self):
         self.prepared()
@@ -344,6 +354,9 @@ class TestRevert(RootCase):
                       line)
         self.assertEqual(self.current(), OLD)
         self.assertFalse(marker.exists(self.root))
+        self.assertEqual(marker.last(self.root),
+                         marker.Last(marker.REVERTED, INTERFACES,
+                                     marker.last(self.root).at))
 
     def test_an_unparseable_marker_with_no_known_file_restores_nothing(self):
         for target in (None, "garbage", json.dumps({"path": "etc/passwd"}),
@@ -665,6 +678,45 @@ class TestConfirm(RootCase):
         (confirmed, lines), _ = self.confirm(ssh())
         self.assertFalse(confirmed)
         self.assertIn("no network change is waiting", lines[0])
+        self.assertNotIn("reverted", lines[0])
+
+    def test_a_change_another_session_confirmed_stays_confirmed(self):
+        """The maintainer's screenshot 040: a session attached from the
+        host confirmed the overlay, then the console's confirm said the
+        change had been reverted, and confconsole that it would revert"""
+        self.prepared(kind=marker.OVERLAY, iface="wg0",
+                      path="etc/wireguard/wg0.conf")
+        console = session.Origin(session.CONSOLE_KIND, "the console")
+        (confirmed, _), _ = self.confirm(
+            session.Origin(session.HOST, "the host"))
+        self.assertTrue(confirmed)
+        (confirmed, lines), run = self.confirm(console)
+        self.assertTrue(confirmed)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("already confirmed", lines[0])
+        self.assertIn("/etc/wireguard/wg0.conf", lines[0])
+        self.assertIn("UTC", lines[0])
+        self.assertIn("it stays", lines[0])
+        self.assertNotIn("revert", lines[0])
+        self.assertEqual(run.calls, [])
+
+    def test_a_reverted_change_is_called_reverted(self):
+        self.prepared()
+        self.write(NEW)
+        self.assertTrue(switch.revert(self.root, Recorder())[0])
+        (confirmed, lines), _ = self.confirm(ssh())
+        self.assertFalse(confirmed)
+        self.assertIn("no network change is waiting", lines[0])
+        self.assertIn(f"the last one, of /{INTERFACES}, was reverted",
+                      lines[0])
+
+    def test_a_record_that_cannot_be_read_says_nothing_of_the_last(self):
+        for text in ("{not json", json.dumps({"outcome": "kept"}),
+                     json.dumps(["confirmed"])):
+            marker.write_private(self.root, marker.LAST, text)
+            (confirmed, lines), _ = self.confirm(ssh())
+            self.assertFalse(confirmed)
+            self.assertEqual(lines, [netconfirm.NOTHING_WAITING])
 
     def test_not_ready_reasons(self):
         marker.write_private(self.root, marker.PENDING, "garbage")

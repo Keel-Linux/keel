@@ -351,6 +351,7 @@ def rolled_back(root: str, pending: marker.Pending, current: str,
     if not written:
         return (f"{problem}; putting the previous file back failed too"
                 f" ({back}); the revert timer will try again")
+    marker.record(root, marker.REVERTED, pending.path)
     marker.clear(root)
     disarm(run)
     if back:
@@ -389,6 +390,7 @@ def revert(root: str, run: Runner, boot: bool = False) -> tuple[bool, str]:
             problem = put_back(root, target, text)
             if problem:
                 return False, f"cannot restore: {problem}"
+            marker.record(root, marker.REVERTED, target.path)
             marker.clear(root)
             if boot:
                 return True, f"{restored(target)} before networking starts"
@@ -417,6 +419,7 @@ def moved_back(root: str, pending: marker.Pending, text: str,
                             autoconf, back=True)
     if not written:
         return False, f"cannot restore: {problem}"
+    marker.record(root, marker.REVERTED, pending.path)
     marker.clear(root)
     disarm(run)
     done = restored(pending.target())

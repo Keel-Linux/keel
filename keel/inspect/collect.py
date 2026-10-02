@@ -60,7 +60,8 @@ def inspect_root(
         [tree.read(paths.INTERFACES)] + tree.read_dir(paths.INTERFACES_D),
         tree.read(paths.RESOLV_CONF),
         tree.exists(paths.LXC_MARKER),
-        Runtime(run_command(tree, paths.IP_ADDR_COMMAND), leases(tree)),
+        Runtime(run_command(tree, paths.IP_ADDR_COMMAND), leases(tree),
+                links(tree)),
     )
     findings += found
     overlay, found = overlay_section(tree)
@@ -96,11 +97,13 @@ def inspect_root(
         tree.read(paths.CRON_APT_CONFIG),
         tree.read(paths.CRON_APT_INSTALL),
         tree.read(paths.AUTO_UPGRADES),
+        tree.read(paths.SEC_UPDATES_RECORD),
     )
     findings += found
     _add(spec, "security", security)
 
-    hub, found = probe_hub(tree.present(paths.TKLBAM_HUB_REGISTRATION))
+    hub, found = probe_hub(tree.present(paths.TKLBAM_HUB_REGISTRATION),
+                           tree.present(paths.CLOUD_API_KEY), secrets_dir)
     findings += found
     _add(spec, "hub", hub)
 
@@ -125,7 +128,8 @@ def inspect_root(
     _add(spec, "locale", locale)
 
     monitor, found = probe_monitor(tree.read(paths.MONIT_CONF),
-                                   monit_cycle(tree))
+                                   monit_cycle(tree),
+                                   tree.read(paths.MONITOR_SETTINGS))
     findings += found
     _add(spec, "monitor", monitor)
 
@@ -200,6 +204,20 @@ def leases(tree: Tree) -> tuple[File, ...]:
         for pattern in paths.DHCP6_LEASES
         for name in tree.glob(pattern)
     )
+
+
+def links(tree: Tree) -> frozenset[str] | None:
+    """The network interfaces the live machine has; None offline
+
+    An offline root carries no /sys of the machine it describes, so
+    which cards that machine has is unknown there, and said so by None.
+    """
+    if tree.root != paths.ROOT_DEFAULT:
+        return None
+    try:
+        return frozenset(os.listdir(paths.SYS_CLASS_NET))
+    except OSError:
+        return None
 
 
 def database_servers(tree: Tree) -> tuple[Installed, ...]:

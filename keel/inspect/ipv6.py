@@ -57,11 +57,14 @@ class Runtime:
 
     `output` is `ip -6 addr show`, or why it could not be run (an offline
     root, no `ip` command); `leases` is every DHCPv6 lease file found
-    under the root, which an offline root does carry.
+    under the root, which an offline root does carry. `links` are the
+    interfaces the live machine has (/sys/class/net), or None where that
+    is not known, an offline root.
     """
 
     output: File
     leases: tuple[File, ...] = ()
+    links: frozenset[str] | None = None
 
     @property
     def addresses(self) -> tuple[Address, ...]:

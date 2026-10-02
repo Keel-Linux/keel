@@ -87,6 +87,29 @@ class TestApplyThenDiff(unittest.TestCase):
     def diff(self) -> tuple[int, str, str]:
         return run_cli("diff", "--spec", self.spec, "--root", self.root)
 
+    def test_what_inspect_emits_applies_again_with_no_change(self):
+        """keel#60, decision 0027: the emitted spec is complete. It lost
+        the channels, did not validate (enabled needs one), and had to
+        have them added by hand before apply"""
+        self.assertEqual(self.apply()[0], exits.OK)
+        emitted = join(self.tmp.name, "emitted.yaml")
+        code, _, err = run_cli("inspect", "--root", self.root, "--output",
+                               emitted, "--report", emitted + ".report")
+        self.assertIn(code, (exits.OK, exits.INSPECT_INCOMPLETE), err)
+        document = spec.load(emitted)
+        declared = spec.load(self.spec)["monitor"]["notify"]
+        self.assertEqual(document["monitor"]["notify"],
+                         {**declared, "details": False})
+        with open(emitted + ".report") as fob:
+            self.assertNotIn("secretpath", fob.read())
+        code, out, err = run_cli("spec", "apply", "--system-only", "--spec",
+                                 emitted, "--root", self.root,
+                                 "--skip-network")
+        monitor = [line for line in out.splitlines()
+                   if line.startswith("monitor:")]
+        self.assertTrue(any("unchanged" in line for line in monitor), out)
+        self.assertFalse(any(": done" in line for line in monitor), out)
+
     def test_apply_diff_off_and_diff_again(self):
         code, out, err = self.apply()
         self.assertEqual((code, err), (exits.OK, ""))

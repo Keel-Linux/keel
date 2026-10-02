@@ -3,7 +3,8 @@
 
 import ipaddress
 
-from keel.inspect.interfaces import Stanza, parse_interfaces
+from keel.inspect.constants import SYS_CLASS_NET
+from keel.inspect.interfaces import Stanza, hotplug_only, parse_interfaces
 from keel.inspect.ipv6 import Runtime, resolve_method
 from keel.inspect.report import Finding, inferred, missing
 from keel.inspect.tree import File
@@ -75,6 +76,14 @@ def _interfaces(
 
     declared: dict = {}
     nameservers: list[str] = []
+    absent = absent_placeholders(readable, runtime.links)
+    for iface, path in absent.items():
+        findings.append(missing(
+            f"network.interfaces.{iface}",
+            f"{path} names {iface} allow-hotplug only, and the machine has"
+            f" no such interface (not in {SYS_CLASS_NET}): its stanza is"
+            " a placeholder for a card that may be added, left out",
+        ))
     for file in readable:
         stanzas, problems = parse_interfaces(file.text or "")
         for header in problems:
@@ -83,7 +92,8 @@ def _interfaces(
                 f"{file.path}: malformed line {header!r}",
             ))
         for stanza in stanzas:
-            if stanza.iface == LOOPBACK or stanza.family not in FAMILIES:
+            if stanza.iface == LOOPBACK or stanza.family not in FAMILIES \
+                    or stanza.iface in absent:
                 continue
             family = FAMILIES[stanza.family]
             field = f"network.interfaces.{stanza.iface}.{family}"
@@ -100,6 +110,24 @@ def _interfaces(
             f"{readable[0].path} has no interface stanza besides lo",
         ))
     return declared, nameservers
+
+
+def absent_placeholders(files: list[File],
+                        links: frozenset[str] | None) -> dict[str, str]:
+    """Hotplug only interfaces the live machine does not have, with the
+    file that names them; nothing when the machine's links are unknown
+
+    An interface `auto` brings up at boot is kept even when its card is
+    missing: that is a fault the report should show, not a placeholder.
+    """
+    if links is None:
+        return {}
+    text = "\n".join(file.text or "" for file in files)
+    found: dict[str, str] = {}
+    for iface in sorted(hotplug_only(text) - links):
+        found[iface] = next(file.path for file in files
+                            if iface in hotplug_only(file.text or ""))
+    return found
 
 
 def _family(

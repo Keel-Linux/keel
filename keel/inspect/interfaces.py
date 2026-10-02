@@ -65,6 +65,31 @@ def parse_interfaces(text: str) -> tuple[list[Stanza], list[str]]:
     return stanzas, problems
 
 
+HOTPLUG = "allow-hotplug"
+AT_BOOT = ("auto", "allow-auto")
+
+
+def hotplug_only(text: str) -> frozenset[str]:
+    """The interfaces an `allow-hotplug` line names and no `auto` line does
+
+    Such an interface is brought up when its card appears, and not at
+    boot: a stanza for it is a placeholder until then, as the eth1 every
+    TurnKey and Keel image ships is. Only unindented lines count, as for
+    `iface`; an indented one belongs to the stanza above it.
+    """
+    hotplug: set[str] = set()
+    at_boot: set[str] = set()
+    for line in text.splitlines():
+        if not line.strip() or line[0] in " \t#":
+            continue
+        fields = line.split()
+        if fields[0] == HOTPLUG:
+            hotplug.update(fields[1:])
+        elif fields[0] in AT_BOOT:
+            at_boot.update(fields[1:])
+    return frozenset(hotplug - at_boot)
+
+
 def _stanza(fields: list) -> Stanza:
     iface, family, method, options = fields
     return Stanza(iface, family, method, tuple(options))

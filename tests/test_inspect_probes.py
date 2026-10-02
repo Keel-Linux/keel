@@ -79,13 +79,13 @@ class TestReport(unittest.TestCase):
 
     def test_summary_counts_and_names_the_required_gaps(self):
         result = Inspection("/", "core", {}, (
-            inferred("instance.hostname", "a", "f"),
-            missing("instance.fqdn", "why"),
+            inferred("instance.fqdn", "a.example.org", "f"),
+            missing("instance.hostname", "why"),
             missing("app.email", "why"),
             Finding("secrets.root_password", NOT_EXTRACTED, "v", "s"),
         ))
         self.assertFalse(result.complete)
-        self.assertEqual(result.missing_required, ("instance.fqdn",))
+        self.assertEqual(result.missing_required, ("instance.hostname",))
         self.assertEqual(
             result.summary(),
             "inspect: 1 inferred, 2 not inferred (1 required), 1 secrets to"
@@ -96,6 +96,16 @@ class TestReport(unittest.TestCase):
         result = Inspection("/", "core", {}, (missing("app.email", "x"),))
         self.assertTrue(result.complete)
         self.assertIn("spec complete", result.summary())
+
+    def test_no_fully_qualified_name_leaves_the_spec_complete(self):
+        """No first boot hook asks for one, and a fresh Core has none, so
+        inspect exited 13 on every new appliance (screenshots 048, 059)"""
+        result = Inspection("/", "core", {}, (
+            inferred("instance.hostname", "core", "f"),
+            missing("instance.fqdn", "no dotted name"),
+        ))
+        self.assertTrue(result.complete)
+        self.assertEqual(result.missing_required, ())
 
 
 class TestFile(unittest.TestCase):
@@ -220,6 +230,20 @@ class TestInterfacesParser(unittest.TestCase):
         self.assertIsNone(stanzas[0].option("gateway"))
         self.assertIsNone(stanzas[0].option("address"))
 
+    def test_hotplug_names_and_the_ones_brought_up_at_boot(self):
+        text = (
+            "auto lo eth0\n"
+            "allow-hotplug eth1 eth2\n"
+            "# allow-hotplug eth9\n"
+            "    allow-hotplug eth8\n"
+            "allow-auto eth3\n"
+            "allow-hotplug\n"
+            "allow-hotplug eth2\n"
+            "auto eth2\n"
+        )
+        self.assertEqual(interfaces.hotplug_only(text),
+                         frozenset({"eth1"}))
+
 
 class TestIPv6Evidence(unittest.TestCase):
     """keel.inspect.ipv6: what the machine says about an inet6 dhcp stanza"""
@@ -294,6 +318,52 @@ class TestNetwork(unittest.TestCase):
         return network.probe_network(
             files, File("/x/etc/resolv.conf", resolv), container, runtime
         )
+
+    # what every TurnKey and Keel image ships: eth0, and an allow-hotplug
+    # eth1 for a second card that a container usually never gets
+    HOTPLUG = (
+        "auto eth0\n"
+        "iface eth0 inet dhcp\n"
+        "allow-hotplug eth1\n"
+        "iface eth1 inet dhcp\n"
+        "iface eth1 inet6 dhcp\n"
+    )
+
+    def test_a_hotplug_stanza_for_a_card_that_is_absent_is_left_out(self):
+        """The maintainer's screenshots 034 and 057: inspect reported an
+        eth1 the container does not have, from the image's placeholder"""
+        runtime = ipv6.Runtime(File(IP_ADDR, SLAAC_OUTPUT),
+                               links=frozenset({"lo", "eth0"}))
+        section, findings = self.probe(self.HOTPLUG, runtime=runtime)
+        self.assertEqual(list(section["interfaces"]), ["eth0"])
+        self.assertEqual(statuses(findings, "network.interfaces.eth1"),
+                         [NOT_INFERRED])
+        self.assertIn("allow-hotplug", reason(findings,
+                                              "network.interfaces.eth1"))
+        self.assertIn("no such interface",
+                      reason(findings, "network.interfaces.eth1"))
+        self.assertEqual(statuses(findings, "network.interfaces.eth1.ipv4"),
+                         [])
+
+    def test_a_hotplug_card_that_is_there_is_reported(self):
+        runtime = ipv6.Runtime(File(IP_ADDR, SLAAC_OUTPUT),
+                               links=frozenset({"eth0", "eth1"}))
+        section, _ = self.probe(self.HOTPLUG, runtime=runtime)
+        self.assertEqual(list(section["interfaces"]), ["eth0", "eth1"])
+
+    def test_without_the_live_links_every_stanza_is_reported(self):
+        """An offline root cannot say which cards the machine has"""
+        section, _ = self.probe(self.HOTPLUG)
+        self.assertEqual(list(section["interfaces"]), ["eth0", "eth1"])
+
+    def test_an_auto_stanza_for_an_absent_card_is_still_reported(self):
+        """`auto` brings it up at boot: a missing card is a fault to see,
+        not a placeholder"""
+        runtime = ipv6.Runtime(File(IP_ADDR, SLAAC_OUTPUT),
+                               links=frozenset({"eth0"}))
+        section, _ = self.probe("auto eth1\niface eth1 inet dhcp\n",
+                                runtime=runtime)
+        self.assertEqual(list(section["interfaces"]), ["eth1"])
 
     def test_static_ipv6_is_read_and_stays_with_the_file(self):
         section, findings = self.probe(
@@ -586,9 +656,24 @@ class TestAppliance(unittest.TestCase):
         self.assertEqual(str(found), "nginx-php-fastcgi 19.0 (trixie, amd64)")
         self.assertEqual(finding.status, INFERRED)
 
+    def test_a_keel_image_names_itself_keel(self):
+        """A Keel Core image's /etc/turnkey_version says keel-core-19.0-...
+        (the maintainer's screenshot 047): the same four fields after
+        another prefix, which inspect called not a version string"""
+        found, finding = app.probe_appliance(
+            File("/x/v", "keel-core-19.0-trixie-amd64\n"))
+        self.assertEqual(found, app.Appliance("core", "19.0", "trixie",
+                                              "amd64"))
+        self.assertEqual(finding.status, INFERRED)
+        found, _ = app.probe_appliance(
+            File("/x/v", "keel-web-19.0-trixie-amd64\n"))
+        self.assertEqual(found.name, "web")
+
     def test_missing_or_foreign_version_file(self):
         for file in (ABSENT, File("/x/v", "\n"), File("/x/v", "debian-13\n"),
-                     File("/x/v", "turnkey-core\n")):
+                     File("/x/v", "turnkey-core\n"),
+                     File("/x/v", "keel-core\n"),
+                     File("/x/v", "keelcore-19.0-trixie-amd64\n")):
             found, finding = app.probe_appliance(file)
             self.assertIsNone(found)
             self.assertEqual(finding.status, NOT_INFERRED)
@@ -643,8 +728,38 @@ class TestSecurity(unittest.TestCase):
                 'APT::Periodic::Unattended-Upgrade "1";\n')
 
     def probe(self, conf=ABSENT, aliases=ABSENT, config=ABSENT,
-              install=ABSENT, auto=ABSENT):
-        return security.probe_security(conf, aliases, config, install, auto)
+              install=ABSENT, auto=ABSENT, record=ABSENT):
+        return security.probe_security(conf, aliases, config, install, auto,
+                                       record)
+
+    RECORD = "/x/var/lib/inithooks/sec-updates"
+
+    def test_the_first_boot_record_wins_over_the_update_posture(self):
+        """Skip at first boot, and inspect said force from the cron-apt
+        install action every image ships (the maintainer's screenshot
+        034); 95secupdates now leaves the answer behind"""
+        section, findings = self.probe(
+            install=self.INSTALL, auto=self.AUTO,
+            record=File(self.RECORD, "skip\n"))
+        self.assertEqual(section[FIELD], "skip")
+        self.assertEqual(reason(findings, UPDATES),
+                         f"{self.RECORD}, what the first boot chose")
+        section, _ = self.probe(record=File(self.RECORD, "FORCE\n"))
+        self.assertEqual(section[FIELD], "force")
+
+    def test_a_conf_still_there_wins_over_the_record(self):
+        section, findings = self.probe(
+            conf=File("/x/c", "SEC_UPDATES=FORCE\n"),
+            record=File(self.RECORD, "skip\n"))
+        self.assertEqual(section[FIELD], "force")
+        self.assertEqual(reason(findings, UPDATES), "/x/c")
+
+    def test_a_record_that_says_neither_is_not_evidence(self):
+        for text in ("", "maybe\n"):
+            section, findings = self.probe(
+                install=self.INSTALL, record=File(self.RECORD, text))
+            self.assertEqual(section[FIELD], "force")
+            self.assertIn("update posture", reason(findings, UPDATES))
 
     def test_the_machine_alias_wins_over_a_stale_conf(self):
         """A conf is first boot input; the alias is what the machine does
@@ -748,17 +863,51 @@ class TestSecrets(unittest.TestCase):
         section, _ = secrets.probe_secrets(ABSENT, "/run/s", True)
         self.assertEqual(list(section), ["root_password", "db_password"])
 
+    NO_HUB = File("/x/var/lib/tklbam/sub_apikey", problem=NOT_PRESENT)
+    NO_CLOUD = File("/x/etc/keel/secrets/cloud_api_key",
+                    problem=NOT_PRESENT)
+    CLOUD = File("/x/etc/keel/secrets/cloud_api_key", "")
+
     def test_hub_key_is_skip_without_a_hub_registration(self):
         section, findings = secrets.probe_hub(
-            File("/x/var/lib/tklbam/sub_apikey", problem=NOT_PRESENT))
+            self.NO_HUB, self.NO_CLOUD, "/etc/keel/secrets")
         self.assertEqual(section, {"api_key": "skip"})
         self.assertIn("no Hub registration", reason(findings, "hub.api_key"))
+        self.assertIn("no Keel Cloud key", reason(findings, "hub.api_key"))
+
+    def test_a_keel_cloud_key_is_referenced_by_its_file(self):
+        """The first boot stores the Keel Cloud key in cloud_api_key and the
+        description references it as hub.api_key; inspect answered skip
+        (the maintainer's screenshots 058 and 061)"""
+        section, findings = secrets.probe_hub(
+            self.NO_HUB, self.CLOUD, "/run/keel/secrets")
+        self.assertEqual(section, {"api_key": {
+            "file": "/run/keel/secrets/cloud_api_key"}})
+        self.assertEqual(statuses(findings, "hub.api_key"), [NOT_EXTRACTED])
+        self.assertIn("never read", reason(findings, "hub.api_key"))
+
+    def test_a_keel_cloud_key_wins_over_a_hub_registration(self):
+        section, _ = secrets.probe_hub(
+            File("/x/var/lib/tklbam/sub_apikey", ""), self.CLOUD,
+            "/etc/keel/secrets")
+        self.assertEqual(section, {"api_key": {
+            "file": "/etc/keel/secrets/cloud_api_key"}})
+
+    def test_a_cloud_key_that_cannot_be_looked_at_leaves_the_key_unknown(
+            self):
+        section, findings = secrets.probe_hub(
+            self.NO_HUB, File("/x/etc/keel/secrets/cloud_api_key",
+                              problem=PERMISSION_DENIED),
+            "/etc/keel/secrets")
+        self.assertIsNone(section)
+        self.assertIn("permission denied", reason(findings, "hub.api_key"))
 
     def test_a_hub_registration_leaves_the_key_unknown(self):
         """inspect answered skip whatever the machine did, so diff called a
         machine registered with the TurnKey Hub the same as one that is not"""
         section, findings = secrets.probe_hub(
-            File("/x/var/lib/tklbam/sub_apikey", "HUBKEY-7f3a9\n"))
+            File("/x/var/lib/tklbam/sub_apikey", "HUBKEY-7f3a9\n"),
+            self.NO_CLOUD, "/etc/keel/secrets")
         self.assertIsNone(section)
         self.assertEqual(statuses(findings, "hub.api_key"), [NOT_INFERRED])
         self.assertIn("registered with the TurnKey Hub",
@@ -767,7 +916,8 @@ class TestSecrets(unittest.TestCase):
 
     def test_a_registry_that_cannot_be_read_leaves_the_key_unknown(self):
         section, findings = secrets.probe_hub(
-            File("/x/var/lib/tklbam/sub_apikey", problem=PERMISSION_DENIED))
+            File("/x/var/lib/tklbam/sub_apikey", problem=PERMISSION_DENIED),
+            self.NO_CLOUD, "/etc/keel/secrets")
         self.assertIsNone(section)
         self.assertIn("permission denied", reason(findings, "hub.api_key"))
 

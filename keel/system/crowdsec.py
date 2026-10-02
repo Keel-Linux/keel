@@ -34,7 +34,7 @@ import secrets
 import subprocess
 from dataclasses import dataclass
 
-from keel.inspect.tree import Tree
+from keel.inspect.tree import File, Tree
 from keel.system.actions import (
     Action,
     AddBouncer,
@@ -97,13 +97,28 @@ def value_of(text: str | None, key: str) -> str | None:
     return None
 
 
+def capi_state(capi: File) -> str:
+    """absent, empty or present, as CrowdsecState has it
+
+    A file of comments only is absent, not a registration: the Core
+    image build seeds one so the package's postinst does not register in
+    the chroot, and one left in an image would otherwise keep `cscli capi
+    register` from ever running (keel#61). An empty one is the package's
+    "not registered yet", which an operator may also keep on purpose.
+    """
+    if not capi.readable:
+        return "absent"
+    if not (capi.text or "").strip():
+        return "empty"
+    return "present" if capi.lines() else "absent"
+
+
 def observe_crowdsec(tree: Tree) -> CrowdsecState:
     capi = tree.read(CAPI)
     bouncer = tree.read(BOUNCER).text
     return CrowdsecState(
         lapi=value_of(tree.read(LAPI).text, "password") is not None,
-        capi=("absent" if not capi.readable
-              else "empty" if not (capi.text or "").strip() else "present"),
+        capi=capi_state(capi),
         bouncer_key=value_of(bouncer, "api_key") is not None,
         bouncer_mode=value_of(bouncer, "mode"),
         bouncer_id=(tree.read(BOUNCER_ID).text or "").strip() or None,

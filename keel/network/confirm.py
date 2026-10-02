@@ -47,9 +47,7 @@ def confirm(root: str, origin: session.Origin, probes: Probes,
     """(confirmed, what to tell the operator)"""
     with marker.locked(root):
         if not marker.exists(root):
-            return False, ["no network change is waiting for a"
-                           " confirmation; one not confirmed in time has"
-                           " been reverted, and keel diff shows it"]
+            return nothing_waiting(marker.last(root))
         pending = marker.read(root)
         refusal = not_ready(pending, probes.boot_id())
         if refusal:
@@ -66,12 +64,33 @@ def confirm(root: str, origin: session.Origin, probes: Probes,
         else:
             lines += untested_lines(pending, origin)
             lines += gateway_lines(pending, origin, probes)
+        marker.record(root, marker.CONFIRMED, pending.path)
         marker.clear(root)
         switch.disarm(run)
         if overlay:
             lines += enabled_lines(pending.iface, run)
     return True, lines + ["the network change stays; the revert is"
                          " cancelled"]
+
+
+NOTHING_WAITING = "no network change is waiting for a confirmation"
+
+
+def nothing_waiting(last: marker.Last | None) -> tuple[bool, list[str]]:
+    """No marker: say how the last change ended, as far as it is known
+
+    A change another session confirmed stays, and confirming it again
+    is no failure; one that reverted is called reverted; with no record
+    (none since keel kept one, or a record that cannot be read) nothing
+    is claimed either way.
+    """
+    if last is None:
+        return False, [NOTHING_WAITING]
+    if last.outcome == marker.CONFIRMED:
+        return True, [f"{NOTHING_WAITING}: the last one, of /{last.path},"
+                      f" was already confirmed at {last.at}, and it stays"]
+    return False, [f"{NOTHING_WAITING}; the last one, of /{last.path}, was"
+                   f" reverted at {last.at}, and keel diff shows it"]
 
 
 def not_ready(pending: marker.Pending | None, boot_id: str | None) -> (

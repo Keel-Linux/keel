@@ -21,6 +21,7 @@ import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
+from datetime import datetime, timezone
 
 DIR = "var/lib/keel/network"
 LOCK = f"{DIR}/lock"
@@ -28,6 +29,11 @@ PENDING = f"{DIR}/pending.json"
 SAVED = f"{DIR}/saved"
 # which file SAVED is a copy of, apart from PENDING (Target)
 TARGET = f"{DIR}/saved.json"
+# how the last change ended (Last), which outlives the marker
+LAST = f"{DIR}/last.json"
+CONFIRMED = "confirmed"
+REVERTED = "reverted"
+OUTCOMES = (CONFIRMED, REVERTED)
 UPLINK_FILE = "etc/network/interfaces"
 # an overlay's file: wg-quick's rule for the interface name
 OVERLAY_FILE_RE = re.compile(r"^etc/wireguard/[A-Za-z0-9_=+.-]{1,15}\.conf$")
@@ -202,6 +208,39 @@ def saved(root: str) -> str | None:
             return fob.read()
     except OSError:
         return None
+
+
+@dataclass(frozen=True)
+class Last:
+    """How the last change ended, kept after its marker is gone
+
+    Without it, a confirm that found nothing waiting could not tell a
+    change another session had confirmed from one that had reverted, and
+    said reverted (the maintainer's screenshot 040). `at` is UTC.
+    """
+
+    outcome: str
+    path: str
+    at: str
+
+
+def record(root: str, outcome: str, changed: str) -> None:
+    """Keep how a change ended: CONFIRMED or REVERTED, and its file"""
+    at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    write_private(root, LAST,
+                  json.dumps(asdict(Last(outcome, changed, at))) + "\n")
+
+
+def last(root: str) -> Last | None:
+    """How the last change ended; None when that is not known"""
+    try:
+        with open(path(root, LAST)) as fob:
+            data = json.load(fob)
+        found = Last(str(data["outcome"]), str(data["path"]),
+                     str(data["at"]))
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return found if found.outcome in OUTCOMES else None
 
 
 def clear(root: str) -> None:

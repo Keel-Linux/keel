@@ -70,7 +70,7 @@ class TestEnabled(unittest.TestCase):
         self.assertEqual(conf.mode, 0o600)
         self.assertIsNone(conf.owner)
         self.assertIn("with path /srv\n", conf.content)
-        self.assertNotIn("/run", conf.content)
+        self.assertNotIn("with path /run", conf.content)
         self.assertNotIn("hooks.example.org", conf.content)
         self.assertEqual(
             conf.describe(),

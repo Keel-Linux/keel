@@ -483,6 +483,23 @@ class TestObserve(ManifestCase):
         self.assertTrue(found.monit_link_present)
         self.assertFalse(found.monit_file.readable)
 
+    def test_a_capi_file_of_comments_only_is_not_a_registration(self):
+        """keel#61: the Core build seeds the file with a comment so the
+        package's postinst does not register in the chroot. Leaked into
+        an image, it read as registered and capi register never ran"""
+        os.makedirs(join(self.root, "etc/crowdsec"))
+        for text, capi in (
+                ("# keel-core image build: no CAPI registration\n", "absent"),
+                ("\n# a comment\n\n", "absent"),
+                ("", "empty"), ("  \n", "empty"),
+                ("url: https://api.crowdsec.net/\nlogin: m\npassword: p\n",
+                 "present")):
+            with open(join(self.root, CAPI), "w") as fob:
+                fob.write(text)
+            found = observe_appliance(self.root, {
+                "version": 1, "appliance": {"name": "core"}})
+            self.assertEqual(found.crowdsec.capi, capi, repr(text))
+
     def test_nothing_of_crowdsec_is_all_missing(self):
         found = observe_appliance(self.root, {
             "version": 1, "appliance": {"name": "core"}})

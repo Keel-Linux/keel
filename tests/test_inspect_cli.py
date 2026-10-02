@@ -37,6 +37,7 @@ DATABASE = join(FIXTURES, "database")
 DHCP = join(FIXTURES, "dhcp")
 STATIC = join(FIXTURES, "static")
 MISSING = join(FIXTURES, "missing")
+KEELCORE = join(FIXTURES, "keelcore")
 
 
 def run_cli(*argv: str) -> tuple[int, str, str]:
@@ -96,6 +97,47 @@ class TestCollector(unittest.TestCase):
     def reason(result, field: str) -> str:
         return next(f.source for f in result.findings if f.field == field)
 
+    @staticmethod
+    def status(result, field: str) -> str:
+        return next(f.status for f in result.findings if f.field == field)
+
+    def test_a_fresh_keel_core_yields_a_complete_spec(self):
+        """The maintainer's screenshots 047, 048 and 057 to 061: a Keel
+        Core after its first boot (Skip for the updates, a Keel Cloud key)
+        was an unknown appliance, exited 13 for its fqdn, and said skip
+        for the key and force for the updates"""
+        result = inspect_root(KEELCORE)
+        self.assertTrue(result.complete, result.missing_required)
+        self.assertEqual(result.appliance, "core 19.0 (trixie, amd64)")
+        self.assertEqual(result.spec["instance"], {"hostname": "core"})
+        self.assertEqual(result.spec["hub"], {"api_key": {
+            "file": "/etc/keel/secrets/cloud_api_key"}})
+        self.assertEqual(result.spec["security"]["updates_at_first_boot"],
+                         "skip")
+        # offline, the cards the machine has are unknown: every stanza
+        self.assertEqual(list(result.spec["network"]["interfaces"]),
+                         ["eth0", "eth1"])
+
+    def test_the_live_links_are_asked_only_of_the_live_root(self):
+        self.assertIsNone(collect.links(Tree(KEELCORE)))
+        with mock.patch.object(collect.os, "listdir",
+                               return_value=["lo", "eth0"]) as listdir:
+            self.assertEqual(collect.links(Tree("/")),
+                             frozenset({"lo", "eth0"}))
+        listdir.assert_called_once_with("/sys/class/net")
+        with mock.patch.object(collect.os, "listdir",
+                               side_effect=FileNotFoundError(2, "No such")):
+            self.assertIsNone(collect.links(Tree("/")))
+
+    def test_the_live_links_reach_the_network_probe(self):
+        with mock.patch.object(collect, "links",
+                               return_value=frozenset({"lo", "eth0"})):
+            result = inspect_root(KEELCORE)
+        self.assertEqual(list(result.spec["network"]["interfaces"]),
+                         ["eth0"])
+        self.assertIn("no such interface",
+                      self.reason(result, "network.interfaces.eth1"))
+
     def test_turnkey_tree_yields_a_complete_spec(self):
         result = inspect_root(TURNKEY, "/run/keel/secrets")
         self.assertTrue(result.complete)
@@ -119,7 +161,8 @@ class TestCollector(unittest.TestCase):
 
     def test_dhcp_container_tree_reads_the_conf_and_the_sourced_files(self):
         result = inspect_root(DHCP)
-        self.assertEqual(result.missing_required, ("instance.fqdn",))
+        self.assertEqual(result.missing_required, ())
+        self.assertEqual(self.status(result, "instance.fqdn"), "not inferred")
         network = result.spec["network"]
         self.assertEqual(network["managed_by"], "host")
         self.assertEqual(network["interfaces"],
@@ -139,7 +182,7 @@ class TestCollector(unittest.TestCase):
     def test_missing_tree_still_yields_a_spec_with_placeholders(self):
         result = inspect_root(MISSING)
         self.assertEqual(result.missing_required, (
-            "instance.hostname", "instance.fqdn", "network.interfaces",
+            "instance.hostname", "network.interfaces",
             "security.alerts",
         ))
         self.assertEqual(result.appliance, "unknown appliance")
@@ -222,7 +265,7 @@ class TestInspectCommand(unittest.TestCase):
         self.assertEqual(
             err,
             "Error: inspect: required fields not inferred: instance.hostname,"
-            " instance.fqdn, network.interfaces, security.alerts\n",
+            " network.interfaces, security.alerts\n",
         )
         self.assertEqual(os.stat(output).st_mode & 0o777, 0o600)
         with open(output) as fob:
@@ -245,8 +288,16 @@ class TestInspectCommand(unittest.TestCase):
     def test_secrets_dir_moves_the_placeholders(self):
         code, out, _ = run_cli("inspect", "--root", DHCP, "--secrets-dir",
                                "/run/keel/secrets")
-        self.assertEqual(code, exits.INSPECT_INCOMPLETE)
+        self.assertEqual(code, exits.OK)
         self.assertIn("file: /run/keel/secrets/root_password", out)
+
+    def test_a_fresh_keel_core_exits_ok(self):
+        code, out, err = run_cli("inspect", "--root", KEELCORE)
+        self.assertEqual(code, exits.OK, err)
+        self.assertIn(f"from {KEELCORE}: core 19.0 (trixie, amd64)\n", out)
+        self.assertNotIn("unknown appliance", out)
+        self.assertIn("instance.fqdn: not inferred", err)
+        self.assertIn("spec complete\n", err)
 
 
 class TestRoundTrip(unittest.TestCase):
@@ -347,7 +398,7 @@ class TestRoundTrip(unittest.TestCase):
             "inspect", "--root", DHCP, "--output", self.output,
             "--secrets-dir", self.secrets,
         )
-        self.assertEqual(code, exits.INSPECT_INCOMPLETE)
+        self.assertEqual(code, exits.OK)
         document = spec.load(self.output)
         document["instance"]["fqdn"] = "core.example.org"
         document["secrets"].pop("app_password")

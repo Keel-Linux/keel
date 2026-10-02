@@ -18,6 +18,9 @@ What monit can express shapes the file (decision 0021):
   so that `keel inspect` can give it back while the cycles agree with it.
 
 Nothing here acts: every action is `exec` of keel notify, which tells.
+The one global setting the file carries is monit's interface, a Unix
+socket only root can open, which `monit summary` and `monit status`
+need; set nowhere, they never worked.
 """
 
 import re
@@ -34,6 +37,17 @@ HEADER = (
     "# written by keel spec apply --system from the monitor section of the"
     " instance spec\n"
     "# (handbook decision 0021); a change made here is overwritten"
+)
+# monit's interface, without which `monit summary` and `monit status`
+# fail: a Unix socket only root can open, and no TCP port, so nothing is
+# exposed (decision 0021). `allow localhost` is what monit asks before it
+# serves the socket at all; it opens no network listener.
+HTTPD = (
+    "# monit's own interface, for monit summary and monit status here: a"
+    " Unix socket\n"
+    "# that only root can open, and no network listener\n"
+    "set httpd unixsocket /run/monit.sock uid root gid root permission 0600\n"
+    "    allow localhost\n"
 )
 MINUTES_COMMENT = "# for_minutes:"
 INDENT = "    "
@@ -116,7 +130,7 @@ def render(checks: dict, mounts: list[Mount], notify: tuple[str, ...],
     `cycle` is monit's, in seconds, which `for N cycles` counts in.
     """
     writer = Writer(notify, cycle)
-    blocks = [f"{HEADER}\n"]
+    blocks = [f"{HEADER}\n", HTTPD]
     names = filesystem_names(mounts)
     for mount in mounts:
         blocks += filesystem_blocks(checks, mount, names[mount.path], writer)
