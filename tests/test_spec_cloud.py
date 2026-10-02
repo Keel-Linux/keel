@@ -83,6 +83,8 @@ class TestCloudSection(unittest.TestCase):
         only(structural(text), "cloud.set: required")
         only(structural(JOINED.replace("set: shop", "set: Shop_1")),
              "cloud.set: a lower case DNS label")
+        only(structural(JOINED.replace("set: shop", 'set: "shop\\n"')),
+             "cloud.set: a lower case DNS label")
 
     def test_the_endpoint_is_https_with_no_path(self):
         for endpoint in ("http://cloud.example.org", "https://", "ftp://x",

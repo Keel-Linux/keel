@@ -30,8 +30,8 @@ KEY = "cloud"
 KEYS = ("endpoint", "api_key", "entry_secret", "set", "ca_file")
 SECRETS = ("api_key", "entry_secret")
 # One lower case DNS label, as Keel Cloud names sets
-SET_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
-PATH_RE = re.compile(r"^/[A-Za-z0-9._/+-]+$")
+SET_RE = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?")
+PATH_RE = re.compile(r"/[A-Za-z0-9._/+-]+")
 
 
 def validate_cloud(doc: dict, check_secret_files: bool) -> list[str]:
@@ -51,11 +51,11 @@ def validate_cloud(doc: dict, check_secret_files: bool) -> list[str]:
     if joined and "set" not in cloud:
         errors.append(f"{KEY}.set: required with an API key, the set this"
                       " node joins")
-    if "set" in cloud and not SET_RE.match(str(cloud["set"])):
+    if "set" in cloud and not SET_RE.fullmatch(str(cloud["set"])):
         errors.append(f"{KEY}.set: a lower case DNS label (a-z, 0-9 and"
                       " '-', at most 63)")
     ca_file = cloud.get("ca_file")
-    if ca_file is not None and not PATH_RE.match(str(ca_file)):
+    if ca_file is not None and not PATH_RE.fullmatch(str(ca_file)):
         errors.append(f"{KEY}.ca_file: an absolute path")
     return errors
 
