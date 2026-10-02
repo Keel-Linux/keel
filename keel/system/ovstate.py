@@ -7,10 +7,8 @@ from dataclasses import dataclass
 from keel.inspect import constants as paths
 from keel.inspect.tree import Tree
 from keel.network import live, marker, wireguard
-from keel.network.wireguard import MODULE
+from keel.network.wireguard import MODULE, WANTS
 from keel.spec.secretstore import secret_file_error
-
-WANTS = "etc/systemd/system/multi-user.target.wants/wg-quick@{iface}.service"
 
 
 @dataclass(frozen=True)

@@ -9,13 +9,18 @@ docs/manifest-v1.md, "The instance spec side":
   it, so it is read from the spec the installer emitted, and reported
   as not inferred otherwise;
 - `overlays.<name>` is read from systemd for an overlay that owns units
-  (keel.inspect.units). An overlay that owns none (the installer,
-  WireGuard) has no state in systemd; the emitted spec gives it, or it
-  is not inferred.
+  (keel.inspect.units). WireGuard owns none in its manifest, since the
+  interface is the spec's: its state is read the way apply leaves it,
+  from wg-quick@<iface> of the /etc/wireguard file and, on the live
+  system, the interface. An overlay with nothing on the machine to say
+  (the installer, WireGuard with no file) is given by the emitted spec,
+  or not inferred.
 
 Nothing is written for a machine with no appliance manifest, which is
 every machine of before 0041.
 """
+
+from collections.abc import Callable
 
 import yaml
 
@@ -28,10 +33,16 @@ from keel.manifest.constants import APPLIANCE
 from keel.manifest.facts import gather
 from keel.manifest.load import ManifestError
 from keel.manifest.resolve import overlay_units
+from keel.network import live as live_link
+from keel.network import wireguard
 from keel.spec.constants import INSTALLATION_MODES, OVERLAY_STATES
 
 EMITTED = "etc/keel/instance.yaml"
 LIVE_ROOT = "/"
+# the overlay whose state is its interface's (decisions 0020, 0024)
+WIREGUARD = "wireguard"
+CONF_SUFFIX = ".conf"
+LinkUp = Callable[[str], bool]
 
 
 def probe_appliance_sections(tree: Tree) -> tuple[dict, list[Finding]]:
@@ -96,17 +107,62 @@ def read_emitted(tree: Tree) -> tuple[dict, str]:
     return (doc if isinstance(doc, dict) else {}), file.path
 
 
-def overlay_states(tree: Tree, resolved, emitted: dict,
-                   where: str) -> tuple[dict, list[Finding]]:
+def wireguard_state(tree: Tree, live: bool,
+                    link_up: LinkUp) -> tuple[str | None, str] | None:
+    """overlays.wireguard as apply leaves it, and what said so
+
+    apply writes /etc/wireguard/<iface>.conf and enables wg-quick@<iface>
+    once the change is confirmed (keel.system.overlay): enabled is that
+    unit enabled and, on the live system, the interface up; disabled is
+    neither. The default interface's file is read when there are several,
+    as for network.overlay. Up and not enabled (a change waiting for its
+    confirmation) or enabled and down (drift apply restarts) is None.
+    None alone when there is no file: then nothing on the machine says.
+    """
+    names = [path.rsplit("/", 1)[-1][:-len(CONF_SUFFIX)] for path in
+             tree.glob(f"{wireguard.CONF_DIR}/*{CONF_SUFFIX}")]
+    if not names:
+        return None
+    iface = (wireguard.DEFAULT_INTERFACE
+             if wireguard.DEFAULT_INTERFACE in names else names[0])
+    enabled = tree.exists(wireguard.WANTS.format(iface=iface))
+    said = f"wg-quick@{iface}.service {'enabled' if enabled else 'disabled'}"
+    up = None
+    if live:
+        up = link_up(iface)
+        said += f", {iface} {'up' if up else 'down'}"
+    if enabled and up is not False:
+        return "enabled", said
+    if not enabled and not up:
+        return "disabled", said
+    return None, said
+
+
+def overlay_states(tree: Tree, resolved, emitted: dict, where: str,
+                   link_up: LinkUp = live_link.link_up) -> (
+    tuple[dict, list[Finding]]
+):
+    live = tree.root == LIVE_ROOT
     wanted = [unit for state in resolved.overlays
               for unit in overlay_units(resolved, state.name)]
-    units = read_units(tree, wanted, tree.root == LIVE_ROOT)
+    units = read_units(tree, wanted, live)
     declared = emitted.get("overlays") or {}
     overlays: dict = {}
     findings = []
     for state in resolved.overlays:
         key = f"overlays.{state.name}"
         names = overlay_units(resolved, state.name)
+        found = (wireguard_state(tree, live, link_up)
+                 if not names and state.name == WIREGUARD else None)
+        if found is not None:
+            value, why = found
+            if value is None:
+                findings.append(missing(key, (
+                    f"its interface and its unit disagree: {why}")))
+            else:
+                overlays[state.name] = value
+                findings.append(inferred(key, value, why))
+            continue
         if not names:
             value = declared.get(state.name) if isinstance(
                 declared, dict) else None

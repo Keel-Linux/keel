@@ -25,6 +25,9 @@ from dataclasses import dataclass
 DEFAULT_INTERFACE = "wg0"
 DEFAULT_PORT = 51820
 CONF_DIR = "etc/wireguard"
+# the link `systemctl enable wg-quick@<iface>` makes, which apply makes
+# once a change of the overlay is confirmed (keel.system.overlay)
+WANTS = "etc/systemd/system/multi-user.target.wants/wg-quick@{iface}.service"
 # present while the module is loaded, in a container too: /sys/module
 # there shows the host's modules, which are the only ones it has
 MODULE = "sys/module/wireguard"
