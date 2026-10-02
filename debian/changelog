@@ -1,3 +1,17 @@
+keel (0.16.0) unstable; urgency=medium
+
+  * The spec gains a cloud section, handbook decision 0046: endpoint,
+    api_key (skip or a file reference), entry_secret (a file reference),
+    set and ca_file. Additive, so the spec stays version 1. keel only
+    validates it and diff never compares it; Keel Cloud's node agent reads
+    it and writes the peers the operator confirmed into
+    network.overlay.wireguard.peers, which apply converges as before.
+  * keel cloud runs keel-cloud-node, the agent of the keel-overlay-cloud
+    package, with the same arguments, and names the package when it is
+    not installed (exit 9).
+
+ -- Marcos Mendez <mendez.foto@gmail.com>  Fri, 02 Oct 2026 18:00:00 +0000
+
 keel (0.15.3) unstable; urgency=medium
 
   * inspect keeps overlays.wireguard from /etc/keel/instance.yaml when

@@ -320,6 +320,24 @@ def make_key(root: str, key: str, path: str) -> int:
     return exits.OK
 
 
+CLOUD_AGENT = "keel-cloud-node"
+
+
+def cloud(args, execvp=os.execvp) -> int:
+    """keel cloud: hand the arguments to Keel Cloud's node agent
+
+    The agent is its own package (keel-overlay-cloud), since a standalone
+    node needs none of it (decision 0046); keel only finds it.
+    """
+    try:
+        execvp(CLOUD_AGENT, [CLOUD_AGENT, *args.arguments])
+    except FileNotFoundError:
+        print(f"Error: keel cloud needs {CLOUD_AGENT}, from the"
+              " keel-overlay-cloud package", file=sys.stderr)
+        return exits.NOT_IMPLEMENTED
+    return exits.OK  # pragma: no cover - execvp does not return
+
+
 def network_wireguard_suggest(args) -> int:
     """Print a fresh unique local address (RFC 4193) for a first node
 

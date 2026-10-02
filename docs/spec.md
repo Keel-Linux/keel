@@ -45,7 +45,7 @@ version: 1
 | `version` | read | Must be `1`. Absent or different is an error |
 
 The other top level keys are `instance`, `network`, `tls`, `secrets`, `app`,
-`hub`, `security`, `first_login_wizard`, `preseed`, `users`, `locale`,
+`hub`, `cloud`, `security`, `first_login_wizard`, `preseed`, `users`, `locale`,
 `database`, `monitor`, `appliance`, `installation`, `overlays` and `firewall`, each optional and each a mapping except `first_login_wizard`. A file with `version: 1` and nothing else is valid and renders to an
 empty conf.
 
@@ -464,6 +464,40 @@ hub:
 
 Making the endpoint itself configurable is brief section 5.6 and is not part of
 this version: only the key is declared here.
+
+## cloud
+
+This node in Keel Cloud (handbook decision 0046): the service that tells
+the nodes of a set about each other, so they exchange WireGuard public
+keys and endpoints without copy and paste. Keel Cloud is never required:
+without the section, or with `api_key: skip`, the node is standalone.
+
+```yaml
+cloud:
+  endpoint: https://cloud.example.org:8443
+  api_key:
+    file: /etc/keel/secrets/cloud_api_key
+  entry_secret:
+    file: /etc/keel/secrets/cloud_entry_secret
+  set: shop
+  ca_file: /etc/keel/cloud-ca.pem
+```
+
+| Field | State | Notes |
+| --- | --- | --- |
+| `cloud.endpoint` | read | The instance, an `https://` URL with no path, user or query; TLS only. Absent: the project's instance |
+| `cloud.api_key` | read | `skip`, or a reference to the enrollment key's file, root's and 0600. `file` only: the key is made by Keel Cloud, never by `generate` |
+| `cloud.entry_secret` | read | A reference to the set's entry secret, `file` only: the set's first node makes it (`keel cloud entry-secret`) and the operator gives it to the others |
+| `cloud.set` | read | The set this node joins, a lower case DNS label; required with an API key |
+| `cloud.ca_file` | read | Optional, the certificate of a self-hosted instance whose certificate no public authority issued |
+
+keel only validates the section; `diff` never compares it. The node agent,
+`keel-cloud-node` of the `keel-overlay-cloud` package, which `keel cloud`
+runs with the same arguments, reads it, and writes the peers the operator
+confirmed into `network.overlay.wireguard.peers`, which `apply --system`
+converges under the window of `keel network confirm` like any other
+change of the overlay. The agent never writes WireGuard's configuration
+itself.
 
 ## security
 
