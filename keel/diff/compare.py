@@ -44,6 +44,8 @@ NOT_COMPARED_REASONS = {
     " machine",
     "installation": "the mode is chosen once, at installation, and"
     " nothing on the machine records it (decision 0041)",
+    "cloud": "Keel Cloud's settings are read by its node agent; the peers"
+    " it writes are compared under network.overlay (decision 0046)",
 }
 SECRET_REASON = "a secret reference; values are never read"
 # Where a secret reference can stand outside the `secrets` section. Each is

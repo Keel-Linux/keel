@@ -23,6 +23,7 @@ TOP_LEVEL_KEYS = (
     "secrets",
     "app",
     "hub",
+    "cloud",
     "security",
     "first_login_wizard",
     "preseed",

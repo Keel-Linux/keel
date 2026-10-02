@@ -186,6 +186,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_root_option(revert_parser, "revert the change of")
     revert_parser.set_defaults(handler=commands.network_revert)
     add_wireguard_parser(network_actions)
+    add_cloud_parser(subparsers)
 
     # no --spec: notify reads the settings apply wrote, never the spec
     notify_parser = subparsers.add_parser(
@@ -285,6 +286,22 @@ def add_manifest_options(parser: argparse.ArgumentParser) -> None:
     )
     add_root_option(parser, "read /usr/share/keel/{overlays,appliances}"
                     " and the unit files and hooks the manifests name in")
+
+
+def add_cloud_parser(subparsers) -> None:
+    """keel cloud: Keel Cloud's node agent, another package's command
+
+    Everything after `cloud` goes to keel-cloud-node unread, its --help
+    included, so its actions are documented in one place (decision 0046).
+    """
+    cloud_parser = subparsers.add_parser(
+        "cloud",
+        help="this node in Keel Cloud: keel-cloud-node of the"
+        " keel-overlay-cloud package, with the same arguments",
+        add_help=False,
+    )
+    cloud_parser.add_argument("arguments", nargs=argparse.REMAINDER)
+    cloud_parser.set_defaults(handler=commands.cloud)
 
 
 def add_wireguard_parser(network_actions) -> None:

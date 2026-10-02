@@ -41,6 +41,7 @@ in [docs/apply.md](docs/apply.md).
 | `keel network revert` | Put back the interfaces file a pending network change replaced; what the revert timer runs. `--boot` restores the file only, for the boot unit |
 | `keel network wireguard key` | Print this node's WireGuard public key, making the key pair first when there is none (root, live system only); the private key is never printed (decision 0020, docs/spec.md) |
 | `keel network wireguard suggest-address` | Print a random unique local IPv6 address with its /64, for the first node of an overlay |
+| `keel cloud` | Run `keel-cloud-node`, Keel Cloud's node agent from the `keel-overlay-cloud` package, with the same arguments; without the package it says so and exits 9 (decision 0046, docs/spec.md "cloud") |
 | `keel notify` | What monit runs when a check of the `monitor` section fails, lasts or recovers: sends one message, saying what happened and what to do, to every channel the section declares (email, Telegram, ntfy, a webhook). It reads the channels from `/etc/keel/monitor.json`, which `apply --system` writes as root, never from the spec, reads the tokens from their secret files and prints no URL (decision 0021, docs/apply.md) |
 | `keel inspect` | Write a spec from the running machine, or from an offline root, and report every field with its source or why it was not inferred; secrets are never read (brief sections 5.2 and 7) |
 | `keel diff` | Report drift between the spec and the running machine, or an offline root, field by field, through the same collector `inspect` uses; secrets are never compared and their files need not exist, nothing is written (brief section 5.2) |
@@ -132,7 +133,7 @@ Defined in one place, `keel/exits.py`, and reproduced here.
 | 6 | `MANIFEST_INVALID` | A layer manifest cannot be read or fails validation; every problem is printed |
 | 7 | `LAYER_MISMATCH` | A layer tarball, parent chain or `.hash` digest does not match its manifest |
 | 8 | `SIGNATURE_UNVERIFIED` | Every layer matches, but a `.hash` file is present whose signature was not verified (no trusted key is configured yet) |
-| 9 | `NOT_IMPLEMENTED` | The command is a documented stub, or the part of it that is (`verify` exits 9 after the layers pass, because packages are not checked yet) |
+| 9 | `NOT_IMPLEMENTED` | The command is a documented stub, or the part of it that is (`verify` exits 9 after the layers pass, because packages are not checked yet), or another package's (`keel cloud` without `keel-overlay-cloud`) |
 | 10 | `LAYER_UNAVAILABLE` | `pull` could not fetch a manifest or tarball from the source or write the cache; `assemble` found a layer of the chain missing from the cache |
 | 11 | `ASSEMBLE_NEEDS_ROOT` | `assemble` was run by a user other than root; nothing was written |
 | 12 | `ASSEMBLE_FAILED` | The rootfs is not empty or cannot be created, or `tar` or `zstd` failed while extracting or packing |
