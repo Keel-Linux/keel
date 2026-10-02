@@ -21,6 +21,7 @@ import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
+from datetime import datetime, timezone
 
 DIR = "var/lib/keel/network"
 LOCK = f"{DIR}/lock"
@@ -28,6 +29,11 @@ PENDING = f"{DIR}/pending.json"
 SAVED = f"{DIR}/saved"
 # which file SAVED is a copy of, apart from PENDING (Target)
 TARGET = f"{DIR}/saved.json"
+# how the last change ended (Last), which outlives the marker
+LAST = f"{DIR}/last.json"
+CONFIRMED = "confirmed"
+REVERTED = "reverted"
+OUTCOMES = (CONFIRMED, REVERTED)
 UPLINK_FILE = "etc/network/interfaces"
 # an overlay's file: wg-quick's rule for the interface name
 OVERLAY_FILE_RE = re.compile(r"^etc/wireguard/[A-Za-z0-9_=+.-]{1,15}\.conf$")
@@ -202,6 +208,64 @@ def saved(root: str) -> str | None:
             return fob.read()
     except OSError:
         return None
+
+
+@dataclass(frozen=True)
+class Last:
+    """How the last change ended, kept after its marker is gone
+
+    Without it, a confirm that found nothing waiting could not tell a
+    change another session had confirmed from one that had reverted, and
+    said reverted (the maintainer's screenshot 040). `at` is UTC.
+    """
+
+    outcome: str
+    path: str
+    at: str
+
+
+def record(root: str, outcome: str, changed: str) -> str | None:
+    """Keep how a change ended: CONFIRMED or REVERTED, and its file
+
+    Called once the marker is gone and the timers are disarmed, so a
+    record that cannot be written (a full disk) never keeps a change
+    pending or reverts one that was confirmed: it returns the note that
+    says so, and the change's own outcome stands.
+    """
+    at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    try:
+        write_private(root, LAST,
+                      json.dumps(asdict(Last(outcome, changed, at))) + "\n")
+    except OSError as e:
+        return (f"how this change ended could not be recorded in /{LAST}"
+                f" ({e.strerror or e}): a later keel network confirm cannot"
+                " say it")
+    return None
+
+
+def forget_last(root: str) -> str | None:
+    """A new change is armed: the record of the one before no longer
+    answers for what is pending, whatever ends it. None, or why the
+    record could not be removed"""
+    try:
+        os.remove(path(root, LAST))
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        return f"cannot remove /{LAST}: {e.strerror or e}"
+    return None
+
+
+def last(root: str) -> Last | None:
+    """How the last change ended; None when that is not known"""
+    try:
+        with open(path(root, LAST)) as fob:
+            data = json.load(fob)
+        found = Last(str(data["outcome"]), str(data["path"]),
+                     str(data["at"]))
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return found if found.outcome in OUTCOMES else None
 
 
 def clear(root: str) -> None:

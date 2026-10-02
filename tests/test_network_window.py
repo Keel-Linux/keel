@@ -180,6 +180,7 @@ class TestChange(RootCase):
         self.assertEqual(self.current(), OLD)
         self.assertFalse(marker.exists(self.root))
         self.assertEqual(run.calls[-1], STOP)
+        self.assertEqual(marker.last(self.root).outcome, marker.REVERTED)
 
     def test_the_old_file_back_but_down_is_said(self):
         run = Recorder(fail={"ifup": 2})
@@ -310,6 +311,61 @@ class TestRevert(RootCase):
         self.assertEqual(switch.revert(self.root, Recorder()),
                          (True, "no network change is waiting; nothing"
                           " to revert"))
+        self.assertIsNone(marker.last(self.root))
+
+    def test_a_record_that_cannot_be_written_never_fails_a_revert(self):
+        for boot in (True, False):
+            self.prepared()
+            os.makedirs(join(self.root, marker.LAST), exist_ok=True)
+            worked, line = switch.revert(self.root, Recorder(), boot=boot)
+            self.assertTrue(worked)
+            self.assertFalse(marker.exists(self.root))
+            self.assertEqual(self.current(), OLD)
+            self.assertIn("could not be recorded", line)
+        marker.save(self.root, OLD, marker.Target(INTERFACES))
+        marker.write_private(self.root, marker.PENDING, "garbage")
+        worked, line = switch.revert(self.root, Recorder())
+        self.assertTrue(worked)
+        self.assertIn("could not be recorded", line)
+
+    def test_a_failed_change_rolled_back_says_a_record_it_could_not_write(
+            self):
+        write = marker.write_private
+
+        def full_disk(root, relative, text):
+            if relative == marker.LAST:
+                raise OSError(28, "No space left on device")
+            write(root, relative, text)
+
+        with mock.patch.object(marker, "boot_id", return_value="b1"), \
+                mock.patch.object(marker, "uptime", return_value=50.0), \
+                mock.patch.object(marker, "write_private", full_disk):
+            problem = switch.change(self.root, pending(), NEW,
+                                    Recorder(fail={"ifup": 1}))
+        self.assertIn("reverted to the previous file", problem)
+        self.assertIn("could not be recorded", problem)
+        self.assertIn("No space left on device", problem)
+        self.assertFalse(marker.exists(self.root))
+
+    def test_a_record_that_cannot_be_removed_changes_nothing(self):
+        os.makedirs(join(self.root, marker.LAST, "x"))
+        run = Recorder()
+        with mock.patch.object(marker, "boot_id", return_value="b1"), \
+                mock.patch.object(marker, "uptime", return_value=50.0):
+            problem = switch.change(self.root, pending(), NEW, run)
+        self.assertIn(f"cannot remove /{marker.LAST}", problem)
+        self.assertTrue(problem.endswith("nothing changed"))
+        self.assertFalse(marker.exists(self.root))
+        self.assertEqual(self.current(), OLD)
+        self.assertEqual(run.calls, [])
+
+    def test_every_revert_that_restored_the_file_is_recorded(self):
+        self.prepared()
+        self.assertTrue(switch.revert(self.root, Recorder(), boot=True)[0])
+        self.assertEqual(marker.last(self.root).outcome, marker.REVERTED)
+        self.assertEqual(marker.last(self.root).path, INTERFACES)
+        mode = os.stat(join(self.root, marker.LAST)).st_mode & 0o777
+        self.assertEqual(mode, 0o600)
 
     def test_live_revert_bounces_onto_the_saved_file(self):
         self.prepared()
@@ -344,6 +400,9 @@ class TestRevert(RootCase):
                       line)
         self.assertEqual(self.current(), OLD)
         self.assertFalse(marker.exists(self.root))
+        self.assertEqual(marker.last(self.root),
+                         marker.Last(marker.REVERTED, INTERFACES,
+                                     marker.last(self.root).at))
 
     def test_an_unparseable_marker_with_no_known_file_restores_nothing(self):
         for target in (None, "garbage", json.dumps({"path": "etc/passwd"}),
@@ -665,6 +724,73 @@ class TestConfirm(RootCase):
         (confirmed, lines), _ = self.confirm(ssh())
         self.assertFalse(confirmed)
         self.assertIn("no network change is waiting", lines[0])
+        self.assertNotIn("reverted", lines[0])
+
+    def test_a_change_another_session_confirmed_stays_confirmed(self):
+        """The maintainer's screenshot 040: a session attached from the
+        host confirmed the overlay, then the console's confirm said the
+        change had been reverted, and confconsole that it would revert"""
+        self.prepared(kind=marker.OVERLAY, iface="wg0",
+                      path="etc/wireguard/wg0.conf")
+        console = session.Origin(session.CONSOLE_KIND, "the console")
+        (confirmed, _), _ = self.confirm(
+            session.Origin(session.HOST, "the host"))
+        self.assertTrue(confirmed)
+        (confirmed, lines), run = self.confirm(console)
+        self.assertTrue(confirmed)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("already confirmed", lines[0])
+        self.assertIn("/etc/wireguard/wg0.conf", lines[0])
+        self.assertIn("UTC", lines[0])
+        self.assertIn("it stays", lines[0])
+        self.assertNotIn("revert", lines[0])
+        self.assertEqual(run.calls, [])
+
+    def test_a_reverted_change_is_called_reverted(self):
+        self.prepared()
+        self.write(NEW)
+        self.assertTrue(switch.revert(self.root, Recorder())[0])
+        (confirmed, lines), _ = self.confirm(ssh())
+        self.assertFalse(confirmed)
+        self.assertIn("no network change is waiting", lines[0])
+        self.assertIn(f"the last one, of /{INTERFACES}, was reverted",
+                      lines[0])
+
+    def test_a_record_that_cannot_be_written_never_undoes_a_confirmation(
+            self):
+        """A full disk at the record must not crash confirm: the marker
+        would stay and the timer revert a change the operator confirmed"""
+        self.prepared()
+        os.makedirs(join(self.root, marker.LAST))
+        (confirmed, lines), run = self.confirm(ssh(), probes(via="fe80::2"))
+        self.assertTrue(confirmed)
+        self.assertFalse(marker.exists(self.root))
+        self.assertEqual(run.calls, [STOP])
+        self.assertIn("could not be recorded", lines[-1])
+        self.assertIsNone(marker.last(self.root))
+
+    def test_a_new_change_forgets_how_the_last_one_ended(self):
+        """Its revert may record nothing (a missing saved copy), so an
+        older confirmation must not answer for it"""
+        marker.record(self.root, marker.CONFIRMED, INTERFACES)
+        with mock.patch.object(marker, "boot_id", return_value="b1"), \
+                mock.patch.object(marker, "uptime", return_value=50.0):
+            self.assertIsNone(switch.change(self.root, pending(), NEW,
+                                            Recorder()))
+        self.assertIsNone(marker.last(self.root))
+        os.remove(join(self.root, marker.SAVED))
+        self.assertFalse(switch.revert(self.root, Recorder())[0])
+        (confirmed, lines), _ = self.confirm(ssh())
+        self.assertFalse(confirmed)
+        self.assertEqual(lines, [netconfirm.NOTHING_WAITING])
+
+    def test_a_record_that_cannot_be_read_says_nothing_of_the_last(self):
+        for text in ("{not json", json.dumps({"outcome": "kept"}),
+                     json.dumps(["confirmed"])):
+            marker.write_private(self.root, marker.LAST, text)
+            (confirmed, lines), _ = self.confirm(ssh())
+            self.assertFalse(confirmed)
+            self.assertEqual(lines, [netconfirm.NOTHING_WAITING])
 
     def test_not_ready_reasons(self):
         marker.write_private(self.root, marker.PENDING, "garbage")

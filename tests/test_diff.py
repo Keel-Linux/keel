@@ -172,6 +172,25 @@ class TestUnknownReason(unittest.TestCase):
         self.assertIsNone(unknown_reason("network.managed_by", {}))
 
 
+class TestChannelsAreWithheld(unittest.TestCase):
+    def test_observed_channels_are_never_repeated(self):
+        """inspect reads the channels back now (keel#60); a URL among
+        them can be a credential, declared or not"""
+        observed = {"enabled": True, "notify": {
+            "webhook": {"url": "https://hooks.example.org/secretpath"},
+            "details": False}}
+        for declared in ({"enabled": True},
+                         {"enabled": True, "notify": {"webhook": {
+                             "url": "https://hooks.example.org/secretpath"}}}):
+            fields = compare_section("monitor", declared, observed, {})
+            self.assertNotIn("secretpath", str([f.to_dict()
+                                                for f in fields]))
+            self.assertNotIn("secretpath", "".join(f.line() for f in fields))
+            url = next(f for f in fields
+                       if f.field == "monitor.notify.webhook.url")
+            self.assertIsNone(url.observed)
+
+
 class TestCompare(unittest.TestCase):
     def test_same_drift_unknown_and_not_declared_in_one_document(self):
         declared = {

@@ -17,6 +17,13 @@ TLS_CERT = "etc/ssl/private/cert.pem"
 # tklbam's record of a Hub registration; only its presence is asked, and
 # at the default registry, not one TKLBAM_REGISTRY moved for a test
 TKLBAM_HUB_REGISTRATION = "var/lib/tklbam/sub_apikey"
+# where the first boot keeps a Keel Cloud API key (confconsole's
+# keelfirstboot.py); only its presence is asked, as for the Hub's
+CLOUD_API_KEY = "etc/keel/secrets/cloud_api_key"
+CLOUD_API_KEY_NAME = "cloud_api_key"
+# the line inithooks' 95secupdates leaves of the first boot's answer,
+# skip or force, which nothing else on the machine records
+SEC_UPDATES_RECORD = "var/lib/inithooks/sec-updates"
 DEHYDRATED_DOMAINS_PLAIN = "etc/dehydrated/domains.txt"
 TURNKEY_VERSION = "etc/turnkey_version"
 INITHOOKS_CONF = "etc/inithooks.conf"
@@ -47,6 +54,11 @@ CHANNEL_STATE = "var/lib/keel/channel"
 # second: the trace that tells a DHCPv6 address from a SLAAC one.
 DHCP6_LEASES = ("var/lib/dhcpcd/*.lease6", "var/lib/dhcp/dhclient6*.leases")
 
+# the kernel's list of the network interfaces, read on the live system
+# only, so an allow-hotplug stanza for a card the machine does not have
+# is told from one it has
+SYS_CLASS_NET = "/sys/class/net"
+
 HOSTNAME_COMMAND = ("hostname", "-f")
 IP_ADDR_COMMAND = ("ip", "-6", "addr", "show")
 # What a server is bound to, asked of the kernel rather than of the
@@ -55,10 +67,12 @@ IP_ADDR_COMMAND = ("ip", "-6", "addr", "show")
 LISTENING_COMMAND = ("ss", "-lntH")
 
 # A spec missing any of these cannot be applied headless: the hook behind
-# each one prompts when its variable is unset.
+# each one prompts when its variable is unset. instance.fqdn is not one:
+# no hook asks for it (00declarative exports FQDN and nothing reads it),
+# apply leaves /etc/hosts alone without it, and an appliance out of the
+# box has none, so requiring it made inspect exit 13 on every new one.
 REQUIRED = (
     "instance.hostname",
-    "instance.fqdn",
     "network.interfaces",
     "security.alerts",
     "security.updates_at_first_boot",

@@ -63,8 +63,9 @@ DESCRIPTIONS = {
     " stale, broken or holding this instance back",
     CHANNEL_ROLLBACK: "a channel pointer names an earlier revision than the"
     " one this instance is on",
-    NETWORK_NOT_CONFIRMED: "keel network confirm refused: nothing waiting,"
-    " or not run over the new configuration",
+    NETWORK_NOT_CONFIRMED: "keel network confirm refused: nothing waiting"
+    " (a change already confirmed is not refused), or not run over the new"
+    " configuration",
     NOTIFY_FAILED: "keel notify reached no channel: none declared, or every"
     " one failed",
 }

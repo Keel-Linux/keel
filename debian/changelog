@@ -1,3 +1,61 @@
+keel (0.15.1) unstable; urgency=medium
+
+  The bugs of the maintainer's screenshots of the Core image, 2026-10-02.
+
+  * inspect recognises a Keel image: /etc/turnkey_version on Keel Core says
+    keel-core-19.0-trixie-amd64, which was "not a TurnKey version string",
+    so the spec's header said "unknown appliance" (screenshots 047, 059).
+    The keel- prefix is read like turnkey-.
+  * instance.fqdn is no longer a required field of inspect. No first boot
+    hook asks for it, apply leaves /etc/hosts alone without it, and an
+    appliance out of the box has none, so inspect exited 13 on every new
+    Core (048, 059) and confconsole's Database mode showed the error.
+  * hub.api_key is the Keel Cloud key's file when the first boot stored
+    one, {file: <secrets-dir>/cloud_api_key}, found by its presence alone;
+    inspect said skip, looking only for a TurnKey Hub registration (058,
+    061).
+  * An allow-hotplug interface the live machine does not have is left out
+    of the spec, with a report line: the eth1 stanza every image ships is
+    a placeholder, and inspect and diff listed an eth1 the container does
+    not have (034, 057). An auto interface whose card is missing is still
+    reported; an offline root reports every stanza.
+  * security.updates_at_first_boot is read from the line inithooks'
+    95secupdates now leaves, /var/lib/inithooks/sec-updates (inithooks
+    2.3.6+keel16), before the update posture: the posture is a cron-apt
+    install action every image ships, so inspect said force after Skip
+    (034, 058).
+  * keel network confirm with nothing waiting says how the last change
+    ended. Each change's outcome, confirmed or reverted, is kept in
+    /var/lib/keel/network/last.json (0600) with its file and time; a
+    change another session confirmed is "already confirmed ... it stays"
+    and exits 0, one that reverted is called reverted (exit 21). It always
+    said "one not confirmed in time has been reverted", false after a
+    confirmation from another session (040). The outcome is recorded
+    only once the marker is gone and the timers are disarmed, and a
+    record that cannot be written (a full disk) is said and never fails
+    the confirmation or the revert, so it can never leave a confirmed
+    change to revert. Arming a new change removes the previous record,
+    so an older confirmation never answers for a change whose end
+    recorded nothing (a revert whose saved copy was missing); a record
+    that cannot be removed refuses the change before anything moves.
+  * monit's interface is set in keel.conf: set httpd unixsocket
+    /run/monit.sock uid root gid root permission 0600, allow localhost. A
+    Unix socket only root opens, no network listener (decision 0021).
+    Without it monit summary and monit status always failed (069, 073,
+    096).
+  * inspect reads the monitor's channels back from /etc/keel/monitor.json
+    (keel#60): email, telegram, ntfy, webhook and details, token and URL
+    files by reference, never by value, and the report line names only
+    the channels. The emitted spec of a monitored machine validates and
+    re-applies with no change. diff now withholds observed channel values
+    too, declared or not, as it did the declared ones.
+  * A CrowdSec online_api_credentials.yaml of comments only counts as
+    absent, not as a registration (keel#61, item 1): the Core build seeds
+    such a file, and one left in an image kept cscli capi register from
+    ever running. An empty file stays "not registered yet".
+
+ -- Marcos Mendez <mendez.foto@gmail.com>  Fri, 02 Oct 2026 06:00:00 +0000
+
 keel (0.15.0) unstable; urgency=medium
 
   * The overlay manifest gains hooks.state: {path, timeout} (keel#62, the

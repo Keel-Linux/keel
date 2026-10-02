@@ -12,7 +12,9 @@ from dataclasses import dataclass
 from keel.inspect.report import Finding, inferred, missing
 from keel.inspect.tree import File
 
-VERSION_PREFIX = "turnkey-"
+# TurnKey's prefix, and the one a Keel image writes in the same file
+# (keel-core-19.0-trixie-amd64): the fields after it are the same four
+VERSION_PREFIXES = ("turnkey-", "keel-")
 VERSION_FIELDS = 4
 APP_PREFIX = "APP_"
 APP_FIXED = {"APP_EMAIL": "email", "APP_DOMAIN": "domain"}
@@ -33,17 +35,19 @@ class Appliance:
 def probe_appliance(
     turnkey_version: File,
 ) -> tuple[Appliance | None, Finding]:
-    """Parse turnkey-<name>-<version>-<codename>-<arch>"""
+    """Parse turnkey-<name>-<version>-<codename>-<arch>, or keel-<name>-..."""
     lines = turnkey_version.lines()
     if not lines:
         reason = turnkey_version.problem or "file is empty"
         return None, missing("appliance", f"{turnkey_version.path} {reason}")
     text = lines[0]
-    fields = text.removeprefix(VERSION_PREFIX).rsplit("-", VERSION_FIELDS - 1)
-    if not text.startswith(VERSION_PREFIX) or len(fields) != VERSION_FIELDS:
+    prefix = next((one for one in VERSION_PREFIXES if text.startswith(one)),
+                  None)
+    fields = text.removeprefix(prefix or "").rsplit("-", VERSION_FIELDS - 1)
+    if prefix is None or len(fields) != VERSION_FIELDS:
         return None, missing(
             "appliance", f"{turnkey_version.path} holds {text!r}, not a"
-            " TurnKey version string",
+            " TurnKey or Keel version string",
         )
     appliance = Appliance(*fields)
     return appliance, inferred("appliance", appliance, turnkey_version.path)

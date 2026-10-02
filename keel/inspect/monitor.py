@@ -18,12 +18,14 @@ winning; keel does not set it.
 Two limits, stated in the report rather than guessed around:
 
 - the channels are not in the file. monit runs keel notify, which reads
-  them from /etc/keel/monitor.json, so `monitor.notify` is not read and
-  diff does not compare it: a URL can be a secret;
+  them from /etc/keel/monitor.json, so `monitor.notify` is read from
+  there, tokens by reference (keel#60), and diff does not compare it: a
+  URL can be a secret;
 - the file says what monit was told, not that monit is installed or
   running; that is the package's and the service's business.
 """
 
+import json
 import os
 import re
 from collections.abc import Iterator
@@ -32,6 +34,7 @@ from dataclasses import dataclass, field
 from keel.inspect import constants as paths
 from keel.inspect.report import Finding, inferred, missing
 from keel.inspect.tree import NOT_PRESENT, File, Tree
+from keel.monitor.channelfile import written_by_keel
 from keel.monitor.render import MINUTES_COMMENT
 from keel.monitor.settings import DEBIAN_CYCLE, cycles, mbit, minutes, number
 
@@ -127,9 +130,15 @@ def control_lines(tree: Tree, relative: str, depth: int) -> (
                 yield from control_lines(tree, name, depth + 1)
 
 
-def probe_monitor(conf: File, cycle: Cycle) -> (
+def probe_monitor(conf: File, cycle: Cycle,
+                  settings: File | None = None) -> (
     tuple[dict | None, list[Finding]]
 ):
+    """The section from monit's file, and its channels from `settings`
+
+    `settings` is /etc/keel/monitor.json, which apply writes from the
+    same spec; without it (None) the channels are reported as not read.
+    """
     key = "monitor.enabled"
     if not conf.readable:
         if conf.problem == NOT_PRESENT:
@@ -143,8 +152,50 @@ def probe_monitor(conf: File, cycle: Cycle) -> (
                               " section")]
     checks, findings = read_checks(text, conf.path, cycle)
     section = {"enabled": True, "checks": checks}
-    return section, [inferred(key, "true", conf.path), *findings,
-                     missing("monitor.notify", NOTIFY_REASON)]
+    if settings is None:
+        return section, [inferred(key, "true", conf.path), *findings,
+                         missing("monitor.notify", NOTIFY_REASON)]
+    notify, finding = read_notify(settings)
+    if notify is not None:
+        section["notify"] = notify
+    return section, [inferred(key, "true", conf.path), *findings, finding]
+
+
+def read_notify(settings: File) -> tuple[dict | None, Finding]:
+    """monitor.notify as the spec wrote it, from what apply resolved
+
+    keel#60: without it, the emitted spec did not validate (enabled
+    needs a channel) and re-applying it needed the channels added by
+    hand. The file holds token files and secret URL files by path, so
+    they come back as references; a URL the spec gave literally comes
+    back literally, and neither ever reaches the report line.
+    """
+    field = "monitor.notify"
+    if not settings.readable:
+        return None, missing(field, f"{settings.path} {settings.problem}")
+    if not written_by_keel(settings.text):
+        return None, missing(field, f"{settings.path} was not written by"
+                             " keel, so it says nothing of the channels")
+    found = json.loads(settings.text or "")
+    notify: dict = {}
+    if found.get("email"):
+        notify["email"] = True
+    telegram = found.get("telegram")
+    if isinstance(telegram, dict):
+        notify["telegram"] = {"chat_id": telegram.get("chat_id"),
+                              "token": {"file": telegram.get("token_file")}}
+    for name in ("ntfy", "webhook"):
+        channel = found.get(name)
+        if not isinstance(channel, dict):
+            continue
+        url = channel.get("url")
+        notify[name] = {"url": url if url is not None
+                        else {"file": channel.get("url_file")}}
+        if channel.get("token_file"):
+            notify[name]["token"] = {"file": channel["token_file"]}
+    notify["details"] = found.get("details") is True
+    names = ", ".join(name for name in notify if name != "details")
+    return notify, inferred(field, names, settings.path)
 
 
 def read_services(text: str) -> list[Service]:

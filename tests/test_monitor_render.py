@@ -30,7 +30,7 @@ from keel.inspect.monitor import (
 )
 from keel.inspect.report import INFERRED, NOT_INFERRED
 from keel.inspect.tree import File, Tree
-from keel.monitor import settings
+from keel.monitor import channelfile, settings
 from keel.monitor.mounts import Mount, parse, real_filesystems, unescape
 from keel.monitor.render import filesystem_names, render, slug
 from keel.monitor.settings import effective
@@ -182,6 +182,19 @@ class TestRender(unittest.TestCase):
         text = rendered()
         self.assertTrue(text.startswith("# written by keel"))
         self.assertNotIn("set daemon", text)
+
+    def test_monit_s_interface_is_a_socket_only_root_opens(self):
+        """`monit summary` and `monit status` talk to monit's interface,
+        which keel never set, so they always failed (the maintainer's
+        screenshots 069, 073 and 096). A Unix socket, root's, mode 0600,
+        and no TCP port (decision 0021: never on a public address)"""
+        text = rendered()
+        self.assertIn(
+            "set httpd unixsocket /run/monit.sock uid root gid root"
+            " permission 0600\n    allow localhost\n", text)
+        self.assertNotIn("port", text.split("check ")[0])
+        # before the first service, where inspect reads no test
+        self.assertLess(text.index("set httpd"), text.index("check "))
 
     def test_warn_and_critical_are_two_services(self):
         found = blocks(rendered())
@@ -413,6 +426,59 @@ class TestReadBack(unittest.TestCase):
         self.assertEqual(findings[-1].source, NOTIFY_REASON)
         self.assertTrue(all(f.status == INFERRED for f in findings[:-1]))
 
+    SETTINGS = "/x/etc/keel/monitor.json"
+    NOTIFY = {
+        "email": True,
+        "telegram": {"chat_id": "-1001234567890",
+                     "token": {"file": "/etc/keel/secrets/telegram_token"}},
+        "ntfy": {"url": "https://ntfy.example.org/keel-blog",
+                 "token": {"file": "/etc/keel/secrets/ntfy_token"}},
+        "webhook": {"url": {"file": "/etc/keel/secrets/webhook_url"}},
+        "details": True,
+    }
+
+    def channels(self, notify: dict) -> File:
+        """monitor.json as apply writes it from a spec with `notify`"""
+        doc = {"instance": {"hostname": "blog"},
+               "security": {"alerts": "ops@example.org"},
+               "monitor": {"enabled": True, "notify": notify}}
+        return File(self.SETTINGS, channelfile.render(doc))
+
+    def test_the_channels_apply_wrote_are_read_back(self):
+        """keel#60: re-applying what inspect emits needed the channels
+        added by hand. They are read from monitor.json, the tokens and a
+        URL kept in a file by reference, never by value"""
+        section, findings = probe_monitor(
+            self.conf(rendered()), MINUTE, self.channels(self.NOTIFY))
+        self.assertEqual(section["notify"], self.NOTIFY)
+        found = [f for f in findings if f.field == "monitor.notify"][0]
+        self.assertEqual(found.status, INFERRED)
+        self.assertEqual(found.value, "email, telegram, ntfy, webhook")
+        self.assertEqual(found.source, self.SETTINGS)
+        self.assertNotIn("ntfy.example.org", str(findings))
+
+    def test_one_channel_and_no_details(self):
+        notify = {"ntfy": {"url": "https://ntfy.example.org/t"}}
+        section, _ = probe_monitor(self.conf(rendered()), MINUTE,
+                                   self.channels(notify))
+        self.assertEqual(section["notify"],
+                         {"ntfy": {"url": "https://ntfy.example.org/t"},
+                          "details": False})
+
+    def test_channels_that_cannot_be_read_are_not_inferred(self):
+        for settings, why in (
+            (File(self.SETTINGS, problem="not present"), "not present"),
+            (File(self.SETTINGS, "{}"), "not written by keel"),
+            (File(self.SETTINGS, "[1]"), "not written by keel"),
+            (File(self.SETTINGS, "{not json"), "not written by keel"),
+        ):
+            section, findings = probe_monitor(self.conf(rendered()), MINUTE,
+                                              settings)
+            self.assertNotIn("notify", section)
+            found = [f for f in findings if f.field == "monitor.notify"][0]
+            self.assertEqual(found.status, NOT_INFERRED)
+            self.assertIn(why, found.source)
+
     def test_minutes_the_cycles_no_longer_give_are_the_cycles_duration(self):
         text = rendered({"memory": {"for_minutes": 5}})
         section, _ = probe_monitor(self.conf(text), DEBIAN)
@@ -486,6 +552,15 @@ class TestRealMonit(unittest.TestCase):
                         "wg-ovl_0": {"max_mbit": 0.5}}}, mounts, 60))
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         self.assertIn("Control file syntax OK", out.stdout + out.stderr)
+
+    def test_monit_reads_the_interface_as_a_socket_and_no_port(self):
+        out = self.check(rendered(), "-v")
+        text = out.stdout + out.stderr
+        self.assertEqual(out.returncode, 0, text)
+        self.assertRegex(text, r"Start monit httpd\s+= True")
+        self.assertRegex(text, r"httpd unix socket\s+= /run/monit.sock")
+        self.assertNotIn("httpd portnumber", text)
+        self.assertNotIn("httpd bind address", text)
 
     def test_the_operator_s_cycle_and_start_delay_are_left_alone(self):
         out = self.check(rendered(cycle=120), "-v")

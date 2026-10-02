@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 from keel.diff.compare import not_inferred
 from keel.inspect import constants as paths
-from keel.inspect.collect import leases, run_command
+from keel.inspect.collect import leases, links, run_command
 from keel.inspect.ipv6 import Runtime
 from keel.inspect.network import probe_network, slaac_enabled
 from keel.inspect.interfaces import Stanza, parse_interfaces
@@ -48,7 +48,8 @@ def observe_network(root: str, doc: dict) -> NetworkState | None:
         [tree.read(paths.INTERFACES)] + tree.read_dir(paths.INTERFACES_D),
         tree.read(paths.RESOLV_CONF),
         in_container,
-        Runtime(run_command(tree, paths.IP_ADDR_COMMAND), leases(tree)),
+        Runtime(run_command(tree, paths.IP_ADDR_COMMAND), leases(tree),
+                links(tree)),
     )
     unknowns = not_inferred(tuple(findings))
     # the declared owner, else what this root says, not the machine keel

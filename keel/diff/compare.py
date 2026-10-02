@@ -230,16 +230,20 @@ def compare_section(
     wanted = dict(flatten(section, declared or {}))
     found = dict(flatten(section, observed or {}))
     skipped = not_compared(section, wanted)
+    # inspect reads the channels back (keel#60), so the observed side
+    # carries them too, and is withheld like the declared one
     fields = [
         FieldDiff(path, NOT_COMPARED,
-                  None if withheld(path) else value, found.get(path),
+                  None if withheld(path) else value,
+                  None if withheld(path) else found.get(path),
                   skipped[path])
         if path in skipped
         else compare_field(path, value, found.get(path), unknowns)
         for path, value in wanted.items()
     ]
     fields += [
-        FieldDiff(path, NOT_DECLARED, None, value)
+        FieldDiff(path, NOT_DECLARED, None,
+                  None if withheld(path) else value)
         for path, value in found.items()
         if path not in wanted
     ]

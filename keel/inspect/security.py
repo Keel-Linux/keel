@@ -5,14 +5,15 @@ The secalerts hook leaves two traces: a root alias in /etc/aliases and
 MAILON=output in the cron-apt config.
 
 updates_at_first_boot is different in kind. The 95secupdates hook reads
-SEC_UPDATES once, installs the pending security updates or does not, and
-leaves nothing behind either way: the cron-apt install action and
-unattended-upgrades that a running appliance carries are shipped with
-the image, not written by that hook. So the value is read from
-inithooks.conf while it is still there, and otherwise inferred from the
-machine's update posture, which is a proxy and says so in the report.
-`keel diff` does not compare the field for the same reason
-(docs/diff.md).
+SEC_UPDATES once, or asks, and installs the pending security updates or
+does not; the cron-apt install action and unattended-upgrades that a
+running appliance carries are shipped with the image, not written by
+that hook. So the value is read from inithooks.conf while it is still
+there, then from the line the hook leaves of its answer
+(/var/lib/inithooks/sec-updates, inithooks 2.3.6+keel16), and only on a
+machine with neither inferred from the update posture, which is a proxy
+and says so in the report: that proxy said force after an operator chose
+Skip. `keel diff` does not compare the field (docs/diff.md).
 """
 
 from keel.inspect.report import Finding, inferred, missing
@@ -34,6 +35,7 @@ def probe_security(
     cron_apt_config: File,
     cron_apt_install: File,
     auto_upgrades: File,
+    record: File,
 ) -> tuple[dict, list[Finding]]:
     variables = conf.assignments() if conf.readable else {}
     security: dict = {}
@@ -47,7 +49,8 @@ def probe_security(
         findings.append(inferred("security.alerts", alerts, source))
 
     updates, source = _updates(
-        variables, conf, cron_apt_config, cron_apt_install, auto_upgrades
+        variables, conf, cron_apt_config, cron_apt_install, auto_upgrades,
+        record,
     )
     security[UPDATES_FIELD] = updates
     findings.append(
@@ -102,10 +105,14 @@ def _updates(
     cron_apt_config: File,
     cron_apt_install: File,
     auto_upgrades: File,
+    record: File,
 ) -> tuple[str, str]:
     declared = variables.get("SEC_UPDATES", "").lower()
     if declared in (SKIP, FORCE):
         return declared, conf.path
+    chosen = (record.lines() or [""])[0].lower()
+    if chosen in (SKIP, FORCE):
+        return chosen, f"{record.path}, what the first boot chose"
     if any("upgrade" in line for line in cron_apt_install.lines()):
         return FORCE, (
             f"{cron_apt_install.path} installs security updates; {NO_TRACE}"

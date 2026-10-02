@@ -782,8 +782,13 @@ handbook decision 0021)
 monit watches, keel tells. The section is rendered into two files, both
 mode 0600 and owned by root, as apply runs:
 
-- `/etc/monit/conf.d/keel.conf`, the checks monit includes (the replicated
-  set of decision 0020 will put monit's HTTP credentials there);
+- `/etc/monit/conf.d/keel.conf`, the checks monit includes, after monit's
+  interface: `set httpd unixsocket /run/monit.sock uid root gid root
+  permission 0600` with `allow localhost`, a Unix socket only root can
+  open and no network listener, which `monit summary` and `monit status`
+  need (before keel 0.15.1 nothing set it and both always failed). The
+  replicated set of decision 0020 will add monit's HTTP credentials and
+  its WireGuard address there;
 - `/etc/keel/monitor.json`, everything `keel notify` reads: the channels
   resolved from the spec (a literal URL or the path of the secret file
   holding it, a chat id), the paths of the token files and never a token,
@@ -1007,7 +1012,7 @@ makes what is missing, before the units start:
 
 | Missing | Made by |
 | --- | --- |
-| `/etc/crowdsec/online_api_credentials.yaml` | an empty file, mode 0600: how the Debian package records "not registered", and what its unit needs to start |
+| `/etc/crowdsec/online_api_credentials.yaml`, or one of comments only | an empty file, mode 0600: how the Debian package records "not registered", and what its unit needs to start. A file of comments only is the Core build's seed (it keeps the package's postinst from registering in the chroot) and counts as missing, not as a registration (keel#61) |
 | the local API credentials | `cscli machines add --auto --force`, which writes the password to `/etc/crowdsec/local_api_credentials.yaml` itself |
 | the central API registration | `cscli capi register`, only when the file above was absent |
 | the bouncer's key, or a registration the Debian package left pending in `/var/lib/crowdsec/pending-registration` | `cscli bouncers add`: the key is read from its standard output into memory and written to `/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml.local`, mode 0600, with `mode: nftables`; its name goes to the `.id` file, the bouncer this machine registered before is deleted, and the pending file is removed, since the bouncer's unit does not start while it is there |
@@ -1268,6 +1273,20 @@ route back to the client used it: a client on the same link reaches the
 machine without the gateway, and saying the gateway was tested would be
 false. A refusal exits 21 (`NETWORK_NOT_CONFIRMED`) and leaves the timer
 running.
+
+How each change ended, confirmed or reverted, is kept in
+`/var/lib/keel/network/last.json` (mode 0600) with its file and the time
+in UTC, after its marker is gone. So a confirm that finds nothing waiting
+says which: a change another session already confirmed stays, and that
+confirm exits 0 saying so; one that reverted is called reverted, and
+exits 21. Before keel 0.15.1 it always said the change had been reverted,
+which was false after a confirmation from another session (the
+maintainer's screenshot 040). With no record, it says only that nothing
+is waiting. The record is written last, after the marker is gone and the
+timers are disarmed; one that cannot be written (a full disk) is said,
+and never fails the confirmation or the revert. Arming a new change
+removes the record of the one before, so it never answers for a change
+whose end recorded nothing.
 
 `keel network revert` gives up on a change by hand without waiting;
 `--boot` restores the file without touching the interface, for the boot
