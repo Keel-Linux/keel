@@ -359,8 +359,11 @@ class TestInspect(ApplianceCliCase):
         self.assertEqual(doc["overlays"]["wireguard"], "enabled")
         self.assertEqual(doc["overlays"]["installer"], "enabled")
 
-    def test_wireguard_s_interface_and_unit_that_disagree(self):
-        # on the live system only: wg0 up and its unit not yet enabled
+    def test_wireguard_disagreeing_keeps_the_emitted_spec_s_value(self):
+        # on the live system only: wg0 up and its unit not yet enabled,
+        # inside a 0018 window. The machine says nothing settled, so the
+        # spec the installer emitted still gives the key, and the emitted
+        # spec keeps every overlay of the chain
         os.makedirs(join(self.root, "etc/keel"))
         with open(join(self.root, "etc/keel/instance.yaml"), "w") as fob:
             fob.write(spec_text())
@@ -368,9 +371,20 @@ class TestInspect(ApplianceCliCase):
         with mock.patch("keel.inspect.overlays.wireguard_state",
                         return_value=(None, why)):
             doc, report = self.inspect()
-        self.assertNotIn("wireguard", doc["overlays"])
+        self.assertEqual(doc["overlays"]["wireguard"], "disabled")
+        self.assertIn("overlays.wireguard: disabled (from"
+                      f" {self.root}/etc/keel/instance.yaml; its interface"
+                      f" and its unit disagree: {why})", report)
+
+    def test_wireguard_disagreeing_with_no_emitted_spec(self):
+        why = "wg-quick@wg0.service disabled, wg0 up"
+        with mock.patch("keel.inspect.overlays.wireguard_state",
+                        return_value=(None, why)):
+            doc, report = self.inspect()
+        self.assertNotIn("wireguard", doc.get("overlays", {}))
         self.assertIn("overlays.wireguard: not inferred: its interface and"
-                      f" its unit disagree: {why}", report)
+                      f" its unit disagree: {why}, and no spec the installer"
+                      " emitted says it at", report)
 
     def test_units_that_disagree_are_not_inferred(self):
         os.makedirs(join(self.root, WANTS))
