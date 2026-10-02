@@ -301,6 +301,11 @@ def changed(root: str, pending: marker.Pending, text: str,
         if problem:
             return f"{problem}; nothing changed"
         pending = prepared(root, pending, current)
+        # what ends this change may record nothing (a saved copy gone),
+        # so the record of the one before must not answer for it
+        problem = marker.forget_last(root)
+        if problem:
+            return f"{problem}; nothing changed"
         marker.save(root, current, pending.target())
         marker.write(root, pending)
         problem = arm(SAFETY_UNIT, pending.window + UP_ALLOWANCE, run)
@@ -351,13 +356,22 @@ def rolled_back(root: str, pending: marker.Pending, current: str,
     if not written:
         return (f"{problem}; putting the previous file back failed too"
                 f" ({back}); the revert timer will try again")
-    marker.record(root, marker.REVERTED, pending.path)
     marker.clear(root)
     disarm(run)
+    note = recorded(root, pending.path)
     if back:
         return (f"{problem}; the previous file is back, but bringing the"
-                f" interface up on it failed: {back}")
-    return f"{problem}; reverted to the previous file"
+                f" interface up on it failed: {back}{note}")
+    return f"{problem}; reverted to the previous file{note}"
+
+
+def recorded(root: str, changed: str) -> str:
+    """Record a revert after the marker is gone; "" or "; <why not>"
+
+    A record that cannot be written is said and never fails the revert.
+    """
+    problem = marker.record(root, marker.REVERTED, changed)
+    return f"; {problem}" if problem else ""
 
 
 def revert(root: str, run: Runner, boot: bool = False) -> tuple[bool, str]:
@@ -390,13 +404,14 @@ def revert(root: str, run: Runner, boot: bool = False) -> tuple[bool, str]:
             problem = put_back(root, target, text)
             if problem:
                 return False, f"cannot restore: {problem}"
-            marker.record(root, marker.REVERTED, target.path)
             marker.clear(root)
             if boot:
-                return True, f"{restored(target)} before networking starts"
+                return True, (f"{restored(target)} before networking"
+                              f" starts{recorded(root, target.path)}")
             disarm(run)
             return True, (f"{restored(target)}; the pending change could"
-                          " not be read, so no interface was restarted")
+                          " not be read, so no interface was restarted"
+                          f"{recorded(root, target.path)}")
         return moved_back(root, pending, text, run)
 
 
@@ -419,16 +434,16 @@ def moved_back(root: str, pending: marker.Pending, text: str,
                             autoconf, back=True)
     if not written:
         return False, f"cannot restore: {problem}"
-    marker.record(root, marker.REVERTED, pending.path)
     marker.clear(root)
     disarm(run)
     done = restored(pending.target())
+    note = recorded(root, pending.path)
     if problem:
-        return False, f"{done}, but {problem}"
+        return False, f"{done}, but {problem}{note}"
     if pending.absent or pending.down_before:
         return True, (f"{done}; {pending.iface} is down, as it was before"
-                      " the change")
-    return True, f"{done} and {pending.iface} is up on it"
+                      f" the change{note}")
+    return True, f"{done} and {pending.iface} is up on it{note}"
 
 
 def restored(target: marker.Target) -> str:

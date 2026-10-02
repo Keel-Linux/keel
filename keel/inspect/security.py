@@ -10,7 +10,7 @@ does not; the cron-apt install action and unattended-upgrades that a
 running appliance carries are shipped with the image, not written by
 that hook. So the value is read from inithooks.conf while it is still
 there, then from the line the hook leaves of its answer
-(/var/lib/inithooks/sec-updates, inithooks 2.3.6+keel15), and only on a
+(/var/lib/inithooks/sec-updates, inithooks 2.3.6+keel16), and only on a
 machine with neither inferred from the update posture, which is a proxy
 and says so in the report: that proxy said force after an operator chose
 Skip. `keel diff` does not compare the field (docs/diff.md).

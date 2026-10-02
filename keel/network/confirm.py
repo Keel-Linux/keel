@@ -64,13 +64,14 @@ def confirm(root: str, origin: session.Origin, probes: Probes,
         else:
             lines += untested_lines(pending, origin)
             lines += gateway_lines(pending, origin, probes)
-        marker.record(root, marker.CONFIRMED, pending.path)
         marker.clear(root)
         switch.disarm(run)
         if overlay:
             lines += enabled_lines(pending.iface, run)
-    return True, lines + ["the network change stays; the revert is"
-                         " cancelled"]
+        # last, so a record that cannot be written changes nothing above
+        problem = marker.record(root, marker.CONFIRMED, pending.path)
+    lines.append("the network change stays; the revert is cancelled")
+    return True, lines + ([problem] if problem else [])
 
 
 NOTHING_WAITING = "no network change is waiting for a confirmation"

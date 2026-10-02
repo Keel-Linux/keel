@@ -1282,7 +1282,11 @@ confirm exits 0 saying so; one that reverted is called reverted, and
 exits 21. Before keel 0.15.1 it always said the change had been reverted,
 which was false after a confirmation from another session (the
 maintainer's screenshot 040). With no record, it says only that nothing
-is waiting.
+is waiting. The record is written last, after the marker is gone and the
+timers are disarmed; one that cannot be written (a full disk) is said,
+and never fails the confirmation or the revert. Arming a new change
+removes the record of the one before, so it never answers for a change
+whose end recorded nothing.
 
 `keel network revert` gives up on a change by hand without waiting;
 `--boot` restores the file without touching the interface, for the boot

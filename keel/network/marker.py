@@ -224,11 +224,36 @@ class Last:
     at: str
 
 
-def record(root: str, outcome: str, changed: str) -> None:
-    """Keep how a change ended: CONFIRMED or REVERTED, and its file"""
+def record(root: str, outcome: str, changed: str) -> str | None:
+    """Keep how a change ended: CONFIRMED or REVERTED, and its file
+
+    Called once the marker is gone and the timers are disarmed, so a
+    record that cannot be written (a full disk) never keeps a change
+    pending or reverts one that was confirmed: it returns the note that
+    says so, and the change's own outcome stands.
+    """
     at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    write_private(root, LAST,
-                  json.dumps(asdict(Last(outcome, changed, at))) + "\n")
+    try:
+        write_private(root, LAST,
+                      json.dumps(asdict(Last(outcome, changed, at))) + "\n")
+    except OSError as e:
+        return (f"how this change ended could not be recorded in /{LAST}"
+                f" ({e.strerror or e}): a later keel network confirm cannot"
+                " say it")
+    return None
+
+
+def forget_last(root: str) -> str | None:
+    """A new change is armed: the record of the one before no longer
+    answers for what is pending, whatever ends it. None, or why the
+    record could not be removed"""
+    try:
+        os.remove(path(root, LAST))
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        return f"cannot remove /{LAST}: {e.strerror or e}"
+    return None
 
 
 def last(root: str) -> Last | None:

@@ -21,7 +21,7 @@ keel (0.15.1) unstable; urgency=medium
     reported; an offline root reports every stanza.
   * security.updates_at_first_boot is read from the line inithooks'
     95secupdates now leaves, /var/lib/inithooks/sec-updates (inithooks
-    2.3.6+keel15), before the update posture: the posture is a cron-apt
+    2.3.6+keel16), before the update posture: the posture is a cron-apt
     install action every image ships, so inspect said force after Skip
     (034, 058).
   * keel network confirm with nothing waiting says how the last change
@@ -30,7 +30,14 @@ keel (0.15.1) unstable; urgency=medium
     change another session confirmed is "already confirmed ... it stays"
     and exits 0, one that reverted is called reverted (exit 21). It always
     said "one not confirmed in time has been reverted", false after a
-    confirmation from another session (040).
+    confirmation from another session (040). The outcome is recorded
+    only once the marker is gone and the timers are disarmed, and a
+    record that cannot be written (a full disk) is said and never fails
+    the confirmation or the revert, so it can never leave a confirmed
+    change to revert. Arming a new change removes the previous record,
+    so an older confirmation never answers for a change whose end
+    recorded nothing (a revert whose saved copy was missing); a record
+    that cannot be removed refuses the change before anything moves.
   * monit's interface is set in keel.conf: set httpd unixsocket
     /run/monit.sock uid root gid root permission 0600, allow localhost. A
     Unix socket only root opens, no network listener (decision 0021).
