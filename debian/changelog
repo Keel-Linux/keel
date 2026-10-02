@@ -1,3 +1,19 @@
+keel (0.15.2) unstable; urgency=medium
+
+  * inspect reads overlays.wireguard from the machine. The WireGuard
+    overlay owns no unit in its manifest, since its interface is the
+    spec's, so inspect looked only at the spec the installer emitted and
+    reported "not inferred" on a Core with wg0 up and wg-quick@wg0
+    enabled (screenshots 047 and 057 of step 8). It is now read the way
+    apply leaves it: enabled when wg-quick@<iface> of the
+    /etc/wireguard/<iface>.conf is enabled and, on the live system, the
+    interface is up; disabled when neither; not inferred, naming both,
+    when they disagree (a change waiting for its confirmation, or an
+    interface that went down). The emitted spec still answers when there
+    is no WireGuard file.
+
+ -- Marcos Mendez <mendez.foto@gmail.com>  Fri, 02 Oct 2026 14:00:00 +0000
+
 keel (0.15.1) unstable; urgency=medium
 
   The bugs of the maintainer's screenshots of the Core image, 2026-10-02.

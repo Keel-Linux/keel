@@ -328,6 +328,50 @@ class TestInspect(ApplianceCliCase):
         self.assertIn("installation.mode: simple (from"
                       f" {self.root}/etc/keel/instance.yaml)", report)
 
+    def wireguard(self, enabled: bool) -> None:
+        """/etc/wireguard/wg0.conf, and the unit's link when `enabled`"""
+        os.makedirs(join(self.root, "etc/wireguard"))
+        with open(join(self.root, "etc/wireguard/wg0.conf"), "w") as fob:
+            fob.write("[Interface]\nAddress = fd00:1::1/64\n")
+        if enabled:
+            os.makedirs(join(self.root, WANTS))
+            os.symlink("/usr/lib/systemd/system/wg-quick@.service",
+                       join(self.root, WANTS, "wg-quick@wg0.service"))
+
+    def test_wireguard_is_read_from_its_interface_s_unit(self):
+        self.wireguard(enabled=True)
+        doc, report = self.inspect()
+        self.assertEqual(doc["overlays"]["wireguard"], "enabled")
+        self.assertIn("overlays.wireguard: enabled (from"
+                      " wg-quick@wg0.service enabled)", report)
+
+    def test_wireguard_s_file_without_its_unit_is_disabled(self):
+        self.wireguard(enabled=False)
+        doc, report = self.inspect()
+        self.assertEqual(doc["overlays"]["wireguard"], "disabled")
+
+    def test_the_machine_says_wireguard_before_the_emitted_spec(self):
+        os.makedirs(join(self.root, "etc/keel"))
+        with open(join(self.root, "etc/keel/instance.yaml"), "w") as fob:
+            fob.write(spec_text())
+        self.wireguard(enabled=True)
+        doc, _ = self.inspect()
+        self.assertEqual(doc["overlays"]["wireguard"], "enabled")
+        self.assertEqual(doc["overlays"]["installer"], "enabled")
+
+    def test_wireguard_s_interface_and_unit_that_disagree(self):
+        # on the live system only: wg0 up and its unit not yet enabled
+        os.makedirs(join(self.root, "etc/keel"))
+        with open(join(self.root, "etc/keel/instance.yaml"), "w") as fob:
+            fob.write(spec_text())
+        why = "wg-quick@wg0.service disabled, wg0 up"
+        with mock.patch("keel.inspect.overlays.wireguard_state",
+                        return_value=(None, why)):
+            doc, report = self.inspect()
+        self.assertNotIn("wireguard", doc["overlays"])
+        self.assertIn("overlays.wireguard: not inferred: its interface and"
+                      f" its unit disagree: {why}", report)
+
     def test_units_that_disagree_are_not_inferred(self):
         os.makedirs(join(self.root, WANTS))
         os.symlink("/x", join(self.root, WANTS, "crowdsec.service"))
