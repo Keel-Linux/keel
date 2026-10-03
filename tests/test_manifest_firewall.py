@@ -95,6 +95,19 @@ class TestRender(FirewallCase):
         self.assertNotIn("8080", found.text)
         self.assertNftAccepts(found.text)
 
+    def test_a_named_set_for_the_pending_invites_ports(self):
+        """keel mesh invite adds its TCP port to the set with a timeout,
+        so the port is open while the invite is pending and closes by
+        itself (decision 0048); empty while none is"""
+        found = self.render(ADVANCED, WG)
+        self.assertIn("\tset mesh_invites {\n\t\ttype inet_service\n"
+                      "\t\tflags timeout\n\t}\n\tchain input {\n",
+                      found.text)
+        self.assertIn("\t\ttcp dport @mesh_invites accept\n", found.text)
+        self.assertNftAccepts(found.text)
+        without = self.render(CORE_OFF)
+        self.assertNotIn("mesh_invites", without.text)
+
     def test_the_overlay_s_defaults(self):
         found = self.render(ADVANCED, {"address": "fd00:1::1/64"})
         self.assertIn('iifname "wg0"', found.text)

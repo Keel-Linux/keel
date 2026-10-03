@@ -33,6 +33,21 @@ def ensure(root: str) -> bytes:
     return found
 
 
+def adopt(root: str, found: bytes) -> None:
+    """Keep the identity a token carries, on the node that joins
+
+    Raises ValueError when this node already keeps another one: it is
+    in another mesh, and a node is in one.
+    """
+    with locked(root):
+        current = read(root)
+        if current is None:
+            write_private(root, IDENTITY, found.hex() + "\n")
+        elif current != found:
+            raise ValueError(f"this node is in another mesh: /{IDENTITY}"
+                             " names another one than the token's")
+
+
 def read(root: str) -> bytes | None:
     """The identity, None when not made yet; ValueError when damaged"""
     try:

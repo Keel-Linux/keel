@@ -67,11 +67,14 @@ DESCRIPTIONS = {
     " one this instance is on",
     NETWORK_NOT_CONFIRMED: "keel network confirm refused: nothing waiting"
     " (a change already confirmed is not refused), or not run over the new"
-    " configuration",
+    " configuration; or a keel mesh change that was not confirmed, which"
+    " reverts by itself",
     NOTIFY_FAILED: "keel notify reached no channel: none declared, or every"
     " one failed",
-    MESH_TOKEN_INVALID: "keel mesh join could not use the token: mistyped"
-    " or truncated, of a format this keel does not read, or expired",
+    MESH_TOKEN_INVALID: "keel mesh join could not use the token, or accept"
+    " its line: mistyped or truncated, of a format this keel does not"
+    " read, or expired",
     MESH_REFUSED: "keel mesh refused: no overlay to invite into, no"
-    " endpoint, no free address, or this node is in another mesh",
+    " endpoint, no free address, this node is in another mesh, a change"
+    " waits in its window, or the inviter refused the join",
 }

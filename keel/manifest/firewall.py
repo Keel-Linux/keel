@@ -5,7 +5,9 @@ docs/manifest-v1.md, "What is derived, and how": every `listen` with
 `expose: public` of a process whose overlay is enabled (and every one of
 the appliance's own processes) is opened on every interface, every
 `expose: mesh` one on the WireGuard interface only, and the overlay's
-own UDP port on the uplink. `loopback` opens nothing. This replaces
+own UDP port on the uplink. `loopback` opens nothing. With an overlay,
+a named set holds the TCP ports of the pending mesh invites (decision
+0048), each with a timeout, and one rule accepts them. This replaces
 `WEBMIN_FW_TCP_INCOMING` of the recipes (0041, 6).
 
 nftables, one table of keel's own, `inet keel`, one input chain whose
@@ -53,6 +55,12 @@ ALWAYS = (
     "udp dport 68 accept",
 )
 ENABLED = "enabled"
+# the TCP ports of the pending mesh invites (decision 0048): keel mesh
+# invite adds its port with a timeout, so it closes by itself
+INVITES_SET = "mesh_invites"
+INVITES_SET_TEXT = (
+    f"\tset {INVITES_SET} {{\n\t\ttype inet_service\n"
+    "\t\tflags timeout\n\t}\n")
 # What a host serves the guests on its bridges (lxcbr0, docker0, a
 # Proxmox vmbr): lxc-net's and libvirt's dnsmasq answer DNS, DHCPv4 and
 # DHCPv6 there, and a drop policy would make every guest lose its lease.
@@ -101,13 +109,17 @@ def render(resolved: Resolved, states: dict, wireguard: dict | None,
         mesh = {}
     opened_mesh = sorted({port for ports in mesh.values() for port in ports})
     rules = list(ALWAYS) + _rules("", sorted(public))
+    sets = ""
     if iface:
         rules += _rules(f'iifname "{iface}" ', opened_mesh)
+        rules.append(f"tcp dport @{INVITES_SET} accept")
+        sets = INVITES_SET_TEXT
     if bridges:
         rules += _rules(_iifname(sorted(set(bridges))) + " ",
                         list(BRIDGE_SERVICES))
     body = "".join(f"\t\t{rule}\n" for rule in rules)
-    digest = hashlib.sha256(body.encode()).hexdigest()[:DIGEST_LENGTH]
+    digest = hashlib.sha256((sets + body).encode()).hexdigest()[
+        :DIGEST_LENGTH]
     family, name = TABLE
     text = (
         f"{HEADER}\n"
@@ -115,6 +127,7 @@ def render(resolved: Resolved, states: dict, wireguard: dict | None,
         f"delete table {family} {name}\n"
         f"table {family} {name} {{\n"
         f'\tcomment "{COMMENT} {digest}"\n'
+        f"{sets}"
         "\tchain input {\n"
         "\t\ttype filter hook input priority filter; policy drop;\n"
         f"{body}"

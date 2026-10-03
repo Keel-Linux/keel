@@ -24,6 +24,20 @@ jobs:
       # the overlay tests hand keel's key and file to (tests/wgtools.py);
       # in CI they fail rather than skip without it.
       apt-packages: bats shellcheck gnupg gpgv wireguard-tools
+  # keel mesh end to end (decision 0048) in a Debian trixie system
+  # container, the release keel ships on: three network namespaces,
+  # the real wg-quick and TLS, as root in the container
+  # (tests/test_mesh_netns.py). The check is "mesh / trixie".
+  mesh:
+    uses: keel-linux/.github/.github/workflows/lxc-trixie.yml@main
+    with:
+      timeout: 20
+      run: |
+        apt-get update -qq
+        apt-get install -y -qq --no-install-recommends python3-pytest \
+          python3-yaml wireguard-tools iproute2 iputils-ping openssl
+        PYTHONPATH=. python3 -m pytest -q tests/test_mesh_netns.py \
+          tests/test_mesh_channel.py
   # A change that ships must come with a changelog entry, or it cannot be
   # installed and never reaches an appliance. The rule and its tests are
   # bin/require-changelog of the .github repository. The check is
