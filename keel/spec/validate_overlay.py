@@ -16,6 +16,10 @@ network.interfaces declares (an address's prefix, a gateway) or a
 peer's endpoint address. An endpoint given by name, or an uplink on a
 private prefix left to DHCP or SLAAC, cannot be checked here: `keel
 network confirm` asks the machine's routes.
+
+No peer may hold this node's own public key. That key is read from the
+private key file, as `keel network wireguard key` reads it, so only when
+secret files are checked.
 """
 
 import ipaddress
@@ -34,7 +38,7 @@ PRIVATE = {
         " 100.64.0.0/10 (RFC 6598)"),
 }
 
-from keel.network import wireguard
+from keel.network import wgkeys, wireguard
 from keel.spec.fields import (
     domain_error,
     is_unicast,
@@ -92,7 +96,10 @@ def validate_wireguard(wg: Any, interfaces: Any,
     if "private_key" in wg:
         errors += private_key_errors(f"{key}.private_key", wg["private_key"],
                                      check_secret_files)
-    return errors + peers_errors(f"{key}.peers", wg.get("peers"), reserved)
+    errors += peers_errors(f"{key}.peers", wg.get("peers"), reserved)
+    if check_secret_files:
+        errors += own_key_errors(f"{key}.peers", wg)
+    return errors
 
 
 def as_prefix(value: Any) -> Network | None:
@@ -232,6 +239,33 @@ def peers_errors(key: str, peers: Any, reserved: Reserved) -> list[str]:
     errors += [f"{key}: public key {one} is declared twice"
                for one in sorted(set(keys)) if keys.count(one) > 1]
     return errors + shared_ips(key, peers or [])
+
+
+def own_key_errors(key: str, wg: dict) -> list[str]:
+    """A peer that is this node itself (keel-web-2, 2026-10-03)
+
+    The node's key is the public key of its private key file, the one
+    `keel network wireguard key` prints. No file yet is no key any peer
+    can hold (apply makes a fresh one); a file that cannot be read, or no
+    wg where the spec is validated, leaves the check to the run that
+    converges the overlay, which reads the key again. A private_key that
+    is not a mapping has its own error.
+    """
+    peers = wg.get("peers")
+    declared = wg.get("private_key")
+    if not isinstance(peers, list) or not peers or (
+            declared is not None and not isinstance(declared, dict)):
+        return []
+    path = wireguard.key_path(wg)
+    if not os.path.exists(path):
+        return []
+    own, _ = wgkeys.public(path)
+    if own is None:
+        return []
+    return [f"{key}[{index}].public_key: this is this node's own public key"
+            f" (of {path}); a node is not its own peer, list the other"
+            " nodes' keys" for index, peer in enumerate(peers)
+            if isinstance(peer, dict) and peer.get("public_key") == own]
 
 
 def peer_errors(key: str, peer: Any, reserved: Reserved) -> list[str]:
