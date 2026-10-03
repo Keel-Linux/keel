@@ -83,12 +83,33 @@ def addresses(overlay: dict) -> tuple[str, ...]:
 
 def is_key(text: str) -> bool:
     """A WireGuard key as wg prints it: 32 bytes in base64, 44 characters"""
+    return key_bytes(text) is not None
+
+
+def key_bytes(text: str) -> bytes | None:
+    """The 32 bytes of a key written as wg prints it, or None
+
+    The last character of the base64 carries two bits no byte uses.
+    Python's decoder ignores them; wg refuses a key that sets them ("Key
+    is not the correct length or format"), so such a spelling is no key
+    here either. Keys are compared by these bytes (same_key), never as
+    text.
+    """
     if len(text) != KEY_LENGTH:
-        return False
+        return None
     try:
-        return len(base64.b64decode(text, validate=True)) == KEY_BYTES
+        found = base64.b64decode(text, validate=True)
     except (binascii.Error, ValueError):
-        return False
+        return None
+    if len(found) != KEY_BYTES or base64.b64encode(found).decode() != text:
+        return None
+    return found
+
+
+def same_key(one: str, other: str) -> bool:
+    """Whether two spellings are the same WireGuard key"""
+    found = key_bytes(one)
+    return found is not None and found == key_bytes(other)
 
 
 def split_endpoint(text: str) -> tuple[str, int]:

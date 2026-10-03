@@ -152,6 +152,14 @@ class TestInvalid(unittest.TestCase):
         one(self, document({"peers": [peer(public_key="abc")]}),
             "not a WireGuard key")
 
+    def test_a_key_spelled_as_wg_never_writes_it(self):
+        # the last character's two spare bits set: Python's base64 decodes
+        # it to PEER_KEY's bytes, wg pubkey refuses it ("Key is not the
+        # correct length or format"), so it is no key here either
+        spelled = PEER_KEY[:-2] + "F="
+        one(self, document({"peers": [peer(public_key=spelled)]}),
+            "not a WireGuard key")
+
     def test_endpoint(self):
         for endpoint, words in (
             ("2001:db8::20:51820", "brackets"),
