@@ -9,6 +9,12 @@ to DHCP or SLAAC, an address the interface holds now). A console or a
 process attached from the container's host has seen the machine and
 needs no such proof.
 
+Decision 0048 adds two sources, for an overlay change keel mesh made and
+no other: a join's authenticated session over the overlay (session.MESH),
+and `keel mesh create` for a mesh with no peer yet (session.SELF). Each
+names the change it made, the marker it read back after its apply, and
+confirms only that one, after the same route check.
+
 Two limits are said rather than hidden: a session tests one family, so a
 static address of the other family is reported as not tested; and a
 client on the same link reaches the machine without its gateway, so when
@@ -42,18 +48,28 @@ class Probes:
     gateways: Callable[[], list[str] | None] = lambda: []
 
 
+MESH_ORIGINS = (session.MESH, session.SELF)
+
+
 def confirm(root: str, origin: session.Origin, probes: Probes,
-            run: switch.Runner) -> tuple[bool, list[str]]:
-    """(confirmed, what to tell the operator)"""
+            run: switch.Runner, expected: marker.Pending | None = None,
+            clients: tuple[str, ...] = ()) -> tuple[bool, list[str]]:
+    """(confirmed, what to tell the operator)
+
+    `expected` is the change keel mesh made, which a MESH or SELF origin
+    may confirm and no other; `clients` are the operator's SSH clients
+    the route check asks too, for an origin that is not their session.
+    """
     with marker.locked(root):
         if not marker.exists(root):
             return nothing_waiting(marker.last(root))
         pending = marker.read(root)
-        refusal = not_ready(pending, probes.boot_id())
+        refusal = not_ready(pending, probes.boot_id()) or not_made_here(
+            pending, origin, expected)
         if refusal:
             return False, [refusal]
         overlay = pending.kind == marker.OVERLAY
-        refusal = captured(pending, origin, probes) or (
+        refusal = captured(pending, origin, probes, clients) or (
             overlay_not_proof if overlay else not_proof)(
             pending, origin, probes)
         if refusal:
@@ -113,6 +129,25 @@ def not_ready(pending: marker.Pending | None, boot_id: str | None) -> (
     return None
 
 
+def not_made_here(pending: marker.Pending, origin: session.Origin,
+                  expected: marker.Pending | None) -> str | None:
+    """A mesh origin confirms the overlay change keel mesh made, alone
+
+    The change is known by the boot and the moment it came up, which
+    the marker records once the interface is up (decision 0048, "It
+    confirms only its own change").
+    """
+    if origin.kind not in MESH_ORIGINS:
+        return None
+    if expected is None or pending.kind != marker.OVERLAY or (
+            expected.boot_id, expected.changed_at) != (
+            pending.boot_id, pending.changed_at):
+        return ("refused: the network change waiting is not the one keel"
+                f" mesh made, so {origin.detail} cannot confirm it;"
+                f" {LEFT_TO_REVERT}")
+    return None
+
+
 def not_proof(pending: marker.Pending, origin: session.Origin,
               probes: Probes) -> str | None:
     if origin.kind in (session.CONSOLE_KIND, session.HOST):
@@ -164,9 +199,20 @@ def overlay_not_proof(pending: marker.Pending, origin: session.Origin,
     make pairing impossible, since the first node's overlay carries
     nothing until the second node has declared it too. confirm then says
     which path was tested and which was not.
+
+    keel mesh's own sources (decision 0048): `create` for a mesh with no
+    peer, and a join's session, which must arrive at an address the
+    overlay declares; WireGuard binds its source to the key of the peer
+    the change added, which the listener checks.
     """
-    if origin.kind in (session.CONSOLE_KIND, session.HOST):
+    if origin.kind in (session.CONSOLE_KIND, session.HOST, session.SELF):
         return None
+    if origin.kind == session.MESH:
+        if origin.local and same_address(origin.local, pending.addresses):
+            return None
+        return (f"refused: {origin.detail} arrived at {origin.local}, not"
+                " at an address the overlay declares"
+                f" ({', '.join(pending.addresses)})")
     if origin.kind != session.SSH:
         return f"refused: {origin.detail}"
     if origin.started is None or origin.started <= pending.changed_at:
@@ -199,7 +245,7 @@ LEFT_TO_REVERT = (
 
 
 def captured(pending: marker.Pending, origin: session.Origin,
-             probes: Probes) -> str | None:
+             probes: Probes, clients: tuple[str, ...] = ()) -> str | None:
     """An overlay change that routes the uplink into itself
 
     Whoever confirms, a console included, would keep a change that cuts
@@ -209,7 +255,8 @@ def captured(pending: marker.Pending, origin: session.Origin,
     to each gateway the spec declared, to each gateway of a default route
     in place (what DHCP, SLAAC or a container's host configured, which
     the spec does not show, and what --skip-uplink left), IPv6 first, and
-    back to the client of an SSH session that came over the uplink. One
+    back to the client of an SSH session that came over the uplink, and
+    to the operator's SSH `clients` keel mesh names. One
     through the overlay refuses; so does one `ip` gives no answer for,
     since an unknown route is not a clean one.
     """
@@ -220,7 +267,8 @@ def captured(pending: marker.Pending, origin: session.Origin,
         return ("refused: `ip route show default` gave no answer, so it"
                 " cannot be told whether the change routes the uplink into"
                 f" the overlay; {LEFT_TO_REVERT}")
-    for address, what in route_targets(pending, origin, live_gateways):
+    for address, what in route_targets(pending, origin, live_gateways,
+                                       clients):
         dev = probes.route_dev(address)
         if dev is None:
             return (f"refused: `ip route get {address}` ({what}) gave no"
@@ -235,7 +283,8 @@ def captured(pending: marker.Pending, origin: session.Origin,
 
 
 def route_targets(pending: marker.Pending, origin: session.Origin,
-                  live_gateways: list[str]) -> list[tuple[str, str]]:
+                  live_gateways: list[str],
+                  clients: tuple[str, ...] = ()) -> list[tuple[str, str]]:
     """(address, what it is) to ask the route of, gateways IPv6 first
 
     A session that came over the overlay is answered through it, as it
@@ -252,12 +301,21 @@ def route_targets(pending: marker.Pending, origin: session.Origin,
     if origin.kind == session.SSH and origin.peer and origin.local and \
             not same_address(origin.local, pending.addresses):
         found.append((origin.peer, "this session's client"))
+    found += [(client, "the operator's SSH client") for client in clients]
     return found
 
 
 def overlay_lines(pending: marker.Pending, origin: session.Origin,
                   probes: Probes) -> list[str]:
     """Which of the two paths this confirmation tested"""
+    if origin.kind == session.SELF:
+        return ["the overlay has no peer yet, so nothing can cross it:"
+                " keel mesh create confirmed it once the routes to the"
+                " gateways and to the operator's session were found to"
+                " still leave through the uplink"]
+    if origin.kind == session.MESH:
+        return [f"the overlay was tested: {origin.detail} arrived at"
+                f" {origin.local} on {pending.iface}, from {origin.peer}"]
     if origin.kind != session.SSH or origin.local is None:
         return []
     if same_address(origin.local, pending.addresses):

@@ -28,13 +28,12 @@ from keel.layers import (
     STATE_ENV,
 )
 from keel.manifest import KINDS as MANIFEST_KINDS
-from keel.mesh import commands as mesh_commands
+from keel.mesh import parser as mesh_parser
 from keel.monitor.channelfile import PATH as NOTIFY_SETTINGS
 from keel.monitor.notify import CHECKS as NOTIFY_CHECKS
 from keel.monitor.notify import DIRECTIONS as NOTIFY_DIRECTIONS
 from keel.monitor.notify import LEVELS as NOTIFY_LEVELS
 from keel.spec import CONF_DEFAULT, CONF_ENV, SPEC_DEFAULT, SPEC_ENV
-from keel.network.wireguard import DEFAULT_PORT as WIREGUARD_PORT
 from keel.system import DEFAULT_WINDOW
 
 
@@ -188,7 +187,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_root_option(revert_parser, "revert the change of")
     revert_parser.set_defaults(handler=commands.network_revert)
     add_wireguard_parser(network_actions)
-    add_mesh_parser(subparsers)
+    mesh_parser.add(subparsers, mesh_parser.Options(
+        add_common_options, add_root_option, port_number, window_seconds))
 
     # no --spec: notify reads the settings apply wrote, never the spec
     notify_parser = subparsers.add_parser(
@@ -321,57 +321,6 @@ def add_wireguard_parser(network_actions) -> None:
         " /64, for the first node of a set; the others take ::2, ::3",
     )
     suggest_parser.set_defaults(handler=commands.network_wireguard_suggest)
-
-
-def add_mesh_parser(subparsers) -> None:
-    """keel mesh: joining the WireGuard mesh with one command (0048)"""
-    mesh_parser = subparsers.add_parser(
-        "mesh",
-        help="invite a node into this node's WireGuard mesh, or join one"
-        " with the line an invite printed (decision 0048, docs/mesh.md)",
-    )
-    mesh_actions = mesh_parser.add_subparsers(
-        dest="action", metavar="ACTION"
-    )
-    invite_parser = mesh_actions.add_parser(
-        "invite",
-        help="print the keel mesh join line for a new node, valid one hour"
-        " and once, and reserve its overlay address (root)",
-    )
-    add_common_options(invite_parser)
-    invite_parser.add_argument(
-        "--endpoint", action="append", default=None, metavar="ADDRESS",
-        help="an address the new node reaches this one at, one per family;"
-        " may be repeated (default: the static addresses"
-        " network.interfaces declares)",
-    )
-    invite_parser.add_argument(
-        "--port", type=port_number, default=WIREGUARD_PORT, metavar="PORT",
-        help="the TCP port the join request goes to (default: %(default)s,"
-        " the number of WireGuard's UDP port)",
-    )
-    add_root_option(invite_parser, "read the overlay of and keep the"
-                    " invite in")
-    invite_parser.set_defaults(handler=mesh_commands.mesh_invite)
-    join_parser = mesh_actions.add_parser(
-        "join",
-        help="join the mesh of the node that printed TOKEN; with --dry-run,"
-        " print the change of this node's spec it makes (the join itself"
-        " is not implemented yet)",
-    )
-    add_common_options(join_parser)
-    join_parser.add_argument(
-        "token", metavar="TOKEN",
-        help="the keel1: token keel mesh invite printed, or - to read it"
-        " from standard input, which keeps it out of the process list",
-    )
-    join_parser.add_argument(
-        "--dry-run", action="store_true",
-        help="print the address and the peer the join would write into the"
-        " spec, and change nothing",
-    )
-    add_root_option(join_parser, "read the appliance manifests of")
-    join_parser.set_defaults(handler=mesh_commands.mesh_join)
 
 
 def port_number(text: str) -> int:

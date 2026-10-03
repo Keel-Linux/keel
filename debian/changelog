@@ -1,3 +1,33 @@
+keel (0.17.0) unstable; urgency=medium
+
+  * The second part of handbook decision 0048, joining the mesh with one
+    command. keel mesh create makes the mesh on its first node, a random
+    unique local /64 with the node at ::1, and confirms it itself once
+    the route check finds the gateways and the operator's SSH client
+    still on the uplink (0048 amending 0018). keel mesh invite starts
+    a root helper as the transient unit keel-mesh-invite@<id> and, from
+    it, the unprivileged listener keel-mesh-listen@<id> (DynamicUser, no
+    capability, sandboxed), HTTPS with the invite's own certificate on
+    TCP 51820 by default (--port), its TLS key handed over as a memfd on
+    a unix socket in its own runtime directory, the peer checked against
+    the unit's MainPID; the HMAC key never leaves the root side, and a
+    join's confirmation rests on a WireGuard handshake from the new
+    peer's key. The port is opened in keel's
+    firewall only where keel-firewall is enabled, through a new named
+    set of the derived ruleset. The printed line feeds the token on
+    standard input (keel mesh join - <<< keel1:...). keel mesh join
+    joins: the request pinned to the token's fingerprint and signed with
+    an HMAC of the invite's key, checked in constant time on the root
+    side, once, without replays; each node writes the other
+    into its own spec and applies it under the window, and the join's
+    own session over the overlay confirms both windows. Tested end to
+    end over 250 ms links with 2% loss. When the port cannot be reached, join
+    applies its side and prints keel mesh accept keel1a:<answer> for the
+    inviter. keel mesh status shows the peers, their handshakes and the
+    pending invites, never a secret. docs/mesh.md.
+
+ -- Marcos Mendez <mendez.foto@gmail.com>  Sat, 03 Oct 2026 23:00:00 +0000
+
 keel (0.16.0) unstable; urgency=medium
 
   * keel mesh invite and keel mesh join --dry-run, the first part of

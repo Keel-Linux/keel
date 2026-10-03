@@ -39,6 +39,12 @@ SSH = "ssh"
 CONSOLE_KIND = "console"
 HOST = "host"
 UNKNOWN = "unknown"
+# decision 0048: sources keel mesh hands confirm itself, never read from
+# the process tree. MESH is a join's authenticated session over the
+# overlay, from the peer the change added; SELF is `keel mesh create`
+# confirming an overlay with no peer, which no peer can.
+MESH = "mesh"
+SELF = "self"
 
 
 @dataclass(frozen=True)

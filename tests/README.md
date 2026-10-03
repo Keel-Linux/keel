@@ -55,6 +55,14 @@ needs the `wireguard` kernel module. Without the tools those tests skip,
 except in CI, where the workflow installs `wireguard-tools`
 (tests/wgtools.py).
 
+`keel mesh` (decision 0048) is tested end to end by
+`tests/test_mesh_netns.py`, which runs `tests/mesh_netns.py` as root in
+a network namespace the same way, with two more namespaces joined to it
+by veths, the real `wg-quick`, real TLS on the namespaces' addresses and
+`ping` over the overlay; it needs the `wireguard` kernel module, and
+skips without it outside CI. `tests/test_mesh_channel.py` serves the
+real TLS listener on `[::1]`.
+
 The one shell file the package ships, the firstboot hook
 `firstboot.d/10keel-system`, is tested with bats in `tests/hook.bats`, with
 `keel` replaced by a script on `PATH` that records its arguments and

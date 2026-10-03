@@ -65,9 +65,11 @@ def run_cli(*argv, stdin=""):
 
 
 def token_of(out: str) -> str:
+    """The token of the line invite prints, which feeds it on standard
+    input, never as an argument"""
     line = out.strip()
-    assert line.startswith("keel mesh join keel1:"), line
-    return line[len("keel mesh join "):]
+    assert line.startswith("keel mesh join - <<< keel1:"), line
+    return line[len("keel mesh join - <<< "):]
 
 
 def secret_forms(secret: bytes) -> tuple[str, ...]:
@@ -164,13 +166,22 @@ class TestInviteReal(Case):
     def test_the_next_invite_takes_the_next_address(self):
         first = mesh_token.parse(token_of(self.invite()[1]),
                                  datetime.now(timezone.utc))
-        second = mesh_token.parse(token_of(self.invite()[1]),
+        second = mesh_token.parse(token_of(self.invite("--port", "8443")[1]),
                                   datetime.now(timezone.utc))
         self.assertEqual((first.assigned, second.assigned),
                          ("fd00:6b65:1::3/64", "fd00:6b65:1::4/64"))
         self.assertNotEqual(first.secret, second.secret)
         self.assertNotEqual(first.fingerprint, second.fingerprint)
         self.assertEqual(first.mesh_id, second.mesh_id)
+
+    def test_one_pending_invite_per_port(self):
+        """the listener of each holds its port on every address"""
+        self.invite()
+        code, out, err = self.invite()
+        self.assertEqual((code, out), (exits.MESH_REFUSED, ""))
+        self.assertIn("is pending on TCP port 51820", err)
+        self.assertIn("--port", err)
+        self.assertEqual(len(self.invite_files()), 1)
 
     def test_endpoint_and_port_given(self):
         code, out, err = self.invite("--endpoint", "198.51.100.7",
@@ -217,6 +228,15 @@ class TestInviteRefused(Case):
         code, _, err = self.invite()
         self.assertEqual(code, exits.MESH_REFUSED)
         self.assertIn("converge the overlay first", err)
+
+    def test_a_listener_that_cannot_start_prints_no_line(self):
+        self.write_spec(OVERLAY)
+        self.key_file()
+        with self.public(), mock.patch(
+                "keel.mesh.commands.listening",
+                return_value=("", exits.APPLY_FAILED)):
+            code, out, _ = self.invite()
+        self.assertEqual((code, out), (exits.APPLY_FAILED, ""))
 
     def test_a_key_wg_cannot_read(self):
         self.write_spec(OVERLAY)
@@ -417,10 +437,13 @@ class TestJoinDryRun(Case):
         self.assertEqual((code, out), (exits.MESH_TOKEN_INVALID, ""))
         self.assertIn("more than 1024 characters", err)
 
-    def test_without_dry_run_nothing_is_done_yet(self):
-        code, out, err = self.join(self.token())
-        self.assertEqual((code, out), (exits.NOT_IMPLEMENTED, ""))
-        self.assertIn("--dry-run", err)
+    def test_without_dry_run_on_the_live_system_needs_root(self):
+        with mock.patch("os.geteuid", return_value=1000):
+            code, out, err = run_cli("mesh", "join", self.token(), "--spec",
+                                     self.spec)
+        self.assertEqual((code, out), (exits.APPLY_NEEDS_ROOT, ""))
+        self.assertIn("keel mesh join on the live system must run as root",
+                      err)
 
     def test_no_action(self):
         code, _, _ = run_cli("mesh")

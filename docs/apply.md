@@ -1118,6 +1118,15 @@ drop, and these rules:
 - every `mesh` port of an enabled overlay, on the WireGuard interface
   only, and none (the step says which) while the spec declares no
   overlay;
+- with an overlay, the TCP ports of the pending mesh invites: a named
+  set, `mesh_invites`, of ports with a timeout, and one rule that
+  accepts TCP to a port in it. `keel mesh invite` adds its port for the
+  time left to its expiry and the listener's end removes it, so the
+  port is open exactly while an invite is pending ([docs/mesh.md](mesh.md),
+  decision 0048). Adding an element is not a ruleset change, so it
+  neither waits on nor disturbs a change in its window. The set is
+  empty while no invite is pending, and a reload of the table empties
+  it;
 - on each of the machine's guest bridges, DNS on 53 and DHCP on 67 and
   547: what lxc-net's or libvirt's dnsmasq serves the guests there,
   which a drop policy would otherwise cut, so every container lost its
@@ -1373,6 +1382,8 @@ used survived, so:
 | SSH, over the overlay | the session started after the change, came from another machine, and arrived at an address the overlay declares (`address`, `ipv4_address`). confirm says the overlay was tested |
 | SSH, over the uplink | the session started after the change, came from another machine, and arrived at an address another interface of this machine holds now. confirm says the overlay itself was not tested, and at which address a peer would test it |
 | A console, a process attached from a container's host | always, as for the uplink |
+| The mesh session of a join (decision 0048), for the overlay change that join made and no other | on the inviter, a WireGuard handshake from the new peer's key since the join (`wg show <if> latest-handshakes`) and the join's confirmation request signed with the invite's HMAC key, both checked by the root side; on the new node, the inviter's signed answer over the tunnel ([docs/mesh.md](mesh.md)) |
+| `keel mesh create`, for the change that created a mesh with no peer and no other | always, after the route check: an overlay with no peer routes its own private prefix only, and no peer exists to confirm it (decision 0048, second round, point 1) |
 | Anything else, a session older than the change, a session from this machine to itself, or one arriving at an address the overlay does not declare | refused (exit 21) |
 
 Requiring the overlay alone would make pairing impossible: the first
@@ -1385,7 +1396,9 @@ first, with `ip route get`: to each gateway `network.interfaces`
 declares and each gateway of a default route in place now (`ip -6` and
 `ip -4 route show default`: what DHCP, SLAAC or a container's host
 configured, and what `--skip-uplink` left), IPv6 first, and, for an SSH
-session that came over the uplink, back to its client. When one of them
+session that came over the uplink, back to its client. `keel mesh
+create` and `keel mesh join` also ask the route back to the client of
+the SSH session they run in. When one of them
 leaves through the overlay's interface, the change routes the uplink's
 traffic into the overlay, and confirm refuses (exit 21) and leaves the
 change to revert when its window ends, or at once with `keel network
