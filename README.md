@@ -41,6 +41,8 @@ in [docs/apply.md](docs/apply.md).
 | `keel network revert` | Put back the interfaces file a pending network change replaced; what the revert timer runs. `--boot` restores the file only, for the boot unit |
 | `keel network wireguard key` | Print this node's WireGuard public key, making the key pair first when there is none (root, live system only); the private key is never printed (decision 0020, docs/spec.md) |
 | `keel network wireguard suggest-address` | Print a random unique local IPv6 address with its /64, for the first node of an overlay |
+| `keel mesh invite` | Print the `keel mesh join keel1:<token>` line a new node runs to join this node's WireGuard mesh, valid one hour and once, and reserve the new node's overlay address (decision 0048, [docs/mesh.md](docs/mesh.md)) |
+| `keel mesh join` | With `--dry-run`, check a `keel1:` token and print the address and the peer it makes in this node's spec, applying nothing; the join itself comes later ([docs/mesh.md](docs/mesh.md)) |
 | `keel notify` | What monit runs when a check of the `monitor` section fails, lasts or recovers: sends one message, saying what happened and what to do, to every channel the section declares (email, Telegram, ntfy, a webhook). It reads the channels from `/etc/keel/monitor.json`, which `apply --system` writes as root, never from the spec, reads the tokens from their secret files and prints no URL (decision 0021, docs/apply.md) |
 | `keel inspect` | Write a spec from the running machine, or from an offline root, and report every field with its source or why it was not inferred; secrets are never read (brief sections 5.2 and 7) |
 | `keel diff` | Report drift between the spec and the running machine, or an offline root, field by field, through the same collector `inspect` uses; secrets are never compared and their files need not exist, nothing is written (brief section 5.2) |
@@ -138,7 +140,7 @@ Defined in one place, `keel/exits.py`, and reproduced here.
 | 12 | `ASSEMBLE_FAILED` | The rootfs is not empty or cannot be created, or `tar` or `zstd` failed while extracting or packing |
 | 13 | `INSPECT_INCOMPLETE` | `inspect` wrote the spec, but a required field (hostname, fqdn, interfaces, alerts, updates) could not be inferred; or `diff` found no drift, but a declared field could not be observed. The report says which and why |
 | 14 | `DRIFT_FOUND` | `diff` found at least one declared field whose observed value differs. Drift wins over unobserved fields, so a report with both exits 14 |
-| 15 | `APPLY_NEEDS_ROOT` | The system phase (`--system`, `--system-only`) on the live system was run by a user other than root; nothing was written, not even the conf |
+| 15 | `APPLY_NEEDS_ROOT` | The system phase (`--system`, `--system-only`) on the live system was run by a user other than root; nothing was written, not even the conf. Also `keel network wireguard key` making a key, and `keel mesh invite`, on the live system |
 | 16 | `APPLY_FAILED` | The system phase could not make at least one change; the output names it. The conf was written, where the run writes one, and every other change was made, so the run can be repeated |
 | 17 | `CHANNEL_INVALID` | A channel pointer, or the record of the one this instance follows, does not parse or fails validation. Also a pointer signed in the future, one claiming more than 30 days of life, and a revision's archived pointer naming another revision |
 | 18 | `CHANNEL_UNVERIFIED` | A channel pointer is not signed by a key that may move a channel, or no keyring was given to check it against. A key that is revoked or expired is refused here: gpgv exits 0 for both and still prints `VALIDSIG`, so `GOODSIG` is what is required |
@@ -146,6 +148,8 @@ Defined in one place, `keel/exits.py`, and reproduced here.
 | 20 | `CHANNEL_ROLLBACK` | A channel pointer names an earlier revision than the one this instance is on; `--allow-rollback`, or naming the release and revision, is how going back is asked for |
 | 21 | `NETWORK_NOT_CONFIRMED` | `keel network confirm` refused: no change is waiting, or it was not run from a new session over the new configuration, or a console (docs/apply.md) |
 | 22 | `NOTIFY_FAILED` | `keel notify` reached no channel: `/etc/keel/monitor.json` is missing or refused, declares none, or every one failed; the message then went to syslog (user.crit) and root's mailbox. One channel that takes the message is success; the others' failures are printed |
+| 23 | `MESH_TOKEN_INVALID` | `keel mesh join` could not use the token: not a `keel1:` token, mistyped or truncated (its checksum), of a later format, inconsistent, or expired. The message never holds the token or its secret |
+| 24 | `MESH_REFUSED` | `keel mesh` refused: no overlay to invite into, no key yet, no endpoint, no free address in the prefix; or this node is in another mesh, at another address of it, or the change would make a spec validation refuses |
 
 Two rules that callers depend on:
 

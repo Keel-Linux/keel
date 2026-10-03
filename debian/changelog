@@ -1,3 +1,24 @@
+keel (0.16.0) unstable; urgency=medium
+
+  * keel mesh invite and keel mesh join --dry-run, the first part of
+    handbook decision 0048 (joining the mesh with one command). invite
+    prints the keel mesh join keel1:<token> line, valid one hour and
+    once, and reserves the new node's overlay address, a random free
+    one of the prefix, in a pending invite under /var/lib/keel/mesh
+    (0700, 0600) that keeps an HMAC key derived from the token's
+    secret, never the secret; a consumed invite keeps its address
+    until it expires. join
+    --dry-run checks the token (prefix, checksum, layout, expiry) and
+    prints the address and the peer it makes in the spec; it applies
+    nothing yet. The listener, the join itself, accept, create and
+    remove come next. docs/mesh.md. New exit codes 23 and 24.
+  * WireGuard keys are compared by their 32 bytes, through one helper,
+    in the peer checks of spec validation; and a key spelled with the
+    two spare bits of its last character set, which wg refuses, is no
+    longer taken for a key.
+
+ -- Marcos Mendez <mendez.foto@gmail.com>  Sat, 03 Oct 2026 20:00:00 +0000
+
 keel (0.15.4) unstable; urgency=medium
 
   * spec validation refuses a peer of network.overlay.wireguard that holds
