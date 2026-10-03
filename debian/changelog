@@ -1,3 +1,15 @@
+keel (0.15.4) unstable; urgency=medium
+
+  * spec validation refuses a peer of network.overlay.wireguard that holds
+    this node's own public key. On keel-web-2 the operator entered the
+    key the overlay screen shows for the node itself as a peer
+    (2026-10-03). The node's key is read from its private key file, as
+    keel network wireguard key reads it, so only when secret files are
+    checked and the file exists; a file wg cannot read leaves the check
+    to the run that converges the overlay.
+
+ -- Marcos Mendez <mendez.foto@gmail.com>  Sat, 03 Oct 2026 15:00:00 +0000
+
 keel (0.15.3) unstable; urgency=medium
 
   * inspect keeps overlays.wireguard from /etc/keel/instance.yaml when

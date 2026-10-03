@@ -2,12 +2,16 @@
 """network.overlay.wireguard validation (decision 0020), IPv6 first"""
 
 import os
+import shutil
 import tempfile
 import unittest
+from unittest import mock
 
+import wgtools
 from helpers import spec
 from helpers import errors as yaml_errors
 
+from keel.network import wgkeys
 from keel.spec.apply import unsupported
 
 PEER_KEY = "nb9/izIukqWXM7gnBpe7hki4jKZZChWOW1wEfONn82E="
@@ -315,3 +319,90 @@ class TestWarning(unittest.TestCase):
         self.assertTrue(any(line.startswith("network.overlay:")
                             for line in found))
         self.assertEqual(unsupported(document(), system=True), [])
+
+
+class TestNotItsOwnPeer(unittest.TestCase):
+    """keel-web-2, 2026-10-03: the node's own public key, shown at the
+    top of the overlay screen, was entered as a peer. The node's key is
+    read from its private key file, as keel network wireguard key reads
+    it, so only when secret files are checked"""
+
+    def setUp(self):
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory)
+        self.path = os.path.join(directory, "wg0.key")
+
+    def key_file(self):
+        fd = os.open(self.path, os.O_WRONLY | os.O_CREAT, 0o600)
+        os.close(fd)
+
+    def doc(self, *keys):
+        return document({"private_key": {"file": self.path}, "peers": [
+            peer(public_key=key, endpoint=None,
+                 allowed_ips=[f"fd00:1::{index}/128"])
+            for index, key in enumerate(keys, 2)]})
+
+    def own(self, found=PEER_KEY, problem=None):
+        return mock.patch("keel.spec.validate_overlay.wgkeys.public",
+                          return_value=(found, problem))
+
+    def test_its_own_key_is_refused(self):
+        self.key_file()
+        with self.own() as public:
+            one(self, self.doc(OTHER_KEY, PEER_KEY),
+                "peers[1].public_key: this is this node's own public key")
+        public.assert_called_once_with(self.path)
+
+    def test_without_secret_files_it_is_not_read(self):
+        self.key_file()
+        with self.own() as public:
+            self.assertEqual(errors(self.doc(PEER_KEY), check=False), [])
+        public.assert_not_called()
+
+    def test_another_node_s_key_passes(self):
+        self.key_file()
+        with self.own(OTHER_KEY):
+            self.assertEqual(errors(self.doc(PEER_KEY)), [])
+
+    def test_no_key_file_yet_cannot_be_a_peer_s(self):
+        # apply makes it at the first converge: a fresh key is no
+        # peer's, so there is nothing to read
+        with self.own() as public:
+            self.assertEqual(errors(self.doc(PEER_KEY)), [])
+        public.assert_not_called()
+
+    def test_a_key_that_cannot_be_read_is_left_to_its_own_errors(self):
+        # wg missing where the spec is validated, say: apply reads the
+        # key again before it converges anything
+        self.key_file()
+        with self.own(None, wgkeys.NO_TOOLS):
+            self.assertEqual(errors(self.doc(PEER_KEY)), [])
+
+    def test_no_peer_reads_no_key(self):
+        self.key_file()
+        with self.own() as public:
+            self.assertEqual(errors(self.doc()), [])
+        public.assert_not_called()
+
+    def test_a_malformed_private_key_has_its_own_error_only(self):
+        with self.own() as public:
+            one(self, document({"private_key": "/etc/wireguard/wg0.key",
+                                "peers": [peer()]}), "file: PATH")
+        public.assert_not_called()
+
+    def test_the_default_key_file_is_the_one_read(self):
+        # no private_key: /etc/wireguard/<interface>.key, as apply and
+        # keel network wireguard key use
+        with mock.patch("keel.spec.validate_overlay.os.path.exists",
+                        return_value=True), self.own() as public:
+            one(self, document({"interface": "wg1", "peers": [peer()]}),
+                "own public key")
+        public.assert_called_once_with("/etc/wireguard/wg1.key")
+
+    def test_with_the_real_wg(self):
+        tools = wgtools.require(self)
+        with mock.patch.dict(os.environ, wgtools.env(tools)):
+            self.assertIsNone(wgkeys.generate(self.path))
+            own, problem = wgkeys.public(self.path)
+            self.assertIsNone(problem)
+            one(self, self.doc(own), "this node's own public key")
