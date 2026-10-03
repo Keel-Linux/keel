@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 
 from keel.mesh import protocol
 from keel.mesh.protocol import (
+    Admission,
     ConfirmAnswer,
     ConfirmRequest,
     JoinAnswer,
@@ -25,16 +26,23 @@ JOINER = "FHKH10gOWeK2bXHZPg8y+oPTprv556bwrmmRkbyEPgg="
 INVITER = "nb9/izIukqWXM7gnBpe7hki4jKZZChWOW1wEfONn82E="
 NOW = datetime(2026, 10, 3, 12, 0, tzinfo=timezone.utc)
 NONCE = "00112233445566778899aabbccddeeff"
+SIGNER = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
 REQUEST = JoinRequest(
     invite_id="0123456789abcdef", public_key=JOINER,
     endpoint="[2001:db8:2::20]:51820", address="fd00:6b65:1::3/64",
-    nonce=NONCE, time=int(NOW.timestamp()))
+    nonce=NONCE, time=int(NOW.timestamp()), sign_key=SIGNER)
+EVIDENCE = Admission(
+    mesh_id="00" * 16, invite_id="0123456789abcdef", public_key=JOINER,
+    sign_key=SIGNER, address="fd00:6b65:1::3", endpoint=None, time=5,
+    by=SIGNER, signature="A" * 86 + "==")
 ANSWER = JoinAnswer(
     invite_id="0123456789abcdef", nonce=NONCE, public_key=INVITER,
     address="fd00:6b65:1::1/64",
     peers=(Peer(public_key=JOINER, endpoint=None,
-                address="fd00:6b65:1::7"),),
-    etcd="none", window=120)
+                address="fd00:6b65:1::7"),
+           Peer(JOINER, "[2001:db8::7]:51820", "fd00:6b65:1::3",
+                EVIDENCE),),
+    etcd="none", window=120, sign_key=SIGNER, admission=EVIDENCE)
 
 
 def body(message, **changed):
@@ -70,13 +78,50 @@ class TestSignature(unittest.TestCase):
         self.assertNotEqual(request, answer)
 
 
+class TestEvidence(unittest.TestCase):
+    def test_what_is_signed(self):
+        self.assertEqual(EVIDENCE.message(), (
+            b"keel mesh admission 1\n" + b"00" * 16 + b"\n0123456789abcdef"
+            + f"\n{JOINER}\n{SIGNER}\nfd00:6b65:1::3\n\n5\n{SIGNER}"
+            .encode()))
+        gone = protocol.Removal("00" * 16, JOINER, 5, SIGNER, "x")
+        self.assertEqual(gone.message(), (
+            b"keel mesh removal 1\n" + b"00" * 16
+            + f"\n{JOINER}\n5\n{SIGNER}".encode()))
+
+    def test_round_trips(self):
+        data = json.loads(protocol.dumps(EVIDENCE))
+        self.assertEqual(protocol.admission(data), EVIDENCE)
+        self.assertEqual(protocol.admission({**data, "invite_id": ""}),
+                         Admission(**{**data, "invite_id": ""}))
+        gone = protocol.Removal("00" * 16, JOINER, 5, SIGNER,
+                                "A" * 86 + "==")
+        self.assertEqual(protocol.removal(json.loads(protocol.dumps(gone))),
+                         gone)
+
+    def test_malformed(self):
+        data = json.loads(protocol.dumps(EVIDENCE))
+        for changed in ({"invite_id": "x"}, {"mesh_id": "00"},
+                        {"signature": "A" * 88}, {"by": "x"},
+                        {"sign_key": 1}, {"address": "fd00::3/64"}):
+            with self.subTest(changed=changed), \
+                    self.assertRaises(ProtocolError):
+                protocol.admission({**data, **changed})
+        for bad in ([], None, "x"):
+            with self.assertRaises(ProtocolError):
+                protocol.admission(bad)
+            with self.assertRaises(ProtocolError):
+                protocol.removal(bad)
+
+
 class TestMessages(unittest.TestCase):
     def test_round_trips(self):
         confirm = ConfirmRequest(invite_id="0123456789abcdef",
                                  public_key=JOINER, nonce=NONCE,
                                  time=int(NOW.timestamp()))
         confirmed = ConfirmAnswer(invite_id="0123456789abcdef", nonce=NONCE,
-                                  confirmed=True, detail="confirmed")
+                                  confirmed=True, detail="confirmed",
+                                  sign_key=SIGNER)
         for message, load in (
                 (REQUEST, protocol.join_request),
                 (REQUEST.__class__(**{**REQUEST.__dict__, "endpoint": None}),

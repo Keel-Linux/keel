@@ -22,9 +22,11 @@ from mesh_helpers import (
     JOINER,
     KEY,
     MADE,
+    MESH,
     NOW,
     OTHER,
     OWN,
+    SIGNER,
     Clock,
     FakeNode,
     confirm_body,
@@ -33,7 +35,7 @@ from mesh_helpers import (
     signature,
 )
 
-from keel.mesh import admit, invites, protocol
+from keel.mesh import admit, identity, invites, protocol, signing, trust
 from keel.mesh.admit import Admitter, stopped
 from keel.mesh.node import NodeError
 from keel.mesh.protocol import Peer
@@ -92,6 +94,17 @@ class TestJoin(Case):
                           answer.address, answer.etcd, answer.window),
                          (INVITE, INVITER, OWN, "none", 120))
         self.assertEqual(answer.peers, self.node.known)
+        # the evidence of the admission, signed with this node's key
+        evidence = answer.admission
+        self.assertEqual(answer.sign_key, signing.public(self.root))
+        self.assertEqual((evidence.by, evidence.public_key,
+                          evidence.sign_key, evidence.address,
+                          evidence.invite_id, evidence.mesh_id),
+                         (answer.sign_key, JOINER, SIGNER, OVERLAY_NEW,
+                          INVITE, MESH.hex()))
+        self.assertTrue(signing.verified(evidence.by, evidence.message(),
+                                         evidence.signature))
+        self.assertEqual(trust.load(self.root).evidence(JOINER), evidence)
         self.assertEqual(self.node.admitted, [{
             "public_key": JOINER, "allowed_ips": [f"{OVERLAY_NEW}/128"],
             "endpoint": "[2001:db8:2::20]:51820"}])
@@ -137,6 +150,43 @@ class TestJoin(Case):
         self.assertIs(self.listener.confirmed, False)
         self.assertIn("cannot be written: disk full; the invite is spent",
                       self.logged[-1])
+
+    def test_the_peers_carry_the_evidence_this_node_keeps(self):
+        self.node.known = (Peer(OTHER, None, "fd00:6b65:1::7"),)
+        signing.ensure(self.root)
+        store = trust.Store()
+        kept = trust.admit(self.root, MESH, "1123456789abcdef", OTHER, SIGNER,
+                           "fd00:6b65:1::7", None, NOW)
+        trust.recorded(store, kept)
+        trust.save(self.root, store)
+        answer = protocol.join_answer(self.join().body)
+        self.assertEqual(answer.peers[0].admission, kept)
+
+    def test_a_damaged_trust_store_spends_the_invite(self):
+        os.makedirs(os.path.dirname(join(self.root, trust.TRUST)),
+                    exist_ok=True)
+        with open(join(self.root, trust.TRUST), "w") as fob:
+            fob.write("x")
+        self.assertEqual(self.join().status, 500)
+        self.assertIn("damaged", self.logged[-1])
+        self.assertEqual(admit.evidenced(self.root, (
+            Peer(OTHER, None, "fd00:6b65:1::7"),))[0].admission, None)
+
+    def test_no_identity_or_no_signing_key_spends_the_invite(self):
+        os.remove(join(self.root, identity.IDENTITY))
+        self.assertEqual(self.join().status, 500)
+        self.assertIn("no mesh identity", self.logged[-1])
+        self.assertEqual(self.node.admitted, [])
+        other = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, other)
+        listener = Admitter(other, reserved(other), INVITER, OWN, self.node,
+                            self.clock, self.logged.append)
+        with mock.patch("keel.mesh.admit.signing.ensure",
+                        side_effect=signing.SigningError("no openssl")):
+            found = listener.forward(protocol.JOIN, signature(
+                protocol.JOIN, body := join_body()), body, "::", UPLINK)
+        self.assertEqual(found.status, 500)
+        self.assertIn("no openssl", self.logged[-1])
 
     def test_a_change_waiting_leaves_the_invite_pending(self):
         self.node.is_waiting = True
@@ -203,6 +253,14 @@ class TestRefusals(Case):
 
 
 class TestConfirm(Case):
+    def test_a_signing_key_that_cannot_be_named(self):
+        self.join()
+        with mock.patch("keel.mesh.admit.signing.public",
+                        side_effect=signing.SigningError("gone")):
+            found = self.confirm()
+        self.assertEqual(found.status, 500)
+        self.assertEqual(self.node.origins, [])
+
     def test_before_any_join(self):
         found = self.confirm()
         self.assertEqual(found.status, 409)

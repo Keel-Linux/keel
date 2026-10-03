@@ -22,6 +22,7 @@ from mesh_helpers import (
     JOINER,
     KEY,
     NOW,
+    SIGNER,
     Clock,
     confirm_body,
     join_body,
@@ -44,6 +45,13 @@ from keel.mesh.node import NodeError
 from keel.network import marker
 
 UPLINK = "2001:db8:2::20"
+
+
+def saying(doc, root, window):
+    """apply as the live one prints it"""
+    print(f"keel mesh: bring the overlay wg0 up; it reverts in {window} s"
+          " unless `keel network confirm` is run from a new session")
+    return Armed()(doc, root, window)
 
 
 class Played:
@@ -85,6 +93,8 @@ class Case(unittest.TestCase):
         self.inviter = inviting.Inviter(
             self.node, Clock(), self.out.append, self.err.append,
             run=self.run, output=lambda argv: "table inet keel {}")
+        self.announced = []
+        self.inviter.announce = self.announced.append
         keys = mock.patch("keel.mesh.inviting.wgkeys.public",
                           return_value=(INVITER, None))
         self.public = keys.start()
@@ -128,6 +138,16 @@ class TestServe(Case):
                        "mesh_invites", "{ 51820 }"), self.run.calls)
         self.assertEqual(self.err[-1], f"invite {INVITE}: joined and"
                          " confirmed")
+        self.assertEqual(self.announced, [JOINER])
+
+    def test_apply_s_lines_go_to_the_journal(self):
+        self.node.apply = saying
+        self.inviter.bridged = Played(join_request(), confirm_request())
+        self.assertEqual(inviting.serve_invite(self.inviter, INVITE),
+                         exits.OK)
+        self.assertIn(f"invite {INVITE}: keel mesh: bring the overlay wg0"
+                      " up; it reverts in 120 s unless `keel network"
+                      " confirm` is run from a new session", self.err)
 
     def test_sigterm_ends_through_the_cleanup(self):
         with self.assertRaises(SystemExit):
@@ -153,6 +173,7 @@ class TestServe(Case):
         self.assertIn("Address in use", self.err[1])
         self.assertFalse(os.path.exists(self.file()))
         self.assertIn("expired unused", self.err[-1])
+        self.assertEqual(self.announced, [])
 
     def test_another_invite_on_the_port_keeps_it_open(self):
         reserved(self.root, secret=bytes(32))
@@ -165,7 +186,7 @@ class TestAccept(Case):
     def line(self, key=KEY, **changed):
         values = dict(public_key=JOINER, endpoint="[2001:db8:2::20]:51820",
                       address=ASSIGNED, invite_id=INVITE,
-                      time=protocol.seconds(NOW))
+                      time=protocol.seconds(NOW), sign_key=SIGNER)
         values.update(changed)
         return acceptline.encode(Accept(**values), key)
 
@@ -188,6 +209,7 @@ class TestAccept(Case):
                       self.run.calls)
         self.assertEqual(self.out, [f"accepted: {JOINER} is a peer of this"
                                     f" node at {JOINER_OVERLAY}"])
+        self.assertEqual(self.announced, [JOINER])
         self.assertFalse(os.path.exists(self.file()))
         self.assertFalse(marker.exists(self.root))
 
@@ -234,8 +256,12 @@ class TestAccept(Case):
         self.assertIn("already used", self.err[0])
 
     def test_the_change_does_not_come_up(self):
-        self.node.apply = Armed(code=16, arms=False)
+        def failing(doc, root, window):
+            print("wg-quick up failed")
+            return 16
+        self.node.apply = failing
         self.assertEqual(self.accept(), exits.APPLY_FAILED)
+        self.assertEqual(self.err[-2], "wg-quick up failed")
         self.assertIn("apply exited 16", self.err[-1])
         self.assertFalse(os.path.exists(self.file()))
 
@@ -246,10 +272,18 @@ class TestAccept(Case):
         self.assertEqual(self.err[-1], "full; the invite is spent")
 
     def test_the_new_node_never_comes(self):
+        self.node.apply = saying
         self.assertEqual(self.accept(played=Played()),
                          exits.NETWORK_NOT_CONFIRMED)
         self.assertIn("not confirmed", self.err[-1])
+        self.assertIn("unless `keel network confirm`", self.err[-2])
         self.assertTrue(marker.exists(self.root))
+        self.assertEqual(self.announced, [])
+
+    def test_apply_s_revert_warning_is_not_shown_when_it_confirms(self):
+        self.node.apply = saying
+        self.assertEqual(self.accept(), exits.OK)
+        self.assertNotIn("unless", "\n".join(self.err))
 
     def test_the_overlay_address_cannot_be_bound(self):
         found = self.accept(played=Played(fail=OSError(99, "not here")))
@@ -301,6 +335,13 @@ class TestClose(Case):
                              "unit")
         unit.assert_called_once_with(INVITE, "path", 30, self.run,
                                      self.inviter.output)
+
+    def test_the_announcement_goes_through_keel_mesh_sync(self):
+        self.inviter.announce = None
+        with mock.patch("keel.mesh.inviting.sync.announce") as announce:
+            self.inviter.announced(JOINER)
+        syncer, key = announce.call_args.args
+        self.assertEqual((syncer.node, key), (self.node, JOINER))
 
     def test_own(self):
         self.assertEqual(self.inviter.own(), (INVITER, "fd00:6b65:1::1/64"))

@@ -1,0 +1,25 @@
+# The members' channel of keel mesh (decision 0048): the root helper.
+# It holds the spec, the trust store and this node's signing key, and
+# starts the unprivileged listener as the transient unit
+# keel-mesh-members-listen (a dynamic user, no capability, the sandbox
+# of keel.mesh.bridge.LISTENER_PROPERTIES), which listens on TCP 51821
+# on this node's overlay address, bound to the overlay's interface, and
+# forwards each request over a 0600 unix socket in its 0700 runtime
+# directory, the peer checked against the unit's MainPID. The helper
+# answers a member's keel mesh sync with this node's roster, and adds
+# the members an announcement names with admission evidence it trusts,
+# under the window of decision 0018, confirmed by a WireGuard handshake
+# (docs/mesh.md). Started by keel-mesh-members.path once the node is in
+# a mesh.
+[Unit]
+Description=keel mesh: the members' channel on the overlay
+After=network-online.target
+Wants=network-online.target
+# a node in no mesh has no members to answer, also when the package's
+# installation starts the unit
+ConditionPathExists=/var/lib/keel/mesh/identity
+
+[Service]
+ExecStart=/usr/bin/keel mesh members
+Restart=on-failure
+RestartSec=10

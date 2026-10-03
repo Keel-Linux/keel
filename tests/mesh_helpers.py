@@ -12,7 +12,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
-from keel.mesh import certificate, invites, protocol
+from keel.mesh import certificate, identity, invites, protocol
 from keel.mesh.node import Change
 from keel.mesh.token import hmac_key, invite_id
 from keel.network import marker
@@ -23,6 +23,13 @@ INVITE = invite_id(SECRET)
 JOINER = "FHKH10gOWeK2bXHZPg8y+oPTprv556bwrmmRkbyEPgg="
 INVITER = "nb9/izIukqWXM7gnBpe7hki4jKZZChWOW1wEfONn82E="
 OTHER = "9vm/AzCVQQsWt1cU2eyjom4cABkNuodiHL8nDjKohEE="
+# a signing key's spelling, where no signature is checked
+SIGNER = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+MESH = bytes(range(16))
+EVIDENCE = protocol.Admission(
+    mesh_id=MESH.hex(), invite_id=invite_id(SECRET), public_key=JOINER,
+    sign_key=SIGNER, address="fd00:6b65:1::3", endpoint=None, time=0,
+    by=SIGNER, signature="A" * 86 + "==")
 NOW = datetime(2026, 10, 3, 12, 0, tzinfo=timezone.utc)
 ASSIGNED = "fd00:6b65:1::3/64"
 OWN = "fd00:6b65:1::1/64"
@@ -47,7 +54,11 @@ def reserved(root: str, port: int = 51820, expires: datetime | None = None,
         invite_id=invite_id(secret), address=ASSIGNED,
         expires=expires or NOW + timedelta(hours=1), https_port=port,
         certificate=cert, hmac_key=hmac_key(secret), tls_key=key)
-    return invites.reserve(root, NOW, lambda others: made)
+    found = invites.reserve(root, NOW, lambda others: made)
+    # the inviter is in a mesh: it signs the new node's admission
+    if identity.read(root) is None:
+        identity.adopt(root, MESH)
+    return found
 
 
 @dataclass
@@ -97,7 +108,8 @@ class Clock:
 def join_body(**changed) -> bytes:
     data = {"invite_id": INVITE, "public_key": JOINER,
             "endpoint": "[2001:db8:2::20]:51820", "address": ASSIGNED,
-            "nonce": protocol.new_nonce(), "time": protocol.seconds(NOW)}
+            "nonce": protocol.new_nonce(), "time": protocol.seconds(NOW),
+            "sign_key": SIGNER}
     data.update(changed)
     return json.dumps(data).encode()
 

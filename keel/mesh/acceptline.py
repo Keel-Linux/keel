@@ -7,6 +7,8 @@ the inviter. The answer carries what the join request would have:
 
     flags          1   bit 0: an IPv6 endpoint follows, bit 1: an IPv4 one
     public key    32   the new node's WireGuard key
+    signing key   32   the new node's Ed25519 key, which its admission
+                       names (keel.mesh.trust)
     endpoint    16|4   when a flag is set, and its UDP port (2)
     address       16   the address the invite reserved
     prefix length  1
@@ -41,7 +43,7 @@ IPV6_ENDPOINT = 0x01
 IPV4_ENDPOINT = 0x02
 LABEL = b"keel mesh accept\n"
 MAC_BYTES = 32
-HEAD = struct.Struct(f">B{KEY_BYTES}s")
+HEAD = struct.Struct(f">B{KEY_BYTES}s{KEY_BYTES}s")
 PORT = struct.Struct(">H")
 BODY = struct.Struct(f">16sB8sI{MAC_BYTES}s")
 
@@ -60,6 +62,7 @@ class Accept:
     address: str
     invite_id: str
     time: int
+    sign_key: str
 
 
 @dataclass(frozen=True)
@@ -99,7 +102,8 @@ def encode(accept: Accept, key: bytes) -> str:
         flags = IPV6_ENDPOINT if address.version == 6 else IPV4_ENDPOINT
         tail = address.packed + PORT.pack(int(port))
     own = ipaddress.IPv6Interface(accept.address)
-    covered = HEAD.pack(flags, key_bytes(accept.public_key)) + tail
+    covered = HEAD.pack(flags, key_bytes(accept.public_key),
+                        key_bytes(accept.sign_key)) + tail
     covered += BODY.pack(own.ip.packed, own.network.prefixlen,
                          bytes.fromhex(accept.invite_id), accept.time,
                          b"")[:-MAC_BYTES]
@@ -137,7 +141,7 @@ def parse(text: str) -> Sealed:
 
 
 def unpack(payload: bytes) -> Sealed:
-    flags, public = HEAD.unpack_from(payload)
+    flags, public, signer = HEAD.unpack_from(payload)
     if flags not in (0, IPV6_ENDPOINT, IPV4_ENDPOINT):
         raise ValueError(f"flags {flags:#04x}: one endpoint at most")
     offset, shown = HEAD.size, None
@@ -155,13 +159,16 @@ def unpack(payload: bytes) -> Sealed:
         accept=Accept(public_key=base64.b64encode(public).decode(),
                       endpoint=shown,
                       address=f"{ipaddress.IPv6Address(address)}/{length}",
-                      invite_id=invite.hex(), time=time),
+                      invite_id=invite.hex(), time=time,
+                      sign_key=base64.b64encode(signer).decode()),
         covered=payload[:-MAC_BYTES], mac=sealed)
 
 
 def check(accept: Accept) -> None:
     if key_bytes(accept.public_key) is None:
         raise AcceptError("the new node's key is not a WireGuard key")
+    if key_bytes(accept.sign_key) is None:
+        raise AcceptError("the new node's signing key is not a key")
     try:
         endpoint(accept.endpoint)
     except ProtocolError as e:

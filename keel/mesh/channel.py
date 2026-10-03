@@ -159,11 +159,11 @@ def exchange(tls: ssl.SSLSocket, host: str, port: int, path: str,
     try:
         connection.request(protocol.METHOD, path, body, headers)
         response = connection.getresponse()
-        data = response.read(protocol.MAX_BODY + 1)
+        data = response.read(protocol.MAX_ANSWER + 1)
     except (OSError, http.client.HTTPException) as e:
         raise ChannelError(f"{shown(host, port)} did not answer: {e}") \
             from None
-    if len(data) > protocol.MAX_BODY:
+    if len(data) > protocol.MAX_ANSWER:
         raise ChannelError(f"the answer from {shown(host, port)} is longer"
                            " than any the protocol has")
     return response.status, response.getheader(protocol.SIGNATURE), data

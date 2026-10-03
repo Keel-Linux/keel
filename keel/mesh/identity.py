@@ -5,8 +5,11 @@ Sixteen random bytes that name the mesh: every invite carries them, so
 the nodes a join adds know which mesh they are in, and etcd takes them
 as its cluster token when it forms at the third node (decision 0048).
 The node that creates the mesh makes them; a mesh built by hand before
-`keel mesh` existed gets them from its first invite. A joining node
-keeps the identity its token carries.
+`keel mesh` existed gets them from `keel mesh create --adopt` on one of
+its nodes, and the others from it through `keel mesh sync`. A joining
+node keeps the identity its token carries, and a node that holds
+another than its members' takes theirs with `keel mesh sync --adopt`
+(keel.mesh.sync).
 """
 
 import secrets
@@ -46,6 +49,24 @@ def adopt(root: str, found: bytes) -> None:
         elif current != found:
             raise ValueError(f"this node is in another mesh: /{IDENTITY}"
                              " names another one than the token's")
+
+
+def replace(root: str, found: bytes) -> bytes | None:
+    """Take `found` in place of the identity this node keeps, which is
+    returned (None when it kept none)
+
+    The repair of a split (keel mesh sync --adopt): a node that made an
+    identity of its own in a mesh whose members keep another takes
+    theirs. A damaged file is replaced too: the members' identity is
+    the one to keep.
+    """
+    with locked(root):
+        try:
+            before = read(root)
+        except ValueError:
+            before = None
+        write_private(root, IDENTITY, found.hex() + "\n")
+    return before
 
 
 def read(root: str) -> bytes | None:

@@ -1,3 +1,68 @@
+keel (0.18.0) unstable; urgency=medium
+
+  * keel mesh makes a full mesh before etcd (handbook decision 0048,
+    "Until etcd exists"). A test on three Keel Web nodes across two
+    sites found a star: a node that joined through one member was never
+    learned by the others. The join's answer already named the members
+    the inviter knows; the new node now takes them as peers in its
+    first change. The inviter, once a join is confirmed, announces the
+    new node to each of its other peers over the overlay, and each adds
+    it under the window of decision 0018, confirmed by a WireGuard
+    handshake from the new node. A member offline then, and a node that
+    joined through the fallback, pull the members with the new
+    keel mesh sync, which keel-mesh-sync.timer runs at boot and every
+    15 minutes. A member that never answered is tried again after an
+    hour, and announcements waiting are applied in one change, under
+    one window.
+  * Only an admitted join adds a peer. Each node has an Ed25519 signing
+    key made on the machine; an inviter signs evidence of each
+    admission (the mesh, the invite, the node's keys, address and
+    endpoint, the time), sent in the join's authenticated answer and
+    with the node's entry in every roster. A member takes a roster's
+    entry only on evidence of an invite signed by a key it already
+    trusts: its own, its inviter's, a member admitted the same way, or
+    a trust root that keel mesh create --adopt or keel mesh sync
+    --adopt made of the spec's peers, the operator's act for a mesh
+    built by hand, whose signing key is bound only from a roster the
+    node fetched from the root itself. docs/mesh.md says what this
+    changes in 0048's threat model; rotating a signing key is follow-up
+    work.
+  * keel mesh remove removes a node from the mesh before etcd: a
+    tombstone signed with the node's key, the peer out of its spec
+    under the window, confirmed by a handshake from a peer it keeps,
+    and its roster sent to the others, each of which drops the peer
+    through one window when the signer may remove it (its admitter, a
+    trust root, or the node itself). Tombstones are kept for good,
+    1024 at most and 64 per signer, every roster carries them all, and
+    no sync adds a removed key again.
+  * The members' channel is split as an invite is: keel-mesh-members,
+    the root helper (started by keel-mesh-members.path once the node is
+    in a mesh), starts the listener keel-mesh-members-listen with a
+    dynamic user, no capability and a sandbox, on TCP 51821 of the
+    overlay address only, bound to the overlay's interface, so
+    WireGuard authenticates who speaks, behind the invite listener's
+    limits: a deadline per request, 4 connections and 2 per source,
+    size caps, and sources refused too often. keel's firewall accepts
+    that port on the overlay's interface only.
+  * The mesh's identity no longer splits. Only a join or the operator's
+    --adopt sets it: keel mesh invite on a node whose peers hold another
+    identity, or with peers and none of its own, is refused; keel mesh
+    create --adopt gives a mesh built by hand its identity, keel mesh
+    sync --adopt ADDRESS takes a member's, which repairs a split. keel
+    mesh status shows the identity.
+  * keel mesh invite and join find this node's endpoint on a DHCP or
+    SLAAC host: the uplink's global, stable IPv6 address (never a
+    unique local, deprecated or privacy one, nor one of wg*), and a
+    public IPv4 one, in the order of keel-core's console banner. They
+    say which, and --endpoint still overrides. With only a privacy or
+    an RFC 1918 address, invite is refused and asks for --endpoint.
+  * keel mesh join, create and accept no longer print apply's "reverts
+    in 120 s unless keel network confirm" while they confirm their own
+    change: they say "confirming over the overlay…" and the result, and
+    show apply's lines only when the change is not confirmed.
+
+ -- Marcos Mendez <mendez.foto@gmail.com>  Sat, 03 Oct 2026 23:30:00 +0000
+
 keel (0.17.0) unstable; urgency=medium
 
   * The second part of handbook decision 0048, joining the mesh with one

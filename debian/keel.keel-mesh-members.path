@@ -1,0 +1,15 @@
+# Start the members' channel once this node is in a mesh (decision 0048).
+#
+# The mesh's identity is written by keel mesh create, join, sync and
+# create --adopt; from then on the node answers its peers over the
+# overlay: its roster for their keel mesh sync, and the announcement of
+# a node another member admitted (docs/mesh.md, "Members learn of each
+# other").
+[Unit]
+Description=Start keel's mesh members' channel once this node is in a mesh
+
+[Path]
+PathExists=/var/lib/keel/mesh/identity
+
+[Install]
+WantedBy=multi-user.target

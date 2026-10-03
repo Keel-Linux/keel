@@ -65,7 +65,7 @@ class TestMeshOrigins(RootCase):
     def test_create_confirms_a_mesh_with_no_peer_itself(self):
         (confirmed, lines), _ = self.confirm(own(), clients=("2001:db8:9::5",))
         self.assertTrue(confirmed, lines)
-        self.assertIn("no peer yet", lines[1])
+        self.assertIn("has no peer, so", lines[1])
         self.assertIn("still leave through the uplink", lines[1])
 
     def test_only_the_change_keel_mesh_made(self):
@@ -121,7 +121,7 @@ class TestLines(unittest.TestCase):
     def test_overlay_lines_of_each_origin(self):
         self.assertEqual(netconfirm.overlay_lines(
             pending(), own(), probes()), [
-                "the overlay has no peer yet, so nothing can cross it:"
+                "the overlay has no peer, so nothing can cross it:"
                 " keel mesh create confirmed it once the routes to the"
                 " gateways and to the operator's session were found to"
                 " still leave through the uplink"])

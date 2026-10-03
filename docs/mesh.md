@@ -22,11 +22,16 @@ operator writes by hand, `address` and a peer, converged by the same
 There is no `mesh` section in the spec, and a mesh built by joins and
 one typed by hand are the same spec.
 
-**What exists in this version:** `create`, `invite` and its listener,
-`join`, the fallback `accept`, and `status`. Not yet: etcd (it forms at
-the third node in cloud advanced, Phase 5), the announcement of a new
-node to the inviter's other peers, `keel mesh remove`, `keel mesh
-invites` and `invite --cancel`, and the boot unit that removes invites
+**What exists in this version:** `create` (and `create --adopt`),
+`invite` and its listener, `join`, the fallback `accept`, `status`, and
+a full mesh before etcd: the announcement of a new node to the
+inviter's other peers, `keel mesh sync`, and the members' channel they
+use ("Members learn of each other"), only with admission evidence
+("Admission evidence and trust"), and `keel mesh remove` before etcd,
+whose tombstone makes the other members drop the node too. Not yet:
+etcd (it forms at the third node in cloud advanced, Phase 5), the
+rotation of a node's signing key, `keel mesh invites` and `invite
+--cancel`, and the boot unit that removes invites
 which expired while the machine was down. confconsole's "Invite a node"
 and "Join a mesh" screens call these commands, in confconsole.
 
@@ -34,6 +39,7 @@ and "Join a mesh" screens call these commands, in confconsole.
 
 ```
 keel mesh create [--network-window SECONDS]
+keel mesh create --adopt
 ```
 
 Root, on the first node, whose spec declares no overlay address. It
@@ -58,8 +64,21 @@ created the mesh: this node is fd2a:9c41:7e03::1/64 on wg0, WireGuard on UDP 518
 keel mesh invite prints the line that joins the next node
 ```
 
-apply's own lines, and the confirmation's, go to standard error;
-standard output holds the summary alone.
+The confirmation's lines go to standard error, after `confirming the
+new overlay…`; standard output holds the summary alone. apply's own
+lines, among them its "reverts in 120 s unless `keel network
+confirm`", are held, and shown only when the change does not come up
+or is not confirmed: `create` confirms it itself.
+
+`--adopt` is for a mesh built by hand before `keel mesh` existed, whose
+nodes hold no identity yet ("The mesh's identity"): on one node of it,
+it keeps that node's identity, else takes the one its peers hold, else
+makes one, and prints it; it is refused when the peers hold another
+identity than this node's, or several. It also makes the peers the
+spec lists this node's trust roots ("Admission evidence and trust"):
+the operator's act is what vouches for them. Each other node then runs
+`keel mesh sync --adopt` with this node's overlay address. Nothing is
+applied.
 
 ## keel mesh invite
 
@@ -76,11 +95,16 @@ It:
    here;
 2. takes the endpoints the new node will reach this one at: the
    `--endpoint` addresses (one per family, for a port forward say), or
-   else the static addresses `network.interfaces` declares, IPv6 first;
+   else the static addresses `network.interfaces` declares, or else, on
+   a DHCP or SLAAC host, the ones found on the uplink ("The endpoint"),
+   IPv6 first, saying which;
 3. makes a key pair and a self signed certificate for this invite only
    (`openssl req -x509`, P-256), whose SHA-256 fingerprint the token
    carries for the new node to pin;
-4. makes the mesh's identity if this node has none (below);
+4. checks the mesh's identity with its peers over the overlay: refused
+   when they hold another one than this node's, it takes theirs when
+   it has none, and makes one only for a node with no peer ("The mesh's
+   identity");
 5. under the mesh's lock, removes the expired invites, reserves a free
    address (below) and writes the pending invite; another invite pending
    on the same TCP port is refused (each listener holds its port), and
@@ -98,6 +122,31 @@ It:
 the number of WireGuard's UDP port, so a provider's firewall needs one
 number for both. Under `--root` no listener is started, and the line can
 be checked with `keel mesh join --dry-run` only.
+
+### The endpoint
+
+A host whose uplink DHCP or SLAAC configures declares no static
+address, so `invite` and `join` find their endpoint in what `ip`
+shows (keel.mesh.endpoint):
+
+- on the uplink, the interfaces the default routes leave through (any
+  interface without a default route), never a WireGuard one (`wg*`);
+- a global IPv6 address that is not unique local (`fc00::/7`), not
+  `deprecated`, and not a SLAAC privacy address (`temporary`), a static
+  one before a SLAAC or DHCPv6 one (`dynamic`): the order of keel-core's
+  console banner (`keel_banner_pick_ipv6`, a shell function of the
+  image, so the rule is kept here in Python and the two agree);
+- beside it, or alone, a public IPv4 address.
+
+Each address chosen is said on standard error (`endpoint
+2804:…:a035, found on eth0 (--endpoint overrides it)`). A privacy
+address changes within a day and an RFC 1918 or carrier NAT address
+(`100.64.0.0/10`) is reached from its own network only, so neither is
+ever taken. A host that holds nothing better has no endpoint found:
+`invite` is refused, says why (`2001:db8::7 is a SLAAC privacy address,
+the only global IPv6 one eth0 holds…`) and asks for `--endpoint`, a
+stable address or a port forward's; `join` sends no endpoint, as a node
+behind NAT does, and says why.
 
 ### The address
 
@@ -134,21 +183,26 @@ It:
    another is in another mesh, and is refused), and makes its key pair
    if it has none;
 4. finds its own endpoint: `--endpoint`, else a static address
-   `network.interfaces` declares, else a global address of an interface
-   other than the overlay's; IPv6 first; none when it has none;
+   `network.interfaces` declares, else the one found on the uplink ("The
+   endpoint"); IPv6 first; none when it has none;
 5. sends the join request to the inviter's HTTPS port, at its IPv6
    endpoint and then its IPv4 one, comparing the SHA-256 of the
    certificate the inviter presents with the token's fingerprint before
    a byte of the request is sent;
 6. with the signed answer, which must carry its own nonce, the invite
-   id, the inviter's key and address, writes its own spec (its address
-   and the inviter as a peer) and applies it under the window, with
+   id, the inviter's key and address, writes its own spec (its address,
+   the inviter as a peer, and the other members the answer names, as
+   `keel mesh sync` takes them) and applies it under the window, with
    `--skip-uplink`;
-7. opens the mesh session to the inviter's overlay address, retrying
-   every two seconds while the tunnel comes up: the inviter confirms its
-   window on receiving it, and this node confirms its own on the
-   inviter's signed answer. No `keel network confirm` is typed on
-   either node.
+7. says `confirming over the overlay…` and opens the mesh session to
+   the inviter's overlay address, retrying every two seconds while the
+   tunnel comes up: the inviter confirms its window on receiving it, and
+   this node confirms its own on the inviter's signed answer. No `keel
+   network confirm` is typed on either node, and apply's "reverts in
+   120 s unless `keel network confirm`" is shown only when the
+   confirmation fails;
+8. the inviter then announces this node to its other peers ("Members
+   learn of each other").
 
 At the end, on standard output:
 
@@ -158,11 +212,14 @@ peer: nb9/izIukqWXM7gnBpe7hki4jKZZChWOW1wEfONn82E= at fd2a:9c41:7e03::1, through
 the mesh is up with 2 nodes; etcd starts when a third node joins, because 2 etcd members cannot lose one and keep a majority
 ```
 
-apply's lines, the confirmation's, and every refusal go to standard
-error. When the inviter knows other peers, the last line says how many
-nodes the mesh has, and that this node reaches the inviter alone until
-they learn of it, which this keel does not do yet (0048, "Until etcd
-exists").
+The confirmation's lines and every refusal go to standard error. When
+the inviter knows other peers, the last line says how many nodes the
+mesh has, that this node has them all as peers, and that the inviter
+announces it to them:
+
+```
+the mesh has 3 nodes: this node has them all as peers, and the inviter announces this node to the 1 other(s) over the overlay (one offline now learns of it at its next keel mesh sync); etcd is not part of this keel
+```
 
 A join that fails after the request was accepted (the tunnel never
 answers within the window, say) reverts on both sides by itself, and
@@ -183,6 +240,9 @@ keel mesh accept keel1a:<answer>
 
 to run on the inviter, then waits for the inviter over the overlay as in
 step 7. Too close to the expiry (under 30 seconds) it refuses instead.
+The line carries no answer, so no member: once confirmed, `join` pulls
+them from the inviter (`learning the other members from the
+inviter…`, a `keel mesh sync --from` the inviter).
 
 ### --dry-run
 
@@ -242,13 +302,305 @@ A line for another invite, or one changed in the copy, is refused
 before anything is spent; a second use of the token finds no pending
 invite.
 
+## Members learn of each other
+
+Until etcd exists, members learn about each other through the inviter
+(0048, "The third node and after"), so that the mesh is a full one and
+not a star around the node that invited:
+
+1. the join's answer names the other members the inviter knows, each
+   with its admission evidence, and the new node takes those it can
+   verify as peers in its first change;
+2. the inviter, once the join is confirmed (by `serve` or `accept`),
+   announces the new node to each of its other peers over the overlay,
+   at once; each adds it and applies, as below;
+3. a member offline then, and a node that joined through the fallback,
+   pull the members with `keel mesh sync`, which
+   `keel-mesh-sync.timer` runs two minutes after boot and every 15
+   minutes.
+
+### Admission evidence and trust
+
+0048 lets only an admitted join add a peer. The overlay authenticates
+who speaks (below); it does not make what a member says about other
+nodes true, and a member that could push any peer to the others could
+add a node no member admitted, whose own handshake would then confirm
+the change. So every member a roster names is taken only with evidence
+of its admission:
+
+- **a signing key per node.** Each node has an Ed25519 key pair, made on
+  the machine with `openssl genpkey` the first time it joins, invites,
+  adopts or serves its members (`/var/lib/keel/mesh/node.key`, 0600,
+  never printed). Its public half travels in the join request, in the
+  `keel1a:` line, in the join's and the confirmation's answers, and in
+  each roster;
+- **evidence.** An inviter that admits a node signs, with its key, the
+  mesh's identity, the invite id, the new node's WireGuard and signing
+  keys, its overlay address and endpoint, and the time. It keeps that
+  evidence, sends it to the new node in the answer, which the invite's
+  HMAC authenticates, and joins it to the node's entry in every roster
+  it gives;
+- **trust.** A node trusts its own key; the inviter it joined through,
+  whose signing key it learned from that authenticated answer; and the
+  trust roots its operator named (below). It takes a roster's entry only
+  when its evidence names an invite, the entry's key and address, is for
+  this mesh, and was signed by a key it trusts; the node it takes is
+  then trusted in turn, so evidence chains from member to member (A
+  admitted B, B admitted C: a node that trusts A takes both). An entry
+  without valid evidence is left out, whoever sends it. Evidence always
+  names an invite: no member vouches for a node it did not admit;
+- **trust roots.** A mesh built by hand before `keel mesh` has no
+  evidence. `keel mesh create --adopt` on one node and `keel mesh sync
+  --adopt` on the others, explicit acts of the operator, make the peers
+  each node's spec lists its trust roots. A root's signing key is
+  learned from the root itself, in a roster this node fetched from the
+  root's own overlay address (`keel mesh sync`), which WireGuard
+  authenticates as that root's; never from an announcement, whose
+  source only the listener reports. A root vouches for nobody: a node
+  is another's root only if that node's operator listed it;
+- **tombstones.** `keel mesh remove` records a removal, signed with the
+  remover's key. A node takes a tombstone only when its signer may
+  remove that node: **the member that admitted it** (as the evidence
+  the node keeps names), **a trust root**, or **the node itself**,
+  leaving. Any other member, trusted or not, removes a node from its own
+  spec only. A node that takes a tombstone drops the peer from its spec,
+  every peer a pull or the pending announcements remove in one change,
+  under one 0018 window (below), and never takes the key again;
+- **how many, and for how long.** Tombstones are kept for good: a
+  removed key never comes back, and a tombstone that expired could let
+  an old roster bring it back to a member that was offline. A node keeps
+  at most 1024 of them, at most 64 signed by one key (so one member
+  cannot fill the store), and each roster carries all it keeps. A node
+  whose store is full refuses `keel mesh remove`, and takes no further
+  tombstone.
+
+The state is `/var/lib/keel/mesh/trust.json`: each trusted member's
+signing key, whether it is a root, and its evidence; and the
+tombstones. A damaged file is refused, never guessed at: `keel mesh sync
+--adopt` makes the peers roots again.
+
+**What this changes in 0048's threat model.** Before, a member could
+make every other member add any peer it named, as long as it spoke over
+the overlay. Now a peer is added only on evidence that a member the node
+already trusts admitted it, and that evidence names the invite and the
+member that signed it, so every added peer can be traced to the member
+that admitted it.
+
+**Any trusted member can vouch for a new node**, as 0048 says any
+member can invite: the evidence it signs is enough for every member
+that trusts it, directly or through the chain. So a compromised member
+(its root, or its signing key) can admit any node it likes into the
+whole mesh, signed in its own name, and every member will add that node
+as a peer. It can also remove the nodes it admitted, and any node if it
+is a root. What it can no longer do is add a node under another
+member's name, add one to a member that does not trust it, remove a
+node it did not admit (unless it is a root), or bring back a key whose
+removal was taken. The way out of a compromised member is to remove it
+(by its admitter or a root): its tombstone makes it trusted no more,
+and evidence it signed afterwards is left out; what it admitted before
+stays, and each such node is removed the same way. A handbook PR asks
+that 0048 be amended to say so.
+
+**A signing key is not rotated yet.** A node keeps the key it made; a
+new key signed by the old one is follow-up work, recorded in the same
+handbook PR. A node whose key may be compromised is removed and joins
+again with a new invite, which makes it a new key pair.
+
+### The members' channel
+
+As an invite is (keel#75), the channel is two processes:
+
+- **the root helper**, `keel mesh members` in
+  `keel-mesh-members.service` (started by `keel-mesh-members.path` once
+  the node holds a mesh identity), which alone holds the spec, the trust
+  store and the signing key. It starts the listener as the transient
+  unit `keel-mesh-members-listen`, with `DynamicUser=yes`, no
+  capability and the sandbox of the invite's listener (below, "The
+  listener"), connects to the unix socket the listener binds in its
+  RuntimeDirectory (`/run/keel/mesh-members`, 0700, the socket 0600),
+  checks with `SO_PEERCRED` that the other end is the unit's MainPID and
+  not root, and sends it the overlay's interface, address and port,
+  which hold no key;
+- **the listener**, `keel mesh members-listen`, which refuses to run
+  with any capability, listens on TCP 51821 on this node's overlay
+  address, applies the limits below, and forwards what passed to the
+  root side, one JSON message per line; the root side treats each as
+  untrusted.
+
+The listener's socket is bound to the overlay's interface
+(`SO_BINDTODEVICE`), as is every client's: a request arrives, and an
+answer comes back, only through WireGuard. WireGuard accepts a packet
+on that interface only when it was decrypted with the key of the peer
+whose `allowed_ips` hold its source address, so the address a request
+comes from names the member that sent it, and the answer to one sent to
+a member's address can only come from that member: 0048's "the overlay
+authenticates the announcement: it comes from a peer's address, which
+only that peer's key can use". That authenticates who speaks; what it
+vouches for needs evidence (above). There is no TLS (WireGuard
+encrypts).
+
+| Request | Body | Answer |
+| --- | --- | --- |
+| `GET /v1/members` | none | 200, this node's roster |
+| `POST /v1/announce` | the sender's roster, the new node in it | 202, queued and applied after the answer |
+
+A roster is the node's mesh identity (hex, or null), its WireGuard and
+signing keys, its overlay address, every peer its spec declares
+(`public_key`, `endpoint` or null, `address`, and the evidence it keeps
+for it, or null), at most 256, and all the tombstones it keeps (at most
+1024). The
+root side refuses (403, logged) a request from an address of no peer's
+`allowed_ips`, and an announcement whose roster names another key than
+the sender's.
+
+Against a member, or anything on the overlay, that sends too much:
+
+- at most 4 connections are read at once, and 2 from one source;
+- reading a request has a deadline of 15 seconds, and each read a
+  timeout of 5;
+- the request line and headers are capped at 8 KiB, the body at 512 KiB;
+- a source refused 5 times within a minute is not answered until the
+  minute has passed;
+- announcements wait in a queue that keeps the latest one per sender
+  and at most 64 senders (a 65th is refused with 503: its member's next
+  sync brings it); one worker applies everything waiting in one change,
+  under one window, not one window per announcement, once 10 seconds
+  passed with no new one: so the answer has reached its sender before
+  the overlay goes down and up (a connection bound to the old interface
+  would not survive it), and announcements close together share the
+  window.
+
+When the overlay goes down and up, as each apply of it does, the
+interface comes back as another one and the socket is bound again.
+keel's firewall, where it is enabled, accepts TCP 51821 on the overlay's
+interface alone (docs/apply.md).
+
+### What a member takes, and how it confirms
+
+From the rosters, the members whose evidence it verifies (above) and
+that it does not know: never its own key or a key it has, never an
+address off its overlay prefix, its own address, or one inside a peer's
+`allowed_ips`; nothing it declares is replaced. Each becomes a peer with
+the endpoint its evidence names, routed its address as a `/128`, in this
+node's own spec (0013), all in one change applied with `apply
+--system-only --skip-uplink` under 0018's window. Then it says
+`confirming over the overlay…`, sends each new member a packet every
+two seconds, which makes WireGuard start a handshake, and confirms its
+window on the first handshake from a new member's key since the change
+(`wg show <if> latest-handshakes`), which only that member, reaching
+this node over the new configuration, can complete; the route check of
+apply.md runs first, as for every overlay change. A change that no new
+member answers within the window reverts by itself, the spec is put
+back as it was (so it says what the machine runs, and the members are
+new again to the next sync), and those members are not tried again for
+an hour (`unreached.json`), so a node that is off does not cost the
+mesh an overlay change at every timer. One sync runs at a time
+(`sync.lock`); a sync that finds a network change waiting in its window
+leaves the members to the next one.
+
+## keel mesh sync
+
+```
+keel mesh sync [--from ADDRESS]... [--network-window SECONDS]
+keel mesh sync --adopt ADDRESS
+```
+
+Root. Asks the roster of every peer (or of the `--from` ones, overlay
+addresses of peers), at once, and adds the members they know, as
+above. A peer that does not answer is said and skipped; one that
+answers as another key or address is left out. A node in no mesh, or
+with no peer, has nothing to sync.
+
+```
+member 9vm/AzCVQQsWt1cU2eyjom4cABkNuodiHL8nDjKohEE= added at fd2a:9c41:7e03::7, through [2001:db8:3::30]:51820
+confirming over the overlay…
+confirmed from a WireGuard handshake from 9vm/AzCVQQsWt1cU2eyjom4cABkNuodiHL8nDjKohEE= (14:02:11 UTC), a member its peers named
+```
+
+`--adopt ADDRESS` repairs a split identity (below): it takes the
+identity of the member at that overlay address in place of this
+node's, then syncs. It is refused while an invite of this node is
+pending, since its token carries the old identity.
+
+## The mesh's identity
+
+Every node of a mesh holds the same identity (`/var/lib/keel/mesh/
+identity`), which each token carries and etcd will take as its cluster
+token. `create` makes it, `join` keeps the token's, and nothing else
+sets it but the operator's `--adopt`:
+
+- a node with no identity takes none from a roster or an announcement:
+  its sync is refused and names `--adopt`;
+- a member of another identity gives nothing; the node says which
+  identities differ and how to repair it;
+- `invite` on a node with peers checks their identities first: another
+  identity than its own refuses the invite, naming `keel mesh sync
+  --adopt`; with no identity of its own it refuses, naming `keel mesh
+  create --adopt`, rather than make a second identity for a mesh. Peers
+  that do not answer are warned about and decide nothing.
+
+**A mesh built by hand**, or one whose nodes ran keel 0.17 (which kept
+no evidence): `keel mesh create --adopt` on one of its nodes (web-1,
+say), then, on each other node, `keel mesh sync --adopt <web-1's
+overlay address>`. Each act makes the node's spec peers its trust
+roots, whose signing keys are bound as each root's members' channel
+answers that node's sync. A root vouches for nobody, so a peer that a
+node's spec lacks and that no member admitted with an invite is added
+by hand, as the mesh was built: write it into that node's spec, then
+run `keel mesh sync --adopt` there again, which makes it a root too.
+Nodes invited from then on carry evidence and spread by themselves.
+
+**A split** is what keel 0.17 could leave: an invite on a node of a
+hand-built mesh that held no identity made one of its own, while the
+others held another. On the odd node (web-2 in the test that found it,
+holding `cfc81bf2…` while web-1 and web-3 hold `9fe71b35…`):
+
+```
+keel mesh sync --adopt <web-1's overlay address>
+```
+
+takes web-1's identity, says `this node now holds the mesh identity
+9fe71b35… of <address> (was cfc81bf2…), and trusts the peers its spec
+lists as roots`, and syncs. web-3 joined web-1 with keel 0.17, which
+signed no evidence, so the full repair is: `keel mesh create --adopt`
+on web-1; on web-2, web-3 written into its spec as a peer (its key, its
+endpoint, its overlay address as a /128), then `keel mesh sync --adopt
+<web-1>`; on web-3, web-2 written into its spec likewise, then `keel
+mesh sync --adopt <web-1>`. `keel mesh status` shows each node's
+identity.
+
+## keel mesh remove
+
+```
+keel mesh remove KEY|ADDRESS [--network-window SECONDS]
+```
+
+Root. "Before etcd, the command removes the peer on the member it ran on
+and sends the same announcement as a join, so the others drop it too"
+(0048):
+
+1. it records a tombstone for the peer of that WireGuard key or overlay
+   address, signed with this node's key;
+2. it removes the peer from this node's spec and applies the change
+   under 0018's window, confirmed as a sync's is: by a WireGuard
+   handshake from a peer it keeps since the change, or, with no peer
+   left, by the route check alone, as `keel mesh create` confirms a mesh
+   with no peer; not confirmed, the spec is put back and the tombstone
+   kept, and the next sync drops the peer again;
+3. it sends its roster, the tombstone in it, to each peer it keeps.
+
+Each member takes the tombstone if this node may remove that peer (it
+admitted it, it is a root, or it is the peer itself), and drops the peer
+through one window of its own; one offline then does at its next sync.
+etcd's `member remove` is not here yet.
+
 ## keel mesh status
 
 ```
 keel mesh status
 ```
 
-This node's overlay, its public key, each peer of the spec with its
+This node's overlay, the mesh's identity, its public key, each peer of the spec with its
 `allowed_ips`, its endpoint (as WireGuard last saw it) and its last
 handshake, and the pending invites: id, reserved address, port, expiry,
 and whether it was used and waits for its confirmation. `wg show` is
@@ -266,13 +618,21 @@ the body.
 
 | Request | Fields | Over |
 | --- | --- | --- |
-| `POST /v1/join` | `invite_id`, `public_key`, `endpoint` (`[address]:port`, or null), `address` (the reserved one, with its length), `nonce` (16 random bytes, hex), `time` (seconds since the epoch) | the uplink |
+| `POST /v1/join` | `invite_id`, `public_key`, `sign_key` (the new node's Ed25519 key), `endpoint` (`[address]:port`, or null), `address` (the reserved one, with its length), `nonce` (16 random bytes, hex), `time` (seconds since the epoch) | the uplink |
 | `POST /v1/confirm` | `invite_id`, `public_key`, `nonce`, `time` | the overlay |
 
 | Answer (200) | Fields |
 | --- | --- |
-| to a join | `invite_id`, `nonce` (the request's), `public_key` and `address` (the inviter's), `peers` (the other members the inviter knows: `public_key`, `endpoint` or null, `address`), `etcd` (`none` in this keel), `window` (the seconds the inviter's change waits) |
-| to a confirmation | `invite_id`, `nonce`, `confirmed` (whether the inviter kept its change), `detail` |
+| to a join | `invite_id`, `nonce` (the request's), `public_key` and `address` (the inviter's), `sign_key` (the inviter's signing key), `admission` (the evidence of this admission, signed with it), `peers` (the other members the inviter knows: `public_key`, `endpoint` or null, `address`, and `admission`, the evidence it keeps, or null), `etcd` (`none` in this keel), `window` (the seconds the inviter's change waits) |
+| to a confirmation | `invite_id`, `nonce`, `confirmed` (whether the inviter kept its change), `detail`, `sign_key` (the inviter's: what the fallback's node learns it by) |
+
+The evidence (`admission`) is `mesh_id` (hex), `invite_id` (empty for a
+trust root's), `public_key`, `sign_key`, `address`, `endpoint` or null,
+`time`, `by` (the signer's signing key) and `signature` (Ed25519, in
+base64, over `keel mesh admission 1\n` and those fields, but the
+signature, one per line). A tombstone is `mesh_id`, `public_key`,
+`time`, `by` and `signature`, over `keel mesh removal 1\n` and those
+fields.
 
 An answer is signed the same way, with the method `ANSWER` and the
 request's path, so the new node knows it came from the node that made
@@ -280,9 +640,9 @@ the token as well as from the pinned certificate. A refusal is a JSON
 `{"error": reason}`, unsigned: it gives nothing to act on.
 
 The fallback's `keel1a:` line carries the join request's fields in
-binary, base64url without padding like the token, about 150 characters:
+binary, base64url without padding like the token, about 200 characters:
 flags (1 byte: an IPv6 or an IPv4 endpoint follows, at most one), the
-new node's key (32), the endpoint and its UDP port (16 or 4, and 2),
+new node's key (32) and signing key (32), the endpoint and its UDP port (16 or 4, and 2),
 the reserved address and its length (16, 1), the invite id (8), the
 time (4), an HMAC-SHA256 with the invite's key (32), and a checksum
 (the first 4 bytes of the SHA-256 of `keel1a:` and the rest), so a
@@ -407,7 +767,10 @@ is taken (two lost SYNs still connect), an answer 180, the mesh session
 is retried every 2 seconds for the whole window, the request's time may
 be five minutes from the inviter's clock, and the listener's deadlines
 are per request. The integration test runs on clean links and again on
-250 ms ±25 ms with 2% loss on every link (`tc netem`).
+250 ms ±25 ms with 2% loss on every link (`tc netem`). The members' channel gives a connection 10 seconds and an
+answer 30, a member's handshake is waited for the whole window with a
+packet sent every 2 seconds, and the announcement and the sync ask
+every member at once rather than one after another.
 
 ## The firewall port
 
@@ -487,6 +850,10 @@ backup set.
 | --- | --- |
 | `invites/<id>.json` | one pending invite: the reserved address, the expiry, the HTTPS port, the invite's certificate and TLS key, and the HMAC key |
 | `identity` | the mesh's identity, 16 bytes in hex |
+| `node.key` | this node's Ed25519 signing key, PEM, never printed |
+| `trust.json` | the members this node trusts (signing key, root or not, admission evidence), and the tombstones |
+| `unreached.json` | the members a sync added that never answered, and when: each is left out for an hour |
+| `sync.lock` | held while a sync or an announcement adds members |
 
 The invite file holds an HMAC key derived from the secret, never the
 secret, so it cannot be turned back into the token. An invite is
@@ -495,10 +862,12 @@ request is told it was already used. The listener's end, or accept's,
 removes the file.
 
 The mesh identity is made once and kept: a file that does not hold one
-is an error, never replaced, since every other node of the mesh knows
-the first. The node that joins keeps the token's, and one that keeps
-another is refused. A mesh built by hand before `keel mesh` existed gets
-it from its first invite.
+is an error, never replaced by an invite, since every other node of the
+mesh knows the first. The node that joins keeps the token's, and one
+that keeps another is refused. A mesh built by hand before `keel mesh`
+existed gets it from `keel mesh create --adopt` on one node, and `keel
+mesh sync --adopt` replaces it on a node that holds another than its
+members' ("The mesh's identity").
 
 **The spec** is written by `create`, the root helper, `join` and
 `accept` through keel's writer for its own state (keel.network.marker's
@@ -527,11 +896,11 @@ listener's lines go to its own unit's journal, under the same rule.
 | --- | --- |
 | 0 | the line, the change or the status was printed; the join or the accept confirmed |
 | 2, 3 | the spec cannot be read or is invalid |
-| 15 | `create`, `invite`, `join`, `accept`, `serve` on the live system, not as root |
+| 15 | `create`, `invite`, `join`, `accept`, `serve`, `sync`, `members`, `remove` on the live system, not as root |
 | 16 | `wg` cannot read or make the key, `openssl` cannot make the certificate, the mesh identity is damaged, the invite's listener cannot start or bind, or this node's change did not come up |
-| 21 | the change was applied and not confirmed (the other side did not answer within the window, or refused, or the route check did): it reverts by itself |
+| 21 | the change was applied and not confirmed (the other side did not answer within the window, or refused, or the route check did; for `sync`, no new member completed a handshake): it reverts by itself |
 | 23 | the token, or `accept`'s line, is mistyped, truncated, of a later format, inconsistent, or expired |
-| 24 | refused: no overlay to invite into, no key yet, no endpoint, no free address, another invite on the port; a node in another mesh or at another address of it, or a change the spec would refuse; a network change waiting; no route to the inviter, or neither node can reach the other; the inviter refused the join (used, expired, bad HMAC), its certificate is not the pinned one, or its answer is not the answer to the request |
+| 24 | refused: no overlay to invite into, no key yet, no endpoint, no free address, another invite on the port; a node in another mesh or at another address of it, or a change the spec would refuse; a network change waiting; an invite whose peers hold another mesh identity, or none while this node has none; members of another identity, an address that is not a peer's, or an identity repair while an invite is pending; no route to the inviter, or neither node can reach the other; the inviter refused the join (used, expired, bad HMAC), its certificate is not the pinned one, or its answer is not the answer to the request |
 
 ## Tests
 
@@ -564,6 +933,17 @@ At these seams, each written down before its tests:
   real `keel.network.confirm` deciding (`tests/test_mesh_joining.py`,
   `tests/test_mesh_inviting.py`, `tests/test_mesh_create_status.py`,
   `tests/test_network_mesh_confirm.py`);
+- the endpoint found on the uplink (`tests/test_mesh_endpoint.py`), the
+  roster and the peers taken from it (`tests/test_mesh_members.py`), the
+  signing key and the evidence with the real openssl
+  (`tests/test_mesh_signing.py`, `tests/test_mesh_trust.py`: chains,
+  forgeries, keys not trusted, roots, tombstones), the listener's front
+  and limits with real sockets on the loopback
+  (`tests/test_mesh_memberlink.py`), the root helper and the listener in
+  one process over their unix socket (`tests/test_mesh_memberd.py`), and
+  sync, the announcement, the identity's adoption and repair, and
+  remove against a real Node (`tests/test_mesh_sync.py`,
+  `tests/test_mesh_adopt.py`, `tests/test_mesh_remove.py`);
 - the CLI through `keel.cli.main` (`tests/test_mesh_cli.py`,
   `tests/test_mesh_cli_live.py`);
 - end to end, `tests/test_mesh_netns.py` runs `tests/mesh_netns.py` as
@@ -571,7 +951,14 @@ At these seams, each written down before its tests:
   namespaces joined to it by veths: real `wg-quick`, real TLS, the real
   listener, join, accept and confirmation logic. One node joins through
   the listener and one through the fallback, both ping the inviter over
-  the overlay with no `keel network confirm` typed, the spent invite is
+  the overlay with no `keel network confirm` typed; the inviter
+  announces the second to the first, which adds it, and the second
+  pulls the first from the inviter (`keel mesh sync`), so the two are
+  each other's confirmed peers and ping each other over the overlay
+  (routed between their namespaces through the inviter's, as the
+  internet would): a full mesh, on evidence the inviter signed, the
+  members' channels each a root helper and a listener without
+  capabilities; the spent invite is
   refused, the inviter's journal holds no secret, and the listener, a
   process of its own under `setpriv` with every capability dropped,
   reports a CapEff of 0. apply there writes keel's rendered file and

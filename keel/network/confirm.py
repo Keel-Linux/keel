@@ -10,7 +10,8 @@ process attached from the container's host has seen the machine and
 needs no such proof.
 
 Decision 0048 adds two sources, for an overlay change keel mesh made and
-no other: a join's authenticated session over the overlay (session.MESH),
+no other: a join's authenticated session over the overlay, or a
+WireGuard handshake from a member keel mesh sync added (session.MESH),
 and `keel mesh create` for a mesh with no peer yet (session.SELF). Each
 names the change it made, the marker it read back after its apply, and
 confirms only that one, after the same route check.
@@ -309,8 +310,8 @@ def overlay_lines(pending: marker.Pending, origin: session.Origin,
                   probes: Probes) -> list[str]:
     """Which of the two paths this confirmation tested"""
     if origin.kind == session.SELF:
-        return ["the overlay has no peer yet, so nothing can cross it:"
-                " keel mesh create confirmed it once the routes to the"
+        return [f"the overlay has no peer, so nothing can cross it:"
+                f" {origin.detail} confirmed it once the routes to the"
                 " gateways and to the operator's session were found to"
                 " still leave through the uplink"]
     if origin.kind == session.MESH:

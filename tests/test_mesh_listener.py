@@ -16,9 +16,11 @@ from datetime import timedelta
 from unittest import mock
 
 from mesh_helpers import (
+    EVIDENCE,
     INVITE,
     JOINER,
     NOW,
+    SIGNER,
     Clock,
     confirm_body,
     join_body,
@@ -35,7 +37,8 @@ JOINER_OVERLAY = "fd00:6b65:1::3"
 ANSWER = protocol.dumps(protocol.JoinAnswer(
     invite_id=INVITE, nonce="00" * 16,
     public_key="nb9/izIukqWXM7gnBpe7hki4jKZZChWOW1wEfONn82E=",
-    address="fd00:6b65:1::1/64", peers=(), etcd="none", window=120))
+    address="fd00:6b65:1::1/64", peers=(), etcd="none", window=120,
+    sign_key=SIGNER, admission=EVIDENCE))
 
 
 def params(**changed) -> Params:
@@ -95,7 +98,8 @@ class TestForwarded(Case):
     def test_the_confirmation_over_the_overlay_only(self):
         self.join()
         self.backend.body = protocol.dumps(protocol.ConfirmAnswer(
-            invite_id=INVITE, nonce="00" * 16, confirmed=True, detail=""))
+            invite_id=INVITE, nonce="00" * 16, confirmed=True, detail="",
+            sign_key=SIGNER))
         for local, peer in ((UPLINK, JOINER_OVERLAY), (OVERLAY, UPLINK)):
             self.assertEqual(self.confirm(local, peer).status, 403)
         self.assertEqual(self.confirm().status, 200)

@@ -9,7 +9,9 @@ it needs to be confirmed in. The unit runs `keel mesh serve <id>`
 (`serve` here), which starts the unprivileged listener on the invite's
 TCP port, on every address, and answers what it forwards through
 keel.mesh.bridge; when it ends, however it ends, it stops the listener
-and removes the invite's file and its port from keel's firewall.
+and removes the invite's file and its port from keel's firewall. A join
+confirmed is then announced to this node's other peers over the overlay
+(keel.mesh.sync), so the mesh stays a full one.
 
 `keel mesh accept keel1a:...` is the fallback's other half: the new node
 could not reach the port, applied its own side, and printed the line.
@@ -28,11 +30,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from keel import exits
-from keel.mesh import acceptline, bridge, invites, ports
-from keel.mesh.admit import Admitter, Joined, stopped
+from keel.mesh import acceptline, bridge, invites, ports, sync
+from keel.mesh.admit import Admitter, Joined, admitted, stopped
 from keel.mesh.bridge import Bridge, BridgeError, socket_path
 from keel.mesh.listener import Params
 from keel.mesh.node import Node, NodeError
+from keel.mesh.signing import SigningError
 from keel.network import live, wgkeys, wireguard
 from keel.system import DEFAULT_WINDOW
 
@@ -79,10 +82,19 @@ class Inviter:
     bridged: Callable[[Bridge], None] = Bridge.run
     output: Callable[[tuple[str, ...]], str | None] = field(
         default=live.output)
+    # tells the other members of a confirmed join (keel.mesh.sync)
+    announce: Callable[[str], None] | None = None
 
     @property
     def root(self) -> str:
         return self.node.root
+
+    def announced(self, key: str) -> None:
+        """The new node `key` announced to this node's other peers"""
+        if self.announce is not None:
+            self.announce(key)
+            return
+        sync.announce(sync.Syncer(self.node, self.clock, self.err), key)
 
     def own(self) -> tuple[str | None, str]:
         """(public key, overlay address with its length); key None and
@@ -156,6 +168,8 @@ def serve_invite(inviter: Inviter, invite_id: str) -> int:
     finally:
         inviter.close(found)
     inviter.err(stopped(admitter))
+    if admitter.confirmed:
+        inviter.announced(admitter.joined.public_key)
     return code
 
 
@@ -214,11 +228,14 @@ def accepted(inviter: Inviter, spent: invites.Pending,
         return exits.MESH_REFUSED
     since = int(inviter.clock().timestamp())
     try:
+        admitted(inviter.root, spent.invite_id, line.public_key,
+                 line.sign_key, joiner, line.endpoint, inviter.clock())
         change = inviter.node.admit(peer)
-    except NodeError as e:
+    except (NodeError, ValueError, SigningError) as e:
         inviter.err(f"{e}; the invite is spent")
         return exits.MESH_REFUSED
     if change.made is None:
+        change.shown(inviter.err)
         inviter.err(f"this node's change did not come up (apply exited"
                     f" {change.code}); the invite is spent")
         return exits.APPLY_FAILED
@@ -238,12 +255,16 @@ def accepted(inviter: Inviter, spent: invites.Pending,
             spent.invite_id, spent.expires, own,
             spent.https_port, own, (line.public_key, joiner, until)))
     except (BridgeError, OSError, ssl.SSLError) as e:
+        change.shown(inviter.err)
         inviter.err(f"cannot serve [{own}]:{spent.https_port}: {e}; this"
                     " node's change reverts by itself")
         return exits.NETWORK_NOT_CONFIRMED
     if not admitter.confirmed:
+        # apply's lines, held while this node confirmed itself
+        change.shown(inviter.err)
         inviter.err(stopped(admitter))
         return exits.NETWORK_NOT_CONFIRMED
+    inviter.announced(line.public_key)
     inviter.out(f"accepted: {line.public_key} is a peer of this node at"
                 f" {joiner}")
     return exits.OK

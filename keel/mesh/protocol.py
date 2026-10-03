@@ -34,13 +34,20 @@ METHOD = "POST"
 ANSWER = "ANSWER"
 SIGNATURE = "X-Keel-Mesh-Signature"
 CONTENT_TYPE = "application/json"
-# a join request is about 300 bytes, an answer grows with the peers
+# a join request is about 350 bytes: what the listener reads at most
 MAX_BODY = 16384
+# an answer grows with the peers and their evidence, about 600 bytes each
+MAX_ANSWER = 262144
 # how far a request's time may be from the inviter's clock
 SKEW = timedelta(minutes=5)
 NONCE_BYTES = 16
 LABEL = b"keel mesh 1\n"
 ID_RE = re.compile(r"^[0-9a-f]{16}$")
+MESH_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+# an Ed25519 signature, 64 bytes in base64
+ED25519_RE = re.compile(r"^[A-Za-z0-9+/]{86}==$")
+ADMISSION_LABEL = b"keel mesh admission 1\n"
+REMOVAL_LABEL = b"keel mesh removal 1\n"
 NONCE_RE = re.compile(rf"^[0-9a-f]{{{NONCE_BYTES * 2}}}$")
 SIGNATURE_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -50,12 +57,58 @@ class ProtocolError(ValueError):
 
 
 @dataclass(frozen=True)
+class Admission:
+    """Evidence that a member admitted a node (keel.mesh.trust)
+
+    Signed with the admitting member's signing key (`by`) over the mesh
+    identity, the invite id (which keel.mesh.trust requires: no member
+    vouches for a node it did not admit), the node's WireGuard key and
+    signing key, its overlay address and endpoint, and the time.
+    """
+
+    mesh_id: str
+    invite_id: str
+    public_key: str
+    sign_key: str
+    address: str
+    endpoint: str | None
+    time: int
+    by: str
+    signature: str
+
+    def message(self) -> bytes:
+        return ADMISSION_LABEL + "\n".join((
+            self.mesh_id, self.invite_id, self.public_key, self.sign_key,
+            self.address, self.endpoint or "", str(self.time),
+            self.by)).encode()
+
+
+@dataclass(frozen=True)
+class Removal:
+    """A tombstone: a member removed this node's key, signed with its
+    signing key (`by`), so no sync adds it again"""
+
+    mesh_id: str
+    public_key: str
+    time: int
+    by: str
+    signature: str
+
+    def message(self) -> bytes:
+        return REMOVAL_LABEL + "\n".join((
+            self.mesh_id, self.public_key, str(self.time),
+            self.by)).encode()
+
+
+@dataclass(frozen=True)
 class Peer:
-    """A member as the answer names it: key, endpoint or None, address"""
+    """A member as the answer names it: key, endpoint or None, address,
+    and the evidence of its admission, None when there is none"""
 
     public_key: str
     endpoint: str | None
     address: str
+    admission: Admission | None = None
 
 
 @dataclass(frozen=True)
@@ -69,6 +122,8 @@ class JoinRequest:
     address: str
     nonce: str
     time: int
+    # the new node's signing key, which its admission names
+    sign_key: str
 
 
 @dataclass(frozen=True)
@@ -84,6 +139,9 @@ class JoinAnswer:
     peers: tuple[Peer, ...]
     etcd: str
     window: int
+    # the inviter's signing key, and the new node's admission it signed
+    sign_key: str
+    admission: Admission
 
 
 @dataclass(frozen=True)
@@ -102,6 +160,8 @@ class ConfirmAnswer:
     nonce: str
     confirmed: bool
     detail: str
+    # the inviter's signing key: what the fallback's node learns it by
+    sign_key: str
 
 
 def sign(key: bytes, method: str, path: str, body: bytes) -> str:
@@ -209,7 +269,7 @@ def join_request(body: bytes) -> JoinRequest:
         endpoint=endpoint(data.get("endpoint")),
         address=overlay(data, "address", True),
         nonce=matching(data, "nonce", NONCE_RE),
-        time=number(data, "time"))
+        time=number(data, "time"), sign_key=key(data, "sign_key"))
 
 
 def join_answer(body: bytes) -> JoinAnswer:
@@ -225,15 +285,44 @@ def join_answer(body: bytes) -> JoinAnswer:
         public_key=key(data, "public_key"),
         address=overlay(data, "address", True),
         peers=tuple(peer(one) for one in peers),
-        etcd=etcd, window=number(data, "window"))
+        etcd=etcd, window=number(data, "window"),
+        sign_key=key(data, "sign_key"),
+        admission=admission(data.get("admission")))
 
 
 def peer(data: object) -> Peer:
     if not isinstance(data, dict):
         raise ProtocolError("a peer is not a JSON object")
+    found = data.get("admission")
     return Peer(public_key=key(data, "public_key"),
                 endpoint=endpoint(data.get("endpoint")),
-                address=overlay(data, "address", False))
+                address=overlay(data, "address", False),
+                admission=None if found is None else admission(found))
+
+
+def admission(data: object) -> Admission:
+    if not isinstance(data, dict):
+        raise ProtocolError("an admission is not a JSON object")
+    invite = field(data, "invite_id", str)
+    if invite and not ID_RE.match(invite):
+        raise ProtocolError("invite_id is malformed")
+    return Admission(
+        mesh_id=matching(data, "mesh_id", MESH_ID_RE), invite_id=invite,
+        public_key=key(data, "public_key"), sign_key=key(data, "sign_key"),
+        address=overlay(data, "address", False),
+        endpoint=endpoint(data.get("endpoint")), time=number(data, "time"),
+        by=key(data, "by"), signature=matching(data, "signature",
+                                               ED25519_RE))
+
+
+def removal(data: object) -> Removal:
+    if not isinstance(data, dict):
+        raise ProtocolError("a removal is not a JSON object")
+    return Removal(
+        mesh_id=matching(data, "mesh_id", MESH_ID_RE),
+        public_key=key(data, "public_key"), time=number(data, "time"),
+        by=key(data, "by"), signature=matching(data, "signature",
+                                               ED25519_RE))
 
 
 def confirm_request(body: bytes) -> ConfirmRequest:
@@ -251,4 +340,4 @@ def confirm_answer(body: bytes) -> ConfirmAnswer:
         invite_id=matching(data, "invite_id", ID_RE),
         nonce=matching(data, "nonce", NONCE_RE),
         confirmed=field(data, "confirmed", bool),
-        detail=field(data, "detail", str))
+        detail=field(data, "detail", str), sign_key=key(data, "sign_key"))

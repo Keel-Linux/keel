@@ -1,0 +1,13 @@
+# keel mesh sync (decision 0048): add the members this node's peers
+# know and it does not, so a member that was offline when a new node
+# was announced, or a node that joined through the fallback, ends up a
+# peer of every other one. Run by keel-mesh-sync.timer, at boot and
+# every 15 minutes; a node in no mesh has nothing to sync.
+[Unit]
+Description=keel mesh: learn the members this node's peers know
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/keel mesh sync

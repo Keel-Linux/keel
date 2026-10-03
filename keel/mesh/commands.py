@@ -18,6 +18,8 @@ import os
 import secrets
 import signal
 import sys
+import threading
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -27,24 +29,24 @@ from keel import exits, spec, system
 from keel.commands import error, manifest_facts, read_spec
 from keel.inspect import ROOT_DEFAULT
 from keel.mesh import (
+    adopt,
     allocate,
     bridge,
     certificate,
     create,
+    endpoint,
     identity,
     invites,
     inviting,
     join,
     joining,
+    memberd,
     ports,
+    remove,
     status,
+    sync,
 )
-from keel.mesh.node import (
-    Node,
-    NodeError,
-    global_addresses,
-    static_addresses,
-)
+from keel.mesh.node import Node, NodeError, static_addresses
 from keel.mesh.token import (
     LIFETIME,
     MAX_TEXT,
@@ -78,13 +80,17 @@ def mesh_invite(args) -> int:
     if public is None:
         return code
     try:
-        hosts = endpoints(args.endpoint, doc)
+        hosts = invite_endpoints(args.endpoint, doc, root == ROOT_DEFAULT,
+                                 err)
     except ValueError as e:
         error(str(e))
         return exits.MESH_REFUSED
     try:
+        mesh_id = invite_identity(root, args.spec)
         tls_key, cert = certificate.make()
-        mesh_id = identity.ensure(root)
+    except adopt.Refused as e:
+        error(str(e))
+        return exits.MESH_REFUSED
     except (certificate.CertificateError, ValueError) as e:
         error(str(e))
         return exits.APPLY_FAILED
@@ -107,6 +113,16 @@ def mesh_invite(args) -> int:
     print(f"keel mesh join - <<< {line}")
     report(made, opened)
     return exits.OK
+
+
+def invite_identity(root: str, path: str) -> bytes:
+    """The mesh identity the invite carries: on the live system, never a
+    second one for the mesh its peers are in (keel.mesh.sync); raises
+    sync.Refused, or ValueError"""
+    if root != ROOT_DEFAULT:
+        return identity.ensure(root)
+    return adopt.invite_identity(sync.Syncer(
+        Node(root, path), utcnow, err))
 
 
 def listening(made: invites.Pending, path: str, root: str,
@@ -212,16 +228,26 @@ def public_key(root: str, overlay: dict) -> tuple[str | None, int]:
     return public, exits.OK
 
 
-def endpoints(declared: list[str] | None, doc: dict) -> tuple[str, ...]:
+def invite_endpoints(declared: list[str] | None, doc: dict, live_system: bool,
+                     say: Callable[[str], None]) -> tuple[str, ...]:
     """Where the new node reaches this one: IPv6 first, one per family
 
     The --endpoint addresses when given (a port forward, say), else the
-    static addresses network.interfaces declares. Raises ValueError.
+    static addresses network.interfaces declares, else, on the live
+    system, the uplink's (keel.mesh.endpoint), each said with `say`.
+    Raises ValueError.
     """
     if declared:
         hosts = [ipaddress.ip_address(one) for one in declared]
     else:
         hosts = list(static_addresses(doc))
+    why: tuple[str, ...] = ()
+    if not hosts and live_system:
+        found = endpoint.detect(live.output)
+        for line in found.said:
+            say(line)
+        why = found.refused
+        hosts = [ipaddress.ip_address(one) for one in found.addresses]
     found = {}
     for host in hosts:
         if host.version in found and declared:
@@ -230,9 +256,11 @@ def endpoints(declared: list[str] | None, doc: dict) -> tuple[str, ...]:
         found.setdefault(host.version, host)
     if not found:
         raise ValueError(
-            "no endpoint: network.interfaces declares no static address"
-            " the new node could reach this one at; give it with"
-            " --endpoint ADDRESS")
+            "no endpoint: network.interfaces declares no static address,"
+            " and none was found on the uplink, that the new node could"
+            f" reach this one at{': ' if why else ''}{'; '.join(why)}."
+            " Give it with --endpoint ADDRESS (a stable address, or a port"
+            " forward's)")
     return tuple(str(found[version]) for version in (6, 4)
                  if version in found)
 
@@ -271,18 +299,19 @@ def mesh_join(args) -> int:
     node = live_node(args)
     try:
         doc = node.document()
-        endpoint = joining.own_endpoint(
-            args.endpoint, doc,
-            global_addresses(live.output(GLOBAL_ADDRESSES) or ""),
-            wireguard.interface(overlay_of(doc) or {}))
+        found = None
+        if not args.endpoint and not list(static_addresses(doc)):
+            found = endpoint.detect(live.output)
+            for line in found.said:
+                err(line)
+            for line in found.refused:
+                err(f"no endpoint is sent, as from a node behind NAT:"
+                    f" {line}; --endpoint gives one")
+        own = joining.own_endpoint(args.endpoint, doc, found)
     except (NodeError, ValueError) as e:
         error(str(e))
         return exits.MESH_REFUSED
-    return joining.run(joining.Joiner(node, token, utcnow, out, err),
-                       endpoint)
-
-
-GLOBAL_ADDRESSES = ("ip", "-o", "address", "show", "scope", "global")
+    return joining.run(joining.Joiner(node, token, utcnow, out, err), own)
 
 
 def join_dry_run(args) -> int:
@@ -352,11 +381,73 @@ def as_root(args, verb: str) -> int:
 
 
 def mesh_create(args) -> int:
-    """Make the mesh on its first node"""
+    """Make the mesh on its first node; with --adopt, give a mesh built
+    by hand its identity"""
     code = as_root(args, "keel mesh create")
     if code != exits.OK:
         return code
+    if args.adopt:
+        return adopt.adopt_mesh(syncer(args), out)
     return create.create(live_node(args), out, err)
+
+
+def syncer(args) -> sync.Syncer:
+    return sync.Syncer(live_node(args), utcnow, err)
+
+
+def overlay_address(text: str) -> str:
+    """An overlay address as the spec writes it; ValueError"""
+    try:
+        return str(ipaddress.IPv6Address(text))
+    except ValueError:
+        raise ValueError(f"{text}: not an IPv6 address; a member is named"
+                         " by its overlay address") from None
+
+
+def mesh_sync(args) -> int:
+    """Pull the members this node's peers know; with --adopt, take a
+    member's identity first"""
+    code = as_root(args, "keel mesh sync")
+    if code != exits.OK:
+        return code
+    try:
+        hosts = tuple(overlay_address(one) for one in args.source or ())
+        adopted = overlay_address(args.adopt) if args.adopt else None
+    except ValueError as e:
+        error(str(e))
+        return exits.MESH_REFUSED
+    if adopted:
+        return adopt.adopt_from(syncer(args), adopted)
+    return sync.pull(syncer(args), hosts)
+
+
+def mesh_members(args) -> int:
+    """What keel-mesh-members.service runs: the members' channel's root
+    helper, which starts its unprivileged listener"""
+    code = as_root(args, "keel mesh members")
+    if code != exits.OK:
+        return code
+    stop = threading.Event()
+
+    def stopped(signum, frame):
+        stop.set()
+        # out of the bridge's read, through serve's cleanup
+        raise SystemExit(0)
+    signal.signal(signal.SIGTERM, stopped)
+    return memberd.serve(syncer(args), stop)
+
+
+def mesh_members_listen(args) -> int:
+    """What keel-mesh-members-listen runs: the unprivileged listener"""
+    return memberd.listen(args.socket, utcnow, err)
+
+
+def mesh_remove(args) -> int:
+    """A peer out of this node's spec, and its tombstone"""
+    code = as_root(args, "keel mesh remove")
+    if code != exits.OK:
+        return code
+    return remove.remove(syncer(args), args.member, out)
 
 
 def inviter(args) -> inviting.Inviter:
