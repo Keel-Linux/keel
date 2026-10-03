@@ -300,6 +300,15 @@ network:
 | `...peers[].allowed_ips` | system | Required, at least one prefix: what is routed to this peer and accepted from it. For a node, its overlay address as a `/128` (and `/32`). A prefix with host bits set is an error, and so is a prefix given to two peers, since wg would silently keep it for the last one only. Each prefix must be inside the private ranges the overlay addresses use (`fc00::/7`; RFC 1918 or `100.64.0.0/10`): a `/0`, a public prefix (a `::/1` and `8000::/1` pair takes as much as `::/0`) and a prefix that overlaps the uplink or a peer's endpoint are refused (see "Routes" below) |
 | `...peers[].persistent_keepalive` | system | Optional, seconds between 1 and 65535: keeps a path through a NAT or a stateful firewall open. Leave it out for none |
 
+**Joining with one command.** The peers and the address need not be
+typed: `keel mesh invite`, on a node already in the mesh, prints a `keel
+mesh join keel1:<token>` line that carries the inviter's key, endpoint
+and port and an address reserved for the new node, and `keel mesh join
+--dry-run` on the new node prints the `address` and the peer entry it
+makes of them, exactly the fields above (handbook decision 0048,
+[docs/mesh.md](mesh.md)). Nothing in the spec records how a peer was
+added.
+
 **Routes.** `wg-quick` adds a route for the overlay's own prefixes and
 for each peer's `allowed_ips`. A route that covers the uplink would send
 the uplink's replies into the overlay, and the machine would be cut off

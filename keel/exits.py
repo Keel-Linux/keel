@@ -28,6 +28,8 @@ CHANNEL_EXPIRED = 19
 CHANNEL_ROLLBACK = 20
 NETWORK_NOT_CONFIRMED = 21
 NOTIFY_FAILED = 22
+MESH_TOKEN_INVALID = 23
+MESH_REFUSED = 24
 
 DESCRIPTIONS = {
     OK: "success, including the no-op cases",
@@ -68,4 +70,8 @@ DESCRIPTIONS = {
     " configuration",
     NOTIFY_FAILED: "keel notify reached no channel: none declared, or every"
     " one failed",
+    MESH_TOKEN_INVALID: "keel mesh join could not use the token: mistyped"
+    " or truncated, of a format this keel does not read, or expired",
+    MESH_REFUSED: "keel mesh refused: no overlay to invite into, no"
+    " endpoint, no free address, or this node is in another mesh",
 }

@@ -234,11 +234,23 @@ def peers_errors(key: str, peers: Any, reserved: Reserved) -> list[str]:
     errors: list[str] = []
     for index, peer in enumerate(peers or []):
         errors += peer_errors(f"{key}[{index}]", peer, reserved)
-    keys = [str(peer.get("public_key")) for peer in peers or []
-            if isinstance(peer, dict) and peer.get("public_key")]
-    errors += [f"{key}: public key {one} is declared twice"
-               for one in sorted(set(keys)) if keys.count(one) > 1]
-    return errors + shared_ips(key, peers or [])
+    return errors + twice(key, peers or []) + shared_ips(key, peers or [])
+
+
+def twice(key: str, peers: list) -> list[str]:
+    """A key two peers declare, compared by its bytes (same_key)"""
+    seen: list[bytes] = []
+    errors = []
+    for peer in peers:
+        found = wireguard.key_bytes(str(peer.get("public_key"))) \
+            if isinstance(peer, dict) else None
+        if found is None:
+            continue
+        if seen.count(found) == 1:
+            errors.append(f"{key}: public key {peer['public_key']} is"
+                          " declared twice")
+        seen.append(found)
+    return errors
 
 
 def own_key_errors(key: str, wg: dict) -> list[str]:
@@ -265,7 +277,8 @@ def own_key_errors(key: str, wg: dict) -> list[str]:
     return [f"{key}[{index}].public_key: this is this node's own public key"
             f" (of {path}); a node is not its own peer, list the other"
             " nodes' keys" for index, peer in enumerate(peers)
-            if isinstance(peer, dict) and peer.get("public_key") == own]
+            if isinstance(peer, dict)
+            and wireguard.same_key(str(peer.get("public_key")), own)]
 
 
 def peer_errors(key: str, peer: Any, reserved: Reserved) -> list[str]:
