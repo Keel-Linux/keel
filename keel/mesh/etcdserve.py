@@ -67,7 +67,8 @@ def checked(member: Etcd, body: bytes, key: str) -> etcdmsg.Message:
     signer = sign_key(member.root, key)
     if signer is None or not message.verified(signer):
         raise Refusal(403, "the message is not signed by a key this node"
-                      " trusts for its sender")
+                      " trusts for its sender (keel mesh sync on this node"
+                      " learns its trust roots' keys)")
     return message
 
 
