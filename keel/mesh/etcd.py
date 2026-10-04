@@ -49,6 +49,9 @@ MODE = "cloud_advanced"
 OVERLAY = "etcd"
 ENABLED = "enabled"
 QUORUM_AT = 3
+# the most members a cluster starts with, or a join's answer names:
+# etcd's own advice is at most seven voters (keel.mesh.etcdmsg's cap)
+MAX_FORMED = 7
 # how long the inviter's helper tries to promote a learner it added,
 # and how often; keel-mesh-etcd.timer takes over after
 PROMOTE_FOR = 120
@@ -111,6 +114,17 @@ def known_ready(etcd: Etcd) -> dict[str, str]:
     if key and etcdstate.credentials(etcd.root):
         found[key] = own_address(etcd.node)
     return found
+
+
+def vetted(etcd: Etcd, members: dict[str, str]) -> dict[str, str]:
+    """The members of `members` this node knows at those addresses: a
+    peer of its spec, or itself; what another member says is ready is
+    never taken for a node this node does not have as a peer"""
+    known = {one.public_key: one.address for one in etcd.node.peers("")}
+    key = own_key(etcd)
+    if key:
+        known[key] = own_address(etcd.node)
+    return {k: v for k, v in members.items() if known.get(k) == v}
 
 
 def token_state(etcd: Etcd) -> str:
@@ -195,6 +209,11 @@ def admit(etcd: Etcd, csr: str | None, key: str, address: str) -> Admission:
         return learner(etcd, grant, members, formed, key, address)
     if len(members) < QUORUM_AT:
         return Admission(grant, None, members)
+    if len(members) > MAX_FORMED:
+        etcd.err(f"etcd: {len(members)} ready members, more than a cluster"
+                 f" starts with ({MAX_FORMED}); keel mesh etcd form forms"
+                 " it")
+        return Admission(grant, None, {})
     own = own_key(etcd)
     cluster = Cluster("new", tuple(
         Member(one, members[one]) for one in sorted(members)), mesh)
@@ -257,7 +276,7 @@ def joined(etcd: Etcd, grant: Grant | None, cluster: Cluster | None,
                 " inviter that can run etcd)")
     try:
         etcdstate.take_grant(etcd.root, grant)
-        etcdstate.add_ready(etcd.root, members)
+        etcdstate.add_ready(etcd.root, vetted(etcd, members))
         if cluster is None:
             return (f"etcd: this node is ready; {len(members)} of"
                     f" {QUORUM_AT} ready members known, etcd forms at the"

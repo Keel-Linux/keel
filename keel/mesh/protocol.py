@@ -285,7 +285,6 @@ def join_request(body: bytes) -> JoinRequest:
 
 
 def join_answer(body: bytes) -> JoinAnswer:
-    from keel.mesh import etcdmsg
     data = loaded(body)
     etcd = field(data, "etcd", str)
     if etcd not in ETCD_STATES:
@@ -301,9 +300,20 @@ def join_answer(body: bytes) -> JoinAnswer:
         etcd=etcd, window=number(data, "window"),
         sign_key=key(data, "sign_key"),
         admission=admission(data.get("admission")),
-        etcd_grant=etcdmsg.grant(data.get("etcd_grant")),
-        etcd_cluster=etcdmsg.cluster(data.get("etcd_cluster")),
-        etcd_ready=etcdmsg.ready(data.get("etcd_ready")))
+        **etcd_fields(data))
+
+
+def etcd_fields(data: dict) -> dict:
+    """The answer's etcd fields; none when they cannot be read: etcd
+    never fails a join (keel.mesh.etcd), keel mesh etcd form brings the
+    node in later"""
+    from keel.mesh import etcdmsg
+    try:
+        return {"etcd_grant": etcdmsg.grant(data.get("etcd_grant")),
+                "etcd_cluster": etcdmsg.cluster(data.get("etcd_cluster")),
+                "etcd_ready": etcdmsg.ready(data.get("etcd_ready"))}
+    except ProtocolError:
+        return {}
 
 
 def peer(data: object) -> Peer:

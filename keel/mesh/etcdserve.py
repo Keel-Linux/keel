@@ -14,17 +14,21 @@ that acts needs the member's own signature too (0048's amendment).
   the overlay address;
 - `enroll` makes this node's intermediate key once and answers its
   request;
-- `cluster` keeps the intermediate a grant brings (never in place of
-  one this node holds, never under another root), notes the members
-  ready, and with a cluster of this mesh that names this node, keeps it
-  and starts etcd (keel.mesh.etcd.start), as a join's new node does.
+- `cluster` keeps the intermediate a grant brings, only from this
+  node's inviter or a trust root (never in place of one this node
+  holds, never under another root), notes the members ready that are
+  this node's peers at those addresses, and with a cluster of this mesh
+  that names this node, and no other cluster held, keeps it and starts
+  etcd (keel.mesh.etcd.start), as a join's new node does; never while a
+  network change waits.
 """
 
 import json
 
 from keel.mesh import etcd, etcdmsg, etcdpki, etcdstate, identity, trust
 from keel.mesh.etcd import Etcd
-from keel.mesh.etcdstate import StateError
+from keel.mesh.etcdpki import PkiError
+from keel.mesh.etcdstate import Cluster, StateError
 from keel.mesh.memberlink import Answer, refused
 from keel.mesh.node import NodeError
 from keel.mesh.protocol import ProtocolError
@@ -38,14 +42,26 @@ class Refusal(Exception):
         self.reason = reason
 
 
-def sign_key(root: str, key: str) -> str | None:
-    """The signing key this node trusts for the member `key`"""
+def trusted(root: str, key: str) -> trust.Member | None:
+    """The member `key` as this node's trust store holds it"""
     try:
         store = trust.load(root)
     except ValueError:
         return None
     found = store.find(key)
-    return None if found is None else store.members[found].sign_key
+    return None if found is None else store.members[found]
+
+
+def sign_key(root: str, key: str) -> str | None:
+    """The signing key this node trusts for the member `key`"""
+    found = trusted(root, key)
+    return None if found is None else found.sign_key
+
+
+def same(held: Cluster, cluster: Cluster) -> bool:
+    """The same cluster: its state, token and member addresses"""
+    return (held.state, held.token, sorted(held.addresses())) == (
+        cluster.state, cluster.token, sorted(cluster.addresses()))
 
 
 def checked(member: Etcd, body: bytes, key: str) -> etcdmsg.Message:
@@ -92,7 +108,7 @@ def answer(member: Etcd, body: bytes, key: str) -> Answer:
     except Refusal as e:
         member.err(f"etcd: refused a message from {key}: {e.reason}")
         return refused(e.status, e.reason)
-    except (StateError, NodeError) as e:
+    except (StateError, NodeError, PkiError, OSError) as e:
         member.err(f"etcd: cannot answer {key}: {e}")
         return refused(503, f"this node cannot answer now: {e}")
 
@@ -111,10 +127,17 @@ def taken(member: Etcd, message: etcdmsg.Message) -> Answer:
         raise Refusal(409, "the cluster does not name this node, or is"
                       " another mesh's")
     held = etcdstate.cluster(member.root)
-    if cluster is not None and held is not None and \
-            held.token != cluster.token:
-        raise Refusal(409, "this node is in another cluster")
+    if cluster is not None and held is not None and not same(held, cluster):
+        raise Refusal(409, "this node is in a cluster already: a cluster"
+                      " is never replaced by a message")
+    if cluster is not None and member.node.waiting():
+        raise Refusal(409, "a network change waits for its confirmation"
+                      " on this node; send it again once it is kept")
     if grant is not None and not etcdstate.credentials(member.root):
+        sender = trusted(member.root, message.sender)
+        if sender is None or not sender.root:
+            raise Refusal(403, "an etcd CA is taken only from this node's"
+                          " inviter or a trust root")
         etcdstate.take_grant(member.root, grant)
     elif grant is not None and etcdstate.root_fingerprint(member.root) != \
             etcdpki.fingerprint(grant.root):
@@ -122,7 +145,7 @@ def taken(member: Etcd, message: etcdmsg.Message) -> Answer:
     if not etcdstate.credentials(member.root):
         raise Refusal(409, "this node holds no etcd CA, and the message"
                       " brings none")
-    etcdstate.add_ready(member.root, members)
+    etcdstate.add_ready(member.root, etcd.vetted(member, members))
     if cluster is None:
         return Answer(200, b'{"taken": true, "started": false}')
     etcdstate.save_cluster(member.root, cluster)

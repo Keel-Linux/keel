@@ -198,3 +198,10 @@ class TestFreshness(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestEtcdFieldsNeverFailAJoin(unittest.TestCase):
+    def test_unreadable_etcd_fields_are_left_out(self):
+        self.assertEqual(protocol.etcd_fields({"etcd_cluster": {"x": 1}}),
+                         {})
+        self.assertEqual(protocol.etcd_fields({})["etcd_ready"], {})

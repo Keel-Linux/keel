@@ -156,6 +156,16 @@ class TestJoins(Mesh):
         self.assertEqual(found.state, "existing")
         self.assertEqual(len(found.members), 4)
 
+    def test_too_many_ready_members_form_nothing_at_a_join(self):
+        etcd_ = self.a
+        with mock.patch("keel.mesh.etcd.known_ready", return_value={
+                f"{n:043d}=": f"fd00::{n + 10}" for n in range(8)}):
+            found = etcd.admit(etcd_, etcd.join_csr(self.b), KEYS[1],
+                               address(1))
+        self.assertIsNotNone(found.grant)
+        self.assertIsNone(found.cluster)
+        self.assertIn("keel mesh etcd form forms it", self.text(0))
+
     def test_a_learner_that_cannot_be_added(self):
         fake = FakeEtcd([voter(0), voter(1), voter(2)])
         a, b, c, d = self.members(4, etcd=fake)
@@ -166,6 +176,16 @@ class TestJoins(Mesh):
         self.assertIsNone(admission.cluster)
         self.assertIn("not added as a learner (etcdserver: unhealthy",
                       self.text(0))
+
+
+class TestVetted(Mesh):
+    def test_a_node_without_its_key_vets_its_peers_only(self):
+        a, b = self.members(2)
+        with mock.patch.object(type(a.node), "public_key",
+                               return_value=(None, "no key")):
+            self.assertEqual(etcd.vetted(a, {KEYS[0]: address(0),
+                                             KEYS[1]: address(1)}),
+                             {KEYS[1]: address(1)})
 
 
 class TestStartAndPromote(Mesh):

@@ -103,6 +103,14 @@ class TestRootAndChain(Case):
         self.assertEqual(etcdpki.fingerprint(root),
                          hashlib.sha256(der).hexdigest())
 
+    def test_no_fingerprint_for_what_is_no_certificate(self):
+        with self.assertRaises(PkiError):
+            etcdpki.fingerprint("x")
+        with mock.patch("keel.mesh.etcdpki.subprocess.run",
+                        side_effect=OSError("not found")), \
+                self.assertRaises(PkiError):
+            etcdpki.fingerprint("x")
+
     def test_pem_blocks_split(self):
         root = etcdpki.root(self.key("root.key"), "ab" * 16)
         self.assertEqual(etcdpki.blocks(root + root), [root, root])

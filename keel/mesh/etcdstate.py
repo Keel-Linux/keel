@@ -171,8 +171,13 @@ def holds_root(root: str) -> bool:
 
 
 def root_fingerprint(root: str) -> str | None:
+    """The fingerprint of the root held; raises StateError for a file
+    that holds no certificate"""
     found = read(root, ROOT_CERT)
-    return etcdpki.fingerprint(found) if found else None
+    try:
+        return etcdpki.fingerprint(found) if found else None
+    except PkiError as e:
+        raise StateError(f"/{ROOT_CERT}: {e}") from None
 
 
 def key(root: str, relative: str) -> str:
@@ -246,9 +251,11 @@ def take_grant(root: str, grant: Grant) -> None:
                 grant.root):
             raise StateError("the grant is under another root than the one"
                              " this node holds")
+        # the root first: a crash between leaves no intermediate that
+        # chains to a root this node does not hold
+        write(root, ROOT_CERT, grant.root)
         write(root, CHAIN, "".join(grant.chain))
         write(root, CA_CERT, grant.certificate)
-        write(root, ROOT_CERT, grant.root)
 
 
 def expires(root: str) -> datetime | None:

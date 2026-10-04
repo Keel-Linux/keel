@@ -52,6 +52,11 @@ class TestTheFirstNode(Case):
         self.assertEqual(etcdstate.root_fingerprint(self.root),
                          etcdpki.fingerprint(before))
 
+    def test_a_root_file_that_holds_none(self):
+        etcdstate.write(self.root, etcdstate.ROOT_CERT, "x")
+        with self.assertRaises(StateError):
+            etcdstate.root_fingerprint(self.root)
+
     def test_a_node_with_a_grant_makes_no_root(self):
         other = self.scratch()
         etcdstate.make_root(other, MESH)

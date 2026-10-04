@@ -325,7 +325,19 @@ def driver() -> None:
 def learner_probe(root: str) -> None:
     """In A's namespace: a learner added, listed, and removed"""
     client = etcdclient.local(root)
-    added = client.add_learner(etcdstate.peer_url("fd00:6b65:e7c::99"))
+    # etcd refuses a reconfiguration until every voter has been active a
+    # while (strict reconfig check): a member that just rejoined
+    for _ in range(30):
+        try:
+            added = client.add_learner(etcdstate.peer_url(
+                "fd00:6b65:e7c::99"))
+            break
+        except etcdclient.EtcdError as e:
+            said = str(e)
+            time.sleep(3)
+    else:
+        print(json.dumps({"error": said}), flush=True)
+        return
     listed = [one for one in client.members() if one.id == added.id]
     client.remove(added.id)
     after = [one for one in client.members() if one.id == added.id]

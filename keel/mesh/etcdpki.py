@@ -182,10 +182,15 @@ def not_after(certificate: str) -> datetime:
 
 def fingerprint(certificate: str) -> str:
     """SHA-256 of the DER form, in hex: how a root is named"""
-    der = subprocess.run([OPENSSL, "x509", "-outform", "DER"],
-                         input=certificate.encode(), capture_output=True,
-                         check=False, timeout=TIMEOUT).stdout
-    return hashlib.sha256(der).hexdigest()
+    try:
+        done = subprocess.run([OPENSSL, "x509", "-outform", "DER"],
+                              input=certificate.encode(), capture_output=True,
+                              check=False, timeout=TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise PkiError(f"openssl could not be run: {e}") from None
+    if done.returncode != 0 or not done.stdout:
+        raise PkiError("not a certificate")
+    return hashlib.sha256(done.stdout).hexdigest()
 
 
 def verified(certificate: str, chain: list[str], trusted: str) -> bool:

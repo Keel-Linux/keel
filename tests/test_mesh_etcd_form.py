@@ -275,8 +275,56 @@ class TestTheReceiver(Mesh):
         mine = Cluster("new", (Member(KEYS[1], address(1)),), "cd" * 16)
         etcdstate.save_cluster(self.b.root, mine)
         theirs = Cluster("new", (Member(KEYS[1], address(1)),), MESH.hex())
-        self.assertIn("another cluster", self.refused(self.message(
+        self.assertIn("in a cluster already", self.refused(self.message(
             etcdmsg.CLUSTER, {"cluster": theirs.dumps()})))
+
+    def test_a_cluster_held_is_never_replaced(self):
+        """Same mesh, same token, other members: refused (the token is
+        always the mesh's identity)"""
+        etcdstate.make_root(self.a.root, MESH.hex())
+        etcdform.form(self.a, False, lambda line: None)
+        rogue = Cluster("new", (Member(KEYS[1], address(1)),
+                                Member(KEYS[0], "fd00:6b65:1::99")),
+                        MESH.hex())
+        self.assertIn("in a cluster already", self.refused(self.message(
+            etcdmsg.CLUSTER, {"cluster": rogue.dumps()})))
+        held = etcdstate.cluster(self.b.root)
+        found = etcdserve.answer(self.b, self.message(
+            etcdmsg.CLUSTER, {"cluster": held.dumps()}), KEYS[0])
+        self.assertEqual(found.status, 200)
+
+    def test_a_grant_only_from_a_root_and_not_while_waiting(self):
+        from keel.mesh import trust
+        etcdstate.make_root(self.a.root, MESH.hex())
+        grant = etcdstate.grant_for(self.a.root, etcdstate.ca_request(
+            self.b.root), "x")
+        store = trust.load(self.b.root)
+        store.members[store.find(KEYS[0])].root = False
+        trust.save(self.b.root, store)
+        self.assertIn("only from this node's inviter", self.refused(
+            self.message(etcdmsg.CLUSTER,
+                         {"grant": etcdmsg.grant_data(grant)})))
+        cluster = Cluster("new", (Member(KEYS[1], address(1)),), MESH.hex())
+        with mock.patch.object(type(self.b.node), "waiting",
+                               return_value=True):
+            self.assertIn("network change waits", self.refused(self.message(
+                etcdmsg.CLUSTER, {"cluster": cluster.dumps()})))
+
+    def test_ready_members_vetted_against_the_peers(self):
+        etcdstate.make_root(self.b.root, MESH.hex())
+        found = etcdserve.answer(self.b, self.message(etcdmsg.CLUSTER, {
+            "ready": {KEYS[0]: address(0), KEYS[2]: "fd00::77",
+                      KEYS[3]: address(3)}}), KEYS[0])
+        self.assertEqual(found.status, 200)
+        self.assertEqual(etcdstate.ready(self.b.root), {KEYS[0]: address(0)})
+
+    def test_openssl_failing_is_a_503(self):
+        etcdstate.make_root(self.b.root, MESH.hex())
+        with mock.patch("keel.mesh.etcdstate.ca_request",
+                        side_effect=OSError("disk full")):
+            found = etcdserve.answer(self.b, self.message(etcdmsg.ENROLL),
+                                     KEYS[0])
+        self.assertEqual(found.status, 503)
 
     def test_a_grant_under_another_root(self):
         etcdstate.make_root(self.b.root, MESH.hex())
