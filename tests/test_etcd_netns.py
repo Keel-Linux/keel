@@ -85,9 +85,13 @@ class TestThreeMembersOnAPoorNetwork(unittest.TestCase):
         on each leg (a ping crosses two, so about 4% of the round trips
         lose one); a link that is not that fails the run"""
         link = self.found["link"]
-        self.assertIn("rtt_ms", link, link)
-        self.assertGreater(link["rtt_ms"], 225, link)
-        self.assertLess(link["rtt_ms"], 290, link)
+        self.assertIn("rtt_min_ms", link, link)
+        # the floor is netem's delay: 250 ms less at most the 25 ms of
+        # jitter; the mean only has to be sane, since loss adds
+        # retransmitted round trips on top of it
+        self.assertGreater(link["rtt_min_ms"], 220, link)
+        self.assertLess(link["rtt_min_ms"], 280, link)
+        self.assertLess(link["rtt_ms"], 400, link)
         # 400 round trips at 2% on each of their two legs: about 4%
         # lost, and with that many, between 0.5% and 8%
         self.assertGreater(link["loss"], 0.005, link)

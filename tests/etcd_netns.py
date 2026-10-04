@@ -191,11 +191,16 @@ def measured(pid: int, address: str) -> dict:
     found = {"said": (done.stdout + done.stderr).strip().splitlines()[-3:]}
     sent = re.search(r"(\d+) packets transmitted, (\d+) received",
                      done.stdout)
-    rtt = re.search(r"= [\d.]+/([\d.]+)/", done.stdout)
+    rtt = re.search(r"= ([\d.]+)/([\d.]+)/", done.stdout)
     if sent:
         found["loss"] = 1 - int(sent.group(2)) / int(sent.group(1))
     if rtt:
-        found["rtt_ms"] = float(rtt.group(1))
+        # the minimum is the delay netem applies; the mean also carries
+        # jitter, reordering and the odd retransmitted handshake, which a
+        # lossy link adds on top (one 2.2 s round trip moved a 400-ping
+        # mean from 250 to 300 ms)
+        found["rtt_min_ms"] = float(rtt.group(1))
+        found["rtt_ms"] = float(rtt.group(2))
     return found
 
 
