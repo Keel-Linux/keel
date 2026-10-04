@@ -9,14 +9,17 @@ window like any first overlay; apply makes the key pair on the machine
 confirms it itself, once apply.md's route check finds every gateway,
 and the operator's SSH client, still leaving through the uplink: an
 overlay with no peer routes its own private prefix only (0048, second
-round, point 1).
+round, point 1). On a cloud advanced node, the first node also makes
+the mesh's etcd root CA (0048, second and third rounds; keel.mesh.etcd).
 """
 
 import secrets
 from collections.abc import Callable
+from datetime import datetime, timezone
+from functools import partial
 
 from keel import exits
-from keel.mesh import identity
+from keel.mesh import etcd, identity
 from keel.mesh.node import Node, NodeError, with_overlay
 from keel.network import session, wireguard
 from keel.network.wireguard import GLOBAL_ID_BYTES
@@ -61,6 +64,7 @@ def create(node: Node, out: Callable[[str], None],
         err(line)
     if not kept:
         return exits.NETWORK_NOT_CONFIRMED
+    etcd.created(etcd.Etcd(node, partial(datetime.now, timezone.utc), err))
     overlay = overlay_of(after)
     out(f"created the mesh: this node is {address} on"
         f" {wireguard.interface(overlay)}, WireGuard on UDP"

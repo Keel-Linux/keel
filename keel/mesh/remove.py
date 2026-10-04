@@ -12,15 +12,20 @@ in it, goes to each of its other peers. Each takes the tombstone only
 when the key that signed it may remove that node: the member that
 admitted it, a trust root, or the node itself (trust.may_remove); it
 then drops the peer through one window of its own, and no sync adds the
-key again. A member offline then learns it at its next sync. etcd's
-`member remove` is not here yet.
+key again. A member offline then learns it at its next sync.
+
+With etcd, the node's etcd member goes too, but only when this node may
+remove it from the whole mesh, by the same rule (0048, third round,
+point 4: trust.may_remove_everywhere); otherwise the removal is local
+only, and its admitter or a trust root removes it from etcd
+(keel.mesh.etcd.leave).
 """
 
 import ipaddress
 from collections.abc import Callable
 
 from keel import exits
-from keel.mesh import identity, signing, sync, trust
+from keel.mesh import etcd, etcdcare, identity, signing, sync, trust
 from keel.mesh.node import NodeError, without_peer
 from keel.mesh.signing import SigningError
 from keel.mesh.sync import Syncer
@@ -62,6 +67,9 @@ def remove(syncer: Syncer, which: str, out: Callable[[str], None]) -> int:
             raise ValueError(f"this node keeps {len(store.removed)}"
                              " tombstones, as many as it may")
         doc = syncer.node.document()
+        # asked before the tombstone, which forgets the node's evidence
+        everywhere = trust.may_remove_everywhere(
+            store, signing.public(syncer.root), found[0])
         trust.record_removal(store, trust.removal(syncer.root, own,
                                                   found[0], syncer.clock()))
         trust.save(syncer.root, store)
@@ -75,6 +83,9 @@ def remove(syncer: Syncer, which: str, out: Callable[[str], None]) -> int:
         syncer.err("the tombstone is kept: keel mesh sync drops the peer"
                    " again once the change can be confirmed")
         return code
+    etcdcare.leave(etcd.Etcd(syncer.node, syncer.clock, syncer.err),
+                   found[1], everywhere, found[0])
+    # the roster announced carries the CRL that revokes the node
     sync.announce(syncer, found[0], "the removal")
     out(f"removed {found[0]} at {found[1]}: the other members drop it on"
         " its tombstone, and no keel mesh sync adds it again")

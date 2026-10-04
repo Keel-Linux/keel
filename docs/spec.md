@@ -879,7 +879,7 @@ overlays:                   # every overlay of the chain, written out (0027)
 | --- | --- | --- |
 | `appliance.name` | system | The appliance manifest this machine runs, `[a-z][a-z0-9-]*`, at most 32 characters. It must be installed under `/usr/share/keel/appliances/` of the root the command works on, valid, and resolve along its `base` chain |
 | `installation.mode` | read | `simple`, `cloud_simple` or `cloud_advanced`. Chosen once, at installation: it picks the column of defaults the installer starts from, and nothing converges it. Moving a machine between modes is out of scope |
-| `overlays.<name>` | system | `enabled` or `disabled`, for every overlay of the resolved chain, none left out and none added. `apply --system` enables and starts, or stops and disables, the overlay's units, and derives Monit's checks from what is enabled ([docs/apply.md](apply.md)) |
+| `overlays.<name>` | system | `enabled` or `disabled`, for every overlay of the resolved chain, none left out and none added. `apply --system` enables and starts, or stops and disables, the overlay's units, and derives Monit's checks from what is enabled ([docs/apply.md](apply.md)). `etcd: enabled` is refused unless `installation.mode` is `cloud_advanced` (decisions 0041 and 0048); it says only that etcd runs: its members and certificates are state ([docs/mesh.md](mesh.md), "etcd") |
 
 The words are `enabled` and `disabled`: YAML reads an unquoted `on`,
 `off`, `yes` or `no` as a boolean, and such a value is refused with that

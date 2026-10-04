@@ -52,6 +52,9 @@ from keel import exits
 from keel.mesh import (
     DIR,
     FILE_MODE,
+    etcd,
+    etcdcare,
+    etcdstate,
     identity,
     invites,
     memberlink,
@@ -137,7 +140,8 @@ def roster(syncer: Syncer) -> Roster:
         tuple(Peer(one.public_key, one.endpoint, one.address,
                    store.evidence(one.public_key))
               for one in syncer.node.peers(public)),
-        tuple(store.removed.values()))
+        tuple(store.removed.values()),
+        etcdstate.read(syncer.root, etcdstate.CRL))
 
 
 def offered(syncer: Syncer) -> Roster:
@@ -278,6 +282,10 @@ def verified(syncer: Syncer, rosters: list[Roster], own: bytes,
         gone += one.removed
     found = trust.accepted(store, signer, own, entries)
     removed = trust.removals(store, signer, own, gone)
+    for one in rosters:
+        if one.identity == own and one.crl:
+            etcdcare.crl_taken(etcd.Etcd(syncer.node, syncer.clock,
+                                         syncer.err), one.crl)
     return Taken(tuple(one for one in found
                        if not store.gone(one.public_key)), removed, code)
 

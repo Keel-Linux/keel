@@ -2,7 +2,8 @@
 """The members' channel: HTTP on the overlay, WireGuard its proof
 
 What `keel mesh sync` pulls and what the inviter announces
-(keel.mesh.members) goes between two members' overlay addresses, on
+(keel.mesh.members), and what members say of etcd (`POST /v1/etcd`,
+keel.mesh.etcdmsg), goes between two members' overlay addresses, on
 TCP 51821, and both ends bind their socket to the overlay's interface
 (SO_BINDTODEVICE): the server takes only what arrived through
 WireGuard, and the client's request leaves, and its answer comes back,
@@ -36,6 +37,7 @@ from http.server import BaseHTTPRequestHandler
 
 from keel.mesh import members
 from keel.mesh.channel import plain, reason, shown
+from keel.mesh.etcdmsg import PATH as ETCD
 from keel.mesh.listener import (
     DRAIN,
     MAX_HEADERS,
@@ -126,6 +128,16 @@ def tell(host: str, iface: str, roster: Roster, port: int = PORT) -> None:
         raise LinkError(f"{shown(host, port)} refused: {reason(data, status)}")
 
 
+def etcd_exchange(host: str, iface: str, body: bytes,
+                  port: int = PORT) -> bytes:
+    """The answer of the member at `host` to a signed etcd message
+    (keel.mesh.etcdmsg); raises LinkError"""
+    status, data = exchange(host, iface, POST, ETCD, body, port=port)
+    if status != 200:
+        raise LinkError(f"{shown(host, port)} refused: {reason(data, status)}")
+    return data
+
+
 def touch(host: str, iface: str, port: int = PORT) -> None:
     """Send `host` a packet through `iface`, so that WireGuard starts a
     handshake with its peer; whatever answers, or nothing"""
@@ -166,7 +178,8 @@ class Front:
 
     def handle(self, method: str, path: str, body: bytes | None,
                source: str) -> Answer:
-        if (method, path) not in ((GET, LIST), (POST, ANNOUNCE)):
+        if (method, path) not in ((GET, LIST), (POST, ANNOUNCE),
+                                  (POST, ETCD)):
             found = refused(404, "no such request")
         elif body is None:
             found = refused(413, "longer than any roster")

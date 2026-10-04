@@ -1035,6 +1035,34 @@ secret reaches an argument vector, a plan line or an error. Nothing is
 made under `--root`: an image is where an identity must not be made.
 Turning the overlay off leaves the identity in place.
 
+**etcd's configuration** (handbook decisions 0025 and 0048, its third
+round). The spec says only `overlays.etcd: enabled`, which `spec
+validate` refuses outside `installation.mode: cloud_advanced`; who the
+members are and this member's certificates are state under
+`/var/lib/keel/etcd` ([docs/mesh.md](mesh.md), "etcd"). With the
+overlay enabled, apply writes from that state:
+
+| File | What, mode and owner |
+| --- | --- |
+| `/etc/default/etcd` | the environment trixie's `etcd.service` reads: peers on `https://[overlay]:2380`, clients on `https://[overlay]:2379` and `https://[::1]:2379`, never a wildcard; client certificates required of both, TLS 1.3; `/health` and `/metrics` alone on a plain listener, `http://[::1]:2381`, for Monit; the initial cluster and its token; heartbeat 300 ms, election timeout 5000 ms. 0644 |
+| `/etc/etcd/keel/member.crt`, `member.key`, `ca.crt`, `crl.pem` | this member's certificate with its chain, its key, the mesh's root, and the root's CRL (`ETCD_PEER_CRL_FILE`, `ETCD_CLIENT_CRL_FILE`), which etcd reads at each handshake. 0600, owned by `etcd` |
+| `/etc/systemd/system/etcd.service.d/keel.conf` | after `wg-quick@<interface>`, restarted on failure, `TimeoutStartSec=infinity` (etcd reports ready only with a quorum), and systemd's sandbox: no capability, `ProtectSystem=strict` with `/var/lib/etcd` writable, the kernel and namespace protections, `@system-service` system calls. Then `systemctl daemon-reload`. 0644 |
+
+etcd is started with `systemctl start --no-block`, and restarted
+(`--no-block`) when its environment or drop-in changes, but not for the
+`ETCD_INITIAL_*` lines once `/var/lib/etcd/default/member` exists: etcd
+reads them only at its first start. A renewed certificate is no
+restart: etcd reads its certificate files at each handshake.
+
+Before this member is in a cluster there is nothing to render: a cloud
+advanced installation enables the overlay from its first boot, and the
+step says `etcd waits for its cluster` and starts nothing, without
+failing the run; `keel diff` reports the overlay as not compared for
+the same reason. A damaged `cluster.json`, a missing `etcd` user
+(etcd-server not installed), a member with no certificate yet, or a
+member in `/var/lib/etcd/default` that keel never started (etcd-server's
+own first start leaves one) is refused.
+
 **derived.monit** (`/etc/keel/monit/keel-manifest.conf`; handbook
 decisions 0040 and 0041)
 

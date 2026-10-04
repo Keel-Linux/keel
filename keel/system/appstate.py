@@ -20,6 +20,7 @@ from keel.manifest import monit
 from keel.manifest.facts import gather
 from keel.manifest.resolve import Resolved, overlay_units
 from keel.system.crowdsec import CrowdsecState, observe_crowdsec
+from keel.system.etcd import EtcdState, observe_etcd
 from keel.system.fwstate import FirewallState, observe_firewall
 from keel.system.hooks import OverlayHooks, observe_hooks
 
@@ -47,6 +48,8 @@ class ApplianceState:
     # each overlay's state hooks (keel.system.hooks), only those that
     # have any, with what was recorded after they last passed
     hooks: dict[str, OverlayHooks] = field(default_factory=dict)
+    # etcd's state and files (keel.system.etcd), when the chain has it
+    etcd: EtcdState | None = None
 
 
 def observe_appliance(root: str, doc: dict) -> ApplianceState | None:
@@ -58,6 +61,7 @@ def observe_appliance(root: str, doc: dict) -> ApplianceState | None:
     facts = gather(root, str(appliance.get("name")))
     units: dict[str, UnitState] = {}
     hooks: dict[str, OverlayHooks] = {}
+    etcd = None
     if facts.resolved is not None:
         names = [unit for state in facts.resolved.overlays
                  for unit in overlay_units(facts.resolved, state.name)]
@@ -65,6 +69,8 @@ def observe_appliance(root: str, doc: dict) -> ApplianceState | None:
         hooks = {state.name: found for state in facts.resolved.overlays
                  if (found := observe_hooks(tree.root, state.name,
                                             state.manifest))}
+        if "etcd" in {state.name for state in facts.resolved.overlays}:
+            etcd = observe_etcd(tree, doc)
     return ApplianceState(
         resolved=facts.resolved,
         problems=facts.problems,
@@ -79,4 +85,5 @@ def observe_appliance(root: str, doc: dict) -> ApplianceState | None:
         firewall=observe_firewall(tree, tree.root == ROOT_DEFAULT
                                   and doc.get("firewall") is not None),
         hooks=hooks,
+        etcd=etcd,
     )

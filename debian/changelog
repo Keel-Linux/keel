@@ -1,3 +1,72 @@
+keel (0.19.0) unstable; urgency=medium
+
+  * etcd, the mesh's registry (handbook decisions 0025 and 0048, its
+    third round), on the cloud advanced members, over the WireGuard
+    mesh. etcd uses its own TLS, peer and client, on the overlay
+    addresses and ::1 only: the first node makes the mesh's root CA,
+    every member holds an intermediate CA its inviter signs, carried in
+    the join's authenticated answer, and issues its own member and
+    client certificates. The member list and the certificates are state
+    under /var/lib/keel/etcd; the spec says only overlays.etcd: enabled,
+    which spec validate refuses outside cloud advanced.
+  * etcd forms at the third cloud advanced member's join: the inviter
+    writes the cluster of three, sends it to the third member over the
+    members' channel, signed with its Ed25519 key, and each enables etcd
+    in its own spec. From the fourth, the inviter adds the new node as a
+    learner before it answers, and promotes it once in sync.
+  * keel mesh etcd form forms etcd on a mesh that never saw a third join
+    (one built with keel 0.18 and adopted, with no CA yet): it asks
+    every member first, refuses two roots or a cluster it is not in,
+    makes the root when none exists, enrolls every member before it
+    starts anything, and with --dry-run only says what it would do. On a
+    formed cluster it brings in the members it lacks. The fallback's
+    join is brought in the same way.
+  * keel mesh etcd tend, from keel-mesh-etcd.timer every 5 minutes,
+    promotes learners in sync, removes those that never started within
+    an hour, and renews the leaves with a third of their life left.
+  * keel mesh remove also removes the etcd member, only when this node
+    admitted the node or it is a trust root (the admission evidence
+    amendment); otherwise the removal is local only.
+  * keel mesh status shows etcd's members, leader and health.
+  * apply renders /etc/default/etcd, the certificates for the etcd user
+    and a sandboxing drop-in from the state, and starts etcd with
+    --no-block; before the cluster exists etcd waits, without failing
+    the run, and keel diff does not count it as drift. Heartbeat 300 ms,
+    election timeout 5000 ms, for 250 ms ±25 ms with 2% loss
+    (decision 0050), measured in tests/test_etcd_netns.py.
+  * Only the root CA's holder forms the cluster, once: it signs a
+    formation record (token, members, root fingerprint) with the root
+    and reserves it under its lock, and a member takes a cluster only
+    with that record. Another inviter of the third member admits it and
+    names the holder for keel mesh etcd form, which runs only there.
+  * Short lives and a CRL: leaves 30 days, renewed by their member;
+    intermediates a year, renewed by the root's holder, which signs
+    them with the root (an inviter relays the request), so chains stay
+    one deep. Every intermediate is name constrained to the mesh's /64
+    and ::1. The holder's CRL, signed by the root, goes to etcd's
+    --peer-crl-file and --client-crl-file and travels with the rosters;
+    keel mesh remove has the holder revoke the removed node's
+    intermediates.
+  * Every intermediate is signed by the root, the request relayed by
+    the inviter (0048's third round, point 1, narrowed); one
+    intermediate deep, path length 0, name constrained to its member's
+    own /128 and ::1, and recorded with its address and key. When the
+    holder cannot be reached the join completes without etcd, and
+    keel-mesh-etcd.timer asks again. A revocation names no serial: the
+    holder revokes what it recorded for that address and key, only for
+    the node's admitter, a trust root or the node itself. Records carry
+    etcd's cluster ID, an epoch, a nonce and an expiry, name exactly the
+    cluster's members, and are never taken twice or older.
+  * A renewal that fails is alerted through the monitor's channels and
+    shown by keel mesh status and keel diff (etcd.certificates), as is a
+    certificate within seven days of its expiry.
+  * etcd's /health on a plain metrics listener on [::1]:2381, for
+    Monit; apply refuses a member etcd-server's own start left, and the
+    join or form that starts etcd removes it first only when
+    keel-overlay-etcd marked it as its own.
+
+ -- Marcos Mendez <mendez.foto@gmail.com>  Sun, 04 Oct 2026 12:00:00 +0000
+
 keel (0.18.0) unstable; urgency=medium
 
   * keel mesh makes a full mesh before etcd (handbook decision 0048,

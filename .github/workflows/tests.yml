@@ -38,6 +38,24 @@ jobs:
           python3-yaml wireguard-tools iproute2 iputils-ping openssl
         PYTHONPATH=. python3 -m pytest -q tests/test_mesh_netns.py \
           tests/test_mesh_channel.py
+  # etcd over the mesh (decisions 0025, 0048, 0050) in a Debian trixie
+  # system container: three namespaces, the real wg-quick and trixie's
+  # etcd 3.5, keel's CA and rendered configuration, on links of 250 ms
+  # ±25 ms with 2% loss; it forms, keeps its leader for 60 s, and a
+  # follower cut off for 45 s rejoins (tests/test_etcd_netns.py; the
+  # 5 and 2 minutes of the brief run by hand, ETCD_SOAK=full). The
+  # check is "etcd / trixie".
+  etcd:
+    uses: keel-linux/.github/.github/workflows/lxc-trixie.yml@main
+    with:
+      timeout: 20
+      run: |
+        apt-get update -qq
+        apt-get install -y -qq --no-install-recommends python3-pytest \
+          python3-yaml wireguard-tools iproute2 iputils-ping openssl \
+          etcd-server
+        KEEL_ETCD_NETNS=1 PYTHONPATH=. python3 -m pytest -q -s \
+          tests/test_etcd_netns.py
   # A change that ships must come with a changelog entry, or it cannot be
   # installed and never reaches an appliance. The rule and its tests are
   # bin/require-changelog of the .github repository. The check is

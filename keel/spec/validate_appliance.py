@@ -24,6 +24,8 @@ MAX_NAME = 32
 NAME_RULE = "[a-z][a-z0-9-]*, at most 32 characters"
 ASK = "ask"
 SECTION_KEYS = {"appliance": ("name",), "installation": ("mode",)}
+ETCD = "etcd"
+ETCD_MODE = "cloud_advanced"
 
 
 @dataclass(frozen=True)
@@ -66,7 +68,22 @@ def validate_appliance(doc: dict) -> list[str]:
                       " overlays these are")
     for name, state in (overlays or {}).items():
         errors += _state(name, state)
+    errors += _etcd_mode(doc, overlays or {})
     return errors
+
+
+def _etcd_mode(doc: dict, overlays: dict) -> list[str]:
+    """etcd runs only in cloud advanced (0041, "Resolved"; 0048, second
+    round, point 5): the mesh never changes the mode by itself"""
+    if overlays.get(ETCD) != "enabled":
+        return []
+    installation = doc.get("installation")
+    mode = installation.get("mode") if isinstance(installation, dict) \
+        else None
+    if mode == ETCD_MODE:
+        return []
+    return [f"overlays.{ETCD}: etcd runs in cloud advanced installations"
+            f" only, and installation.mode is {mode or 'not declared'}"]
 
 
 def _section(key: str, value: Any, fields: tuple[str, ...]) -> list[str]:
