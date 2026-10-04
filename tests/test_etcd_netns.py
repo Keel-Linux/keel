@@ -80,6 +80,19 @@ class TestThreeMembersOnAPoorNetwork(unittest.TestCase):
         self.fail(f"no result from {DRIVER}:\n{done.stdout[-3000:]}\n"
                   f"{done.stderr[-3000:]}")
 
+    def test_the_links_are_the_design_case(self):
+        """Measured before the scenario: 250 ms round trip, and 2% loss
+        on each leg (a ping crosses two, so about 4% of the round trips
+        lose one); a link that is not that fails the run"""
+        link = self.found["link"]
+        self.assertIn("rtt_ms", link, link)
+        self.assertGreater(link["rtt_ms"], 225, link)
+        self.assertLess(link["rtt_ms"], 290, link)
+        # 400 round trips at 2% on each of their two legs: about 4%
+        # lost, and with that many, between 0.5% and 8%
+        self.assertGreater(link["loss"], 0.005, link)
+        self.assertLess(link["loss"], 0.08, link)
+
     def test_it_forms_under_the_design_case(self):
         self.assertEqual(self.found["netem_leg"], ["125ms", "12.5ms", "2%"])
         self.assertIsNotNone(self.found["formed_s"], self.found)
@@ -136,6 +149,7 @@ class TestThreeMembersOnAPoorNetwork(unittest.TestCase):
                         self.found)
         self.assertTrue(self.found["c_reaches_a_after"].startswith(
             "refused"), self.found)
+        self.assertEqual(self.found["revoked"], [self.found["c_serial"]])
 
     def test_a_learner_added_and_removed_with_keel_s_client(self):
         self.assertEqual(self.found["learner"], {

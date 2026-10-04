@@ -47,6 +47,7 @@ stability is 300 s and the partition 120 s (the brief's), else 60 and
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -67,6 +68,7 @@ STABLE = int(os.environ.get("ETCD_STABLE") or (300 if FULL else 60))
 PARTITION = int(os.environ.get("ETCD_PARTITION") or (120 if FULL else 45))
 LEADER_PARTITION = int(os.environ.get("ETCD_LEADER_PARTITION") or 120)
 LEG = os.environ.get("ETCD_NETEM", "125ms 12.5ms 2%").split()
+PINGS = 400
 CHILDREN: list[subprocess.Popen] = []
 WATCHERS: list[subprocess.Popen] = []
 ETCDS: list[subprocess.Popen] = []
@@ -145,13 +147,17 @@ def overlay_up(pid: int, root: str, index: int, pairs) -> None:
     sh("wg-quick", "up", conf, pid=pid)
 
 
+KEYS: list[str] = []
+
+
 def credentials(roots: list[str]) -> None:
-    """A makes the root; B's intermediate by A, C's by B"""
+    """A makes the root and signs B's and C's intermediates with it:
+    only the root's holder signs (keel.mesh.etcdca)"""
     etcdstate.make_root(roots[0], MESH, OVERLAY.format(n=1))
-    for n, issuer, member in ((2, roots[0], roots[1]),
-                              (3, roots[1], roots[2])):
+    for n, member in ((2, roots[1]), (3, roots[2])):
         etcdstate.take_grant(member, etcdstate.grant_for(
-            issuer, etcdstate.ca_request(member), OVERLAY.format(n=n)))
+            roots[0], etcdstate.ca_request(member), OVERLAY.format(n=n),
+            KEYS[n - 1]))
     for index, root in enumerate(roots):
         etcdstate.leaves(root, OVERLAY.format(n=index + 1), utcnow())
 
@@ -168,6 +174,28 @@ def environment(root: str, address: str, cluster: Cluster) -> dict:
         if value in moved:
             found[key] = os.path.join(root, moved[value])
     found["ETCD_DATA_DIR"] = os.path.join(root, "etcd-data")
+    return found
+
+
+def measured(pid: int, address: str) -> dict:
+    """The round trip and the loss over the overlay from `pid` to
+    `address`, before anything else runs on it: a few pings bring the
+    tunnel up (its first handshake), then PINGS of them are counted"""
+    warm = ["nsenter", "-t", str(pid), "-n", "ping", "-6", "-I", "wg0",
+            "-c", "10", "-i", "0.5", "-W", "3", address]
+    subprocess.run(warm, capture_output=True, check=False, timeout=120)
+    done = subprocess.run(
+        ["nsenter", "-t", str(pid), "-n", "ping", "-6", "-I", "wg0", "-q",
+         "-c", str(PINGS), "-i", "0.1", "-W", "3", address],
+        capture_output=True, text=True, check=False, timeout=600)
+    found = {"said": (done.stdout + done.stderr).strip().splitlines()[-3:]}
+    sent = re.search(r"(\d+) packets transmitted, (\d+) received",
+                     done.stdout)
+    rtt = re.search(r"= [\d.]+/([\d.]+)/", done.stdout)
+    if sent:
+        found["loss"] = 1 - int(sent.group(2)) / int(sent.group(1))
+    if rtt:
+        found["rtt_ms"] = float(rtt.group(1))
     return found
 
 
@@ -260,17 +288,19 @@ def driver() -> None:
     pairs = keys()
     for index, pid in enumerate(pids):
         overlay_up(pid, roots[index], index, pairs)
+    KEYS.extend(pair[1] for pair in pairs)
     credentials(roots)
     # the root's holder forms, signing the record every member checks
     cluster = etcdca.record(roots[0], tuple(
         Member(pairs[index][1], OVERLAY.format(n=index + 1))
-        for index in range(len(NAMES))), MESH)
-    problems = [etcdca.problem(root, cluster) for root in roots]
+        for index in range(len(NAMES))), MESH, utcnow())
+    problems = [etcdca.problem(root, cluster, utcnow()) for root in roots]
     report = {"netem_leg": LEG, "stable_s": STABLE, "partition_s": PARTITION,
               "heartbeat_ms": etcdconf.HEARTBEAT_MS,
               "election_ms": etcdconf.ELECTION_MS,
               "record_problems": problems,
               "leader_partition_s": LEADER_PARTITION}
+    report["link"] = measured(pids[0], OVERLAY.format(n=2))
     began = time.time()
     for index, pid in enumerate(pids):
         start_etcd(pid, roots[index], environment(
@@ -291,10 +321,6 @@ def driver() -> None:
         print("RESULT " + json.dumps(report), flush=True)
         return
     report["leader_at_formation"] = agreed(paths, began)
-    # the round trip over the overlay, once the tunnels are up
-    rtt = sh("ping", "-6", "-c", "20", "-i", "0.5", "-q",
-             OVERLAY.format(n=2), pid=pids[0], check=False)
-    report["ping_a_b_overlay"] = rtt.strip().splitlines()[-2:]
 
     # 2. stays: STABLE seconds, every member asked each second
     start = time.time()
@@ -378,9 +404,9 @@ def driver() -> None:
     # reaches A's etcd (etcd checks the CRL against the chain it is shown)
     report["c_reaches_a_before"] = reaches(pids[2], roots[2])
     serial = etcdpki.serial(etcdstate.read(roots[2], etcdstate.CA_CERT))
-    expiry = etcdpki.stamp(etcdpki.not_after(etcdstate.read(
-        roots[2], etcdstate.CA_CERT)))
-    found = etcdca.revoke(roots[0], None, {serial: expiry}, utcnow())
+    found = etcdca.revoke(roots[0], OVERLAY.format(n=3), KEYS[2], utcnow())
+    report["revoked"] = sorted(etcdpki.crl_serials(found))
+    report["c_serial"] = serial
     for root in roots[1:]:
         etcdstate.take_crl(root, found)
     report["c_reaches_a_after"] = reaches(pids[2], roots[2])
