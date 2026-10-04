@@ -120,10 +120,29 @@ class TestStructure(unittest.TestCase):
             " most 32 characters)"])
 
     def test_overlays_need_the_appliance_they_belong_to(self):
-        found = validate_appliance({"overlays": {"etcd": "enabled"}})
+        found = validate_appliance({"overlays": {"crowdsec": "enabled"}})
         self.assertEqual(found, [
             "overlays: needs appliance.name, the appliance whose overlays"
             " these are"])
+
+    def test_etcd_runs_in_cloud_advanced_only(self):
+        """0041, "Resolved"; 0048, second round, point 5"""
+        for mode in ("simple", "cloud_simple", None):
+            doc = {"appliance": {"name": "core"},
+                   "overlays": {"etcd": "enabled"}}
+            if mode:
+                doc["installation"] = {"mode": mode}
+            self.assertEqual(validate_appliance(doc), [
+                "overlays.etcd: etcd runs in cloud advanced installations"
+                f" only, and installation.mode is {mode or 'not declared'}"])
+        self.assertEqual(validate_appliance({
+            "appliance": {"name": "core"},
+            "installation": {"mode": "cloud_advanced"},
+            "overlays": {"etcd": "enabled"}}), [])
+        self.assertEqual(validate_appliance({
+            "appliance": {"name": "core"},
+            "installation": {"mode": "simple"},
+            "overlays": {"etcd": "disabled"}}), [])
 
     def test_without_the_system_phase_the_overlays_are_left_alone(self):
         self.assertEqual(spec.unsupported(core()), [

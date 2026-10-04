@@ -1,0 +1,11 @@
+# keel mesh etcd tend every 5 minutes (decisions 0025, 0048)
+[Unit]
+Description=keel mesh: tend etcd regularly
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+RandomizedDelaySec=1min
+
+[Install]
+WantedBy=timers.target

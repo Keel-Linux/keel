@@ -20,9 +20,11 @@ two processes:
 
 The root side (`Members`) treats what the listener forwards as
 untrusted: the source must be in a spec peer's allowed_ips, an
-announcement must parse whole and name its sender's key. It answers the
-roster at once and queues an announcement (`Pending`): one per sender,
-the latest replacing an earlier one, at most MAX_PENDING senders. One
+announcement must parse whole and name its sender's key. A message
+about etcd is answered at once by keel.mesh.etcdserve, which checks its
+signature. It answers the roster at once and queues an announcement
+(`Pending`): one per sender, the latest replacing an earlier one, at
+most MAX_PENDING senders. One
 worker applies everything pending in one change, under one window
 (keel.mesh.sync.announced), after verifying each entry's evidence
 (keel.mesh.trust).
@@ -40,9 +42,25 @@ from collections.abc import Callable
 from datetime import datetime
 
 from keel import exits
-from keel.mesh import bridge, memberlink, members, signing, sync
+from keel.mesh import (
+    bridge,
+    etcd,
+    etcdserve,
+    memberlink,
+    members,
+    signing,
+    sync,
+)
 from keel.mesh.bridge import BridgeError, Unit, capabilities, line, send
-from keel.mesh.memberlink import ANNOUNCE, GET, LIST, POST, Answer, refused
+from keel.mesh.memberlink import (
+    ANNOUNCE,
+    ETCD,
+    GET,
+    LIST,
+    POST,
+    Answer,
+    refused,
+)
 from keel.mesh.members import PORT, Roster
 from keel.mesh.protocol import ProtocolError
 from keel.mesh.signing import SigningError
@@ -110,11 +128,13 @@ class Members:
 
     def __init__(self, roster: Callable[[], Roster],
                  member_of: Callable[[str], str | None], pending: Pending,
-                 log: Callable[[str], None]):
+                 log: Callable[[str], None],
+                 etcd_answer: Callable[[bytes, str], Answer] | None = None):
         self.roster = roster
         self.member_of = member_of
         self.pending = pending
         self.log = log
+        self.etcd_answer = etcd_answer
 
     def handle(self, method: str, path: str, body: bytes | None,
                source: str) -> Answer:
@@ -129,6 +149,9 @@ class Members:
             except ValueError as e:
                 self.log(f"cannot answer {source}: {e}")
                 return refused(503, "this node cannot give its roster now")
+        if (method, path) == (POST, ETCD) and body is not None and \
+                self.etcd_answer is not None:
+            return self.etcd_answer(body, key)
         if (method, path) != (POST, ANNOUNCE) or body is None:
             return refused(404, "no such request")
         try:
@@ -305,9 +328,11 @@ def serve(syncer: sync.Syncer, stop: threading.Event,
     pending = Pending(settle=settle)
     worker = threading.Thread(target=work, args=(syncer, pending, stop))
     worker.start()
+    member = etcd.Etcd(syncer.node, syncer.clock, syncer.err)
     handler = Members(lambda: sync.offered(syncer),
                       lambda source: sync.member_of(syncer.node, source),
-                      pending, syncer.err)
+                      pending, syncer.err,
+                      lambda body, key: etcdserve.answer(member, body, key))
     code = exits.OK
     started = None
     try:

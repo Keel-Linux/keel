@@ -36,7 +36,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
-from keel.mesh import identity, invites, protocol, signing, trust
+from keel.mesh import etcd, identity, invites, protocol, signing, trust
 from keel.mesh.node import Node, NodeError
 from keel.mesh.protocol import ProtocolError
 from keel.mesh.signing import SigningError
@@ -136,7 +136,9 @@ class Admitter:
                  address: str, node: Node, clock: Callable[[], datetime],
                  log: Callable[[str], None] | None = None,
                  joined: Joined | None = None,
-                 sleep: Callable[[float], None] = time.sleep):
+                 sleep: Callable[[float], None] = time.sleep,
+                 etcd_admit: Callable[[str | None, str, str],
+                                      etcd.Admission] | None = None):
         self.root = root
         self.invite = invite
         self.public_key = public_key
@@ -150,6 +152,11 @@ class Admitter:
         self.forged = 0
         self.confirmed: bool | None = None
         self.cancelled = False
+        self.etcd_admit = etcd_admit or (lambda csr, key, address: etcd.admit(
+            etcd.Etcd(node, clock, self.log), csr, key, address))
+        # what the join decided for etcd (keel.mesh.etcd), acted on once
+        # the join is confirmed (keel.mesh.inviting)
+        self.etcd_admission = etcd.Admission()
 
     @property
     def name(self) -> str:
@@ -258,12 +265,17 @@ class Admitter:
         window = change.made.window
         self.joined = Joined(request.public_key, address, change.made,
                              self.clock() + timedelta(seconds=window), since)
+        # its etcd CA, and at the third member or after, its cluster:
+        # 0048, "the inviter runs member add ... before it answers"
+        decided = self.etcd_admission = self.etcd_admit(
+            request.etcd_csr, request.public_key, address)
         answer = protocol.JoinAnswer(
             invite_id=self.invite.invite_id, nonce=request.nonce,
             public_key=self.public_key, address=self.address,
             peers=evidenced(self.root, self.node.peers(request.public_key)),
-            etcd="none", window=window, sign_key=evidence.by,
-            admission=evidence)
+            etcd=decided.state, window=window, sign_key=evidence.by,
+            admission=evidence, etcd_grant=decided.grant,
+            etcd_cluster=decided.cluster, etcd_ready=decided.ready)
         self.log(f"{self.name}: peer applied; waiting {window} s for the"
                  " new node over the overlay")
         return self.signed(protocol.JOIN, protocol.dumps(answer))

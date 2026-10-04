@@ -28,9 +28,15 @@ a full mesh before etcd: the announcement of a new node to the
 inviter's other peers, `keel mesh sync`, and the members' channel they
 use ("Members learn of each other"), only with admission evidence
 ("Admission evidence and trust"), and `keel mesh remove` before etcd,
-whose tombstone makes the other members drop the node too. Not yet:
-etcd (it forms at the third node in cloud advanced, Phase 5), the
-rotation of a node's signing key, `keel mesh invites` and `invite
+whose tombstone makes the other members drop the node too; and etcd,
+the mesh's registry, on the cloud advanced members: its CA, its
+formation at the third of them, learners promoted from the fourth,
+`keel mesh etcd form` for a mesh that never saw a third join, `keel
+mesh etcd tend`, the etcd member removed under the amendment's rule,
+and its section of `keel mesh status` ("etcd"). Not yet: members
+learning of each other through etcd's registry (they still do through
+the members' channel), the VIP controller of decision 0049, rotating
+an intermediate CA or the root, the rotation of a node's signing key, `keel mesh invites` and `invite
 --cancel`, and the boot unit that removes invites
 which expired while the machine was down. confconsole's "Invite a node"
 and "Join a mesh" screens call these commands, in confconsole.
@@ -218,8 +224,14 @@ mesh has, that this node has them all as peers, and that the inviter
 announces it to them:
 
 ```
-the mesh has 3 nodes: this node has them all as peers, and the inviter announces this node to the 1 other(s) over the overlay (one offline now learns of it at its next keel mesh sync); etcd is not part of this keel
+the mesh has 3 nodes: this node has them all as peers, and the inviter announces this node to the 1 other(s) over the overlay (one offline now learns of it at its next keel mesh sync)
+etcd: this node forms with 2 other member(s)
 ```
+
+The last line is etcd's, when the inviter gave this node an etcd CA
+("etcd"): `forms with` at the third cloud advanced member, `joins as a
+learner with` from the fourth, or how many ready members are known
+before the third.
 
 A join that fails after the request was accepted (the tunnel never
 answers within the window, say) reverts on both sides by itself, and
@@ -443,6 +455,7 @@ encrypts).
 | --- | --- | --- |
 | `GET /v1/members` | none | 200, this node's roster |
 | `POST /v1/announce` | the sender's roster, the new node in it | 202, queued and applied after the answer |
+| `POST /v1/etcd` | a signed etcd message ("etcd", "The members' channel for etcd") | 200, answered by the root side at once |
 
 A roster is the node's mesh identity (hex, or null), its WireGuard and
 signing keys, its overlay address, every peer its spec declares
@@ -569,6 +582,156 @@ endpoint, its overlay address as a /128), then `keel mesh sync --adopt
 mesh sync --adopt <web-1>`. `keel mesh status` shows each node's
 identity.
 
+## etcd
+
+etcd is the mesh's registry (decision 0025), control plane only. It
+runs on the members whose spec says `installation.mode: cloud_advanced`
+and whose appliance carries the `etcd` overlay (decision 0048, third
+round, point 3; `spec validate` refuses `overlays.etcd: enabled` in any
+other mode), and forms at the third of them: two etcd members have no
+fault tolerance.
+
+### The CA and the certificates
+
+etcd uses its own TLS, peer and client, not WireGuard alone, so a
+process on a member that holds no certificate signed in the mesh cannot
+read or write the registry (0048, second round, point 3). All P-256,
+made with openssl on the machine, never in an image (keel.mesh.etcdpki):
+
+- **the root CA** is made by the first node: `keel mesh create` on a
+  cloud advanced node, or `keel mesh etcd form` on a mesh that has none.
+  Its key stays on that node;
+- **an intermediate CA per member** (third round, point 1): its key is
+  made on the member, its request travels in the join request, and the
+  inviter signs it with its own intermediate (the first node with the
+  intermediate its root signed). The join's answer, under the invite's
+  HMAC, carries it with the chain above it and the root. The member
+  checks it certifies its own key, chains to the root, and that the root
+  is the one it holds, if any;
+- **leaves**, issued by each member with its own intermediate: its
+  member certificate (server and client, its overlay address and ::1 as
+  addresses, a year) and keel's client certificate (root's alone). Every
+  certificate can be traced to the member whose intermediate signed it.
+
+A leaf is renewed with a third of its life left, by `keel mesh etcd
+tend` (`keel-mesh-etcd.timer`); etcd reads its certificate files at each
+handshake, so nothing restarts. An intermediate lasts ten years and the
+root twenty; rotating either is not in this version: a member whose
+intermediate may be compromised is removed and joins again.
+
+### Birth at the third member
+
+The inviter's token says `forms` when it and exactly one other member
+are ready (cloud advanced, an intermediate held). When it admits a third
+ready node, it signs the node's intermediate and writes a cluster of the
+three, `new`, the mesh's identity as its token, the members named after
+their overlay addresses (`keel-fd2a-9c41-7e03--3`); the answer carries
+it. Once the join is confirmed, the new node and the inviter each write
+`overlays.etcd: enabled` into their own spec and apply, which renders
+etcd's configuration from the state and starts it ([docs/apply.md](
+apply.md), "etcd's configuration"); the inviter sends the cluster to the
+third member over the members' channel, which does the same. A join that
+reverts leaves etcd alone on both sides.
+
+### The fourth node and after
+
+The token says `running`. Before it answers, the inviter adds the new
+node as a **learner** (`member add --learner` for its peer URL), which
+does not count towards the quorum, so a join that never finishes cannot
+lower the cluster's fault tolerance; the answer says `existing` with the
+member list. The new node starts as a learner; the inviter's helper
+promotes it once etcd accepts (a learner in sync), for two minutes, and
+`keel mesh etcd tend` on every member goes on after. A learner that
+never started within an hour is a join that never came, and tend
+removes it.
+
+### keel mesh etcd form
+
+```
+keel mesh etcd form [--dry-run]
+```
+
+Root, on any cloud advanced member, for a mesh that never sees a third
+join: one that already had three nodes (built with keel 0.18, or by
+hand and adopted), or whose third member joined by the fallback, whose
+line carries no request. It is made safe on such a mesh, which has no
+CA yet:
+
+1. it asks every peer over the members' channel (`probe`, which changes
+   nothing on them): whether it can run etcd, which root it holds,
+   whether it is in a cluster. It refuses while a network change waits,
+   when members hold two roots, when a cluster exists and this node is
+   not in it, when another member holds the CA and this node does not,
+   or when this node cannot run etcd. A member that does not answer is
+   left out and said;
+2. with `--dry-run` it prints what it would do, and stops:
+
+   ```
+   would make the mesh's root CA on this node
+   would enroll fd2a:9c41:7e03::2
+   would enroll fd2a:9c41:7e03::3
+   would form a cluster of 3: this node and fd2a:9c41:7e03::2, fd2a:9c41:7e03::3
+   dry run: nothing was changed on any member
+   ```
+
+3. it makes the root on this node when no member holds one, and enrolls
+   every ready member that holds no intermediate (`enroll`, its request,
+   signed here). Any enrollment that fails stops it before anything is
+   started anywhere;
+4. at three ready members or more it sends each the cluster (`cluster`)
+   and starts its own; with fewer, the members keep their intermediates
+   and etcd forms at the third.
+
+On a member of a formed cluster it brings in what the cluster lacks: a
+ready member that is not in etcd is added as a learner and sent the
+cluster, and a member of the first cluster that never started is sent it
+again. So a run that stopped part way is run again, and the inviter of
+a fallback join runs it by itself once the join is confirmed.
+
+### keel mesh etcd tend
+
+```
+keel mesh etcd tend
+```
+
+Root; what `keel-mesh-etcd.timer` runs every five minutes, on a member
+of a cluster: each learner etcd says is in sync is promoted, a learner
+that never started within an hour is removed, and this member's leaves
+are renewed with a third of their life left.
+
+### The members' channel for etcd
+
+`POST /v1/etcd` carries one message: `kind` (`probe`, `enroll` or
+`cluster`), `mesh_id`, `sender` (its WireGuard key), `time` and `body`,
+signed with the sender's Ed25519 key over `keel mesh etcd 1\n` and the
+message's canonical JSON. WireGuard says who speaks; a message that acts
+needs the member's own signature too (0048's amendment): the root side
+takes it only when it names the key of the peer it came from, is no more
+than five minutes from this node's clock, is for this node's mesh, and
+is signed by the signing key its trust store holds for that member. A
+`cluster` message never replaces an intermediate this node holds, never
+brings another root, and names this node.
+
+### Timeouts, two members, a partition
+
+A heartbeat of 300 ms and an election timeout of 5000 ms, for the
+design case of decision 0050, 250 ms ±25 ms with 2% loss. etcd's tuning
+guide sets the heartbeat interval "around the round-trip time between
+members" and the election timeout "at least 10 times the round-trip
+time". Peer traffic is a TCP stream, so a lost segment holds it for one
+retransmission timeout (200 ms at least, plus the round trip), and
+losses back to back double it; 0050's bench, at 3 s, still re-elected
+under loss. 5 s is about 17 heartbeats and 20 round trips; a dead leader
+is seen in 5 to 10 s, which beside DNS's one to five minutes (0020)
+costs nothing. Pre-vote stays on (etcd 3.5's default).
+
+Two members are never formed by a join; they are left by a removal or
+a failure, and `keel mesh status` and `remove` say that a majority of
+two is two. A member cut off from three cannot win a pre-vote, so it
+raises no term and the leader stays; it serves nothing linearizable
+and catches up on heal. A leader cut off steps down after an election
+timeout, and the majority elects another.
+
 ## keel mesh remove
 
 ```
@@ -592,7 +755,15 @@ and sends the same announcement as a join, so the others drop it too"
 Each member takes the tombstone if this node may remove that peer (it
 admitted it, it is a root, or it is the peer itself), and drops the peer
 through one window of its own; one offline then does at its next sync.
-etcd's `member remove` is not here yet.
+
+With etcd, the node's etcd member is removed too (`member remove`),
+only when this node may remove it from the whole mesh (0048, third
+round, point 4): this node admitted it, by the evidence it keeps, or the
+node is one of this node's trust roots, which on a mesh built by hand
+and adopted makes this node its root as well. Otherwise it says the
+etcd member stays and the removal is local only: the node's admitter or
+a root removes it from etcd. With two voters left it says so: two etcd
+members have no fault tolerance.
 
 ## keel mesh status
 
@@ -608,6 +779,12 @@ asked for `public-key`, `endpoints` and `latest-handshakes` only, never
 `dump` or `private-key`, and no secret is printed. Off the live system
 (`--root`) no handshake is read.
 
+Then etcd's section: not on this node (not cloud advanced); not formed,
+with how many of the three ready members are known; or each member of
+the cluster (its name, overlay address, voter or learner, healthy or
+why not), the leader they report (`members disagree` when they do not),
+and a warning with two voters. Off the live system etcd is not asked.
+
 ## The protocol
 
 Two requests go to the inviter's HTTPS port, each a JSON body POSTed
@@ -618,12 +795,12 @@ the body.
 
 | Request | Fields | Over |
 | --- | --- | --- |
-| `POST /v1/join` | `invite_id`, `public_key`, `sign_key` (the new node's Ed25519 key), `endpoint` (`[address]:port`, or null), `address` (the reserved one, with its length), `nonce` (16 random bytes, hex), `time` (seconds since the epoch) | the uplink |
+| `POST /v1/join` | `invite_id`, `public_key`, `sign_key` (the new node's Ed25519 key), `endpoint` (`[address]:port`, or null), `address` (the reserved one, with its length), `nonce` (16 random bytes, hex), `time` (seconds since the epoch), `etcd_csr` (the request for its etcd intermediate CA, PEM, sent only by a node that can run etcd, else null) | the uplink |
 | `POST /v1/confirm` | `invite_id`, `public_key`, `nonce`, `time` | the overlay |
 
 | Answer (200) | Fields |
 | --- | --- |
-| to a join | `invite_id`, `nonce` (the request's), `public_key` and `address` (the inviter's), `sign_key` (the inviter's signing key), `admission` (the evidence of this admission, signed with it), `peers` (the other members the inviter knows: `public_key`, `endpoint` or null, `address`, and `admission`, the evidence it keeps, or null), `etcd` (`none` in this keel), `window` (the seconds the inviter's change waits) |
+| to a join | `invite_id`, `nonce` (the request's), `public_key` and `address` (the inviter's), `sign_key` (the inviter's signing key), `admission` (the evidence of this admission, signed with it), `peers` (the other members the inviter knows: `public_key`, `endpoint` or null, `address`, and `admission`, the evidence it keeps, or null), `etcd` (`none`, `forms` or `running`), `window` (the seconds the inviter's change waits), `etcd_grant` (the new node's intermediate CA, its chain and the root, or null), `etcd_cluster` (the cluster it starts, `new` or `existing`, or null), `etcd_ready` (the members ready for etcd: key to address) |
 | to a confirmation | `invite_id`, `nonce`, `confirmed` (whether the inviter kept its change), `detail`, `sign_key` (the inviter's: what the fallback's node learns it by) |
 
 The evidence (`admission`) is `mesh_id` (hex), `invite_id` (empty for a
@@ -770,7 +947,9 @@ are per request. The integration test runs on clean links and again on
 250 ms ±25 ms with 2% loss on every link (`tc netem`). The members' channel gives a connection 10 seconds and an
 answer 30, a member's handshake is waited for the whole window with a
 packet sent every 2 seconds, and the announcement and the sync ask
-every member at once rather than one after another.
+every member at once rather than one after another. etcd's timeouts are
+in "etcd"; `tests/test_etcd_netns.py` forms a cluster of three on these
+links, watches its leader, and cuts a member off.
 
 ## The firewall port
 
@@ -855,6 +1034,15 @@ backup set.
 | `unreached.json` | the members a sync added that never answered, and when: each is left out for an hour |
 | `sync.lock` | held while a sync or an announcement adds members |
 
+etcd's state is beside it, under `/var/lib/keel/etcd`, root's, 0700,
+files 0600: the root CA's key on the first node alone (`root.key`), the
+root (`root.crt`), this member's intermediate (`ca.key`, `ca.crt`) and
+the chain above it (`chain.pem`), its leaves (`member.key`,
+`member.crt`, `client.key`, `client.crt`), the cluster
+(`cluster.json`), the members ready for etcd (`ready.json`) and when
+each unstarted learner was first seen (`learners.json`). Never in the
+spec, never in a backup set.
+
 The invite file holds an HMAC key derived from the secret, never the
 secret, so it cannot be turned back into the token. An invite is
 consumed once, under the lock: it is marked consumed, and a second
@@ -896,11 +1084,11 @@ listener's lines go to its own unit's journal, under the same rule.
 | --- | --- |
 | 0 | the line, the change or the status was printed; the join or the accept confirmed |
 | 2, 3 | the spec cannot be read or is invalid |
-| 15 | `create`, `invite`, `join`, `accept`, `serve`, `sync`, `members`, `remove` on the live system, not as root |
-| 16 | `wg` cannot read or make the key, `openssl` cannot make the certificate, the mesh identity is damaged, the invite's listener cannot start or bind, or this node's change did not come up |
+| 15 | `create`, `invite`, `join`, `accept`, `serve`, `sync`, `members`, `remove`, `etcd form`, `etcd tend` on the live system, not as root |
+| 16 | `wg` cannot read or make the key, `openssl` cannot make the certificate, the mesh identity is damaged, the invite's listener cannot start or bind, or this node's change did not come up; for `etcd form` and `etcd tend`, etcd's state cannot be read or etcd does not answer |
 | 21 | the change was applied and not confirmed (the other side did not answer within the window, or refused, or the route check did; for `sync`, no new member completed a handshake): it reverts by itself |
 | 23 | the token, or `accept`'s line, is mistyped, truncated, of a later format, inconsistent, or expired |
-| 24 | refused: no overlay to invite into, no key yet, no endpoint, no free address, another invite on the port; a node in another mesh or at another address of it, or a change the spec would refuse; a network change waiting; an invite whose peers hold another mesh identity, or none while this node has none; members of another identity, an address that is not a peer's, or an identity repair while an invite is pending; no route to the inviter, or neither node can reach the other; the inviter refused the join (used, expired, bad HMAC), its certificate is not the pinned one, or its answer is not the answer to the request |
+| 24 | refused: no overlay to invite into, no key yet, no endpoint, no free address, another invite on the port; a node in another mesh or at another address of it, or a change the spec would refuse; a network change waiting; an invite whose peers hold another mesh identity, or none while this node has none; members of another identity, an address that is not a peer's, or an identity repair while an invite is pending; no route to the inviter, or neither node can reach the other; the inviter refused the join (used, expired, bad HMAC), its certificate is not the pinned one, or its answer is not the answer to the request; `etcd form` on a node that cannot run etcd or holds no identity, while a network change waits, with members holding two roots, a cluster this node is not in, the CA on another member, an enrollment that failed (nothing started), or a member that did not take the cluster (run it again) |
 
 ## Tests
 
@@ -946,6 +1134,25 @@ At these seams, each written down before its tests:
   `tests/test_mesh_adopt.py`, `tests/test_mesh_remove.py`);
 - the CLI through `keel.cli.main` (`tests/test_mesh_cli.py`,
   `tests/test_mesh_cli_live.py`);
+- etcd: the CA, the intermediates and the leaves with the real openssl
+  (`tests/test_mesh_etcdpki.py`, `tests/test_mesh_etcdstate.py`), the
+  rendered configuration (`tests/test_mesh_etcdconf.py`), the client
+  against a fake gateway over real TLS (`tests/test_mesh_etcdclient.py`),
+  the messages (`tests/test_mesh_etcdmsg.py`), the flows of a join, tend,
+  leave and status with members in one process and a recording etcd
+  (`tests/test_mesh_etcd.py`), `keel mesh etcd form` on a mesh adopted
+  with no CA and the members' answers (`tests/test_mesh_etcd_form.py`),
+  where etcd meets the rest (`tests/test_mesh_etcd_wiring.py`), and apply's
+  step (`tests/test_system_etcd.py`);
+- etcd end to end, `tests/test_etcd_netns.py` runs `tests/etcd_netns.py`
+  as root in a network namespace that routes for three others: the real
+  wg-quick and etcd 3.5, keel's CA (one intermediate signed by a member
+  that is not the first), leaves and rendered configuration, on links of
+  250 ms ±25 ms with 2% loss. It forms, keeps its leader and term, a
+  follower cut off keeps the others their quorum and writes and comes
+  back without raising the term, and a learner is added and removed with
+  keel's client. In CI, `etcd / trixie` runs 60 s and 45 s;
+  `ETCD_SOAK=full` runs 5 minutes and 2;
 - end to end, `tests/test_mesh_netns.py` runs `tests/mesh_netns.py` as
   root in a network namespace (tests/wgtools.py), with two more
   namespaces joined to it by veths: real `wg-quick`, real TLS, the real

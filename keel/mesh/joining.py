@@ -39,6 +39,7 @@ from keel import exits
 from keel.mesh import (
     acceptline,
     channel,
+    etcd,
     identity,
     join,
     members,
@@ -143,7 +144,8 @@ def run(joiner: Joiner, endpoint: str | None) -> int:
     request = protocol.JoinRequest(
         invite_id=token.invite_id, public_key=public, endpoint=own,
         address=token.assigned, nonce=protocol.new_nonce(),
-        time=protocol.seconds(joiner.clock()), sign_key=signer)
+        time=protocol.seconds(joiner.clock()), sign_key=signer,
+        etcd_csr=etcd.join_csr(member(joiner)))
     return requested(joiner, after, request, reach)
 
 
@@ -189,7 +191,13 @@ def requested(joiner: Joiner, after: dict, request: protocol.JoinRequest,
     change = applied(joiner, after)
     if change is None:
         return exits.APPLY_FAILED
-    return confirmed(joiner, change, request.public_key, answer.peers)
+    return confirmed(joiner, change, request.public_key, answer.peers,
+                     answer)
+
+
+def member(joiner: Joiner) -> etcd.Etcd:
+    """This node as an etcd member (keel.mesh.etcd)"""
+    return etcd.Etcd(joiner.node, joiner.clock, joiner.err)
 
 
 def admitted_by(answer: protocol.JoinAnswer, request: protocol.JoinRequest,
@@ -286,7 +294,8 @@ def unconfirmed(joiner: Joiner, change: Change, message: str) -> int:
 
 
 def confirmed(joiner: Joiner, change: Change, public: str,
-              peers: tuple[protocol.Peer, ...]) -> int:
+              peers: tuple[protocol.Peer, ...],
+              join_answer: protocol.JoinAnswer | None = None) -> int:
     """The mesh session over the overlay, then this node's confirmation
 
     apply's lines are held (keel.mesh.node.Change): this node confirms
@@ -349,6 +358,11 @@ def confirmed(joiner: Joiner, change: Change, public: str,
     if not kept:
         return exits.NETWORK_NOT_CONFIRMED
     summary(joiner, peers)
+    if join_answer is not None and join_answer.etcd_grant is not None:
+        # kept only now: a join that reverts leaves etcd alone
+        joiner.out(etcd.joined(member(joiner), join_answer.etcd_grant,
+                               join_answer.etcd_cluster,
+                               join_answer.etcd_ready))
     return exits.OK
 
 
@@ -371,8 +385,7 @@ def summary(joiner: Joiner, peers: tuple[protocol.Peer, ...]) -> None:
     joiner.out(f"the mesh has {len(peers) + 2} nodes: this node has them all"
                f" as peers, and the inviter announces this node to the"
                f" {len(peers)} other(s) over the overlay (one offline now"
-               " learns of it at its next keel mesh sync); etcd is not part"
-               " of this keel")
+               " learns of it at its next keel mesh sync)")
 
 
 def own_key(root: str, overlay: dict) -> tuple[str | None, str]:

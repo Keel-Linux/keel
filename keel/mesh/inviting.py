@@ -30,7 +30,16 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from keel import exits
-from keel.mesh import acceptline, bridge, invites, ports, sync
+from keel.mesh import (
+    acceptline,
+    bridge,
+    etcd,
+    etcdform,
+    etcdstate,
+    invites,
+    ports,
+    sync,
+)
 from keel.mesh.admit import Admitter, Joined, admitted, stopped
 from keel.mesh.bridge import Bridge, BridgeError, socket_path
 from keel.mesh.listener import Params
@@ -84,6 +93,9 @@ class Inviter:
         default=live.output)
     # tells the other members of a confirmed join (keel.mesh.sync)
     announce: Callable[[str], None] | None = None
+    # etcd once a join is confirmed: the admitter of a join through the
+    # listener, None for the fallback's (keel.mesh.etcd)
+    etcd_after: Callable[[Admitter | None], None] | None = None
 
     @property
     def root(self) -> str:
@@ -95,6 +107,29 @@ class Inviter:
             self.announce(key)
             return
         sync.announce(sync.Syncer(self.node, self.clock, self.err), key)
+
+    def etcd_joined(self, admitter: Admitter | None) -> None:
+        """etcd, once a join is confirmed: what the admitter decided
+        (keel.mesh.etcd.admitted); for the fallback's join, whose line
+        carries no request, keel mesh etcd form brings the node in"""
+        if self.etcd_after is not None:
+            self.etcd_after(admitter)
+            return
+        member = etcd.Etcd(self.node, self.clock, self.err)
+        if admitter is not None:
+            etcd.admitted(member, admitter.etcd_admission,
+                          admitter.joined.public_key,
+                          lambda one, cluster: etcdform.send_cluster(
+                              member, one, cluster))
+            return
+        try:
+            if not etcd.ready(self.node.document()) or \
+                    not etcdstate.credentials(self.root):
+                return
+        except NodeError:
+            return
+        self.err("etcd: bringing the new node in (keel mesh etcd form)")
+        etcdform.form(member, False, self.err)
 
     def own(self) -> tuple[str | None, str]:
         """(public key, overlay address with its length); key None and
@@ -170,6 +205,7 @@ def serve_invite(inviter: Inviter, invite_id: str) -> int:
     inviter.err(stopped(admitter))
     if admitter.confirmed:
         inviter.announced(admitter.joined.public_key)
+        inviter.etcd_joined(admitter)
     return code
 
 
@@ -267,4 +303,5 @@ def accepted(inviter: Inviter, spent: invites.Pending,
     inviter.announced(line.public_key)
     inviter.out(f"accepted: {line.public_key} is a peer of this node at"
                 f" {joiner}")
+    inviter.etcd_joined(None)
     return exits.OK

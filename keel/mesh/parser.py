@@ -200,3 +200,40 @@ def actions(mesh_actions, options: Options) -> None:
     listen_parser.add_argument("socket", metavar="SOCKET",
                                help="the root helper's unix socket")
     listen_parser.set_defaults(handler=commands.mesh_listen)
+    etcd_actions(mesh_actions, options)
+
+
+def etcd_actions(mesh_actions, options: Options) -> None:
+    """keel mesh etcd form and tend (0025, 0048)"""
+    etcd_parser = mesh_actions.add_parser(
+        "etcd",
+        help="etcd, the mesh's registry: form it on a mesh that never saw"
+        " a third join, and tend its learners and certificates",
+    )
+    etcd_subs = etcd_parser.add_subparsers(dest="etcd_action",
+                                           metavar="ACTION")
+    form_parser = etcd_subs.add_parser(
+        "form",
+        help="ask every member, make the mesh's etcd CA if it has none,"
+        " enroll the cloud advanced members and form the cluster at three;"
+        " on a formed cluster, bring in what it lacks (root)",
+    )
+    options.common(form_parser)
+    form_parser.add_argument(
+        "--dry-run", action="store_true",
+        help="ask the members and print what it would do; change nothing"
+        " on any member",
+    )
+    window(options, form_parser)
+    options.root(form_parser, "form etcd in")
+    form_parser.set_defaults(handler=commands.mesh_etcd_form)
+    tend_parser = etcd_subs.add_parser(
+        "tend",
+        help="promote learners in sync, remove those that never started"
+        " within an hour, renew this member's certificates; what"
+        " keel-mesh-etcd.timer runs (root)",
+    )
+    options.common(tend_parser)
+    window(options, tend_parser)
+    options.root(tend_parser, "tend etcd in")
+    tend_parser.set_defaults(handler=commands.mesh_etcd_tend)

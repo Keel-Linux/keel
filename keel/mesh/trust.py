@@ -212,6 +212,24 @@ def may_remove(store: Store, own: str, found: Removal) -> bool:
         member.admission is not None and found.by == member.admission.by)
 
 
+def may_remove_everywhere(store: Store, own: str, key: str) -> bool:
+    """Whether this node, signing with `own`, may remove `key` from the
+    whole mesh, which etcd's `member remove` does (0048, third round,
+    point 4): it admitted that node (the evidence it keeps for it is
+    signed with `own`), or that node is one of its trust roots. Roots
+    are made by the operator's act on a mesh built by hand, which makes
+    the members each other's roots (keel.mesh.adopt): a node this node
+    holds as a root holds this node as one too, and takes its
+    tombstones (`may_remove`). The node itself leaving is the third
+    case of the rule, and is not `keel mesh remove`'s."""
+    known = store.find(key)
+    if known is None:
+        return False
+    member = store.members[known]
+    return member.root or (member.admission is not None
+                           and member.admission.by == own)
+
+
 def room_for(store: Store, signer: str) -> bool:
     """Whether the store takes another tombstone signed by `signer`"""
     return len(store.removed) < MAX_REMOVED and sum(

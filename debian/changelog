@@ -1,3 +1,42 @@
+keel (0.19.0) unstable; urgency=medium
+
+  * etcd, the mesh's registry (handbook decisions 0025 and 0048, its
+    third round), on the cloud advanced members, over the WireGuard
+    mesh. etcd uses its own TLS, peer and client, on the overlay
+    addresses and ::1 only: the first node makes the mesh's root CA,
+    every member holds an intermediate CA its inviter signs, carried in
+    the join's authenticated answer, and issues its own member and
+    client certificates. The member list and the certificates are state
+    under /var/lib/keel/etcd; the spec says only overlays.etcd: enabled,
+    which spec validate refuses outside cloud advanced.
+  * etcd forms at the third cloud advanced member's join: the inviter
+    writes the cluster of three, sends it to the third member over the
+    members' channel, signed with its Ed25519 key, and each enables etcd
+    in its own spec. From the fourth, the inviter adds the new node as a
+    learner before it answers, and promotes it once in sync.
+  * keel mesh etcd form forms etcd on a mesh that never saw a third join
+    (one built with keel 0.18 and adopted, with no CA yet): it asks
+    every member first, refuses two roots or a cluster it is not in,
+    makes the root when none exists, enrolls every member before it
+    starts anything, and with --dry-run only says what it would do. On a
+    formed cluster it brings in the members it lacks. The fallback's
+    join is brought in the same way.
+  * keel mesh etcd tend, from keel-mesh-etcd.timer every 5 minutes,
+    promotes learners in sync, removes those that never started within
+    an hour, and renews the leaves with a third of their life left.
+  * keel mesh remove also removes the etcd member, only when this node
+    admitted the node or it is a trust root (the admission evidence
+    amendment); otherwise the removal is local only.
+  * keel mesh status shows etcd's members, leader and health.
+  * apply renders /etc/default/etcd, the certificates for the etcd user
+    and a sandboxing drop-in from the state, and starts etcd with
+    --no-block; before the cluster exists etcd waits, without failing
+    the run, and keel diff does not count it as drift. Heartbeat 300 ms,
+    election timeout 5000 ms, for 250 ms ±25 ms with 2% loss
+    (decision 0050), measured in tests/test_etcd_netns.py.
+
+ -- Marcos Mendez <mendez.foto@gmail.com>  Sun, 04 Oct 2026 12:00:00 +0000
+
 keel (0.18.0) unstable; urgency=medium
 
   * keel mesh makes a full mesh before etcd (handbook decision 0048,

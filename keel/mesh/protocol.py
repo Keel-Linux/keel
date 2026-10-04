@@ -23,6 +23,7 @@ import json
 import re
 import secrets
 from dataclasses import asdict, dataclass
+from dataclasses import field as dataclass_field
 from datetime import datetime, timedelta
 
 from keel.mesh.token import ETCD_STATES
@@ -124,6 +125,9 @@ class JoinRequest:
     time: int
     # the new node's signing key, which its admission names
     sign_key: str
+    # the request for its etcd intermediate CA, sent only by a node that
+    # can run etcd (keel.mesh.etcdmsg, 0048 third round)
+    etcd_csr: str | None = None
 
 
 @dataclass(frozen=True)
@@ -142,6 +146,11 @@ class JoinAnswer:
     # the inviter's signing key, and the new node's admission it signed
     sign_key: str
     admission: Admission
+    # for etcd (keel.mesh.etcdmsg): the new node's intermediate CA, the
+    # cluster it starts, the members ready, key to overlay address
+    etcd_grant: object = None
+    etcd_cluster: object = None
+    etcd_ready: dict = dataclass_field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -262,6 +271,8 @@ def number(data: dict, name: str) -> int:
 
 
 def join_request(body: bytes) -> JoinRequest:
+    # etcdmsg reads ProtocolError and the shapes from here
+    from keel.mesh import etcdmsg
     data = loaded(body)
     return JoinRequest(
         invite_id=matching(data, "invite_id", ID_RE),
@@ -269,10 +280,12 @@ def join_request(body: bytes) -> JoinRequest:
         endpoint=endpoint(data.get("endpoint")),
         address=overlay(data, "address", True),
         nonce=matching(data, "nonce", NONCE_RE),
-        time=number(data, "time"), sign_key=key(data, "sign_key"))
+        time=number(data, "time"), sign_key=key(data, "sign_key"),
+        etcd_csr=etcdmsg.csr(data.get("etcd_csr")))
 
 
 def join_answer(body: bytes) -> JoinAnswer:
+    from keel.mesh import etcdmsg
     data = loaded(body)
     etcd = field(data, "etcd", str)
     if etcd not in ETCD_STATES:
@@ -287,7 +300,10 @@ def join_answer(body: bytes) -> JoinAnswer:
         peers=tuple(peer(one) for one in peers),
         etcd=etcd, window=number(data, "window"),
         sign_key=key(data, "sign_key"),
-        admission=admission(data.get("admission")))
+        admission=admission(data.get("admission")),
+        etcd_grant=etcdmsg.grant(data.get("etcd_grant")),
+        etcd_cluster=etcdmsg.cluster(data.get("etcd_cluster")),
+        etcd_ready=etcdmsg.ready(data.get("etcd_ready")))
 
 
 def peer(data: object) -> Peer:

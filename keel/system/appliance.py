@@ -8,6 +8,8 @@ comes up before it and goes down after it. Nothing is ever masked or
 unmasked, so what `systemctl enable` undoes stays what an operator,
 Webmin and keel all expect (Keel-Linux/common, packages/README.md).
 CrowdSec's identity is made on its first enable (keel.system.crowdsec).
+etcd's configuration is rendered from the mesh's state, and etcd waits
+for its cluster before anything is started (keel.system.etcd).
 An overlay's state hooks, Coraza's for one, which has no unit, run after
 its units come up and before they go down (keel.system.hooks).
 
@@ -45,6 +47,8 @@ from keel.system.appstate import (
 )
 from keel.system.crowdsec import OVERLAY as CROWDSEC
 from keel.system.crowdsec import plan_identity
+from keel.system.etcd import OVERLAY as ETCD
+from keel.system.etcd import plan_etcd, waiting
 from keel.system.hooks import plan_hooks
 from keel.system.monitor import NOTIFY, reload
 
@@ -125,13 +129,20 @@ def plan_overlay(name: str, wanted: str | None, units: tuple[str, ...],
         identity = plan_identity(state.crowdsec, live, available)
         actions += identity
     made = any(not isinstance(action, Note) for action in identity)
+    if on and name == ETCD and state.etcd is not None:
+        rendered, made = plan_etcd(state.etcd, live)
+        if waiting(state.etcd) or any(isinstance(action, Refuse)
+                                      for action in rendered):
+            return Step(field, tuple(rendered))
+        actions += rendered
     if not on:
         # what reacts to the overlay lets go of it before its units stop
         actions += hooked
     for unit in (units if on else tuple(reversed(units))):
         found = state.units[unit]
         if on:
-            actions += start(systemctl, unit, found, live, made)
+            actions += start(systemctl, unit, found, live, made,
+                             name == ETCD)
         else:
             actions += stop(systemctl, unit, found, live)
     if on:
@@ -147,15 +158,21 @@ def plan_overlay(name: str, wanted: str | None, units: tuple[str, ...],
 
 
 def start(systemctl: tuple[str, ...], unit: str, found, live: bool,
-          made: bool) -> list[Action]:
+          made: bool, no_block: bool = False) -> list[Action]:
+    """`no_block` for etcd, which says it started only once a majority
+    of its cluster runs"""
     actions: list[Action] = []
+    later = ("--no-block",) if no_block else ()
     if not found.is_enabled and not found.is_fixed:
         actions.append(Run((*systemctl, "enable", unit),
                            f"enable {unit}: the overlay is enabled"))
     if live and not found.is_running:
-        actions.append(Run(("systemctl", "start", unit), f"start {unit}"))
+        actions.append(Run(("systemctl", "start", *later, unit),
+                           f"start {unit}"))
     elif live and made:
-        actions.append(Run(("systemctl", "restart", unit),
+        actions.append(Run(("systemctl", "restart", *later, unit),
+                           f"restart {unit}: its configuration changed"
+                           if no_block else
                            f"restart {unit}: its identity or its bouncer's"
                            " mode changed"))
     return actions

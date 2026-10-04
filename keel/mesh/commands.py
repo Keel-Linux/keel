@@ -35,6 +35,8 @@ from keel.mesh import (
     certificate,
     create,
     endpoint,
+    etcd,
+    etcdform,
     identity,
     invites,
     inviting,
@@ -46,6 +48,7 @@ from keel.mesh import (
     status,
     sync,
 )
+from keel.mesh.etcdstate import CLIENT_PORT
 from keel.mesh.node import Node, NodeError, static_addresses
 from keel.mesh.token import (
     LIFETIME,
@@ -96,12 +99,14 @@ def mesh_invite(args) -> int:
         return exits.APPLY_FAILED
     now = datetime.now(timezone.utc).replace(microsecond=0)
     secret = secrets.token_bytes(SECRET_BYTES)
+    state = etcd.token_state(etcd.Etcd(Node(root, args.spec), utcnow, err))
     draft = Token(
         public_key=public, endpoints=hosts, port=wireguard.port(overlay),
         https_port=args.port, fingerprint=certificate.fingerprint(cert),
         address=str(ipaddress.IPv6Interface(str(overlay["address"]))),
         assigned="", mesh_id=mesh_id, invite_id=invite_id(secret),
-        expires=now + LIFETIME, secret=secret)
+        expires=now + LIFETIME, secret=secret, etcd=state,
+        etcd_port=CLIENT_PORT if state == "running" else None)
     try:
         made, line = invite(root, now, draft, overlay, (tls_key, cert))
     except (allocate.AllocationError, TokenError, invites.InviteError) as e:
@@ -489,4 +494,28 @@ def mesh_status(args) -> int:
     for line in status.lines(overlay, root, utcnow(),
                              live.output if root == ROOT_DEFAULT else None):
         print(line)
+    if overlay and overlay.get("address"):
+        for line in etcd.status(etcd.Etcd(Node(root, args.spec), utcnow,
+                                          err), root == ROOT_DEFAULT):
+            print(line)
     return exits.OK
+
+
+def member(args) -> etcd.Etcd:
+    return etcd.Etcd(live_node(args), utcnow, err)
+
+
+def mesh_etcd_form(args) -> int:
+    """etcd on a mesh that never saw a third join, or what it lacks"""
+    code = as_root(args, "keel mesh etcd form")
+    if code != exits.OK:
+        return code
+    return etcdform.form(member(args), args.dry_run, out)
+
+
+def mesh_etcd_tend(args) -> int:
+    """What keel-mesh-etcd.timer runs: learners, and the leaves"""
+    code = as_root(args, "keel mesh etcd tend")
+    if code != exits.OK:
+        return code
+    return etcd.tend(member(args))

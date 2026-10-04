@@ -142,6 +142,25 @@ class TestJoin(Case):
         # the answer carried the members: nothing to pull
         self.assertEqual(self.learned, [])
 
+    def test_the_answer_s_etcd_grant_is_taken_once_confirmed(self):
+        """The inviter issued an etcd CA (keel.mesh.etcd): the joiner
+        takes it once its join is confirmed, and says what came of it;
+        here a grant for another key, which it refuses"""
+        from keel.mesh import etcd, etcdstate
+        issuer, other = tempfile.mkdtemp(), tempfile.mkdtemp()
+        for one in (issuer, other):
+            self.addCleanup(shutil.rmtree, one)
+        etcdstate.make_root(issuer, "ab" * 16)
+        grant = etcdstate.grant_for(issuer, etcdstate.ca_request(other), "x")
+        asked = []
+        self.admitter.etcd_admit = lambda csr, key, address: (
+            asked.append(csr) or etcd.Admission(grant))
+        self.assertEqual(self.joining(), exits.OK, self.err)
+        # this node is not cloud advanced: it asked for no CA
+        self.assertEqual(asked, [None])
+        self.assertTrue(self.out[-1].startswith("etcd: not set up"))
+        self.assertEqual(self.admitter.etcd_admission.grant, grant)
+
     def test_a_node_behind_nat_sends_no_endpoint(self):
         self.assertEqual(self.joining(endpoint=None), exits.OK, self.err)
         theirs = spec_of(self.inviter)["network"]["overlay"]["wireguard"]

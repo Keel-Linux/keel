@@ -1,0 +1,14 @@
+# keel mesh etcd tend (decisions 0025, 0048): promote each learner etcd
+# says is in sync, remove a learner that never started within an hour
+# (a join that never came), and renew this member's certificates with a
+# third of their life left. Run by keel-mesh-etcd.timer; a node in no
+# etcd cluster has nothing to tend.
+[Unit]
+Description=keel mesh: tend etcd's learners and this member's certificates
+After=network-online.target etcd.service
+Wants=network-online.target
+ConditionPathExists=/var/lib/keel/etcd/cluster.json
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/keel mesh etcd tend
