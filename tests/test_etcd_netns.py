@@ -120,6 +120,23 @@ class TestThreeMembersOnAPoorNetwork(unittest.TestCase):
             after.update(seen["terms"])
         self.assertEqual(after, terms)
 
+    def test_a_partitioned_leader_is_replaced_and_rejoins_as_a_follower(self):
+        found = self.found
+        self.assertEqual(found["record_problems"], [None, None, None])
+        self.assertIsNotNone(found["new_leader_s"], found)
+        # an election timeout, randomised in [5 s, 10 s), and its rounds
+        # over a lossy link
+        self.assertLess(found["new_leader_s"], 60, found)
+        self.assertIsNotNone(found["writes_resumed_s"], found)
+        self.assertIsNotNone(found["old_leader_rejoined_s"], found)
+        self.assertTrue(found["old_leader_follows"], found)
+
+    def test_a_revoked_member_no_longer_reaches_etcd(self):
+        self.assertTrue(self.found["c_reaches_a_before"].startswith("ok"),
+                        self.found)
+        self.assertTrue(self.found["c_reaches_a_after"].startswith(
+            "refused"), self.found)
+
     def test_a_learner_added_and_removed_with_keel_s_client(self):
         self.assertEqual(self.found["learner"], {
             "added": True, "listed_unstarted": True, "removed": True})

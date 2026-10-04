@@ -29,8 +29,16 @@ Then:
 3. **partition**: a follower is cut off (100% loss, both ways) for
    PARTITION seconds while the others write; then healed, and the time
    until it reports the leader again;
+   then the leader is cut off for LEADER_PARTITION seconds (120): the
+   time until the other two elect another and write again, and, healed,
+   that the old leader follows the new one;
 4. a learner added with keel's client and removed again, on the real
-   etcd: what `keel mesh join` and `keel mesh remove` ask of it.
+   etcd: what `keel mesh join` and `keel mesh remove` ask of it;
+5. C's intermediate revoked by the CRL the root's holder signs: C's
+   client certificate reached A's etcd before, and is refused after.
+
+The cluster is formed by the root's holder, A, from the record it signs
+with the root (keel.mesh.etcdca), which every member checks.
 
 The result is one JSON line, `RESULT {...}`; with ETCD_SOAK=full the
 stability is 300 s and the partition 120 s (the brief's), else 60 and
@@ -46,7 +54,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 
-from keel.mesh import etcdclient, etcdconf, etcdstate
+from keel.mesh import etcdca, etcdclient, etcdconf, etcdpki, etcdstate
 from keel.mesh.etcdstate import Cluster, Member
 from keel.network import wireguard
 
@@ -57,6 +65,7 @@ OVERLAY = "fd00:6b65:e7c::{n}"
 FULL = os.environ.get("ETCD_SOAK") == "full"
 STABLE = int(os.environ.get("ETCD_STABLE") or (300 if FULL else 60))
 PARTITION = int(os.environ.get("ETCD_PARTITION") or (120 if FULL else 45))
+LEADER_PARTITION = int(os.environ.get("ETCD_LEADER_PARTITION") or 120)
 LEG = os.environ.get("ETCD_NETEM", "125ms 12.5ms 2%").split()
 CHILDREN: list[subprocess.Popen] = []
 WATCHERS: list[subprocess.Popen] = []
@@ -138,10 +147,11 @@ def overlay_up(pid: int, root: str, index: int, pairs) -> None:
 
 def credentials(roots: list[str]) -> None:
     """A makes the root; B's intermediate by A, C's by B"""
-    etcdstate.make_root(roots[0], MESH)
-    for issuer, member in ((roots[0], roots[1]), (roots[1], roots[2])):
+    etcdstate.make_root(roots[0], MESH, OVERLAY.format(n=1))
+    for n, issuer, member in ((2, roots[0], roots[1]),
+                              (3, roots[1], roots[2])):
         etcdstate.take_grant(member, etcdstate.grant_for(
-            issuer, etcdstate.ca_request(member), "member"))
+            issuer, etcdstate.ca_request(member), OVERLAY.format(n=n)))
     for index, root in enumerate(roots):
         etcdstate.leaves(root, OVERLAY.format(n=index + 1), utcnow())
 
@@ -152,7 +162,8 @@ def environment(root: str, address: str, cluster: Cluster) -> dict:
         address, cluster).splitlines() if line and not line.startswith("#"))
     moved = {f"/{etcdconf.MEMBER_CERT}": etcdstate.MEMBER_CERT,
              f"/{etcdconf.MEMBER_KEY}": etcdstate.MEMBER_KEY,
-             f"/{etcdconf.TRUSTED}": etcdstate.ROOT_CERT}
+             f"/{etcdconf.TRUSTED}": etcdstate.ROOT_CERT,
+             f"/{etcdconf.CRL}": etcdstate.CRL}
     for key, value in found.items():
         if value in moved:
             found[key] = os.path.join(root, moved[value])
@@ -189,6 +200,7 @@ def watch(root: str, out: str, name: str) -> None:
                 try:
                     client.put(f"probe/{name}", str(beat))
                     sample["put"] = True
+                    sample["put_t"] = time.time()
                 except etcdclient.EtcdError:
                     sample["put"] = False
             beat += 1
@@ -249,12 +261,16 @@ def driver() -> None:
     for index, pid in enumerate(pids):
         overlay_up(pid, roots[index], index, pairs)
     credentials(roots)
-    cluster = Cluster("new", tuple(
+    # the root's holder forms, signing the record every member checks
+    cluster = etcdca.record(roots[0], tuple(
         Member(pairs[index][1], OVERLAY.format(n=index + 1))
         for index in range(len(NAMES))), MESH)
+    problems = [etcdca.problem(root, cluster) for root in roots]
     report = {"netem_leg": LEG, "stable_s": STABLE, "partition_s": PARTITION,
               "heartbeat_ms": etcdconf.HEARTBEAT_MS,
-              "election_ms": etcdconf.ELECTION_MS}
+              "election_ms": etcdconf.ELECTION_MS,
+              "record_problems": problems,
+              "leader_partition_s": LEADER_PARTITION}
     began = time.time()
     for index, pid in enumerate(pids):
         start_etcd(pid, roots[index], environment(
@@ -310,6 +326,45 @@ def driver() -> None:
                             for i in range(len(NAMES))}
     report["leader_after_heal"] = agreed(paths, healed_at)
 
+    # 3b. the leader cut off, both ways, for LEADER_PARTITION seconds
+    old = report["leader_after_heal"]
+    ids = {samples(paths[i], healed_at)[-1].get("id"): i
+           for i in range(len(NAMES))}
+    cut = ids.get(old, 0)
+    rest = [paths[i] for i in range(len(NAMES)) if i != cut]
+    report["leader_partitioned"] = NAMES[cut]
+    leg(f"to{cut + 1}", "100%")
+    sh("tc", "qdisc", "replace", "dev", "uplink", "root", "netem", "loss",
+       "100%", pid=pids[cut])
+    cut_at = time.time()
+
+    def elected():
+        found = agreed(rest, cut_at)
+        return found if found not in (None, old) else None
+    took = wait_for(elected, LEADER_PARTITION)
+    report["new_leader_s"] = None if took is None else round(took, 1)
+    new_leader = elected()
+    report["new_leader"] = new_leader
+    # the first write the majority committed after the cut, and after
+    # the new leader was known: a write begun before it waits for it
+    time.sleep(max(0.0, cut_at + LEADER_PARTITION - time.time()))
+    found = [one["put_t"] for path in rest for one in samples(path, cut_at)
+             if one.get("put") and one["t"] > cut_at]
+    writes_at = min(found) - cut_at if found else None
+    report["writes_resumed_s"] = None if writes_at is None else round(
+        writes_at, 1)
+    healed_at = time.time()
+    report["during_leader_partition"] = {NAMES[i]: summary(samples(
+        paths[i], cut_at, healed_at)) for i in range(len(NAMES))}
+    leg(f"to{cut + 1}")
+    sh("tc", "qdisc", "del", "dev", "uplink", "root", pid=pids[cut])
+    back = wait_for(lambda: agreed(paths, healed_at), 180)
+    report["old_leader_rejoined_s"] = None if back is None else round(back, 1)
+    latest = samples(paths[cut], healed_at)[-1:]
+    report["old_leader_follows"] = bool(latest) and \
+        latest[0].get("leader") == new_leader and \
+        latest[0].get("id") != new_leader
+
     # 4. a learner added and removed with keel's client, on real etcd
     done = subprocess.run(
         ["nsenter", "-t", str(pids[0]), "-n", sys.executable, __file__,
@@ -319,7 +374,37 @@ def driver() -> None:
         report["learner"] = json.loads(done.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):
         report["learner"] = {"error": done.stderr[-500:]}
+    # 5. C revoked by the root's CRL: its client certificate no longer
+    # reaches A's etcd (etcd checks the CRL against the chain it is shown)
+    report["c_reaches_a_before"] = reaches(pids[2], roots[2])
+    serial = etcdpki.serial(etcdstate.read(roots[2], etcdstate.CA_CERT))
+    expiry = etcdpki.stamp(etcdpki.not_after(etcdstate.read(
+        roots[2], etcdstate.CA_CERT)))
+    found = etcdca.revoke(roots[0], None, {serial: expiry}, utcnow())
+    for root in roots[1:]:
+        etcdstate.take_crl(root, found)
+    report["c_reaches_a_after"] = reaches(pids[2], roots[2])
     print("RESULT " + json.dumps(report), flush=True)
+
+
+def reaches(pid: int, root: str) -> str:
+    done = subprocess.run(
+        ["nsenter", "-t", str(pid), "-n", sys.executable, __file__,
+         "connect", root, etcdstate.client_url(OVERLAY.format(n=1))],
+        capture_output=True, text=True, check=False,
+        env=os.environ.copy(), timeout=60)
+    return (done.stdout.strip().splitlines() or ["no answer"])[-1]
+
+
+def connect(root: str, url: str) -> None:
+    """From a member's namespace: the member list of `url`, with this
+    member's client certificate"""
+    try:
+        found = etcdclient.Client((url,), etcdclient.context(root),
+                                  timeout=10).members()
+        print(f"ok: {len(found)} members", flush=True)
+    except etcdclient.EtcdError as e:
+        print(f"refused: {str(e)[:160]}", flush=True)
 
 
 def learner_probe(root: str) -> None:
@@ -351,6 +436,8 @@ if __name__ == "__main__":
         watch(sys.argv[2], sys.argv[3], sys.argv[4])
     elif sys.argv[1:2] == ["learner"]:
         learner_probe(sys.argv[2])
+    elif sys.argv[1:2] == ["connect"]:
+        connect(sys.argv[2], sys.argv[3])
     else:
         try:
             driver()
