@@ -58,6 +58,7 @@ ENABLED = "enabled"
 # the TCP ports of the pending mesh invites (decision 0048): keel mesh
 # invite adds its port with a timeout, so it closes by itself
 INVITES_SET = "mesh_invites"
+MEMBERS_PORT = 51821
 INVITES_SET_TEXT = (
     f"\tset {INVITES_SET} {{\n\t\ttype inet_service\n"
     "\t\tflags timeout\n\t}\n")
@@ -112,6 +113,9 @@ def render(resolved: Resolved, states: dict, wireguard: dict | None,
     sets = ""
     if iface:
         rules += _rules(f'iifname "{iface}" ', opened_mesh)
+        # keel mesh sync and the announcement of a new node, between
+        # members, on the overlay alone (keel.mesh.members)
+        rules.append(f'iifname "{iface}" tcp dport {MEMBERS_PORT} accept')
         rules.append(f"tcp dport @{INVITES_SET} accept")
         sets = INVITES_SET_TEXT
     if bridges:

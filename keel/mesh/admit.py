@@ -33,12 +33,13 @@ import json
 import sys
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
-from keel.mesh import invites, protocol
+from keel.mesh import identity, invites, protocol, signing, trust
 from keel.mesh.node import Node, NodeError
 from keel.mesh.protocol import ProtocolError
+from keel.mesh.signing import SigningError
 from keel.network import marker, session
 from keel.network.wireguard import same_key
 
@@ -238,11 +239,15 @@ class Admitter:
         if request.endpoint:
             entry["endpoint"] = request.endpoint
         try:
+            evidence = self.evidence(request.public_key, request.sign_key,
+                                     address, request.endpoint)
             change = self.node.admit(entry)
+            for line in change.lines:
+                self.log(f"{self.name}: {line}")
             problem = None if change.made else (
                 f"this node's change did not come up (apply exited"
                 f" {change.code})")
-        except NodeError as e:
+        except (NodeError, ValueError, SigningError) as e:
             problem = str(e)
         if problem:
             self.confirmed = False
@@ -256,11 +261,20 @@ class Admitter:
         answer = protocol.JoinAnswer(
             invite_id=self.invite.invite_id, nonce=request.nonce,
             public_key=self.public_key, address=self.address,
-            peers=self.node.peers(request.public_key), etcd="none",
-            window=window)
+            peers=evidenced(self.root, self.node.peers(request.public_key)),
+            etcd="none", window=window, sign_key=evidence.by,
+            admission=evidence)
         self.log(f"{self.name}: peer applied; waiting {window} s for the"
                  " new node over the overlay")
         return self.signed(protocol.JOIN, protocol.dumps(answer))
+
+    def evidence(self, key: str, sign_key: str, address: str,
+                 endpoint: str | None) -> protocol.Admission:
+        """The new node's admission, signed with this node's key and
+        kept in its trust store (keel.mesh.trust); raises ValueError or
+        SigningError"""
+        return admitted(self.root, self.invite.invite_id, key, sign_key,
+                        address, endpoint, self.clock())
 
     def confirm(self, signature: str | None,
                 body: bytes | None) -> Response:
@@ -269,6 +283,12 @@ class Admitter:
         request = self.checked(protocol.CONFIRM, signature, body)
         if request.public_key != self.joined.public_key:
             raise Refusal(403, "the confirmation is not the new node's")
+        try:
+            # the answer names it: the fallback's node learns it so
+            signer = signing.public(self.root)
+        except SigningError as e:
+            raise Refusal(500, f"this node cannot name its signing key"
+                          f" ({e})") from None
         seen = self.handshake()
         if seen is None:
             raise Refusal(409, f"no WireGuard handshake from"
@@ -285,7 +305,7 @@ class Admitter:
         self.confirmed = confirmed
         answer = protocol.ConfirmAnswer(
             invite_id=self.invite.invite_id, nonce=request.nonce,
-            confirmed=confirmed, detail="; ".join(lines))
+            confirmed=confirmed, detail="; ".join(lines), sign_key=signer)
         found = self.signed(protocol.CONFIRM, protocol.dumps(answer))
         return Response(found.status, found.body, found.signature, True)
 
@@ -307,6 +327,35 @@ class Admitter:
     def signed(self, path: str, body: bytes) -> Response:
         return Response(200, body, protocol.sign(
             self.invite.hmac_key, protocol.ANSWER, path, body))
+
+
+def admitted(root: str, invite_id: str, key: str, sign_key: str,
+             address: str, endpoint: str | None,
+             now: datetime) -> protocol.Admission:
+    """Evidence that this node admits `key` by the invite, signed and
+    kept; raises ValueError (no identity, a damaged store) or
+    SigningError"""
+    mesh_id = identity.read(root)
+    if mesh_id is None:
+        raise ValueError("this node holds no mesh identity to admit into")
+    signing.ensure(root)
+    found = trust.admit(root, mesh_id, invite_id, key, sign_key, address,
+                        endpoint, now)
+    store = trust.load(root)
+    trust.recorded(store, found)
+    trust.save(root, store)
+    return found
+
+
+def evidenced(root: str, peers: tuple[protocol.Peer, ...]) -> tuple[
+        protocol.Peer, ...]:
+    """`peers` with the evidence this node keeps for each, if any"""
+    try:
+        store = trust.load(root)
+    except ValueError:
+        store = trust.Store()
+    return tuple(replace(one, admission=store.evidence(one.public_key))
+                 for one in peers)
 
 
 def stopped(admitter: Admitter) -> str:

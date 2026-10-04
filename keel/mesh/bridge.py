@@ -200,6 +200,33 @@ def answered(admitter: Admitter, data: bytes) -> dict:
             "signature": response.signature, "final": response.final}
 
 
+def connected(path: str, started, sleep: Callable[[float], None],
+              trusted: Callable[[int, int], None],
+              skipped: Callable[[int, int], None]) -> socket.socket:
+    """The socket at `path`, its peer checked with SO_PEERCRED against
+    `started.trusted(pid, uid)`; untrusted ones are skipped until the
+    listener shows or CONNECT_WAIT passes. Raises BridgeError"""
+    deadline = time.monotonic() + CONNECT_WAIT
+    while time.monotonic() < deadline:
+        conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            conn.connect(path)
+        except OSError:
+            conn.close()
+            sleep(RETRY)
+            continue
+        pid, uid, _ = PEERCRED.unpack(conn.getsockopt(
+            socket.SOL_SOCKET, socket.SO_PEERCRED, PEERCRED.size))
+        if started.trusted(pid, uid):
+            trusted(pid, uid)
+            return conn
+        conn.close()
+        skipped(pid, uid)
+        sleep(RETRY)
+    raise BridgeError(f"the listener did not connect within"
+                      f" {CONNECT_WAIT} s")
+
+
 @dataclass
 class Bridge:
     """The root helper of one invite
@@ -229,29 +256,12 @@ class Bridge:
     def connected(self, started) -> socket.socket:
         """The listener's socket, its peer checked; untrusted ones are
         skipped until the listener shows or CONNECT_WAIT passes"""
-        deadline = time.monotonic() + CONNECT_WAIT
-        while time.monotonic() < deadline:
-            conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            try:
-                conn.connect(self.path)
-            except OSError:
-                conn.close()
-                self.sleep(RETRY)
-                continue
-            pid, uid, _ = PEERCRED.unpack(conn.getsockopt(
-                socket.SOL_SOCKET, socket.SO_PEERCRED, PEERCRED.size))
-            if started.trusted(pid, uid):
-                self.log(f"invite {self.params.invite_id}: the listener"
-                         f" (pid {pid}, uid {uid}) serves TCP port"
-                         f" {self.params.port}")
-                return conn
-            conn.close()
-            self.log(f"invite {self.params.invite_id}: skipped process"
-                     f" {pid} (uid {uid}) at {self.path}: it is not the"
-                     " listener")
-            self.sleep(RETRY)
-        raise BridgeError(f"the listener did not connect within"
-                          f" {CONNECT_WAIT} s")
+        name = f"invite {self.params.invite_id}"
+        return connected(self.path, started, self.sleep, lambda pid, uid: (
+            self.log(f"{name}: the listener (pid {pid}, uid {uid}) serves"
+                     f" TCP port {self.params.port}")), lambda pid, uid: (
+            self.log(f"{name}: skipped process {pid} (uid {uid}) at"
+                     f" {self.path}: it is not the listener")))
 
     def exchange(self, conn: socket.socket) -> None:
         with pem_fds(self.certificate, self.tls_key) as fds:

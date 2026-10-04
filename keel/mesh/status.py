@@ -1,18 +1,18 @@
 # Copyright (c) 2026 KeelLinux maintainers
 """keel mesh status: the peers, their handshakes, the pending invites
 
-Read from the spec, from `wg show` (its public-key, endpoints and
-latest-handshakes views, never `dump` or `private-key`, which hold the
-private key) and from the invite files, of which only the id, the
-reserved address, the port and the expiry are shown. Nothing secret is
-printed.
+Read from the spec, from the mesh's identity, from `wg show` (its
+public-key, endpoints and latest-handshakes views, never `dump` or
+`private-key`, which hold the private key) and from the invite files,
+of which only the id, the reserved address, the port and the expiry are
+shown. Nothing secret is printed.
 """
 
 import ipaddress
 from collections.abc import Callable
 from datetime import datetime
 
-from keel.mesh import invites
+from keel.mesh import identity, invites
 from keel.mesh.token import shown
 from keel.network import wireguard
 from keel.network.wireguard import allowed, same_key
@@ -39,6 +39,20 @@ def handshake(value: str | None, now: datetime) -> str:
     return f"handshake {max(ago, 0)} s ago"
 
 
+def mesh_identity(root: str) -> str:
+    """Which mesh this node is in: its identity, as every member holds
+    it (keel.mesh.identity)"""
+    try:
+        found = identity.read(root)
+    except ValueError as e:
+        return f"mesh identity: {e}"
+    if found is None:
+        return ("mesh identity: none yet (a mesh built by hand gets one with"
+                " keel mesh create --adopt on one node, keel mesh sync on"
+                " the others)")
+    return f"mesh identity: {found.hex()}"
+
+
 def lines(overlay: dict | None, root: str, now: datetime,
           output: Reader | None) -> list[str]:
     """What status prints; `output` None off the live system"""
@@ -47,7 +61,7 @@ def lines(overlay: dict | None, root: str, now: datetime,
                 " mesh join joins one"]
     iface = wireguard.interface(overlay)
     found = [f"this node: {overlay['address']} on {iface}, WireGuard on"
-             f" UDP {wireguard.port(overlay)}"]
+             f" UDP {wireguard.port(overlay)}", mesh_identity(root)]
     if output is None:
         found.append("not the live system: no handshake read")
         endpoints = handshakes = {}

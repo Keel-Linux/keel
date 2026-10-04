@@ -7,7 +7,9 @@ unshare -n`, which is what Ubuntu's CI runners allow), with the real
 wg and wg-quick, which need the wireguard kernel module. Three nodes
 joined by veths: B joins A through A's listener, C through the fallback
 and `keel mesh accept`, both ping A over the overlay with no `keel
-network confirm` typed, the spent invite is refused, no secret reaches
+network confirm` typed, A announces C to B and C pulls B from A, so B
+and C are peers and ping each other (a full mesh), the spent invite is
+refused, no secret reaches
 A's journal, and the listener that faced the network held no
 capability. In CI a missing tool or namespace fails instead of
 skipping.
@@ -99,14 +101,32 @@ class TestThreeNamespaces(unittest.TestCase):
         self.assertEqual(self.found["peers"], [None, 25])
         self.assertEqual(self.found["invites_left"], [])
 
+    def test_the_mesh_is_full(self):
+        """C joined through A alone: A announced it to B, and C pulled B
+        from A; B and C are each other's peers, confirmed, over the
+        overlay (decision 0048, "Until etcd exists")"""
+        b, c, checked = (self.found["b"], self.found["c"],
+                         self.found["b_after_c"])
+        self.assertIn(c["key"], checked["peers"], checked)
+        self.assertEqual(checked["outcome"], "confirmed", checked)
+        self.assertTrue(checked["ping"], checked)
+        self.assertIn(b["key"], c["peers"], c)
+        self.assertTrue(c["ping_other"], c)
+        self.assertIn(f"announced {c['key']} to 1 of the 1 other member(s)",
+                      "\n".join(self.found["journal"]))
+        self.assertIn("an announcement from", "\n".join(checked["log"]))
+        self.assertIn("learning the other members from the inviter…",
+                      c["err"])
+
     def test_a_spent_invite_is_refused(self):
         code, said = self.found["again"]
         self.assertEqual(code, exits.MESH_REFUSED)
         self.assertIn("no pending invite", said[0])
 
     def test_the_listener_held_no_capability(self):
+        # the two invites' listeners, and A's members' listener
         self.assertEqual(self.found["capabilities"],
-                         ["0000000000000000"] * 2)
+                         ["0000000000000000"] * 3)
         self.assertEqual(self.found["netem"], self.netem.split())
 
     def test_no_secret_in_the_inviter_s_journal(self):

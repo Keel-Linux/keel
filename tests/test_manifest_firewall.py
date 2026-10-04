@@ -108,6 +108,15 @@ class TestRender(FirewallCase):
         without = self.render(CORE_OFF)
         self.assertNotIn("mesh_invites", without.text)
 
+    def test_the_members_port_on_the_overlay_alone(self):
+        """keel mesh sync and the announcement of a new node, between
+        members over the overlay (decision 0048, keel.mesh.members)"""
+        found = self.render(ADVANCED, WG)
+        self.assertIn('\t\tiifname "wg0" tcp dport 51821 accept\n',
+                      found.text)
+        self.assertNftAccepts(found.text)
+        self.assertNotIn("51821", self.render(CORE_OFF).text)
+
     def test_the_overlay_s_defaults(self):
         found = self.render(ADVANCED, {"address": "fd00:1::1/64"})
         self.assertIn('iifname "wg0"', found.text)

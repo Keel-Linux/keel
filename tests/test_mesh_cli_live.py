@@ -21,7 +21,8 @@ from mesh_wire import token
 from test_mesh_cli import run_cli
 
 from keel import exits
-from keel.mesh import commands, invites, inviting
+from keel.mesh import commands, identity, invites, inviting
+from keel.mesh.endpoint import Choice
 from keel.mesh.token import encode
 from keel.network import session
 
@@ -60,7 +61,8 @@ class TestNeedsRoot(Case):
     def test_each_command_that_changes_the_machine(self):
         for argv in (("create",), ("accept", "keel1a:x"),
                      ("serve", "0123456789abcdef"),
-                     ("join", "keel1:x")):
+                     ("join", "keel1:x"), ("sync",), ("members",),
+                     ("create", "--adopt"), ("remove", "fd00::7")):
             with self.subTest(argv=argv), \
                     mock.patch("os.geteuid", return_value=1000):
                 code, out, err = run_cli("mesh", *argv)
@@ -119,6 +121,34 @@ class TestHandlers(Case):
             _, _, err = self.mesh("join", "-", stdin=line)
         self.assertNotIn("Warning", err)
 
+    def test_join_finds_its_endpoint_on_the_uplink(self):
+        with open(self.spec, "w") as fob:
+            fob.write("version: 1\n")
+        found = Choice(("2001:db8:7::9",), ("endpoint 2001:db8:7::9, found"
+                                            " on eth0",))
+        with mock.patch("keel.mesh.commands.joining.run",
+                        return_value=exits.OK) as joined, \
+                mock.patch("keel.mesh.commands.endpoint.detect",
+                           return_value=found):
+            code, _, err = self.mesh("join", "-", stdin=self.line())
+        self.assertEqual(code, exits.OK)
+        self.assertEqual(joined.call_args.args[1], "2001:db8:7::9")
+        self.assertIn("endpoint 2001:db8:7::9, found on eth0", err)
+
+    def test_join_without_an_endpoint_says_why(self):
+        with open(self.spec, "w") as fob:
+            fob.write("version: 1\n")
+        found = Choice((), (), ("10.0.0.5 is a private address",))
+        with mock.patch("keel.mesh.commands.joining.run",
+                        return_value=exits.OK) as joined, \
+                mock.patch("keel.mesh.commands.endpoint.detect",
+                           return_value=found):
+            code, _, err = self.mesh("join", "-", stdin=self.line())
+        self.assertEqual(code, exits.OK)
+        self.assertIsNone(joined.call_args.args[1])
+        self.assertIn("no endpoint is sent, as from a node behind NAT:"
+                      " 10.0.0.5 is a private address", err)
+
     def test_listen_needs_no_root(self):
         with mock.patch("os.geteuid", return_value=61234), \
                 mock.patch("keel.mesh.commands.bridge.listen",
@@ -156,6 +186,85 @@ class TestHandlers(Case):
         self.assertEqual(served.call_args.args[1], "0123456789abcdef")
         self.assertEqual(signal.getsignal(signal.SIGTERM),
                          inviting.terminated)
+
+    def test_sync(self):
+        with mock.patch("keel.mesh.commands.sync.pull",
+                        return_value=exits.OK) as pulled:
+            self.assertEqual(self.mesh("sync")[0], exits.OK)
+            self.assertEqual(self.mesh("sync", "--from", "fd00:6b65:1::01",
+                                       "--from", "fd00:6b65:1::7")[0],
+                             exits.OK)
+        syncer, hosts = pulled.call_args_list[0].args
+        self.assertEqual((syncer.node.root, hosts), (self.root, ()))
+        self.assertEqual(pulled.call_args_list[1].args[1],
+                         ("fd00:6b65:1::1", "fd00:6b65:1::7"))
+
+    def test_sync_adopt(self):
+        with mock.patch("keel.mesh.commands.adopt.adopt_from",
+                        return_value=exits.OK) as adopted:
+            self.assertEqual(self.mesh("sync", "--adopt",
+                                       "fd00:6b65:1::1")[0], exits.OK)
+        self.assertEqual(adopted.call_args.args[1], "fd00:6b65:1::1")
+
+    def test_sync_with_an_address_that_is_not_an_overlay_one(self):
+        for argv in (("--from", "x"), ("--adopt", "192.0.2.1")):
+            with self.subTest(argv=argv):
+                code, _, err = self.mesh("sync", *argv)
+                self.assertEqual(code, exits.MESH_REFUSED)
+                self.assertIn("not an IPv6 address", err)
+
+    def test_members(self):
+        """the root helper, until SIGTERM sets its stop and ends it
+        through its cleanup"""
+        before = signal.getsignal(signal.SIGTERM)
+        self.addCleanup(signal.signal, signal.SIGTERM, before)
+
+        def serve(syncer, stop):
+            with self.assertRaises(SystemExit):
+                signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+            self.assertTrue(stop.is_set())
+            return exits.OK
+        with mock.patch("keel.mesh.commands.memberd.serve",
+                        side_effect=serve) as served:
+            self.assertEqual(self.mesh("members")[0], exits.OK)
+        self.assertEqual(served.call_args.args[0].node.root, self.root)
+
+    def test_members_listen_needs_no_root(self):
+        with mock.patch("os.geteuid", return_value=61234), \
+                mock.patch("keel.mesh.commands.memberd.listen",
+                           return_value=exits.OK) as listened:
+            code, _, _ = run_cli("mesh", "members-listen",
+                                 "/run/keel/mesh-members/bridge.sock")
+        self.assertEqual(code, exits.OK)
+        self.assertEqual(listened.call_args.args[0],
+                         "/run/keel/mesh-members/bridge.sock")
+
+    def test_remove(self):
+        with mock.patch("keel.mesh.commands.remove.remove",
+                        return_value=exits.OK) as removed:
+            self.assertEqual(self.mesh("remove", "fd00::7")[0], exits.OK)
+        syncer, which, _ = removed.call_args.args
+        self.assertEqual((syncer.node.root, which), (self.root, "fd00::7"))
+
+    def test_create_adopt(self):
+        with mock.patch("keel.mesh.commands.adopt.adopt_mesh",
+                        return_value=exits.OK) as adopted, \
+                mock.patch("keel.mesh.commands.create.create") as made:
+            self.assertEqual(self.mesh("create", "--adopt")[0], exits.OK)
+        made.assert_not_called()
+        self.assertEqual(adopted.call_args.args[0].node.root, self.root)
+
+    def test_the_identity_of_an_invite(self):
+        with mock.patch("keel.mesh.commands.adopt.invite_identity",
+                        return_value=bytes(16)) as asked:
+            made = commands.invite_identity(self.root, self.spec)
+            self.assertEqual(made, identity.read(self.root))
+            asked.assert_not_called()
+            with mock.patch("keel.mesh.commands.ROOT_DEFAULT", self.root):
+                self.assertEqual(commands.invite_identity(self.root,
+                                                          self.spec),
+                                 bytes(16))
+        self.assertEqual(asked.call_args.args[0].node.path, self.spec)
 
     def test_status(self):
         with open(self.spec, "a") as fob:

@@ -1,7 +1,7 @@
 # Copyright (c) 2026 KeelLinux maintainers
 """The keel1a: line the fallback prints for the inviter (decision 0048)
 
-The new node's key, its endpoint, the reserved address, the invite id
+The new node's keys, its endpoint, the reserved address, the invite id
 and the time, with an HMAC keyed with the invite's HMAC key and a
 checksum, so a mistyped paste and a line for another invite are told
 apart and neither is accepted.
@@ -16,7 +16,8 @@ KEY = bytes(range(32))
 JOINER = "FHKH10gOWeK2bXHZPg8y+oPTprv556bwrmmRkbyEPgg="
 LINE = Accept(public_key=JOINER, endpoint="[2001:db8:2::20]:51820",
               address="fd00:6b65:1::3/64", invite_id="0123456789abcdef",
-              time=1_790_000_000)
+              time=1_790_000_000,
+              sign_key="AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=")
 
 
 class TestRoundTrip(unittest.TestCase):
@@ -27,7 +28,7 @@ class TestRoundTrip(unittest.TestCase):
                 made = Accept(**{**LINE.__dict__, "endpoint": endpoint})
                 text = acceptline.encode(made, KEY)
                 self.assertTrue(text.startswith("keel1a:"))
-                self.assertLess(len(text), 200)
+                self.assertLess(len(text), 250)
                 sealed = acceptline.parse(text)
                 self.assertEqual(sealed.accept, made)
                 self.assertTrue(sealed.authentic(KEY))
@@ -63,13 +64,14 @@ class TestRefused(unittest.TestCase):
                 (bytes([4]) + bytes(100), "flags"),
                 (bytes([3]) + bytes(100), "flags"),
                 (bytes([1]) + bytes(10), "malformed"),
-                (bytes([0]) + bytes(32) + bytes(61) + b"x", "bytes where")):
+                (bytes([0]) + bytes(64) + bytes(61) + b"x", "bytes where")):
             with self.subTest(payload=payload[:2]):
                 self.refused(acceptline.wrap(payload), words)
 
     def test_values_no_inviter_could_use(self):
         for changed, words in (
                 ({"public_key": "A" * 43 + "B"}, "not a WireGuard key"),
+                ({"sign_key": "x"}, "signing key is not a key"),
                 ({"endpoint": "[::1]:51820"}, "cannot be reached"),
                 ({"address": "2001:db8::3/64"}, "not an overlay address")):
             with self.subTest(changed=changed):

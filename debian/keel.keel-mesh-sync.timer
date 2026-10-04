@@ -1,0 +1,11 @@
+# keel mesh sync at boot and every 15 minutes (decision 0048)
+[Unit]
+Description=keel mesh: learn the members this node's peers know, regularly
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=15min
+RandomizedDelaySec=1min
+
+[Install]
+WantedBy=timers.target

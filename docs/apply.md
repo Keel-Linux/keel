@@ -1118,6 +1118,10 @@ drop, and these rules:
 - every `mesh` port of an enabled overlay, on the WireGuard interface
   only, and none (the step says which) while the spec declares no
   overlay;
+- with an overlay, TCP 51821 on the WireGuard interface only: the
+  members' channel of keel mesh, which `keel mesh sync` and the
+  announcement of a new node use between members ([docs/mesh.md](mesh.md),
+  "Members learn of each other");
 - with an overlay, the TCP ports of the pending mesh invites: a named
   set, `mesh_invites`, of ports with a timeout, and one rule that
   accepts TCP to a port in it. `keel mesh invite` adds its port for the
@@ -1383,6 +1387,7 @@ used survived, so:
 | SSH, over the uplink | the session started after the change, came from another machine, and arrived at an address another interface of this machine holds now. confirm says the overlay itself was not tested, and at which address a peer would test it |
 | A console, a process attached from a container's host | always, as for the uplink |
 | The mesh session of a join (decision 0048), for the overlay change that join made and no other | on the inviter, a WireGuard handshake from the new peer's key since the join (`wg show <if> latest-handshakes`) and the join's confirmation request signed with the invite's HMAC key, both checked by the root side; on the new node, the inviter's signed answer over the tunnel ([docs/mesh.md](mesh.md)) |
+| A member added by `keel mesh sync` or by an inviter's announcement (decision 0048, "Until etcd exists"), for the overlay change that added it and no other | a WireGuard handshake from the key of a member that change added, since the change (`wg show <if> latest-handshakes`), which only that member, reaching this node over the new configuration, can complete; after the route check ([docs/mesh.md](mesh.md)) |
 | `keel mesh create`, for the change that created a mesh with no peer and no other | always, after the route check: an overlay with no peer routes its own private prefix only, and no peer exists to confirm it (decision 0048, second round, point 1) |
 | Anything else, a session older than the change, a session from this machine to itself, or one arriving at an address the overlay does not declare | refused (exit 21) |
 

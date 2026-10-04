@@ -17,9 +17,9 @@ keel mesh may confirm, and no other (keel.network.confirm).
 """
 
 import contextlib
+import io
 import ipaddress
 import os
-import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -29,7 +29,7 @@ from keel import spec
 from keel.commands import apply_system, manifest_facts
 from keel.mesh.protocol import Peer
 from keel.network import confirm as netconfirm
-from keel.network import live, marker, session, wireguard
+from keel.network import live, marker, session, wgkeys, wireguard
 from keel.network.marker import write_private
 from keel.network.wireguard import allowed, same_key
 from keel.system import DEFAULT_WINDOW
@@ -42,22 +42,29 @@ class NodeError(Exception):
 
 @dataclass(frozen=True)
 class Change:
-    """apply's exit code, and the overlay change waiting, if it made one"""
+    """apply's exit code, the overlay change waiting, if it made one, and
+    the lines apply printed
+
+    The lines are held, not printed: they say the change "reverts in
+    120 s unless `keel network confirm`", which is not what the operator
+    has to do when keel mesh confirms it itself. A flow shows them when
+    the change does not come up or is not confirmed (`shown`).
+    """
 
     code: int
     made: marker.Pending | None
+    lines: tuple[str, ...] = ()
+
+    def shown(self, say: Callable[[str], None]) -> None:
+        for line in self.lines:
+            say(line)
 
 
 def live_apply(doc: dict, root: str, window: int) -> int:
-    """apply --system-only --skip-uplink, its lines on standard error
-
-    Standard output stays the command's own: the line to paste, or the
-    summary confconsole shows.
-    """
-    with contextlib.redirect_stdout(sys.stderr):
-        return apply_system(doc, root, False, "keel mesh",
-                            defer_certificate=True, network_window=window,
-                            skip_uplink=True)
+    """apply --system-only --skip-uplink"""
+    return apply_system(doc, root, False, "keel mesh",
+                        defer_certificate=True, network_window=window,
+                        skip_uplink=True)
 
 
 @dataclass
@@ -106,12 +113,16 @@ class Node:
     def change(self, doc: dict, window: int | None = None) -> Change:
         """Write `doc` and apply it; the change waiting, if any"""
         self.write(doc)
-        code = self.apply(doc, self.root, window or self.window)
+        said = io.StringIO()
+        # standard output stays the command's own: the line to paste,
+        # or the summary confconsole shows
+        with contextlib.redirect_stdout(said):
+            code = self.apply(doc, self.root, window or self.window)
         made = marker.read(self.root) if marker.exists(self.root) else None
         if made is not None and (made.kind != marker.OVERLAY
                                  or made.changed_at is None):
             made = None
-        return Change(code, made)
+        return Change(code, made, tuple(said.getvalue().splitlines()))
 
     def waiting(self) -> bool:
         return marker.exists(self.root)
@@ -133,6 +144,15 @@ class Node:
                 found.append(Peer(key, peer.get("endpoint"),
                                   hosts[0].split("/")[0]))
         return tuple(found)
+
+    def public_key(self) -> tuple[str | None, str]:
+        """This node's public key, as `wg pubkey` gives it from its key
+        file; None, and why, when it cannot"""
+        overlay = self.overlay()
+        path = os.path.join(self.root,
+                            wireguard.key_path(overlay).lstrip("/"))
+        public, problem = wgkeys.public(path)
+        return public, str(problem or "")
 
     def handshake(self, key: str) -> int | None:
         """When `key` last completed a WireGuard handshake with this node,
@@ -163,17 +183,6 @@ def static_addresses(doc: dict):
                 yield ipaddress.ip_interface(str(block["address"])).ip
 
 
-def global_addresses(text: str) -> list[tuple[str, str]]:
-    """`ip -o address show scope global` output: (interface, address)"""
-    found = []
-    for line in text.splitlines():
-        fields = line.split()
-        if len(fields) > 3 and fields[2] in ("inet", "inet6"):
-            found.append((fields[1].split("@")[0],
-                          fields[3].split("/")[0]))
-    return found
-
-
 def with_peer(doc: dict, peer: dict) -> dict:
     """`doc` with the peer added to its overlay, as a new document
 
@@ -188,6 +197,17 @@ def with_peer(doc: dict, peer: dict) -> dict:
         raise NodeError(f"{peer['public_key']} is already a peer of this"
                         " node; a join never replaces one")
     wireguard["peers"] = kept + [peer]
+    return {**doc, "network": {**network, "overlay": {
+        **overlay, "wireguard": wireguard}}}
+
+
+def without_peer(doc: dict, key: str) -> dict:
+    """`doc` without the peer of key `key`, as a new document"""
+    network = dict(doc.get("network") or {})
+    overlay = dict(network.get("overlay") or {})
+    wireguard = dict(overlay.get("wireguard") or {})
+    wireguard["peers"] = [one for one in wireguard.get("peers") or []
+                          if not same_key(str(one.get("public_key")), key)]
     return {**doc, "network": {**network, "overlay": {
         **overlay, "wireguard": wireguard}}}
 

@@ -45,12 +45,18 @@ def create(node: Node, out: Callable[[str], None],
         err(str(e))
         return exits.MESH_REFUSED
     if change.made is None:
+        change.shown(err)
         err(f"the overlay did not come up under the window (apply exited"
             f" {change.code}); the spec declares it, and the next apply"
             " --system brings it up")
         return exits.APPLY_FAILED
+    # apply's lines are held: they say the change reverts unless
+    # confirmed, and create confirms it itself; shown when it cannot
+    err("confirming the new overlay…")
     kept, lines = node.confirm(
         session.Origin(session.SELF, "keel mesh create"), change.made)
+    if not kept:
+        change.shown(err)
     for line in lines:
         err(line)
     if not kept:

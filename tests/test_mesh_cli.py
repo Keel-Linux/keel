@@ -26,8 +26,9 @@ import wgtools
 from helpers import spec  # noqa: F401
 
 from keel import cli, exits
-from keel.mesh import invites
+from keel.mesh import adopt, commands, invites
 from keel.mesh import token as mesh_token
+from keel.mesh.endpoint import Choice
 from keel.mesh.identity import IDENTITY
 
 OVERLAY = """\
@@ -306,6 +307,18 @@ class TestInviteRefused(Case):
                 self.assertIn(words, err)
         self.assertEqual(self.invite_files(), [])
 
+    def test_an_invite_that_would_split_the_identity(self):
+        self.write_spec(OVERLAY)
+        self.key_file()
+        with self.public(), mock.patch(
+                "keel.mesh.commands.invite_identity",
+                side_effect=adopt.Refused("this node's peers are in mesh"
+                                         " 9fe71b35…")):
+            code, out, err = self.invite()
+        self.assertEqual((code, out), (exits.MESH_REFUSED, ""))
+        self.assertIn("9fe71b35", err)
+        self.assertEqual(self.invite_files(), [])
+
     def test_a_damaged_identity_is_not_replaced(self):
         self.write_spec(OVERLAY)
         self.key_file()
@@ -326,6 +339,48 @@ class TestInviteRefused(Case):
             code, _, err = self.invite()
         self.assertEqual(code, exits.APPLY_NEEDS_ROOT)
         self.assertIn("must run as root", err)
+
+
+class TestInviteEndpoints(unittest.TestCase):
+    """--endpoint, else the static addresses, else found on the uplink"""
+
+    STATIC = {"network": {"interfaces": {"eth0": {"ipv6": {
+        "method": "static", "address": "2001:db8:1::10/64"}}}}}
+
+    def test_static_addresses_before_the_uplink(self):
+        said = []
+        with mock.patch("keel.mesh.commands.endpoint.detect") as detect:
+            self.assertEqual(commands.invite_endpoints(
+                None, self.STATIC, True, said.append), ("2001:db8:1::10",))
+            self.assertEqual(commands.invite_endpoints(
+                ["192.0.2.1"], {}, True, said.append), ("192.0.2.1",))
+        detect.assert_not_called()
+        self.assertEqual(said, [])
+
+    def test_found_on_the_uplink_of_the_live_system(self):
+        said = []
+        found = Choice(("2001:db8:7::9",),
+                       ("endpoint 2001:db8:7::9, found on eth0",))
+        with mock.patch("keel.mesh.commands.endpoint.detect",
+                        return_value=found) as detect:
+            self.assertEqual(commands.invite_endpoints(
+                None, {}, True, said.append), ("2001:db8:7::9",))
+            with self.assertRaises(ValueError):
+                commands.invite_endpoints(None, {}, False, said.append)
+        self.assertEqual(detect.call_count, 1)
+        self.assertEqual(said, ["endpoint 2001:db8:7::9, found on eth0"])
+
+    def test_only_a_privacy_or_private_address_is_refused(self):
+        said = []
+        found = Choice((), (), ("2001:db8::7 is a SLAAC privacy address",))
+        with mock.patch("keel.mesh.commands.endpoint.detect",
+                        return_value=found), \
+                self.assertRaises(ValueError) as raised:
+            commands.invite_endpoints(None, {}, True, said.append)
+        self.assertIn("--endpoint", str(raised.exception))
+        self.assertIn("none was found on the uplink", str(raised.exception))
+        self.assertIn("SLAAC privacy address", str(raised.exception))
+        self.assertEqual(said, [])
 
 
 class TestJoinDryRun(Case):

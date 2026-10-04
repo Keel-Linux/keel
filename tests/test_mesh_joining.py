@@ -12,6 +12,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import timedelta
 from unittest import mock
 
@@ -20,8 +21,10 @@ from mesh_helpers import (
     ASSIGNED,
     INVITER,
     JOINER,
+    MESH,
     NOW,
     OTHER,
+    SIGNER,
     Clock,
     reserved,
 )
@@ -37,14 +40,32 @@ from mesh_wire import (
 )
 
 from keel import exits
-from keel.mesh import acceptline, identity, invites, joining, protocol
+from keel.mesh import (
+    acceptline,
+    identity,
+    invites,
+    joining,
+    protocol,
+    signing,
+    trust,
+)
 from keel.mesh.admit import Admitter, Joined
+from keel.mesh.endpoint import Choice
 from keel.mesh.listener import Listener, Params
 from keel.mesh.node import NodeError
 from keel.mesh.token import hmac_key
 from keel.network import marker
 
 JOINER_ENDPOINT = "2001:db8:2::20"
+
+
+class Saying(Armed):
+    """apply, and the lines it prints, as the live one does"""
+
+    def __call__(self, doc, root, window):
+        print(f"keel mesh: bring the overlay wg0 up; it reverts in {window}"
+              " s unless `keel network confirm` is run from a new session")
+        return super().__call__(doc, root, window)
 
 
 def spec_of(found):
@@ -71,7 +92,7 @@ class Case(unittest.TestCase):
                    self.invite.expires, "::", 51820, "fd00:6b65:1::1"),
             self.admitter, self.clock, self.logged.append)
         self.wire = Wire(self.listener, token(self.invite).fingerprint)
-        self.out, self.err, self.slept = [], [], []
+        self.out, self.err, self.slept, self.learned = [], [], [], []
         keys = mock.patch.multiple(
             "keel.mesh.joining.wgkeys", generate=mock.DEFAULT,
             public=mock.DEFAULT)
@@ -86,7 +107,8 @@ class Case(unittest.TestCase):
             self.joiner, token(self.invite, **changed), self.clock,
             self.out.append, self.err.append, post=self.wire,
             sleep=self.slept.append,
-            route_dev=lambda host: route)
+            route_dev=lambda host: route,
+            learn=lambda host: self.learned.append(host) or exits.OK)
         return joining.run(self.found, endpoint)
 
 
@@ -117,18 +139,123 @@ class TestJoin(Case):
         self.assertEqual([path for _, path in self.wire.calls],
                          [protocol.JOIN, protocol.CONFIRM])
         self.assertEqual(self.wire.calls[1][0], "fd00:6b65:1::1")
+        # the answer carried the members: nothing to pull
+        self.assertEqual(self.learned, [])
 
     def test_a_node_behind_nat_sends_no_endpoint(self):
         self.assertEqual(self.joining(endpoint=None), exits.OK, self.err)
         theirs = spec_of(self.inviter)["network"]["overlay"]["wireguard"]
         self.assertNotIn("endpoint", theirs["peers"][0])
 
-    def test_a_mesh_of_three_says_what_this_keel_does_not_do(self):
+    def other_member(self, evidenced=True):
+        """OTHER, a peer of the inviter, with evidence the inviter signed"""
         with open(self.inviter.path, "a") as fob:
             fob.write(f"      peers:\n      - public_key: {OTHER}\n"
+                      "        endpoint: '[2001:db8:3::30]:51820'\n"
                       "        allowed_ips: [fd00:6b65:1::7/128]\n")
+        if evidenced:
+            signing.ensure(self.inviter_root)
+            store = trust.load(self.inviter_root)
+            trust.recorded(store, trust.admit(
+                self.inviter_root, MESH, "1123456789abcdef", OTHER, SIGNER,
+                "fd00:6b65:1::7", "[2001:db8:3::30]:51820", NOW))
+            trust.save(self.inviter_root, store)
+
+    def test_a_member_without_evidence_is_not_taken(self):
+        self.other_member(evidenced=False)
         self.assertEqual(self.joining(), exits.OK, self.err)
+        mine = spec_of(self.joiner)["network"]["overlay"]["wireguard"]
+        self.assertEqual(len(mine["peers"]), 1)
+
+    def test_the_inviter_is_this_node_s_trust_root(self):
+        self.assertEqual(self.joining(), exits.OK, self.err)
+        store = trust.load(self.joiner_root)
+        self.assertTrue(store.members[INVITER].root)
+        self.assertEqual(store.members[INVITER].sign_key,
+                         signing.public(self.inviter_root))
+        # and the inviter keeps this node's evidence
+        evidence = trust.load(self.inviter_root).evidence(JOINER)
+        self.assertEqual(evidence.sign_key, signing.public(self.joiner_root))
+        self.assertEqual(evidence.invite_id, self.invite.invite_id)
+
+    def test_evidence_that_is_not_this_node_s_admission(self):
+        real = self.wire
+
+        def forged(host, port, path, body, *args, **kwargs):
+            reply = real(host, port, path, body, *args, **kwargs)
+            if path != protocol.JOIN:
+                return reply
+            data = protocol.join_answer(reply.body)
+            other = protocol.dumps(replace(data, admission=replace(
+                data.admission, address="fd00:6b65:1::9")))
+            return reply.__class__(other, reply.local, reply.peer)
+        self.wire = forged
+        self.assertEqual(self.joining(), exits.MESH_REFUSED)
+        self.assertIn("no valid evidence of this node's admission",
+                      self.err[-1])
+
+    def test_a_damaged_trust_store(self):
+        os.makedirs(os.path.join(self.joiner_root, "var/lib/keel/mesh"),
+                    exist_ok=True)
+        with open(os.path.join(self.joiner_root, trust.TRUST), "w") as fob:
+            fob.write("x")
+        self.assertEqual(self.joining(), exits.MESH_REFUSED)
+        self.assertIn("damaged", self.err[-1])
+
+    def test_no_signing_key_can_be_made(self):
+        with mock.patch("keel.mesh.joining.signing.ensure",
+                        side_effect=signing.SigningError("no openssl")):
+            self.assertEqual(self.joining(), exits.APPLY_FAILED)
+        self.assertEqual(self.err[-1], "no openssl")
+
+    def test_the_other_members_the_inviter_knows_are_peers_too(self):
+        self.other_member()
+        self.assertEqual(self.joining(), exits.OK, self.err)
+        mine = spec_of(self.joiner)["network"]["overlay"]["wireguard"]
+        self.assertEqual(mine["peers"][1], {
+            "public_key": OTHER, "endpoint": "[2001:db8:3::30]:51820",
+            "allowed_ips": ["fd00:6b65:1::7/128"]})
+        self.assertEqual(len(mine["peers"]), 2)
         self.assertIn("the mesh has 3 nodes", self.out[-1])
+        self.assertIn("the inviter announces this node to the 1 other",
+                      self.out[-1])
+
+    def test_a_member_this_node_cannot_take_is_left_out(self):
+        """its own key, or the inviter's again, even with evidence: never
+        written, the join goes on (the rest: test_mesh_members.py)"""
+        answer = (protocol.Peer(JOINER, None, "fd00:6b65:1::8"),
+                  protocol.Peer(INVITER, None, "fd00:6b65:1::9"))
+        signing.ensure(self.inviter_root)
+        store = trust.load(self.inviter_root)
+        for one in answer:
+            trust.recorded(store, trust.admit(
+                self.inviter_root, MESH, "1123456789abcdef",
+                one.public_key, SIGNER,
+                one.address, None, NOW))
+        trust.save(self.inviter_root, store)
+        with mock.patch.object(self.inviter, "peers", return_value=answer):
+            self.assertEqual(self.joining(), exits.OK, self.err)
+        mine = spec_of(self.joiner)["network"]["overlay"]["wireguard"]
+        self.assertEqual([one["public_key"] for one in mine["peers"]],
+                         [INVITER])
+
+    def test_apply_s_revert_warning_only_when_the_confirmation_fails(self):
+        """the join confirms itself: `unless keel network confirm` is not
+        what the operator has to do"""
+        self.joiner.apply = Saying()
+        self.assertEqual(self.joining(), exits.OK, self.err)
+        said = "\n".join(self.err)
+        self.assertNotIn("unless `keel network confirm`", said)
+        first = self.err.index("confirming over the overlay…")
+        self.assertTrue(self.err[first + 1].startswith("confirmed from"))
+
+    def test_apply_s_revert_warning_when_the_confirmation_fails(self):
+        self.joiner.apply = Saying()
+        self.joiner.probes = lambda: probes("wg0")
+        self.assertEqual(self.joining(), exits.NETWORK_NOT_CONFIRMED)
+        said = "\n".join(self.err)
+        self.assertIn("confirming over the overlay…", said)
+        self.assertIn("reverts in 120 s unless `keel network confirm`", said)
 
     def test_the_mesh_session_is_retried_while_the_tunnel_comes_up(self):
         calls = []
@@ -326,6 +453,7 @@ class TestFallback(Case):
     def accepted(self):
         """What accept leaves the inviter in: the peer applied, the
         listener waiting for the mesh session"""
+        signing.ensure(self.inviter_root)
         self.inviter.admit({"public_key": JOINER,
                             "allowed_ips": [f"{JOINER_OVERLAY}/128"]})
         until = NOW + timedelta(seconds=120)
@@ -349,6 +477,41 @@ class TestFallback(Case):
         [(doc, window)] = self.joiner.apply.documents
         self.assertEqual(window, 900)
         self.assertEqual(self.out[-1], joining.TWO_NODES)
+        # no answer carried the inviter's members: they are pulled
+        self.assertEqual(self.learned, ["fd00:6b65:1::1"])
+        self.assertIn("learning the other members from the inviter…",
+                      self.err)
+
+    def test_the_members_are_pulled_with_keel_mesh_sync(self):
+        found = joining.Joiner(self.joiner, token(self.invite), self.clock,
+                               self.out.append, self.err.append)
+        with mock.patch("keel.mesh.joining.sync.pull",
+                        return_value=exits.OK) as pulled:
+            self.assertEqual(found.learned("fd00:6b65:1::1"), exits.OK)
+        syncer, hosts = pulled.call_args.args
+        self.assertEqual((syncer.node, hosts),
+                         (self.joiner, ("fd00:6b65:1::1",)))
+
+    def test_the_inviter_s_signing_key_is_learned_from_its_answer(self):
+        self.accepted()
+        self.assertEqual(self.joining(), exits.OK, self.err)
+        found = trust.load(self.joiner_root).members[INVITER]
+        self.assertEqual(found.sign_key, signing.public(self.inviter_root))
+
+    def test_a_trust_store_that_cannot_take_the_inviter(self):
+        self.accepted()
+        os.makedirs(os.path.join(self.joiner_root, "var/lib/keel/mesh"),
+                    exist_ok=True)
+        with open(os.path.join(self.joiner_root, trust.TRUST), "w") as fob:
+            fob.write("x")
+        self.assertEqual(self.joining(), exits.NETWORK_NOT_CONFIRMED)
+        self.assertIn("damaged", self.err[-1])
+        self.assertEqual(self.learned, [])
+
+    def test_nothing_is_pulled_when_the_join_is_not_confirmed(self):
+        """the inviter never ran accept: the mesh session is refused"""
+        self.assertEqual(self.joining(), exits.NETWORK_NOT_CONFIRMED)
+        self.assertEqual(self.learned, [])
 
     def test_the_window_is_the_time_left_to_the_expiry(self):
         self.accepted()
@@ -375,20 +538,19 @@ class TestFallback(Case):
 
 class TestOwnEndpoint(unittest.TestCase):
     def test_declared_first(self):
-        self.assertEqual(joining.own_endpoint("2001:db8::5", {}, [], "wg0"),
+        self.assertEqual(joining.own_endpoint("2001:db8::5", {}, None),
                          "2001:db8::5")
 
-    def test_static_then_global_ipv6_first(self):
+    def test_static_then_found_on_the_uplink(self):
         doc = {"network": {"interfaces": {"eth0": {
             "ipv4": {"method": "static", "address": "192.0.2.5/24"}}}}}
-        held = [("eth0", "198.51.100.1"), ("wg0", "fd00::1"),
-                ("eth1", "2001:db8::9"), ("lo", "::1")]
-        self.assertEqual(joining.own_endpoint(None, doc, held, "wg0"),
-                         "2001:db8::9")
-        self.assertEqual(joining.own_endpoint(None, doc, [], "wg0"),
+        found = Choice(("2001:db8::9", "198.51.100.1"))
+        self.assertEqual(joining.own_endpoint(None, doc, found),
                          "192.0.2.5")
-        self.assertIsNone(joining.own_endpoint(None, {}, [("lo", "::1")],
-                                               "wg0"))
+        self.assertEqual(joining.own_endpoint(None, {}, found),
+                         "2001:db8::9")
+        self.assertIsNone(joining.own_endpoint(None, {}, Choice(())))
+        self.assertIsNone(joining.own_endpoint(None, {}, None))
 
     def test_endpoint_text(self):
         self.assertEqual(joining.endpoint_text("192.0.2.1"), "192.0.2.1")

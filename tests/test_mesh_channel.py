@@ -251,7 +251,7 @@ class TestForgedAnswer(Served):
 
 class TooLong(Listener):
     def handle(self, *args):
-        return Response(200, b"x" * (protocol.MAX_BODY + 1), None)
+        return Response(200, b"x" * (protocol.MAX_ANSWER + 1), None)
 
 
 class TestTooLongAnswer(Served):

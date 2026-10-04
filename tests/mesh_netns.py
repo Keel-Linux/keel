@@ -5,8 +5,10 @@ Run as root in a network namespace of its own by tests/test_mesh_netns.py
 (tests/wgtools.py says how); never run by hand on a machine. This
 namespace is the inviter A. Two children, B and C, are network
 namespaces of their own (`unshare -n`), each joined to A by a veth on
-its own /64. Then, with the real wg-quick, the real TLS listener and
-client, the real flows and the real confirmation logic of 0018:
+its own /64, with a default route through A, which forwards between
+them as the internet would. Then, with the real wg-quick, the real TLS
+listener and client, the real flows and the real confirmation logic of
+0018:
 
 1. A is in the mesh: its overlay up, and `keel mesh invite` through
    keel.cli prints the line;
@@ -17,9 +19,16 @@ client, the real flows and the real confirmation logic of 0018:
    TCP answer, applies its side and prints `keel mesh accept`, which A
    runs (keel.mesh.inviting.accept); both windows are confirmed over
    the overlay, and C pings A;
+   A then announces C to B over the overlay, B adds C and confirms it
+   by C's WireGuard handshake, and C, whose accept line carried no
+   member, pulls B from A (keel mesh sync): the mesh is a full one, and
+   B and C ping each other over it;
 4. the second token used again, from a fresh scratch root on C: the
    port gives no answer, so the join falls back again, and A refuses
    its line: the invite is spent.
+
+A and B run the members' channel (keel.mesh.sync.serve) as
+keel-mesh-members does, on their overlay address through wg0.
 
 Two things are not keel's own here. apply: a live apply arms systemd
 timers on the host, which no namespace isolates, so apply writes keel's
@@ -54,7 +63,7 @@ import time
 from datetime import datetime, timezone
 
 from keel import cli
-from keel.mesh import inviting, joining
+from keel.mesh import inviting, joining, memberd, sync
 from keel.mesh.node import Node
 from keel.mesh.token import parse
 from keel.network import marker, wireguard
@@ -128,28 +137,73 @@ def node(root: str, path: str) -> Node:
     return Node(root, path, apply=netns_apply, run=Recorder())
 
 
-def ping(address: str) -> bool:
-    """One answer of five is enough: the link may lose packets"""
-    return subprocess.run(["ping", "-6", "-c", "5", "-i", "0.3", "-W", "3",
-                           address], capture_output=True,
-                          check=False).returncode == 0
+def ping(address: str, rounds: int = 3) -> bool:
+    """One answer of five is enough: the link may lose packets. Up to
+    three rounds: a tunnel the last change brought down and up needs a
+    new handshake, and on a poor link a lost initiation is sent again
+    only after WireGuard's 5 s rekey timeout"""
+    return any(subprocess.run(["ping", "-6", "-c", "5", "-i", "0.3", "-W",
+                               "3", address], capture_output=True,
+                              check=False).returncode == 0
+               for _ in range(rounds))
 
 
-def joiner(token_text: str, endpoint: str) -> None:
-    """In B's or C's namespace: join, then ping A over the overlay"""
+def joiner(token_text: str, endpoint: str, after: str) -> None:
+    """In B's or C's namespace: join, then ping A over the overlay
+
+    `after` "serve": stay, as a member, with the members' channel up
+    (keel-mesh-members), answering the driver's `check` lines on
+    standard input; an overlay address: ping that member too, the one
+    this node learned of after its join.
+    """
     root, path = scratch("version: 1\n")
     out, err = [], []
 
     def said(line):
         out.append(line)
         print(line, flush=True)
-    found = joining.Joiner(node(root, path), parse(token_text, utcnow()),
+    here = node(root, path)
+    found = joining.Joiner(here, parse(token_text, utcnow()),
                            utcnow, said, err.append)
     code = joining.run(found, endpoint)
     last = marker.last(root)
-    print("RESULT " + json.dumps({
-        "code": code, "out": out, "err": err, "ping": ping(OVERLAY_A),
-        "outcome": last.outcome if last else None}), flush=True)
+    report = {"code": code, "out": out, "err": err, "ping": ping(OVERLAY_A),
+              "outcome": last.outcome if last else None,
+              "address": here.overlay().get("address"),
+              "key": here.public_key()[0]}
+    if after not in ("serve", "-"):
+        report["ping_other"] = ping(after)
+        report["peers"] = [one.get("public_key")
+                           for one in here.overlay().get("peers") or []]
+    print("RESULT " + json.dumps(report), flush=True)
+    if after == "serve":
+        member(here, root)
+
+
+def member(here: Node, root: str) -> None:
+    """keel-mesh-members, until the driver says `quit`; `check ADDRESS
+    KEY` waits for the member KEY to be this node's confirmed peer, and
+    pings it"""
+    log: list[str] = []
+    service, stop = members_service(here, log.append)
+    for line in sys.stdin:
+        words = line.split()
+        if words[:1] != ["check"]:
+            break
+        deadline = time.monotonic() + 300
+        while time.monotonic() < deadline:
+            keys = [one.get("public_key")
+                    for one in here.overlay().get("peers") or []]
+            if words[2] in keys and not marker.exists(root) and \
+                    marker.last(root).outcome == marker.CONFIRMED:
+                break
+            time.sleep(1)
+        last = marker.last(root)
+        print("CHECK " + json.dumps({
+            "peers": keys, "outcome": last.outcome if last else None,
+            "ping": ping(words[1]), "log": log}), flush=True)
+    stop.set()
+    service.join(30)
 
 
 CHILDREN: list[subprocess.Popen] = []
@@ -170,12 +224,13 @@ shutil.copytree(os.path.dirname(os.path.dirname(os.path.abspath(
 class Spawned:
     """`keel mesh listen` as its own process, with no capability"""
 
-    def __init__(self, invite_id: str, path: str, seconds: int):
+    def __init__(self, invite_id: str, path: str, seconds: int,
+                 action: str = "listen"):
         with open(LISTENER_LOG, "a") as log:
             self.process = subprocess.Popen(
                 ["setpriv", "--no-new-privs", "--bounding-set", "-all",
                  "--inh-caps", "-all", "--ambient-caps", "-all",
-                 sys.executable, "-m", "keel", "mesh", "listen", path],
+                 sys.executable, "-m", "keel", "mesh", action, path],
                 stdout=log, stderr=log, cwd=LISTENER_HOME,
                 env={**os.environ, "PYTHONPATH": LISTENER_HOME})
 
@@ -188,6 +243,23 @@ class Spawned:
     def stop(self) -> None:
         self.process.terminate()
         self.process.wait(10)
+
+
+def members_listener(path: str) -> Spawned:
+    """`keel mesh members-listen`, the members' channel's unprivileged
+    listener, as keel-mesh-members-listen runs it"""
+    return Spawned("members", path, 0, "members-listen")
+
+
+def members_service(here: Node, log) -> tuple[threading.Thread,
+                                               threading.Event]:
+    """keel-mesh-members: the root helper, and its listener"""
+    stop = threading.Event()
+    service = threading.Thread(target=memberd.serve, args=(
+        sync.Syncer(here, utcnow, log), stop), kwargs={
+        "start": members_listener})
+    service.start()
+    return service, stop
 
 
 def shaped(device: str, pid: int | None = None) -> None:
@@ -227,7 +299,10 @@ def link(name: str) -> int:
     for argv in (("ip", "link", "set", "lo", "up"),
                  ("ip", "-6", "address", "add", f"{net}::2/64", "dev",
                   "uplink", "nodad"),
-                 ("ip", "link", "set", "uplink", "up")):
+                 ("ip", "link", "set", "uplink", "up"),
+                 # the other children through A, as the internet would
+                 ("ip", "-6", "route", "add", "default", "via", f"{net}::1",
+                  "dev", "uplink")):
         sh(*argv, pid=child.pid)
     shaped(f"to{name}")
     shaped("uplink", child.pid)
@@ -245,19 +320,24 @@ def invite(root: str, path: str, name: str, port: int) -> str:
     return out.getvalue().split()[-1]
 
 
-def run_joiner(pid: int, token_text: str, name: str) -> subprocess.Popen:
+def run_joiner(pid: int, token_text: str, name: str,
+               after: str = "-") -> subprocess.Popen:
     return subprocess.Popen(
         ["nsenter", "-t", str(pid), "-n", sys.executable, __file__, "join",
-         token_text, f"{LINKS[name]}::2"], stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, text=True)
+         token_text, f"{LINKS[name]}::2", after], stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
 
-def result(process: subprocess.Popen) -> dict:
-    out, err = process.communicate(timeout=300)
-    for line in out.splitlines():
-        if line.startswith("RESULT "):
-            return json.loads(line[len("RESULT "):])
-    raise RuntimeError(f"no result: {out}\n{err}")
+def result(process: subprocess.Popen, prefix: str = "RESULT ") -> dict:
+    """The next line of `process` that starts with `prefix`, read as it
+    comes: a member that stays prints more later"""
+    seen = []
+    for line in process.stdout:
+        if line.startswith(prefix):
+            return json.loads(line[len(prefix):])
+        seen.append(line)
+    raise RuntimeError(f"no {prefix.strip()}: {''.join(seen)[-3000:]}\n"
+                       f"{process.stderr.read()[-3000:]}")
 
 
 def accept_line(process: subprocess.Popen) -> str:
@@ -270,6 +350,9 @@ def accept_line(process: subprocess.Popen) -> str:
 
 def inviter() -> None:
     sh("ip", "link", "set", "lo", "up")
+    # A routes between B and C: their endpoints reach each other
+    with open("/proc/sys/net/ipv6/conf/all/forwarding", "w") as fob:
+        fob.write("1\n")
     pids = {name: link(name) for name in LINKS}
     root, path = scratch("version: 1\nnetwork:\n  overlay:\n    wireguard:\n"
                          f"      address: {OVERLAY_A}/64\n")
@@ -283,7 +366,11 @@ def inviter() -> None:
     journal = []
     report = {}
 
-    # 1-2. the root helper and its unprivileged listener, and B joins
+    # A's members' channel, as keel-mesh-members runs it
+    service, stop = members_service(a, journal.append)
+
+    # 1-2. the root helper and its unprivileged listener, and B joins;
+    # B stays, a member with its own members' channel
     first = invite(root, path, "B", 51900)
     a_side = inviting.Inviter(a, utcnow, journal.append, journal.append,
                               run=Recorder(), output=lambda argv: None,
@@ -293,23 +380,34 @@ def inviter() -> None:
         inviting.serve_invite(a_side, parse(first, utcnow()).invite_id)))
     thread.start()
     listening(f"{LINKS['B']}::1", 51900)
-    report["b"] = result(run_joiner(pids["B"], first, "B"))
+    b_process = run_joiner(pids["B"], first, "B", "serve")
+    report["b"] = result(b_process)
     thread.join(120)
     report["serve"] = codes
     report["a_after_b"] = marker.last(root).outcome
+    b_address = report["b"]["address"].split("/")[0]
 
-    # 3. nothing listens on the second invite's port: the fallback
+    # 3. nothing listens on the second invite's port: the fallback. A
+    # announces C to B once C is confirmed, and C, whose accept line
+    # carried no member, pulls B from A (keel mesh sync)
     second = invite(root, path, "C", 51901)
     accepting = inviting.Inviter(a, utcnow, journal.append, journal.append,
                                  run=Recorder(), output=lambda argv: None,
                                  start=Spawned)
-    process = run_joiner(pids["C"], second, "C")
+    process = run_joiner(pids["C"], second, "C", b_address)
     report["accept"] = inviting.accept(accepting, accept_line(process))
-    rest, err = process.communicate(timeout=300)
-    report["c"] = next(
-        (json.loads(one[len("RESULT "):]) for one in rest.splitlines()
-         if one.startswith("RESULT ")), {"err": err})
+    report["c"] = result(process)
+    process.wait(60)
     report["a_after_c"] = marker.last(root).outcome
+    # B learned of C through A's announcement, and confirmed it
+    b_process.stdin.write(f"check {report['c']['address'].split('/')[0]}"
+                          f" {report['c']['key']}\n")
+    b_process.stdin.flush()
+    report["b_after_c"] = result(b_process, "CHECK ")
+    b_process.stdin.close()
+    b_process.wait(60)
+    stop.set()
+    service.join(30)
 
     # 4. the second token again: A refuses the line, the join is stopped
     process = run_joiner(pids["C"], second, "C")
@@ -334,7 +432,7 @@ def inviter() -> None:
 
 if __name__ == "__main__":
     if sys.argv[1:2] == ["join"]:
-        joiner(sys.argv[2], sys.argv[3])
+        joiner(sys.argv[2], sys.argv[3], sys.argv[4])
     else:
         try:
             inviter()

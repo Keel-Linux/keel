@@ -25,11 +25,17 @@ from keel.mesh import create, identity, invites, ports, status
 from keel.mesh.node import (
     Node,
     NodeError,
-    global_addresses,
     live_apply,
     with_overlay,
 )
 from keel.network import marker
+
+
+def saying(doc, root, window):
+    """apply as the live one prints it"""
+    print(f"keel mesh: bring the overlay wg0 up; it reverts in {window} s"
+          " unless `keel network confirm` is run from a new session")
+    return Armed()(doc, root, window)
 
 
 class TestCreate(unittest.TestCase):
@@ -63,9 +69,19 @@ class TestCreate(unittest.TestCase):
 
     def test_the_operator_session_routed_into_it_reverts_it(self):
         self.node.probes = lambda: probes("wg0")
+        self.node.apply = saying
         self.assertEqual(self.create(), exits.NETWORK_NOT_CONFIRMED)
         self.assertTrue(marker.exists(self.root))
-        self.assertIn("leaves through wg0", self.err[0])
+        self.assertEqual(self.err[0], "confirming the new overlay…")
+        self.assertIn("unless `keel network confirm`", self.err[1])
+        self.assertIn("leaves through wg0", self.err[2])
+
+    def test_apply_s_revert_warning_is_not_shown_when_it_confirms(self):
+        self.node.apply = saying
+        self.assertEqual(self.create(), exits.OK)
+        self.assertNotIn("unless", "\n".join(self.err))
+        self.assertEqual(self.err[:2], ["confirming the new overlay…",
+                                        "confirmed from keel mesh create"])
 
     def test_a_node_already_in_a_mesh(self):
         with open(self.node.path, "w") as fob:
@@ -86,9 +102,13 @@ class TestCreate(unittest.TestCase):
         self.assertIn("does not hold a mesh identity", self.err[0])
 
     def test_the_overlay_does_not_come_up(self):
-        self.node.apply = Armed(code=16, arms=False)
+        def failing(doc, root, window):
+            print("wg-quick up failed")
+            return 16
+        self.node.apply = failing
         self.assertEqual(self.create(), exits.APPLY_FAILED)
-        self.assertIn("apply exited 16", self.err[0])
+        self.assertEqual(self.err[0], "wg-quick up failed")
+        self.assertIn("apply exited 16", self.err[1])
 
 
 class TestStatus(unittest.TestCase):
@@ -111,7 +131,10 @@ class TestStatus(unittest.TestCase):
 
     def test_the_peers_their_handshakes_and_the_invites(self):
         reserved(self.root)
+        identity.adopt(self.root, bytes(range(16)))
         found = status.lines(self.overlay, self.root, NOW, self.wg)
+        self.assertEqual(found.pop(1), "mesh identity:"
+                         " 000102030405060708090a0b0c0d0e0f")
         self.assertEqual(found[:4], [
             "this node: fd00:6b65:1::1/64 on wg0, WireGuard on UDP 51820",
             "public key: nb9/izIukqWXM7gnBpe7hki4jKZZChWOW1wEfONn82E=",
@@ -139,12 +162,22 @@ class TestStatus(unittest.TestCase):
     def test_an_interface_that_is_down(self):
         found = status.lines(self.overlay, self.root, NOW, lambda argv: None)
         self.assertIn("public key: unknown (is the interface up?)", found)
-        self.assertIn("no handshake known", found[3])
+        self.assertIn("no handshake known", found[4])
 
     def test_off_the_live_system(self):
         found = status.lines(self.overlay, self.root, NOW, None)
-        self.assertEqual(found[1], "not the live system: no handshake read")
-        self.assertTrue(found[3].endswith("[2001:db8:2::20]:51820"))
+        self.assertEqual(found[2], "not the live system: no handshake read")
+        self.assertTrue(found[4].endswith("[2001:db8:2::20]:51820"))
+
+    def test_no_identity_yet_or_a_damaged_one(self):
+        found = status.lines(self.overlay, self.root, NOW, None)
+        self.assertIn("none yet", found[1])
+        self.assertIn("keel mesh create --adopt", found[1])
+        os.makedirs(os.path.join(self.root, "var/lib/keel/mesh"))
+        with open(os.path.join(self.root, identity.IDENTITY), "w") as fob:
+            fob.write("x\n")
+        found = status.lines(self.overlay, self.root, NOW, None)
+        self.assertIn("does not hold a mesh identity", found[1])
 
     def test_no_mesh(self):
         for overlay in (None, {}):
@@ -228,18 +261,29 @@ class TestNode(unittest.TestCase):
         self.assertEqual(found.peers(OTHER)[0].address, "fd00:6b65:1::3")
         self.assertEqual(found.peers(JOINER), ())
 
-    def test_the_live_apply_writes_its_lines_to_standard_error(self):
+    def test_the_live_apply(self):
         with mock.patch("keel.mesh.node.apply_system",
-                        side_effect=lambda *args, **kwargs: print("line")
-                        or 0) as applied, \
-                mock.patch("sys.stderr") as err, \
-                mock.patch("sys.stdout") as out:
+                        return_value=0) as applied:
             self.assertEqual(live_apply({"version": 1}, "/", 150), 0)
         applied.assert_called_once_with(
             {"version": 1}, "/", False, "keel mesh", defer_certificate=True,
             network_window=150, skip_uplink=True)
-        self.assertTrue(err.write.called)
+
+    def test_apply_s_lines_are_held_by_the_change_not_printed(self):
+        def saying(doc, root, window):
+            print("it reverts in 120 s unless `keel network confirm`")
+            return Armed()(doc, root, window)
+        found = node(self.root, INVITER_SPEC, apply=saying)
+        with mock.patch("sys.stdout") as out:
+            change = found.admit({"public_key": JOINER,
+                                  "allowed_ips": ["fd00:6b65:1::3/128"]})
         self.assertFalse(out.write.called)
+        self.assertEqual(change.lines,
+                         ("it reverts in 120 s unless `keel network"
+                          " confirm`",))
+        said = []
+        change.shown(said.append)
+        self.assertEqual(said, list(change.lines))
 
     def test_a_spec_that_cannot_be_written(self):
         found = node(self.root)
@@ -275,13 +319,6 @@ class TestNode(unittest.TestCase):
             self.assertIsNone(found.handshake(key))
         found.output = lambda argv: None
         self.assertIsNone(found.handshake(JOINER))
-
-    def test_global_addresses(self):
-        text = ("2: eth0    inet6 2001:db8::5/64 scope global \\\n"
-                "3: wg0@NONE    inet6 fd00::1/64 scope global\n"
-                "garbage\n")
-        self.assertEqual(global_addresses(text), [
-            ("eth0", "2001:db8::5"), ("wg0", "fd00::1")])
 
     def test_defaults_are_live(self):
         found = Node("/", "/etc/keel/instance.yaml")

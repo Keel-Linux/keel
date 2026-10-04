@@ -100,9 +100,67 @@ def actions(mesh_actions, options: Options) -> None:
         " this node at ::1, confirmed by itself (root)",
     )
     options.common(create_parser)
+    create_parser.add_argument(
+        "--adopt", action="store_true",
+        help="on one node of a mesh built by hand: give the mesh its"
+        " identity (this node's, else its peers', else a new one), which"
+        " the others take with keel mesh sync",
+    )
     window(options, create_parser)
     options.root(create_parser, "create the mesh in")
     create_parser.set_defaults(handler=commands.mesh_create)
+    sync_parser = mesh_actions.add_parser(
+        "sync",
+        help="add the members this node's peers know and it does not, over"
+        " the overlay, confirmed by a WireGuard handshake (root); run at"
+        " boot and by keel-mesh-sync.timer",
+    )
+    options.common(sync_parser)
+    sync_parser.add_argument(
+        "--from", dest="source", action="append", default=None,
+        metavar="ADDRESS",
+        help="ask the member at this overlay address alone; may be"
+        " repeated (default: every peer)",
+    )
+    sync_parser.add_argument(
+        "--adopt", default=None, metavar="ADDRESS",
+        help="first take the mesh identity of the member at this overlay"
+        " address in place of this node's: the repair of a split",
+    )
+    window(options, sync_parser)
+    options.root(sync_parser, "sync the mesh of")
+    sync_parser.set_defaults(handler=commands.mesh_sync)
+    members_parser = mesh_actions.add_parser(
+        "members",
+        help="the members' channel on the overlay, which keel-mesh-members"
+        " runs: rosters for keel mesh sync, announcements of new nodes;"
+        " not run by hand",
+    )
+    options.common(members_parser)
+    window(options, members_parser)
+    options.root(members_parser, "serve the mesh of")
+    members_parser.set_defaults(handler=commands.mesh_members)
+    members_listen = mesh_actions.add_parser(
+        "members-listen",
+        help="the unprivileged listener keel mesh members starts as the"
+        " unit keel-mesh-members-listen; not run by hand",
+    )
+    members_listen.add_argument("socket", metavar="SOCKET",
+                                help="the root helper's unix socket")
+    members_listen.set_defaults(handler=commands.mesh_members_listen)
+    remove_parser = mesh_actions.add_parser(
+        "remove",
+        help="remove a peer from this node's spec, applied under the window"
+        " for keel network confirm, and keep its tombstone so no keel mesh"
+        " sync adds it again (root)",
+    )
+    options.common(remove_parser)
+    remove_parser.add_argument(
+        "member", metavar="KEY|ADDRESS",
+        help="the peer's WireGuard public key or its overlay address")
+    window(options, remove_parser)
+    options.root(remove_parser, "remove the peer in")
+    remove_parser.set_defaults(handler=commands.mesh_remove)
     accept_parser = mesh_actions.add_parser(
         "accept",
         help="on the inviter, the keel mesh accept line a join printed when"
