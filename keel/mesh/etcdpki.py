@@ -20,12 +20,12 @@ address gets none of it.
 Short lives, so that a key that leaks stops working by itself: a leaf
 lasts 30 days and is renewed by its member with a third left
 (`keel mesh etcd tend`), an intermediate a year and is renewed by the
-root's holder. Every intermediate carries name constraints that permit
-only the mesh's overlay prefix and ::1, so no member can certify an
-address outside the mesh. Its path length cannot be limited to 0: an
-intermediate signs the intermediate of the node its member invites when
-the root's holder cannot be reached (keel.mesh.etcd), and the chain is
-re-anchored under the root at that node's first renewal.
+root's holder. Only the root signs intermediates, so every chain is
+one intermediate deep and each intermediate has a path length of 0: it
+signs leaves, never another CA. Each is name constrained to its own
+member's address (a /128) and ::1, the addresses its leaves name, so
+no member can certify another member's address or one outside the
+mesh.
 
 Revocation is a CRL the root signs (`crl`), which etcd checks against
 every certificate a peer or a client presents, chain included: revoking
@@ -54,7 +54,7 @@ CRL_DAYS = 30
 PEM_RE = re.compile(r"-----BEGIN (?P<label>[A-Z0-9 ]+)-----\n[A-Za-z0-9+/=\n]+"
                     r"-----END (?P=label)-----\n")
 EXTENSIONS = {
-    CA: ("basicConstraints=critical,CA:TRUE\n"
+    CA: ("basicConstraints=critical,CA:TRUE,pathlen:0\n"
          "keyUsage=critical,keyCertSign,cRLSign\n"),
     MEMBER: ("basicConstraints=critical,CA:FALSE\n"
              "keyUsage=critical,digitalSignature\n"
@@ -131,8 +131,9 @@ def root(path: str, mesh_id: str) -> str:
 
 
 def constraints(prefix: str) -> str:
-    """The name constraints of an intermediate: the overlay prefix and
-    ::1, which every member certificate names, and nothing else"""
+    """The name constraints of an intermediate: `prefix` (its member's
+    own /128) and ::1, which its member certificate names, and nothing
+    else"""
     net = ipaddress.IPv6Network(prefix, strict=False)
     loop = ipaddress.IPv6Network("::1/128")
     return ("nameConstraints=critical,"
@@ -146,7 +147,7 @@ def issue(kind: str, issuer_key: str, issuer: str, csr: str, name: str,
     """A certificate of `kind` for the key of `csr`, named `name`, signed
     with the key at `issuer_key` whose certificate is `issuer`; a member
     certificate carries `addresses` as its IP SANs, an intermediate the
-    name constraints of the overlay `prefix`. Raises PkiError"""
+    name constraints of `prefix`. Raises PkiError"""
     request_key(csr)
     extensions = EXTENSIONS[kind] + IDS
     if kind == CA:

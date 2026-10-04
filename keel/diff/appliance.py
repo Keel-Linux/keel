@@ -10,6 +10,8 @@ unit has nothing in systemd to compare, and says so; nor has etcd while
 it waits for its cluster, which apply leaves stopped (keel.system.etcd).
 """
 
+from datetime import datetime, timezone
+
 from keel.diff.report import DRIFT, NOT_COMPARED, SAME, UNKNOWN, FieldDiff
 from keel.inspect.monitor import monit_cycle
 from keel.inspect.tree import Tree
@@ -22,6 +24,7 @@ from keel.mesh import etcdstate
 from keel.system.fwstate import bridges_of, table_digest
 from keel.system.monitor import NOTIFY
 
+RENEWED = "renewed by keel mesh etcd tend"
 LIVE_ROOT = "/"
 RENDERED = "the file apply renders from the manifests"
 DIFFERS = "a file that differs from it"
@@ -68,7 +71,31 @@ def appliance_fields(declared: dict, root: str) -> list[FieldDiff]:
         status = SAME if value == wanted else DRIFT
         fields.append(FieldDiff(key, status, wanted, value or why))
     return (fields + monit_fields(declared, resolved, states, tree)
-            + firewall_fields(declared, resolved, states, tree))
+            + firewall_fields(declared, resolved, states, tree)
+            + etcd_fields(states, tree))
+
+
+def etcd_fields(states: dict, tree: Tree,
+                now: datetime | None = None) -> list[FieldDiff]:
+    """etcd.certificates: renewed by keel mesh etcd tend, or drift, with
+    why: its last renewal failed, or the certificate expires within seven
+    days (keel.mesh.etcdcare)"""
+    from keel.mesh import etcdcare
+    if states.get("etcd") != "enabled" or \
+            not tree.exists(etcdstate.CLUSTER):
+        return []
+    now = now or datetime.now(timezone.utc)
+    problem = etcdcare.renewal_problem(tree.root)
+    ends = etcdstate.expires(tree.root)
+    if problem is None and ends is not None and \
+            ends - now < etcdcare.WARN_BEFORE:
+        problem = f"expires {ends:%Y-%m-%d %H:%M} UTC, within 7 days"
+    if problem is None and ends is None:
+        problem = "no member certificate"
+    if problem:
+        return [FieldDiff("etcd.certificates", DRIFT, RENEWED, None,
+                          problem)]
+    return [FieldDiff("etcd.certificates", SAME, RENEWED, RENEWED)]
 
 
 def firewall_fields(declared: dict, resolved, states: dict,

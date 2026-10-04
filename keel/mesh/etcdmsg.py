@@ -53,7 +53,9 @@ KINDS = (PROBE, ENROLL, CLUSTER, ISSUE, REVOKE)
 MAX_RECORD = 16384
 LABEL = b"keel mesh etcd 1\n"
 MAX_PEM = 4096
-MAX_CHAIN = 8
+# a grant carries no intermediate above the member's: the root signs
+# every intermediate, so a chain is one intermediate deep
+MAX_CHAIN = 0
 # etcd's own advice is at most seven voters; a cluster sent is no more
 MAX_MEMBERS = 9
 MAX_READY = 256

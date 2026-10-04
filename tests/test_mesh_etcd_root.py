@@ -33,17 +33,18 @@ class TestTheHolder(Mesh):
 
     def test_only_the_holder_signs_a_record(self):
         with self.assertRaisesRegex(StateError, "only the node"):
-            etcdca.record(self.b.root, self.three, MESH.hex())
+            etcdca.record(self.b.root, self.three, MESH.hex(), NOW)
         with mock.patch("keel.mesh.etcdpki.sign",
                         side_effect=PkiError("no")), \
                 self.assertRaisesRegex(StateError, "no"):
-            etcdca.record(self.a.root, self.three, MESH.hex())
-        found = etcdca.record(self.a.root, self.three, MESH.hex())
-        self.assertIsNone(etcdca.problem(self.a.root, found))
-        self.assertIn("holds no root", etcdca.problem(self.b.root, found))
+            etcdca.record(self.a.root, self.three, MESH.hex(), NOW)
+        found = etcdca.record(self.a.root, self.three, MESH.hex(), NOW)
+        self.assertIsNone(etcdca.problem(self.a.root, found, NOW))
+        self.assertIn("holds no root", etcdca.problem(self.b.root, found,
+                                                       NOW))
 
     def test_one_formation_reserved_given_back_once(self):
-        found = etcdca.record(self.a.root, self.three, MESH.hex())
+        found = etcdca.record(self.a.root, self.three, MESH.hex(), NOW)
         self.assertTrue(etcdca.reserve(self.a.root, found))
         self.assertFalse(etcdca.reserve(self.a.root, found))
         etcdca.release(self.a.root)
@@ -55,18 +56,24 @@ class TestTheHolder(Mesh):
 
     def test_revoke_and_refresh_on_the_holder_alone(self):
         with self.assertRaisesRegex(StateError, "only the root"):
-            etcdca.revoke(self.b.root, None, {}, NOW)
+            etcdca.revoke(self.b.root, address(2), KEYS[2], NOW)
         self.assertFalse(etcdca.refresh(self.b.root, NOW))
+        grant = etcdstate.grant_for(self.a.root, etcdstate.ca_request(
+            self.c.root), address(2), KEYS[2])
+        with self.assertRaisesRegex(StateError, "no intermediate"):
+            etcdca.revoke(self.a.root, address(2), KEYS[1], NOW)
         etcdstate.write(self.a.root, etcdca.REVOKED, "{")
-        etcdstate.write(self.a.root, etcdstate.ISSUED, "{")
-        found = etcdca.revoke(self.a.root, None, {"AB": "271004000000Z"},
-                              NOW)
-        self.assertEqual(etcdpki.crl_serials(found), {"AB"})
+        found = etcdca.revoke(self.a.root, address(2), KEYS[2], NOW)
+        self.assertEqual(etcdpki.crl_serials(found),
+                         {etcdpki.serial(grant.certificate)})
         etcdstate.write(self.a.root, etcdca.REVOKED, "[1]")
         self.assertEqual(etcdca.revoked(self.a.root), {})
         with mock.patch("keel.mesh.etcdpki.crl", side_effect=PkiError("x")), \
                 self.assertRaises(StateError):
-            etcdca.revoke(self.a.root, None, {}, NOW)
+            etcdca.revoke(self.a.root, address(2), KEYS[2], NOW)
+        etcdstate.write(self.a.root, etcdstate.ISSUED, "{")
+        with self.assertRaisesRegex(StateError, "no intermediate"):
+            etcdca.revoke(self.a.root, address(2), KEYS[2], NOW)
         just = os.path.getmtime(os.path.join(self.a.root, etcdstate.CRL))
         from datetime import datetime, timezone
         self.assertFalse(etcdca.refresh(
@@ -99,29 +106,58 @@ class TestTheHolderAnswers(Mesh):
 
     def test_issue_refusals(self):
         csr = etcdstate.ca_request(self.c.root)
-        self.assertIn("does not hold", self.error(
-            self.b, etcdmsg.ISSUE, {"csr": csr, "address": address(2)},
-            sender=0))
+        body = {"csr": csr, "address": address(2), "public_key": KEYS[2]}
+        self.assertIn("does not hold", self.error(self.b, etcdmsg.ISSUE,
+                                                  body, sender=0))
         self.assertIn("not an overlay address", self.error(
-            self.a, etcdmsg.ISSUE, {"csr": csr, "address": "x"}))
+            self.a, etcdmsg.ISSUE, {**body, "address": "x"}))
         self.assertIn("not in this mesh's prefix", self.error(
-            self.a, etcdmsg.ISSUE, {"csr": csr, "address": "fd99::1"}))
+            self.a, etcdmsg.ISSUE, {**body, "address": "fd99::1"}))
+        self.assertIn("no WireGuard key", self.error(
+            self.a, etcdmsg.ISSUE, {**body, "public_key": "x"}))
         self.assertIn("PEM", self.error(
-            self.a, etcdmsg.ISSUE, {"csr": "x", "address": address(2)}))
+            self.a, etcdmsg.ISSUE, {**body, "csr": "x"}))
         self.assertIn("no request", self.error(
-            self.a, etcdmsg.ISSUE, {"address": address(2)}))
-        found = self.ask(self.a, etcdmsg.ISSUE,
-                         {"csr": csr, "address": address(2)})
+            self.a, etcdmsg.ISSUE, {**body, "csr": None}))
+        # b asks for c's address with its own key: c's, refused
+        self.assertIn("another member's", self.error(
+            self.a, etcdmsg.ISSUE, {**body, "public_key": KEYS[1]}))
+        self.assertIn("another member's", self.error(
+            self.a, etcdmsg.ISSUE, {**body, "address": address(0),
+                                    "public_key": KEYS[1]}))
+        found = self.ask(self.a, etcdmsg.ISSUE, body)
         self.assertEqual(found.status, 200)
+        # an address nobody holds yet: a node being admitted
+        fresh = {**body, "address": "fd00:6b65:1::9", "public_key": KEYS[3]}
+        self.assertEqual(self.ask(self.a, etcdmsg.ISSUE, fresh).status, 200)
+        self.assertEqual(etcdserve.claimed(self.a, "fd00:6b65:1::9"),
+                         KEYS[3])
+        etcdstate.write(self.a.root, etcdstate.ISSUED,
+                        '{"fd00:6b65:1::8": [[1]]}')
+        self.assertIsNone(etcdserve.claimed(self.a, "fd00:6b65:1::8"))
+        etcdstate.write(self.a.root, etcdstate.ISSUED, "{")
+        self.assertIsNone(etcdserve.claimed(self.a, "fd00:6b65:1::8"))
+
+    def test_a_member_cannot_revoke_another_s_certificates(self):
+        """b names itself as the removed node, at c's address: refused,
+        and c's intermediate is not revoked"""
+        found = self.error(self.a, etcdmsg.REVOKE, {
+            "address": address(2), "public_key": KEYS[1]})
+        self.assertIn("no intermediate of", found)
+        self.assertEqual(etcdpki.crl_serials(etcdstate.read(
+            self.a.root, etcdstate.CRL)), set())
+        # b leaving names its own address: its own intermediate goes
+        own = self.ask(self.a, etcdmsg.REVOKE, {
+            "address": address(1), "public_key": KEYS[1]})
+        self.assertEqual(own.status, 200)
+        self.assertEqual(etcdpki.crl_serials(json.loads(own.body)["crl"]),
+                         {etcdpki.serial(etcdstate.read(
+                             self.b.root, etcdstate.CA_CERT))})
 
     def test_revoke_refusals(self):
-        self.assertIn("malformed revocation", self.error(
+        self.assertIn("no WireGuard key", self.error(
             self.a, etcdmsg.REVOKE, {"address": address(2),
                                      "public_key": 1}))
-        self.assertIn("malformed revocation", self.error(
-            self.a, etcdmsg.REVOKE, {"address": address(2),
-                                     "public_key": KEYS[2],
-                                     "serials": {"a": 1}}))
         store = trust.load(self.a.root)
         store.members[store.find(KEYS[1])].root = False
         del store.members[store.find(KEYS[2])]
@@ -140,12 +176,11 @@ class TestTheHolderAnswers(Mesh):
         trust.save(self.a.root, store)
         self.assertTrue(etcdserve.may_revoke(self.a.root, KEYS[1], KEYS[3]))
 
-
     def test_a_revocation_on_a_holder_in_no_cluster(self):
         os.remove(os.path.join(self.a.root, etcdstate.CLUSTER))
         found = self.ask(self.a, etcdmsg.REVOKE, {
             "address": address(2), "public_key": KEYS[2]})
-        self.assertEqual(found.status, 200)
+        self.assertEqual(found.status, 200, found.body)
 
     def test_an_older_crl_is_not_written(self):
         held = etcdstate.read(self.b.root, etcdstate.CRL)
@@ -182,6 +217,42 @@ class TestFormLimits(Mesh):
         self.assertIn("a formation is under way", self.text(0))
 
 
+class TestSmallPaths(Mesh):
+    def test_damaged_bookkeeping_and_late_records(self):
+        from keel.mesh import etcdcare
+        a, b, c = self.members(3)
+        etcdstate.write(a.root, etcdstate.PENDING, "{")
+        self.assertEqual(etcdstate.pending(a.root), [])
+        etcdstate.write(a.root, etcdstate.RENEWAL, "{")
+        self.assertIsNone(etcdcare.renewal_problem(a.root))
+        sent = []
+        with mock.patch("keel.monitor.channelfile.load", return_value={}), \
+                mock.patch("keel.monitor.notify.send",
+                           return_value=[mock.Mock(line=lambda: "x: sent")]):
+            etcdcare.alert(a, "t", "x")
+        self.assertIn("alert x: sent", self.text(0))
+        del sent
+        # a member of the first cluster that never started, after the
+        # first record expired: signed again, at a newer epoch
+        fake = FakeEtcd([voter(0), voter(1), voter(2, name=False)])
+        a, b, c = self.members(3, etcd=fake)
+        etcdform.form(a, False, lambda line: None)
+        first = etcdca.epoch(etcdstate.cluster(a.root))
+        for one in self.all:
+            one.clock = lambda: NOW + timedelta(hours=2)
+        out = []
+        etcdform.form(a, False, out.append)
+        self.assertGreater(etcdca.highest(c.root), 0)
+        self.assertGreaterEqual(first, 1)
+
+    def test_a_client_cluster_id(self):
+        from keel.mesh import etcdclient
+        client = etcdclient.Client(("https://[::1]:1",), None)
+        with mock.patch.object(client, "ask", return_value={
+                "header": {"cluster_id": "77"}}):
+            self.assertEqual(client.cluster_id(), "77")
+
+
 class TestJoinEdges(Mesh):
     def test_a_record_that_cannot_be_made_forms_nothing(self):
         a, b, c = self.members(3)
@@ -196,12 +267,16 @@ class TestJoinEdges(Mesh):
     def test_a_holder_whose_answer_holds_no_grant(self):
         a, b, c = self.members(3)
         etcdform.form(a, False, lambda line: None)
-        with mock.patch("keel.mesh.etcdmsg.grant", return_value=None):
-            found = etcd.issued(b, etcdstate.ca_request(c.root), address(2))
-        self.assertEqual(len(found.chain), 1)
-        self.assertIn("holds no grant", self.text(1))
+        with mock.patch("keel.mesh.etcdmsg.grant", return_value=None), \
+                self.assertRaisesRegex(StateError, "holds no grant"):
+            etcd.issued(b, etcdstate.ca_request(c.root), address(2),
+                        KEYS[2])
+        etcdstate.write(b.root, etcdstate.HOLDER, "")
+        with self.assertRaisesRegex(StateError, "does not know"):
+            etcd.issued(b, etcdstate.ca_request(c.root), address(2),
+                        KEYS[2])
 
-    def test_a_stray_member_directory_is_removed_once(self):
+    def test_a_stray_member_directory_only_with_the_package_s_mark(self):
         a, = self.members(1)
         etcd.created(a)
         etcdstate.save_cluster(a.root, Cluster("new", (), MESH.hex()))
@@ -209,11 +284,18 @@ class TestJoinEdges(Mesh):
         os.makedirs(stray)
         ran = []
         a.node.run = ran.append
+        # not marked by keel-overlay-etcd: refused, kept
+        self.assertFalse(etcd.start(a))
+        self.assertTrue(os.path.exists(stray))
+        self.assertIn("did not mark", self.text(0))
+        mark = os.path.join(a.root, etcd.PACKAGE_MEMBER)
+        os.makedirs(os.path.dirname(mark))
+        open(mark, "w").close()
         self.assertTrue(etcd.start(a))
         self.assertFalse(os.path.exists(stray))
+        self.assertFalse(os.path.exists(mark))
         self.assertEqual(ran, [("systemctl", "stop", "etcd.service")])
-        self.assertIn("a lone member etcd-server's own start left",
-                      self.text(0))
+        self.assertIn("which the package marked", self.text(0))
         os.makedirs(stray)
         self.assertTrue(etcd.start(a))
         self.assertTrue(os.path.exists(stray))

@@ -182,6 +182,31 @@ class TestTheCli(Mesh):
 
 
 class TestDiff(ManifestCase):
+    def test_certificates_renewed_or_drift(self):
+        from datetime import datetime, timedelta, timezone
+
+        from keel.diff.appliance import DRIFT, SAME, etcd_fields
+        from keel.inspect.tree import Tree
+        tree = Tree(self.root)
+        on = {"etcd": "enabled"}
+        self.assertEqual(etcd_fields({"etcd": "disabled"}, tree), [])
+        self.assertEqual(etcd_fields(on, tree), [])
+        etcdstate.save_cluster(self.root, Cluster("new", (), MESH.hex()))
+        self.assertEqual(etcd_fields(on, tree)[0].reason,
+                         "no member certificate")
+        etcdstate.make_root(self.root, MESH.hex(), "fd00::1")
+        now = datetime.now(timezone.utc)
+        etcdstate.leaves(self.root, "fd00::1", now)
+        self.assertEqual(etcd_fields(on, tree)[0].status, SAME)
+        found = etcd_fields(on, tree, now + timedelta(days=25))[0]
+        self.assertEqual(found.status, DRIFT)
+        self.assertIn("within 7 days", found.reason)
+        etcdstate.write(self.root, etcdstate.RENEWAL,
+                        '{"problem": "the holder did not sign"}')
+        self.assertEqual(etcd_fields(on, tree)[0].reason,
+                         "the holder did not sign")
+        os.remove(os.path.join(self.root, etcdstate.CLUSTER))
+
     def test_etcd_waiting_for_its_cluster_is_not_drift(self):
         import yaml
         doc = yaml.safe_load(spec(0, 1, etcd="enabled"))

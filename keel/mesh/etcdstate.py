@@ -58,6 +58,8 @@ CLIENT_CERT = f"{DIR}/client.crt"
 CLUSTER = f"{DIR}/cluster.json"
 READY = f"{DIR}/ready.json"
 LEARNERS = f"{DIR}/learners.json"
+PENDING = f"{DIR}/pending.json"
+RENEWAL = f"{DIR}/renewal.json"
 HOLDER = f"{DIR}/holder"
 ISSUED = f"{DIR}/issued.json"
 # written once keel started etcd here for this mesh's cluster
@@ -222,7 +224,7 @@ def make_root(root: str, mesh_id: str, address: str) -> bool:
             made = etcdpki.root(key(root, ROOT_KEY), mesh_id)
             own = etcdpki.issue(etcdpki.CA, path(root, ROOT_KEY), made,
                                 etcdpki.request(key(root, CA_KEY)),
-                                name(address), prefix=prefix_of(address))
+                                name(address), prefix=f"{address}/128")
             first = etcdpki.crl(path(root, ROOT_KEY), made, {}, 1)
         except PkiError as e:
             raise StateError(str(e)) from None
@@ -254,33 +256,32 @@ def ca_request(root: str) -> str:
             raise StateError(str(e)) from None
 
 
-def grant_for(root: str, csr: str, address: str) -> Grant:
+def grant_for(root: str, csr: str, address: str,
+              public_key: str | None = None) -> Grant:
     """An intermediate CA for the key of `csr`, for the member at
-    `address`: signed with the root on the root's holder, which keeps
-    every chain one deep, else with this member's own intermediate (the
-    root's holder cannot be reached, keel.mesh.etcd); the intermediate
-    is constrained to the mesh's prefix. Raises StateError"""
-    if not credentials(root):
-        raise StateError("this node holds no etcd CA to issue with")
-    rooted = holds_root(root)
-    issuer = read(root, ROOT_CERT) if rooted else read(root, CA_CERT)
+    `address` (WireGuard key `public_key`), signed with the root: only
+    the root's holder signs, so every chain is one intermediate deep and
+    every intermediate is recorded for revocation. The intermediate is
+    name constrained to the member's own /128 and ::1: the addresses its
+    leaves name, and nothing else. Raises StateError"""
+    if not holds_root(root):
+        raise StateError("only the node that holds the mesh's root CA signs"
+                         " an intermediate")
+    issuer = read(root, ROOT_CERT)
     try:
-        made = etcdpki.issue(
-            etcdpki.CA, path(root, ROOT_KEY if rooted else CA_KEY), issuer,
-            csr, name(address), prefix=prefix_of(address))
-        if rooted:
-            record_issued(root, address, made)
+        made = etcdpki.issue(etcdpki.CA, path(root, ROOT_KEY), issuer, csr,
+                             name(address), prefix=f"{address}/128")
+        record_issued(root, address, made, public_key)
     except PkiError as e:
         raise StateError(f"the request cannot be signed: {e}") from None
-    chain = () if rooted else (issuer, *etcdpki.blocks(read(root, CHAIN)
-                                                       or ""))
-    return Grant(made, chain, read(root, ROOT_CERT), read(root, CRL),
-                 holder(root))
+    return Grant(made, (), issuer, read(root, CRL), holder(root))
 
 
-def record_issued(root: str, address: str, certificate: str) -> None:
+def record_issued(root: str, address: str, certificate: str,
+                  public_key: str | None = None) -> None:
     """On the root's holder: an intermediate it signed, by its member's
-    address, so a removal can revoke it (keel.mesh.etcdca)"""
+    address, with the member's WireGuard key, so a removal revokes it
+    and only it (keel.mesh.etcdca)"""
     try:
         data = json.loads(read(root, ISSUED) or "{}")
     except ValueError:
@@ -288,7 +289,7 @@ def record_issued(root: str, address: str, certificate: str) -> None:
     if not isinstance(data, dict):
         data = {}
     entry = [etcdpki.serial(certificate),
-             etcdpki.stamp(etcdpki.not_after(certificate))]
+             etcdpki.stamp(etcdpki.not_after(certificate)), public_key]
     data.setdefault(str(ipaddress.IPv6Address(address)), []).append(entry)
     write(root, ISSUED, json.dumps(data, sort_keys=True) + "\n")
 
@@ -425,6 +426,32 @@ def drop_ready(root: str, public_key: str) -> None:
     with locked(root):
         write(root, READY, json.dumps(
             {k: v for k, v in ready(root).items() if k != public_key},
+            sort_keys=True) + "\n")
+
+
+def pending(root: str) -> list[dict]:
+    """The requests that wait for the root CA's holder: an inviter could
+    not reach it when it admitted the node, and the timer asks again"""
+    try:
+        data = json.loads(read(root, PENDING) or "[]")
+    except ValueError:
+        return []
+    return [one for one in data if isinstance(one, dict)] \
+        if isinstance(data, list) else []
+
+
+def queue(root: str, address: str, public_key: str, csr: str) -> None:
+    with locked(root):
+        kept = [one for one in pending(root) if one.get("address") != address]
+        write(root, PENDING, json.dumps(kept + [{
+            "address": address, "public_key": public_key, "csr": csr}],
+            sort_keys=True) + "\n")
+
+
+def unqueue(root: str, address: str) -> None:
+    with locked(root):
+        write(root, PENDING, json.dumps(
+            [one for one in pending(root) if one.get("address") != address],
             sort_keys=True) + "\n")
 
 

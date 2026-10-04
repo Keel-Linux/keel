@@ -123,6 +123,11 @@ class Client:
             return answered(status, data)
         raise EtcdError(f"no member answered: {'; '.join(problems)}")
 
+    def cluster_id(self) -> str:
+        """etcd's ID of the cluster, as its member list's header says"""
+        found = self.ask("/v3/cluster/member/list", {})
+        return str((found.get("header") or {}).get("cluster_id") or "")
+
     def members(self) -> list[Member]:
         found = self.ask("/v3/cluster/member/list", {})
         try:

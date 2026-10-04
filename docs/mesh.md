@@ -602,22 +602,27 @@ made with openssl on the machine, never in an image (keel.mesh.etcdpki):
   cloud advanced node, or `keel mesh etcd form` on a mesh that has none.
   Its key stays on that node, **the root's holder**, whose overlay
   address every member learns with its intermediate;
-- **an intermediate CA per member** (third round, point 1): its key is
-  made on the member and its request travels in the join request. The
-  root's holder signs it with the root: itself when it invites, or
-  through the inviter, which relays the request over the members'
-  channel (`issue`). Only when the holder cannot be reached does the
-  inviter sign with its own intermediate, one level deeper, and the
-  member's first renewal re-anchors it under the root. So chains stay one
-  intermediate deep; the protocol carries at most eight. The join's
-  answer, under the invite's HMAC, carries the intermediate, its chain,
-  the root, the root's CRL and the holder's address. The member checks
-  the intermediate certifies its own key, chains to the root, and that
-  the root is the one it holds, if any;
-- **name constraints**: every intermediate permits only the mesh's
-  overlay /64 and ::1, so no member can certify an address outside the
-  mesh. Its path length is not limited to 0, since an intermediate signs
-  an intermediate when the holder is unreachable;
+- **an intermediate CA per member**, signed by the root alone: its key
+  is made on the member and its request travels in the join request; the
+  root's holder signs it, itself when it invites, or through the
+  inviter, which relays the request over the members' channel (`issue`).
+  This narrows 0048's third round, point 1 ("signed by its inviter") to
+  "signed by the root CA, relayed by the inviter": an intermediate that
+  signed intermediates could not be limited to its own member, nor
+  recorded where a removal finds it. When the holder cannot be reached
+  the join completes without etcd; the inviter queues the request,
+  `keel-mesh-etcd.timer` asks the holder again and sends the node its CA
+  once it signs, and `keel mesh status` says the node waits. The holder
+  records every intermediate it signs with its member's address and key,
+  and signs one for an address only with that address's own key. The
+  join's answer, under the invite's HMAC, carries the intermediate, the
+  root, the root's CRL and the holder's address. The member checks the
+  intermediate certifies its own key and chains to the root it holds;
+- **one intermediate deep, constrained to its member**: an intermediate
+  has a path length of 0 (it signs leaves, never another CA), and name
+  constraints that permit only its member's own address (a /128) and
+  ::1, so no member can certify another member's address or one outside
+  the mesh;
 - **leaves**, issued by each member with its own intermediate: its
   member certificate (server and client, its overlay address and ::1)
   and keel's client certificate (root's alone).
@@ -626,15 +631,21 @@ made with openssl on the machine, never in an image (keel.mesh.etcdpki):
 ten left; an intermediate lasts a year and is renewed by the root's
 holder with four months left (`keel mesh etcd tend`, every five
 minutes); the root lasts twenty years. etcd reads its certificate files
-at each handshake, so nothing restarts.
+at each handshake, so nothing restarts. A renewal that fails is alerted
+through the monitor's channels (decision 0021, as Monit's alerts are),
+kept, and shown by `keel mesh status` and by `keel diff` as drift of
+`etcd.certificates`; so is a certificate within seven days of its
+expiry.
 
 **Revocation.** The root's holder keeps a CRL signed by the root, which
 every member writes to etcd's `--peer-crl-file` and `--client-crl-file`;
 etcd checks it against every certificate a peer or a client presents,
 its chain included, at each handshake. When `keel mesh remove` removes a
 node under the amendment's rule, the remover asks the holder (`revoke`)
-to revoke the node's intermediates, which revokes its leaves and every
-intermediate it issued; the holder signs the CRL again, and every
+to revoke the node's intermediates, which revokes its leaves. The holder
+revokes only for the node's admitter, a trust root or the node itself,
+and only the intermediates it recorded for that address and key: a
+revocation names no serial; the holder signs the CRL again, and every
 member takes it from the rosters (`keel mesh sync`, the announcement)
 when the root signed it and it is newer. The holder signs it again every
 ten days; its life is thirty.
@@ -644,12 +655,16 @@ ten days; its life is thirty.
 Two inviters admitting two nodes at once must never start two clusters
 ({A,B,C} and {A,B,D}). So only the root's holder forms, and once
 (keel.mesh.etcdca): it picks the members and signs, with the root, a
-**formation record** (the cluster token, the members' addresses and
-keys, the root's fingerprint), and reserves the formation under its
-lock before it sends anything. A member takes a cluster, from a join's
-answer or a `cluster` message, only with a record the root signed, for
-its root and its mesh, that names it; a member in a cluster takes no
-other record. A second formation, by a concurrent join or a second form,
+**record** (the cluster token and etcd's cluster ID, the members'
+addresses and keys, the root's fingerprint, the cluster's state, an
+epoch that only grows, a nonce, and an expiry an hour on), and reserves
+the formation under its lock before it sends anything. Only the holder
+adds a learner, so every `existing` record is its too. A member takes a
+cluster, from a join's answer or a `cluster` message, only with a record
+the root signed, for its root, its mesh and that state, naming exactly
+the cluster's members, unexpired, and newer than every record it took;
+a member in a cluster takes no other record (the one it holds, sent
+again, starts it again). A second formation, by a concurrent join or a second form,
 is refused; a join that reverts gives the reservation back.
 
 ### Birth at the third member
@@ -672,17 +687,18 @@ forms.
 
 **A data directory keel never started.** etcd-server's own start at its
 installation leaves a lone member of no cluster in
-`/var/lib/etcd/default` (the overlay package removes it when it made it
-in the same transaction, Keel-Linux/common). apply refuses to start etcd
-over a member keel never started, and the join or form that starts etcd
-on this node stops etcd and removes it first, and says so, only while
-this node was never a member of this mesh's cluster (`started` in its
-state).
+`/var/lib/etcd/default`; keel-overlay-etcd marks it
+(`/var/lib/keel-overlay-etcd/package-member`) when it made it in the
+same transaction (Keel-Linux/common). apply refuses to start etcd over a
+member keel never started. The join or form that starts etcd removes a
+marked one first, stopping etcd, and says so; an unmarked one it
+refuses, naming it, for the operator to look at.
 
 ### The fourth node and after
 
-The token says `running`. Before it answers, the inviter adds the new
-node as a **learner** (`member add --learner` for its peer URL), which
+The token says `running`. Before it answers, the root's holder adds the
+new node as a **learner** (`member add --learner` for its peer URL,
+asked by the inviter with the request it relays), which
 does not count towards the quorum, so a join that never finishes cannot
 lower the cluster's fault tolerance; the answer says `existing` with the
 member list and the cluster's formation record. The new node starts as a

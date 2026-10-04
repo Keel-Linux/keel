@@ -93,7 +93,8 @@ def enrolled(etcd_: Etcd, peer: Peer) -> Grant:
     try:
         csr = etcdmsg.enroll_answer(said(etcd_, etcdmsg.ENROLL,
                                          peer.address, {}))
-        return etcdstate.grant_for(etcd_.root, csr, peer.address)
+        return etcdstate.grant_for(etcd_.root, csr, peer.address,
+                                   peer.public_key)
     except (LinkError, ProtocolError, SigningError, StateError,
             ValueError) as e:
         raise Refused(f"member {peer.address} was not enrolled: {e};"
@@ -202,7 +203,7 @@ def new(etcd_: Etcd, mesh: str, ready: list[tuple[Peer, Probe]],
         chosen = [address] + [peer.address for peer, _ in ready]
         cluster = etcdca.record(etcd_.root, tuple(
             Member(key, at) for key, at in members.items() if at in chosen),
-            mesh)
+            mesh, etcd_.clock())
         if not etcdca.reserve(etcd_.root, cluster):
             raise Refused("a formation is under way on this node already (a"
                           " join forming the cluster); run it again once"
@@ -255,19 +256,22 @@ def extend(etcd_: Etcd, ready: list[tuple[Peer, Probe]], dry_run: bool,
         out("dry run: nothing was changed on any member")
         return exits.OK
     missed = []
+    again = held
+    if late and etcdca.expired(held, etcd_.clock()):
+        # a member that never received the first record: the same
+        # members, signed again, at a newer epoch
+        again = etcdca.record(etcd_.root, held.members, held.token,
+                              etcd_.clock())
     for peer in late:
         problem = send_cluster(etcd_, Member(peer.public_key, peer.address),
-                               held)
+                               again)
         if problem:
             missed.append(f"{peer.address} ({problem})")
     for peer, found in missing:
         grant = None if found.root else enrolled(etcd_, peer)
-        added = client.add_learner(etcdstate.peer_url(peer.address))
-        etcd_.err(f"etcd: {peer.address} added as a learner ({added.id})")
         etcdstate.add_ready(etcd_.root, {peer.public_key: peer.address})
-        cluster = Cluster("existing", tuple(
-            Member(None, one.address) for one in client.members()
-            if one.address), held.token, held.record, held.signature)
+        cluster, _ = etcd.holder_adds(etcd_, peer.address, peer.public_key,
+                                      held)
         problem = send_cluster(etcd_, Member(peer.public_key, peer.address),
                                cluster, grant)
         if problem:

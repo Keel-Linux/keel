@@ -296,11 +296,11 @@ class TestTheReceiver(Mesh):
         other = self.all[2]
         etcdstate.make_root(other.root, MESH.hex(), address(2))
         from keel.mesh import etcdca
-        rogue = etcdca.record(other.root, bare.members, MESH.hex())
+        rogue = etcdca.record(other.root, bare.members, MESH.hex(), NOW)
         self.assertIn("no record signed by the mesh's root", self.refused(
             self.message(etcdmsg.CLUSTER, {"cluster": rogue.dumps()},
                          sender=2), KEYS[2]))
-        good = etcdca.record(self.a.root, bare.members, MESH.hex())
+        good = etcdca.record(self.a.root, bare.members, MESH.hex(), NOW)
         from dataclasses import replace
         swapped = replace(good, members=(Member(KEYS[1], address(1)),
                                          Member(KEYS[3], address(3))))
@@ -318,6 +318,42 @@ class TestTheReceiver(Mesh):
             os.path.join(self.a.root, etcdstate.ROOT_KEY), body.encode()))
         self.assertIn("another root or token", self.refused(self.message(
             etcdmsg.CLUSTER, {"cluster": other_token.dumps()})))
+
+    def test_records_expire_and_are_never_replayed(self):
+        """Each record has an epoch that only grows, a nonce and an
+        expiry; an `existing` record names exactly its members"""
+        from dataclasses import replace
+
+        from keel.mesh import etcdca
+        etcdstate.make_root(self.a.root, MESH.hex(), address(0))
+        etcdstate.take_grant(self.b.root, etcdstate.grant_for(
+            self.a.root, etcdstate.ca_request(self.b.root), address(1)))
+        two = (Member(KEYS[0], address(0)), Member(KEYS[1], address(1)))
+        first = etcdca.record(self.a.root, two, MESH.hex(), NOW,
+                              "existing", "4242")
+        second = etcdca.record(self.a.root, two, MESH.hex(), NOW,
+                               "existing", "4242")
+        self.assertEqual((etcdca.epoch(first), etcdca.epoch(second)),
+                         (1, 2))
+        self.assertNotEqual(first.record, second.record)
+        later = NOW + timedelta(hours=2)
+        self.assertEqual(etcdca.problem(self.b.root, second, later),
+                         "the cluster's record expired")
+        self.assertTrue(etcdca.expired(second, later))
+        self.assertTrue(etcdca.expired(Cluster("new", (), "x"), NOW))
+        grown = replace(second, members=two + (Member(KEYS[2],
+                                                      address(2)),))
+        self.assertEqual(etcdca.problem(self.b.root, grown, NOW),
+                         "the cluster is not the one its record names")
+        self.assertIsNone(etcdca.problem(self.b.root, second, NOW))
+        etcdca.taken(self.b.root, second)
+        self.assertIn("no newer", etcdca.problem(self.b.root, first, NOW))
+        self.assertEqual(etcdca.epoch(None), 0)
+        etcdstate.write(self.b.root, etcdca.SEEN, "x")
+        self.assertEqual(etcdca.highest(self.b.root), 0)
+        etcdstate.write(self.a.root, etcdca.EPOCH, "x")
+        self.assertEqual(etcdca.epoch(etcdca.record(
+            self.a.root, two, MESH.hex(), NOW)), 1)
 
     def test_a_cluster_held_is_never_replaced(self):
         """Same mesh, same token, other members: refused (the token is

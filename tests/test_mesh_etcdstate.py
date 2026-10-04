@@ -73,31 +73,33 @@ class TestGrants(Case):
         self.first = self.scratch()
         etcdstate.make_root(self.first, MESH, "fd00::1")
 
-    def test_issued_by_an_intermediate_two_deep(self):
-        second = self.scratch()
-        etcdstate.take_grant(second, etcdstate.grant_for(
-            self.first, etcdstate.ca_request(second), "fd00::2"))
-        third = self.root
-        grant = etcdstate.grant_for(second, etcdstate.ca_request(third),
-                                    "fd00::3")
-        # the first node signs with the root: no chain; the second, not
-        # the root's holder, with its own intermediate
-        self.assertEqual(len(grant.chain), 1)
-        self.assertEqual(etcdstate.holder(third), None)
-        etcdstate.take_grant(third, grant)
-        self.assertEqual(etcdstate.holder(third), "fd00::1")
-        self.assertEqual(etcdstate.root_fingerprint(third),
+    def test_every_intermediate_is_the_root_s(self):
+        second = self.root
+        grant = etcdstate.grant_for(self.first, etcdstate.ca_request(second),
+                                    "fd00::3", "k2")
+        self.assertEqual(grant.chain, ())
+        self.assertEqual(etcdstate.holder(second), None)
+        etcdstate.take_grant(second, grant)
+        self.assertEqual(etcdstate.holder(second), "fd00::1")
+        self.assertEqual(etcdstate.root_fingerprint(second),
                          etcdstate.root_fingerprint(self.first))
-        self.assertTrue(etcdstate.leaves(third, "fd00::3", NOW))
-        member = etcdstate.read(third, etcdstate.MEMBER_CERT)
+        self.assertTrue(etcdstate.leaves(second, "fd00::3", NOW))
+        member = etcdstate.read(second, etcdstate.MEMBER_CERT)
         chain = etcdpki.blocks(member)
-        self.assertEqual(len(chain), 3)  # the leaf, its CA, its issuer
+        self.assertEqual(len(chain), 2)  # the leaf, its CA
         self.assertTrue(etcdpki.verified(
-            chain[0], chain[1:], etcdstate.read(third, etcdstate.ROOT_CERT)))
+            chain[0], chain[1:], etcdstate.read(second, etcdstate.ROOT_CERT)))
         self.assertEqual(etcdpki.addresses(chain[0]), ("fd00::3", "::1"))
-        client = etcdpki.blocks(etcdstate.read(third, etcdstate.CLIENT_CERT))
+        client = etcdpki.blocks(etcdstate.read(second, etcdstate.CLIENT_CERT))
         self.assertTrue(etcdpki.verified(
-            client[0], client[1:], etcdstate.read(third, etcdstate.ROOT_CERT)))
+            client[0], client[1:], etcdstate.read(second,
+                                                  etcdstate.ROOT_CERT)))
+        issued = json.loads(etcdstate.read(self.first, etcdstate.ISSUED))
+        self.assertEqual(issued["fd00::3"][0][2], "k2")
+        # a member that is not the holder signs nothing
+        with self.assertRaisesRegex(StateError, "only the node"):
+            etcdstate.grant_for(second, etcdstate.ca_request(
+                self.scratch()), "fd00::4")
 
     def test_a_grant_for_another_key_is_refused(self):
         stranger = self.scratch()
@@ -128,7 +130,7 @@ class TestGrants(Case):
                 other, etcdstate.ca_request(self.root), "fd00::4"))
 
     def test_no_intermediate_no_grant(self):
-        with self.assertRaisesRegex(StateError, "holds no etcd CA"):
+        with self.assertRaisesRegex(StateError, "only the node"):
             etcdstate.grant_for(self.root, etcdstate.ca_request(
                 self.scratch()), "fd00::4")
 

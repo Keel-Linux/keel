@@ -41,7 +41,7 @@ from keel.mesh.etcdstate import Cluster, StateError
 from keel.mesh.memberlink import Answer, refused
 from keel.mesh.node import NodeError
 from keel.mesh.protocol import ProtocolError
-from keel.network.wireguard import same_key
+from keel.network.wireguard import is_key, same_key
 
 
 class Refusal(Exception):
@@ -139,7 +139,13 @@ def taken(member: Etcd, message: etcdmsg.Message) -> Answer:
         raise Refusal(409, "the cluster does not name this node, or is"
                       " another mesh's")
     held = etcdstate.cluster(member.root)
-    if cluster is not None and held is not None and not same(held, cluster):
+    if cluster is not None and held is not None:
+        if same(held, cluster):
+            # the record this node took: started again, when it never
+            # started (keel mesh etcd form sends it again)
+            started = etcd.start(member)
+            return Answer(200, json.dumps({"taken": True,
+                                           "started": started}).encode())
         raise Refusal(409, "this node is in a cluster already: a cluster"
                       " is never replaced by a message")
     if cluster is not None and member.node.waiting():
@@ -157,14 +163,15 @@ def taken(member: Etcd, message: etcdmsg.Message) -> Answer:
     if not etcdstate.credentials(member.root):
         raise Refusal(409, "this node holds no etcd CA, and the message"
                       " brings none")
-    problem = None if cluster is None else etcdca.problem(member.root,
-                                                          cluster)
+    problem = None if cluster is None else etcdca.problem(
+        member.root, cluster, member.clock())
     if problem:
         raise Refusal(403, problem)
     etcdstate.add_ready(member.root, etcd.vetted(member, members))
     if cluster is None:
         return Answer(200, b'{"taken": true, "started": false}')
     etcdstate.save_cluster(member.root, cluster)
+    etcdca.taken(member.root, cluster)
     started = etcd.start(member)
     member.err(f"etcd: a cluster of {len(cluster.members)} from"
                f" {message.sender}; {'started' if started else 'not started'}")
@@ -186,6 +193,9 @@ def holder(member: Etcd, message: etcdmsg.Message) -> Answer:
     if ipaddress.IPv6Address(address) not in ipaddress.IPv6Network(
             etcdstate.prefix_of(own)):
         raise Refusal(403, f"{address} is not in this mesh's prefix")
+    removed = body.get("public_key")
+    if not isinstance(removed, str) or not is_key(removed):
+        raise Refusal(400, "no WireGuard key for the member")
     if message.kind == etcdmsg.ISSUE:
         try:
             csr = etcdmsg.csr(body.get("csr"))
@@ -193,26 +203,51 @@ def holder(member: Etcd, message: etcdmsg.Message) -> Answer:
             raise Refusal(400, str(e)) from None
         if csr is None:
             raise Refusal(400, "no request to sign")
-        grant = etcdstate.grant_for(member.root, csr, address)
+        holder_of = claimed(member, address)
+        if holder_of is not None and not same_key(holder_of, removed):
+            raise Refusal(403, f"{address} is another member's: an"
+                          " intermediate is signed for a member's own"
+                          " address and key only")
+        found = etcd.sign_here(member, csr, address, removed)
         member.err(f"etcd: an intermediate for {address} signed with the"
                    f" root, asked by {message.sender}")
-        return Answer(200, json.dumps(
-            {"grant": etcdmsg.grant_data(grant)}).encode())
-    removed = body.get("public_key")
-    serials = body.get("serials") or {}
-    if not isinstance(removed, str) or not isinstance(serials, dict) or \
-            not all(isinstance(k, str) and isinstance(v, str)
-                    for k, v in serials.items()):
-        raise Refusal(400, "malformed revocation")
+        return Answer(200, json.dumps({
+            "grant": etcdmsg.grant_data(found.grant),
+            "cluster": etcdmsg.cluster_data(found.cluster),
+            "learner": found.learner}).encode())
     if not may_revoke(member.root, message.sender, removed):
         raise Refusal(403, "the sender may not remove that node: neither"
                       " its admitter, nor a trust root, nor the node")
-    found = etcdca.revoke(member.root, address, serials, member.clock())
+    try:
+        found = etcdca.revoke(member.root, address, removed, member.clock())
+    except StateError as e:
+        raise Refusal(404, str(e)) from None
     member.err(f"etcd: the certificates of {address} revoked, asked by"
                f" {message.sender}")
     if etcdstate.cluster(member.root) is not None:
         etcd.start(member)
     return Answer(200, json.dumps({"crl": found}).encode())
+
+
+def claimed(member: Etcd, address: str) -> str | None:
+    """The WireGuard key `address` belongs to, as this node knows it:
+    its own, a peer's of its spec, or the key an intermediate was signed
+    for at that address; None for an address nobody holds yet (a node
+    an inviter is admitting)"""
+    if address == etcd.own_address(member.node):
+        return etcd.own_key(member)
+    for one in member.node.peers(""):
+        if one.address == address:
+            return one.public_key
+    try:
+        issued = json.loads(etcdstate.read(member.root, etcdstate.ISSUED)
+                            or "{}")
+    except ValueError:
+        issued = {}
+    for one in issued.get(address, []) if isinstance(issued, dict) else []:
+        if isinstance(one, list) and len(one) == 3 and one[2]:
+            return one[2]
+    return None
 
 
 def may_revoke(root: str, sender: str, removed: str) -> bool:

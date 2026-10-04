@@ -47,9 +47,23 @@ keel (0.19.0) unstable; urgency=medium
     --peer-crl-file and --client-crl-file and travels with the rosters;
     keel mesh remove has the holder revoke the removed node's
     intermediates.
+  * Every intermediate is signed by the root, the request relayed by
+    the inviter (0048's third round, point 1, narrowed); one
+    intermediate deep, path length 0, name constrained to its member's
+    own /128 and ::1, and recorded with its address and key. When the
+    holder cannot be reached the join completes without etcd, and
+    keel-mesh-etcd.timer asks again. A revocation names no serial: the
+    holder revokes what it recorded for that address and key, only for
+    the node's admitter, a trust root or the node itself. Records carry
+    etcd's cluster ID, an epoch, a nonce and an expiry, name exactly the
+    cluster's members, and are never taken twice or older.
+  * A renewal that fails is alerted through the monitor's channels and
+    shown by keel mesh status and keel diff (etcd.certificates), as is a
+    certificate within seven days of its expiry.
   * etcd's /health on a plain metrics listener on [::1]:2381, for
     Monit; apply refuses a member etcd-server's own start left, and the
-    join or form that starts etcd removes it first.
+    join or form that starts etcd removes it first only when
+    keel-overlay-etcd marked it as its own.
 
  -- Marcos Mendez <mendez.foto@gmail.com>  Sun, 04 Oct 2026 12:00:00 +0000
 

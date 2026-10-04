@@ -29,13 +29,13 @@ class TestJoinFields(unittest.TestCase):
                 etcdmsg.csr(bad)
 
     def test_a_grant_round_trip(self):
-        grant = Grant(CERT, (CERT, CERT), CERT)
+        grant = Grant(CERT, (), CERT)
         self.assertEqual(etcdmsg.grant(etcdmsg.grant_data(grant)), grant)
         self.assertIsNone(etcdmsg.grant(None))
         self.assertIsNone(etcdmsg.grant_data(None))
         for bad in ([], {"certificate": CERT, "chain": "x", "root": CERT},
                     {"certificate": CSR, "chain": [], "root": CERT},
-                    {"certificate": CERT, "chain": [CERT] * 9,
+                    {"certificate": CERT, "chain": [CERT],
                      "root": CERT}, {"chain": []}):
             with self.assertRaises(ProtocolError):
                 etcdmsg.grant(bad)

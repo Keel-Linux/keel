@@ -125,11 +125,10 @@ def plan_etcd(state: EtcdState, live: bool) -> tuple[list[Action], bool]:
         return [Refuse("this member holds no etcd certificate yet: keel"
                        " mesh etcd tend issues it")], False
     if state.initialized and not state.started:
-        return [Refuse(f"/{INITIALIZED} holds a member keel never started:"
-                       " etcd-server's own start at its installation leaves"
-                       " a lone member of no cluster; this node joins only"
-                       " once it is gone, which the join or keel mesh etcd"
-                       " form does")], False
+        return [Refuse(f"/{INITIALIZED} holds a member keel never started;"
+                       " the join or keel mesh etcd form removes it when"
+                       " keel-overlay-etcd marked it as etcd-server's own"
+                       " lone member, and an operator any other")], False
     actions: list[Action] = []
     environment = etcdconf.environment(
         state.address, state.cluster, etcdconf.CRL in state.wanted)

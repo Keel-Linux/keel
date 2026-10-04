@@ -106,7 +106,7 @@ class TestJoins(Mesh):
                              [address(0), address(1), address(2)])
             self.assertEqual(self.applied(one)[-1]["overlays"]["etcd"],
                              "enabled")
-            self.assertIsNone(etcdca.problem(one.root, found))
+            self.assertEqual(etcdca.epoch(found), 1)
         self.assertIn(f"the cluster sent to {address(1)}", self.text(0))
         self.assertEqual(etcd.token_state(self.c), "running")
 
@@ -191,8 +191,16 @@ class TestJoins(Mesh):
                         side_effect=etcdstate.StateError("no")):
             found = etcd.admit(self.a, etcd.join_csr(self.c), KEYS[2],
                                address(2))
+        self.assertIsNone(found.grant)
+        self.assertIn("waits for the root CA's holder (no)", found.said)
+        self.assertEqual([one["address"] for one in etcdstate.pending(
+            self.a.root)], [address(2)])
+        with mock.patch("keel.mesh.identity.read",
+                        side_effect=ValueError("damaged")):
+            found = etcd.admit(self.a, etcd.join_csr(self.c), KEYS[2],
+                               address(2))
         self.assertEqual(found, etcd.Admission())
-        self.assertIn("gets no etcd CA (no)", self.text(0))
+        self.assertIn("gets no etcd CA (damaged)", self.text(0))
 
     def test_a_grant_the_joiner_cannot_keep(self):
         admission = etcd.admit(self.a, etcd.join_csr(self.b), KEYS[1],
@@ -442,18 +450,63 @@ class TestRenewal(Mesh):
         self.assertIn("intermediate CA renewed", self.text(0))
         self.assertIn("the CRL signed again", self.text(0))
 
-    def test_a_renewal_waits_for_the_holder(self):
+    def test_a_renewal_that_fails_is_kept_and_alerted(self):
         self.later(self.b, 250)
         self.down.add(address(0))
         self.assertEqual(etcdcare.tend(self.b), exits.APPLY_FAILED)
-        self.assertIn("the next tend asks again", self.text(1))
+        self.assertIn("renewal failed: the root CA's holder", self.text(1))
+        self.assertIn("certificate renewal failed; no alert sent",
+                      self.text(1))
+        self.assertIn("etcd: the last renewal failed",
+                      "\n".join(etcdcare.status(self.b)))
+        self.down.clear()
+        self.assertEqual(etcdcare.tend(self.b), exits.OK)
+        self.assertIsNone(etcdcare.renewal_problem(self.b.root))
 
-    def test_the_holder_unreachable_this_node_signs(self):
+    def test_an_expiry_within_seven_days_is_warned(self):
+        with mock.patch("keel.mesh.etcdstate.leaves", return_value=False):
+            self.later(self.b, 25)
+            self.assertEqual(etcdcare.tend(self.b), exits.OK)
+        self.assertIn("certificate expires soon; no alert sent",
+                      self.text(1))
+        self.assertIn("WARNING: within 7 days",
+                      "\n".join(etcdcare.status(self.b)))
+
+    def test_alerts_go_through_the_monitor_s_channels(self):
+        sent = []
+        with mock.patch("keel.monitor.channelfile.load",
+                        return_value={"host": "web-2"}), \
+                mock.patch("keel.monitor.notify.send",
+                           side_effect=lambda settings, message, level:
+                           sent.append((message.title, level)) or []):
+            etcdcare.alert(self.b, "etcd certificate renewal failed", "x")
+        self.assertEqual(sent, [("[web-2] etcd certificate renewal failed",
+                                 "critical")])
+
+    def test_the_holder_unreachable_the_join_waits_for_the_timer(self):
+        """No chain through a member: the join completes without etcd,
+        the request waits, and the timer brings it in once the holder
+        answers"""
         self.down.add(address(0))
-        grant = etcd.issued(self.b, etcdstate.ca_request(self.c.root),
-                            address(2))
-        self.assertEqual(len(grant.chain), 1)
-        self.assertIn("did not sign", self.text(1))
+        found = etcd.admit(self.b, etcd.join_csr(self.c), KEYS[2],
+                           address(2))
+        self.assertIsNone(found.grant)
+        self.assertIn("1 node(s) wait for the root CA's holder",
+                      "\n".join(etcdcare.status(self.b)))
+        self.assertEqual(etcdcare.waiting(self.b), exits.APPLY_FAILED)
+        self.assertIn("still waits", self.text(1))
+        self.down.clear()
+        with mock.patch("keel.mesh.etcdform.send_cluster",
+                        return_value="timed out"):
+            self.assertEqual(etcdcare.waiting(self.b), exits.APPLY_FAILED)
+        self.assertIn("did not take its CA (timed out)", self.text(1))
+        sent = []
+        with mock.patch("keel.mesh.etcdform.send_cluster",
+                        side_effect=lambda *args: sent.append(args) or None):
+            self.assertEqual(etcdcare.waiting(self.b), exits.OK)
+        self.assertEqual(sent[0][1].address, address(2))
+        self.assertEqual(sent[0][3].chain, ())
+        self.assertEqual(etcdstate.pending(self.b.root), [])
 
 
 class TestStatus(Mesh):

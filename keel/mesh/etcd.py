@@ -62,6 +62,9 @@ PROMOTE_EVERY = 5.0
 # a learner that never started within this is a join that never came
 STALE_LEARNER = timedelta(hours=1)
 MEMBER_DIR = "var/lib/etcd/default/member"
+# what keel-overlay-etcd's postinst writes when etcd-server's own start
+# made a member in the same transaction (Keel-Linux/common#39)
+PACKAGE_MEMBER = "var/lib/keel-overlay-etcd/package-member"
 NO_TOLERANCE = ("2 voters have no fault tolerance: a majority of 2 is 2, so"
                 " losing either stops both")
 
@@ -106,31 +109,76 @@ def said(etcd: Etcd, kind: str, address: str, body: dict) -> bytes:
                          message)
 
 
-def issued(etcd: Etcd, csr: str, address: str,
-           fallback: bool = True) -> Grant:
-    """An intermediate for `csr`: from the root's holder when this node
-    is it or can reach it, which keeps the chain one deep; else, with
-    `fallback`, signed with this node's own intermediate, and
-    re-anchored under the root at its first renewal. Raises StateError"""
-    from keel.mesh.memberlink import LinkError
-    holder = etcdstate.holder(etcd.root)
-    if etcdstate.holds_root(etcd.root) or holder is None:
-        return etcdstate.grant_for(etcd.root, csr, address)
+@dataclass(frozen=True)
+class Issued:
+    """What the root's holder gives a member it admits: its grant, and
+    when a cluster runs, the `existing` cluster it was added to as a
+    learner, with the record the root signed, and the learner's ID"""
+
+    grant: Grant
+    cluster: Cluster | None = None
+    learner: str | None = None
+
+
+def holder_adds(etcd: Etcd, address: str, key: str | None,
+                formed: Cluster) -> tuple[Cluster, str]:
+    """On the root's holder: the member at `address` added as a learner
+    of the running cluster, and the `existing` cluster with a record the
+    root signed; raises EtcdError or StateError"""
+    client = etcd.local()
+    added = client.add_learner(etcdstate.peer_url(address))
+    listed = client.members()
+    known = {**etcdstate.ready(etcd.root), **({key: address} if key else {})}
+    keys = {v: k for k, v in known.items()}
+    etcd.err(f"etcd: {address} added as a learner ({added.id})")
+    return etcdca.record(etcd.root, tuple(
+        Member(keys.get(one.address), one.address) for one in listed
+        if one.address), formed.token, etcd.clock(), "existing",
+        client.cluster_id()), added.id
+
+
+def sign_here(etcd: Etcd, csr: str, address: str, key: str) -> Issued:
+    """On the root's holder: the intermediate, and the learner when a
+    cluster runs (0048: the member is added before the answer). Raises
+    StateError"""
+    grant = etcdstate.grant_for(etcd.root, csr, address, key)
+    formed = etcdstate.cluster(etcd.root)
+    if formed is None:
+        return Issued(grant)
     try:
-        found = etcdmsg.grant(etcdmsg.loaded(said(
-            etcd, etcdmsg.ISSUE, holder, {"csr": csr, "address": address}
-        )).get("grant"))
-        if found is None:
+        cluster, learner = holder_adds(etcd, address, key, formed)
+    except EtcdError as e:
+        etcd.err(f"etcd: {address} was not added as a learner ({e});"
+                 " keel mesh etcd form adds it later")
+        return Issued(grant)
+    return Issued(grant, cluster, learner)
+
+
+def issued(etcd: Etcd, csr: str, address: str, key: str) -> Issued:
+    """An intermediate for `csr`, always signed by the root (0048's
+    third round narrowed: "signed by the root CA, relayed by the
+    inviter"): here on the holder, else asked of the holder over the
+    members' channel (`issue`). Raises StateError when the holder
+    cannot be reached: the caller queues the request for the timer"""
+    from keel.mesh.memberlink import LinkError
+    if etcdstate.holds_root(etcd.root):
+        return sign_here(etcd, csr, address, key)
+    holder = etcdstate.holder(etcd.root)
+    if holder is None:
+        raise StateError("this node does not know the root CA's holder")
+    try:
+        found = etcdmsg.loaded(said(etcd, etcdmsg.ISSUE, holder, {
+            "csr": csr, "address": address, "public_key": key}))
+        grant = etcdmsg.grant(found.get("grant"))
+        cluster = etcdmsg.cluster(found.get("cluster"))
+        learner = found.get("learner")
+        if grant is None or (learner is not None
+                             and not isinstance(learner, str)):
             raise ValueError("its answer holds no grant")
-        return found
     except (LinkError, SigningError, ValueError, ProtocolError) as e:
-        if not fallback:
-            raise StateError(f"the root's holder at {holder} did not sign"
-                             f" ({e}); the next tend asks again") from None
-        etcd.err(f"etcd: the root's holder at {holder} did not sign ({e});"
-                 " this node signs, and the chain is re-anchored at the"
-                 " first renewal")
-    return etcdstate.grant_for(etcd.root, csr, address)
+        raise StateError(f"the root CA's holder at {holder} did not sign"
+                         f" ({e})") from None
+    return Issued(grant, cluster, learner)
 
 
 def ready(doc: dict) -> bool:
@@ -237,22 +285,40 @@ class Admission:
 
 
 def admit(etcd: Etcd, csr: str | None, key: str, address: str) -> Admission:
-    """The inviter's decision, before it answers; never raises"""
+    """The inviter's decision, before it answers; never raises. When
+    the root's holder cannot be reached the join goes on without etcd,
+    and the request waits for keel-mesh-etcd.timer (`queue`)"""
     if csr is None:
         return Admission()
     try:
         doc = etcd.node.document()
         if not ready(doc) or not etcdstate.credentials(etcd.root):
             return Admission(ready=known_ready(etcd))
-        grant = issued(etcd, csr, address)
         members = {**known_ready(etcd), key: address}
         formed = etcdstate.cluster(etcd.root)
         mesh = identity.read(etcd.root).hex()
     except (StateError, NodeError, ValueError, AttributeError) as e:
         etcd.err(f"etcd: the new node gets no etcd CA ({e})")
         return Admission()
-    if formed is not None:
-        return learner(etcd, grant, members, formed, key, address)
+    try:
+        found = issued(etcd, csr, address, key)
+    except StateError as e:
+        etcdstate.queue(etcd.root, address, key, csr)
+        line = (f"etcd: waits for the root CA's holder ({e});"
+                " keel-mesh-etcd.timer asks again, and keel mesh status"
+                " says so")
+        etcd.err(line)
+        return Admission(said=line)
+    if found.cluster is not None or formed is not None:
+        return Admission(found.grant, found.cluster, members, (),
+                         found.learner)
+    return formation(etcd, found.grant, members, mesh, key)
+
+
+def formation(etcd: Etcd, grant: Grant, members: dict[str, str],
+              mesh: str, key: str) -> Admission:
+    """At the third ready member, on the root's holder alone: the
+    cluster, its record signed and reserved"""
     if len(members) < QUORUM_AT:
         return Admission(grant, None, members)
     if len(members) > MAX_FORMED:
@@ -270,7 +336,8 @@ def admit(etcd: Etcd, csr: str | None, key: str, address: str) -> Admission:
     own = own_key(etcd)
     try:
         cluster = etcdca.record(etcd.root, tuple(
-            Member(one, members[one]) for one in sorted(members)), mesh)
+            Member(one, members[one]) for one in sorted(members)), mesh,
+            etcd.clock())
     except StateError as e:
         etcd.err(f"etcd: no cluster formed ({e})")
         return Admission(grant, None, members)
@@ -281,25 +348,6 @@ def admit(etcd: Etcd, csr: str | None, key: str, address: str) -> Admission:
         return Admission(grant, None, members, said=line)
     return Admission(grant, cluster, members, tuple(
         one for one in cluster.members if one.public_key not in (own, key)))
-
-
-def learner(etcd: Etcd, grant: Grant, members: dict[str, str],
-            formed: Cluster, key: str, address: str) -> Admission:
-    """The new node added as a learner of the running cluster"""
-    try:
-        client = etcd.local()
-        added = client.add_learner(etcdstate.peer_url(address))
-        listed = client.members()
-    except EtcdError as e:
-        etcd.err(f"etcd: the new node was not added as a learner ({e});"
-                 " keel mesh etcd form adds it later")
-        return Admission(grant, None, members)
-    etcd.err(f"etcd: {address} added as a learner ({added.id})")
-    keys = {v: k for k, v in members.items()}
-    cluster = Cluster("existing", tuple(
-        Member(keys.get(one.address), one.address) for one in listed
-        if one.address), formed.token, formed.record, formed.signature)
-    return Admission(grant, cluster, members, (), added.id)
 
 
 def abandoned(etcd: Etcd, admission: Admission) -> None:
@@ -355,10 +403,11 @@ def joined(etcd: Etcd, grant: Grant | None, cluster: Cluster | None,
             return (f"etcd: this node is ready; {len(members)} of"
                     f" {QUORUM_AT} ready members known, etcd forms at the"
                     " third")
-        problem = etcdca.problem(etcd.root, cluster)
+        problem = etcdca.problem(etcd.root, cluster, etcd.clock())
         if problem:
             return f"etcd: not started: {problem}"
         etcdstate.save_cluster(etcd.root, cluster)
+        etcdca.taken(etcd.root, cluster)
     except StateError as e:
         return f"etcd: not set up ({e}); keel mesh etcd form brings it in"
     started = start(etcd)
@@ -370,18 +419,29 @@ def joined(etcd: Etcd, grant: Grant | None, cluster: Cluster | None,
 
 def stray(etcd: Etcd) -> None:
     """A data directory this node holds before keel ever started etcd
-    here, left by etcd-server's own start at its installation (a lone
-    member of no cluster): etcd stopped and the directory removed, said.
-    Never once keel started etcd for this mesh's cluster"""
+    here. Removed only when keel-overlay-etcd's first installation
+    marked it as the lone member etcd-server's own start made in that
+    transaction (Keel-Linux/common, packages/etcd); any other is refused,
+    raising StateError, for the operator to look at"""
     found = etcdstate.path(etcd.root, MEMBER_DIR)
     if not os.path.isdir(found) or \
             os.path.exists(etcdstate.path(etcd.root, etcdstate.STARTED)):
         return
+    proof = etcdstate.path(etcd.root, PACKAGE_MEMBER)
+    if not os.path.exists(proof):
+        raise StateError(
+            f"/{MEMBER_DIR} holds a member keel never started and"
+            " keel-overlay-etcd did not mark as etcd-server's own lone"
+            " member: look at it (etcdutl snapshot status, or its"
+            " member/wal), and remove /var/lib/etcd/default by hand if it"
+            " holds nothing to keep, then run this again")
     etcd.node.run(("systemctl", "stop", "etcd.service"))
     shutil.rmtree(found)
-    etcd.err(f"etcd: removed /{MEMBER_DIR}, a lone member etcd-server's own"
-             " start left at its installation; this node was never a"
-             " member of this mesh's cluster")
+    os.remove(proof)
+    etcd.err(f"etcd: removed /{MEMBER_DIR}, the lone member etcd-server's"
+             " own start made at keel-overlay-etcd's installation, which"
+             " the package marked; this node was never a member of this"
+             " mesh's cluster")
 
 
 def start(etcd: Etcd) -> bool:

@@ -114,6 +114,10 @@ class FakeEtcd:
         self.check("members")
         return list(self.members_)
 
+    def cluster_id(self):
+        self.check("cluster_id")
+        return "4242"
+
     def add_learner(self, url):
         self.check("add_learner", url)
         self.next_id += 1
