@@ -23,9 +23,18 @@ that acts needs the member's own signature too (0048's amendment).
   network change waits.
 """
 
+import ipaddress
 import json
 
-from keel.mesh import etcd, etcdmsg, etcdpki, etcdstate, identity, trust
+from keel.mesh import (
+    etcd,
+    etcdca,
+    etcdmsg,
+    etcdpki,
+    etcdstate,
+    identity,
+    trust,
+)
 from keel.mesh.etcd import Etcd
 from keel.mesh.etcdpki import PkiError
 from keel.mesh.etcdstate import Cluster, StateError
@@ -59,9 +68,9 @@ def sign_key(root: str, key: str) -> str | None:
 
 
 def same(held: Cluster, cluster: Cluster) -> bool:
-    """The same cluster: its state, token and member addresses"""
-    return (held.state, held.token, sorted(held.addresses())) == (
-        cluster.state, cluster.token, sorted(cluster.addresses()))
+    """The same cluster: the same formation record, for the same token"""
+    return (held.token, held.record, held.signature) == (
+        cluster.token, cluster.record, cluster.signature)
 
 
 def checked(member: Etcd, body: bytes, key: str) -> etcdmsg.Message:
@@ -97,7 +106,10 @@ def answer(member: Etcd, body: bytes, key: str) -> Answer:
             return Answer(200, etcdmsg.probe_dumps(
                 etcd.ready(doc), etcdstate.root_fingerprint(member.root),
                 etcdstate.cluster(member.root) is not None,
-                etcd.own_address(member.node)))
+                etcd.own_address(member.node),
+                etcdstate.holds_root(member.root)))
+        if message.kind in (etcdmsg.ISSUE, etcdmsg.REVOKE):
+            return holder(member, message)
         if not etcd.ready(doc):
             raise Refusal(409, "this node does not run etcd (cloud advanced"
                           " members only)")
@@ -145,6 +157,10 @@ def taken(member: Etcd, message: etcdmsg.Message) -> Answer:
     if not etcdstate.credentials(member.root):
         raise Refusal(409, "this node holds no etcd CA, and the message"
                       " brings none")
+    problem = None if cluster is None else etcdca.problem(member.root,
+                                                          cluster)
+    if problem:
+        raise Refusal(403, problem)
     etcdstate.add_ready(member.root, etcd.vetted(member, members))
     if cluster is None:
         return Answer(200, b'{"taken": true, "started": false}')
@@ -154,3 +170,61 @@ def taken(member: Etcd, message: etcdmsg.Message) -> Answer:
                f" {message.sender}; {'started' if started else 'not started'}")
     return Answer(200, json.dumps({"taken": True,
                                    "started": started}).encode())
+
+
+def holder(member: Etcd, message: etcdmsg.Message) -> Answer:
+    """On the root's holder: an intermediate signed by the root
+    (`issue`), or a removed node's certificates revoked (`revoke`)"""
+    if not etcdstate.holds_root(member.root):
+        raise Refusal(409, "this node does not hold the mesh's root CA")
+    body = message.body
+    try:
+        address = etcdmsg.address(body.get("address"))
+    except ProtocolError as e:
+        raise Refusal(400, str(e)) from None
+    own = etcd.own_address(member.node)
+    if ipaddress.IPv6Address(address) not in ipaddress.IPv6Network(
+            etcdstate.prefix_of(own)):
+        raise Refusal(403, f"{address} is not in this mesh's prefix")
+    if message.kind == etcdmsg.ISSUE:
+        try:
+            csr = etcdmsg.csr(body.get("csr"))
+        except ProtocolError as e:
+            raise Refusal(400, str(e)) from None
+        if csr is None:
+            raise Refusal(400, "no request to sign")
+        grant = etcdstate.grant_for(member.root, csr, address)
+        member.err(f"etcd: an intermediate for {address} signed with the"
+                   f" root, asked by {message.sender}")
+        return Answer(200, json.dumps(
+            {"grant": etcdmsg.grant_data(grant)}).encode())
+    removed = body.get("public_key")
+    serials = body.get("serials") or {}
+    if not isinstance(removed, str) or not isinstance(serials, dict) or \
+            not all(isinstance(k, str) and isinstance(v, str)
+                    for k, v in serials.items()):
+        raise Refusal(400, "malformed revocation")
+    if not may_revoke(member.root, message.sender, removed):
+        raise Refusal(403, "the sender may not remove that node: neither"
+                      " its admitter, nor a trust root, nor the node")
+    found = etcdca.revoke(member.root, address, serials, member.clock())
+    member.err(f"etcd: the certificates of {address} revoked, asked by"
+               f" {message.sender}")
+    if etcdstate.cluster(member.root) is not None:
+        etcd.start(member)
+    return Answer(200, json.dumps({"crl": found}).encode())
+
+
+def may_revoke(root: str, sender: str, removed: str) -> bool:
+    """The amendment's rule, as this node knows it: the node itself, a
+    trust root, or the member whose key signed the node's admission"""
+    if same_key(sender, removed):
+        return True
+    member = trusted(root, sender)
+    if member is None:
+        return False
+    if member.root:
+        return True
+    admitted = trusted(root, removed)
+    return admitted is not None and admitted.admission is not None and \
+        admitted.admission.by == member.sign_key

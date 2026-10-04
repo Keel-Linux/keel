@@ -59,6 +59,9 @@ class Roster:
     address: str
     members: tuple[Peer, ...]
     removed: tuple[Removal, ...] = ()
+    # the root's CRL for etcd, the newest this member holds
+    # (keel.mesh.etcdca), or None
+    crl: str | None = None
 
 
 def dumps(roster: Roster) -> bytes:
@@ -67,8 +70,8 @@ def dumps(roster: Roster) -> bytes:
         "public_key": roster.public_key, "sign_key": roster.sign_key,
         "address": roster.address,
         "members": [asdict(one) for one in roster.members],
-        "removed": [asdict(one) for one in roster.removed]},
-        sort_keys=True).encode()
+        "removed": [asdict(one) for one in roster.removed],
+        "crl": roster.crl}, sort_keys=True).encode()
 
 
 def loads(body: bytes) -> Roster:
@@ -83,7 +86,18 @@ def loads(body: bytes) -> Roster:
                   sign_key=protocol.key(data, "sign_key"),
                   address=protocol.overlay(data, "address", False),
                   members=tuple(protocol.peer(one) for one in found),
-                  removed=tuple(protocol.removal(one) for one in gone))
+                  removed=tuple(protocol.removal(one) for one in gone),
+                  crl=crl(data.get("crl")))
+
+
+def crl(value: object) -> str | None:
+    """A roster's CRL; one that cannot be read is left out, never a
+    roster refused for it"""
+    from keel.mesh import etcdmsg
+    try:
+        return None if value is None else etcdmsg.crl(value)
+    except ProtocolError:
+        return None
 
 
 def mesh_identity(value: object) -> bytes | None:

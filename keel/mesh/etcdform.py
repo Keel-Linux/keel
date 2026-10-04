@@ -3,37 +3,41 @@
 
 A mesh that already has three or more nodes (built with keel 0.18, or
 by hand and adopted) never sees the third join that forms etcd, so the
-operator forms it with one command, on any member (0048, third round,
-point 3). It is built to be safe on such a mesh, which has no CA yet:
+operator forms it with one command (0048, third round, point 3), on the
+node that holds the mesh's root CA: only that node forms the cluster,
+and once (keel.mesh.etcdca). It is built to be safe on such a mesh,
+which has no CA yet:
 
 1. it asks every peer first, over the members' channel (`probe`, which
    changes nothing on them): whether it can run etcd, which root it
-   holds, whether it is in a cluster. It refuses while a network change
-   waits here, when members hold two different roots, when a cluster
-   exists and this node is not in it, or when this node cannot run etcd;
-   with `--dry-run` it stops there and prints what it would do;
-2. it makes the mesh's root CA on this node when no member holds one,
-   and enrolls every ready member that holds no intermediate (`enroll`:
-   its request, signed with this node's intermediate). Any failure here
-   stops it before anything is started anywhere;
-3. at three ready members or more, it sends each the cluster to start
-   (`cluster`), and starts its own; with fewer, the members keep their
-   intermediates and etcd forms at the third.
+   holds and whether it holds the root's key, whether it is in a
+   cluster. It refuses while a network change waits here, when members
+   hold two different roots, when another node holds the root, or when
+   this node cannot run etcd; with `--dry-run` it stops there and prints
+   what it would do;
+2. when no member holds a root it makes the mesh's root CA here, so the
+   operator runs it on a trust root; it enrolls every ready member that
+   holds no intermediate (`enroll`: its request, signed with the root).
+   Any failure here stops it before anything is started anywhere;
+3. at three ready members or more it picks them, signs the formation
+   record with the root, reserves the formation, sends each the cluster
+   with its record (`cluster`), and starts its own; with fewer, the
+   members keep their intermediates and etcd forms later.
 
-On a cluster that exists, run on one of its members, it brings in what
-is missing: a ready member that is not in etcd is added as a learner
-and sent the cluster (`existing`), and a member of the first cluster
-that never started is sent it again. So a run that stopped part way is
-run again, and the fallback's join, whose line carries no request,
-comes in the same way (keel.mesh.inviting). Every message is signed
-with this node's key (keel.mesh.etcdmsg).
+On a cluster that exists it brings in what is missing: a ready member
+that is not in etcd is added as a learner and sent the cluster
+(`existing`, the same record), and a member of the first cluster that
+never started is sent it again. So a run that stopped part way is run
+again, and the fallback's join, whose line carries no request, comes in
+the same way (keel.mesh.inviting). Every message is signed with this
+node's key (keel.mesh.etcdmsg).
 """
 
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 
 from keel import exits
-from keel.mesh import etcd, etcdmsg, etcdstate, identity
+from keel.mesh import etcd, etcdca, etcdmsg, etcdstate, identity
 from keel.mesh.etcd import QUORUM_AT, Etcd
 from keel.mesh.etcdclient import EtcdError
 from keel.mesh.etcdmsg import Probe
@@ -42,7 +46,6 @@ from keel.mesh.memberlink import LinkError
 from keel.mesh.node import NodeError
 from keel.mesh.protocol import Peer, ProtocolError
 from keel.mesh.signing import SigningError
-from keel.network import wireguard
 
 PARALLEL = 8
 
@@ -51,13 +54,7 @@ class Refused(Exception):
     """The form is refused, and why"""
 
 
-def said(etcd_: Etcd, kind: str, peer_address: str, body: dict) -> bytes:
-    """The member's answer to one signed message; raises LinkError"""
-    mesh = identity.read(etcd_.root).hex()
-    message = etcdmsg.signed(etcd_.root, kind, mesh, etcd.own_key(etcd_),
-                             etcd_.clock(), body)
-    iface = wireguard.interface(etcd_.node.overlay())
-    return etcd_.exchange(peer_address, iface, message)
+said = etcd.said
 
 
 def send_cluster(etcd_: Etcd, member: Member, cluster: Cluster | None,
@@ -96,8 +93,7 @@ def enrolled(etcd_: Etcd, peer: Peer) -> Grant:
     try:
         csr = etcdmsg.enroll_answer(said(etcd_, etcdmsg.ENROLL,
                                          peer.address, {}))
-        return etcdstate.grant_for(etcd_.root, csr,
-                                   etcdstate.name(peer.address))
+        return etcdstate.grant_for(etcd_.root, csr, peer.address)
     except (LinkError, ProtocolError, SigningError, StateError,
             ValueError) as e:
         raise Refused(f"member {peer.address} was not enrolled: {e};"
@@ -156,18 +152,18 @@ def formed(etcd_: Etcd, dry_run: bool, out: Callable[[str], None]) -> int:
     if len(roots) > 1:
         raise Refused("the members hold different etcd roots: one mesh has"
                       " one; nothing was changed")
+    if roots and not etcdstate.holds_root(etcd_.root):
+        holders = [peer.address for peer, found in answered if found.holder]
+        at = holders[0] if holders else (etcdstate.holder(etcd_.root)
+                                         or "the node that made it")
+        raise Refused(f"only the node that holds the mesh's root CA forms"
+                      f" etcd: run keel mesh etcd form on {at}")
     if etcdstate.cluster(etcd_.root) is not None:
         return extend(etcd_, ready, dry_run, out)
     others = [peer.address for peer, found in answered if found.formed]
     if others:
-        raise Refused(f"an etcd cluster exists ({', '.join(others)}) and"
-                      " this node is not in it: run keel mesh etcd form on"
-                      " one of its members")
-    if roots and not held:
-        holder = [peer.address for peer, found in answered
-                  if found.root][0]
-        raise Refused(f"this node holds no etcd CA and {holder} does: run"
-                      " keel mesh etcd form there")
+        raise Refused(f"members are in a cluster this node has no record"
+                      f" of ({', '.join(others)}); nothing was changed")
     return new(etcd_, mesh.hex(), ready, not roots, dry_run, out)
 
 
@@ -177,8 +173,12 @@ def new(etcd_: Etcd, mesh: str, ready: list[tuple[Peer, Probe]],
     lacking = [peer for peer, found in ready if not found.root]
     plan = []
     if make_root:
-        plan.append("make the mesh's root CA on this node")
+        plan.append("make the mesh's root CA on this node (run it on a"
+                    " trust root: the root's key stays where it is made)")
     plan += [f"enroll {peer.address}" for peer in lacking]
+    if count > etcd.MAX_FORMED:
+        raise Refused(f"{count} ready members: a cluster starts with at most"
+                      f" {etcd.MAX_FORMED}")
     if count >= QUORUM_AT:
         plan.append(f"form a cluster of {count}: this node and "
                     + ", ".join(peer.address for peer, _ in ready))
@@ -189,20 +189,24 @@ def new(etcd_: Etcd, mesh: str, ready: list[tuple[Peer, Probe]],
             out(f"would {line}")
         out("dry run: nothing was changed on any member")
         return exits.OK
+    address = etcd.own_address(etcd_.node)
     if make_root:
-        etcdstate.make_root(etcd_.root, mesh)
+        etcdstate.make_root(etcd_.root, mesh, address)
         etcd_.err("etcd: this node now holds the mesh's root CA")
     grants = {peer.public_key: enrolled(etcd_, peer) for peer in lacking}
-    address = etcd.own_address(etcd_.node)
     members = {**etcd.known_ready(etcd_),
                **{peer.public_key: peer.address for peer, _ in ready}}
     etcdstate.add_ready(etcd_.root, members)
     cluster = None
     if count >= QUORUM_AT:
-        cluster = Cluster("new", tuple(sorted(
-            (Member(key, at) for key, at in members.items()
-             if at in [address] + [peer.address for peer, _ in ready]),
-            key=lambda one: one.address)), mesh)
+        chosen = [address] + [peer.address for peer, _ in ready]
+        cluster = etcdca.record(etcd_.root, tuple(
+            Member(key, at) for key, at in members.items() if at in chosen),
+            mesh)
+        if not etcdca.reserve(etcd_.root, cluster):
+            raise Refused("a formation is under way on this node already (a"
+                          " join forming the cluster); run it again once"
+                          " that join is done")
     missed = []
     for peer, _ in ready:
         problem = send_cluster(etcd_, Member(peer.public_key, peer.address),
@@ -231,7 +235,7 @@ def finished(etcd_: Etcd, missed: list[str]) -> int:
 
 def extend(etcd_: Etcd, ready: list[tuple[Peer, Probe]], dry_run: bool,
            out: Callable[[str], None]) -> int:
-    """On a member of a cluster: the ready members it lacks"""
+    """On the root's holder, in a cluster: the ready members it lacks"""
     client = etcd_.local()
     listed = {one.address: one for one in client.members()}
     held = etcdstate.cluster(etcd_.root)
@@ -263,7 +267,7 @@ def extend(etcd_: Etcd, ready: list[tuple[Peer, Probe]], dry_run: bool,
         etcdstate.add_ready(etcd_.root, {peer.public_key: peer.address})
         cluster = Cluster("existing", tuple(
             Member(None, one.address) for one in client.members()
-            if one.address), held.token)
+            if one.address), held.token, held.record, held.signature)
         problem = send_cluster(etcd_, Member(peer.public_key, peer.address),
                                cluster, grant)
         if problem:

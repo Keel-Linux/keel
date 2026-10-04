@@ -34,6 +34,22 @@ keel (0.19.0) unstable; urgency=medium
     the run, and keel diff does not count it as drift. Heartbeat 300 ms,
     election timeout 5000 ms, for 250 ms ±25 ms with 2% loss
     (decision 0050), measured in tests/test_etcd_netns.py.
+  * Only the root CA's holder forms the cluster, once: it signs a
+    formation record (token, members, root fingerprint) with the root
+    and reserves it under its lock, and a member takes a cluster only
+    with that record. Another inviter of the third member admits it and
+    names the holder for keel mesh etcd form, which runs only there.
+  * Short lives and a CRL: leaves 30 days, renewed by their member;
+    intermediates a year, renewed by the root's holder, which signs
+    them with the root (an inviter relays the request), so chains stay
+    one deep. Every intermediate is name constrained to the mesh's /64
+    and ::1. The holder's CRL, signed by the root, goes to etcd's
+    --peer-crl-file and --client-crl-file and travels with the rosters;
+    keel mesh remove has the holder revoke the removed node's
+    intermediates.
+  * etcd's /health on a plain metrics listener on [::1]:2381, for
+    Monit; apply refuses a member etcd-server's own start left, and the
+    join or form that starts etcd removes it first.
 
  -- Marcos Mendez <mendez.foto@gmail.com>  Sun, 04 Oct 2026 12:00:00 +0000
 

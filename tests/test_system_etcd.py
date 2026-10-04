@@ -41,7 +41,8 @@ class Root(unittest.TestCase):
                       "etcd:x:120:125::/var/lib/etcd:/usr/sbin/nologin\n")
 
     def formed(self):
-        etcdstate.make_root(self.root, MESH)
+        etcdstate.make_root(self.root, MESH, "fd00::1")
+        etcdstate.write(self.root, etcdstate.STARTED, "started\n")
         etcdstate.leaves(self.root, "fd00::1", NOW)
         etcdstate.save_cluster(self.root, THREE)
 
@@ -78,7 +79,9 @@ class TestObserve(Root):
                    if isinstance(one, WriteFile)}
         self.assertEqual(set(written), {
             etcdconf.ENVIRONMENT, etcdconf.MEMBER_CERT, etcdconf.MEMBER_KEY,
-            etcdconf.TRUSTED, etcdconf.DROP_IN})
+            etcdconf.TRUSTED, etcdconf.CRL, etcdconf.DROP_IN})
+        self.assertIn("ETCD_PEER_CRL_FILE=/etc/etcd/keel/crl.pem",
+                      written[etcdconf.ENVIRONMENT].content)
         self.assertEqual(written[etcdconf.MEMBER_KEY].owner, "etcd")
         self.assertEqual(written[etcdconf.MEMBER_KEY].mode, 0o600)
         self.assertEqual(written[etcdconf.ENVIRONMENT].mode, 0o644)
@@ -92,6 +95,16 @@ class TestObserve(Root):
             with open(path, "w") as fob:
                 fob.write(one.content)
         self.assertEqual(etcd.plan_etcd(self.observed(), True), ([], False))
+
+    def test_a_member_keel_never_started_is_refused(self):
+        self.formed()
+        os.remove(os.path.join(self.root, etcdstate.STARTED))
+        os.makedirs(os.path.join(self.root, etcd.INITIALIZED))
+        actions, _ = etcd.plan_etcd(self.observed(), True)
+        self.assertIn("keel never started", actions[0].describe())
+        etcdstate.write(self.root, etcdstate.STARTED, "started\n")
+        actions, _ = etcd.plan_etcd(self.observed(), True)
+        self.assertNotIsInstance(actions[0], Refuse)
 
     def test_under_root_no_daemon_reload(self):
         self.formed()

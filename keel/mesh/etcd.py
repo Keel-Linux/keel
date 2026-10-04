@@ -20,11 +20,11 @@ flows of a join, seen from etcd:
   sends the cluster to the members that start it with them, over the
   members' channel (`admitted`, keel.mesh.etcdform.send_cluster); a
   learner is promoted once etcd says it is in sync (`promote`);
-- `keel-mesh-etcd.timer` promotes what is still a learner, removes a
-  learner that never started within an hour, and renews the leaves
-  (`tend`); `keel mesh remove` removes a member under the amendment's
-  rule (`leave`); `keel mesh status` shows the members, the leader and
-  their health (`status`).
+- only the node that holds the root CA forms the cluster, once
+  (keel.mesh.etcdca): another inviter of a third member admits it to the
+  mesh, gives it its CA, and says to run `keel mesh etcd form` on the
+  root's holder;
+- tend, leave and status are keel.mesh.etcdcare's.
 
 Each node writes only its own spec (0013): enabling etcd is
 `overlays.etcd: enabled` in this node's spec, and `apply`, which renders
@@ -34,16 +34,19 @@ form` brings the node in later.
 """
 
 import ipaddress
+import os
+import shutil
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from keel import exits
-from keel.mesh import etcdclient, etcdstate, identity
+from keel.mesh import etcdca, etcdclient, etcdmsg, etcdstate, identity
 from keel.mesh.etcdclient import Client, EtcdError
 from keel.mesh.etcdstate import Cluster, Grant, Member, StateError
 from keel.mesh.node import Node, NodeError
+from keel.mesh.protocol import ProtocolError
+from keel.mesh.signing import SigningError
 
 MODE = "cloud_advanced"
 OVERLAY = "etcd"
@@ -58,6 +61,7 @@ PROMOTE_FOR = 120
 PROMOTE_EVERY = 5.0
 # a learner that never started within this is a join that never came
 STALE_LEARNER = timedelta(hours=1)
+MEMBER_DIR = "var/lib/etcd/default/member"
 NO_TOLERANCE = ("2 voters have no fault tolerance: a majority of 2 is 2, so"
                 " losing either stops both")
 
@@ -88,6 +92,45 @@ class Etcd:
     def local(self) -> Client:
         """This member's etcd on ::1; raises EtcdError"""
         return self.client() if self.client else etcdclient.local(self.root)
+
+
+def said(etcd: Etcd, kind: str, address: str, body: dict) -> bytes:
+    """The answer of the member at `address` to one message signed with
+    this node's key (keel.mesh.etcdmsg); raises LinkError, SigningError
+    or ValueError"""
+    from keel.network import wireguard
+    mesh = identity.read(etcd.root).hex()
+    message = etcdmsg.signed(etcd.root, kind, mesh, own_key(etcd),
+                             etcd.clock(), body)
+    return etcd.exchange(address, wireguard.interface(etcd.node.overlay()),
+                         message)
+
+
+def issued(etcd: Etcd, csr: str, address: str,
+           fallback: bool = True) -> Grant:
+    """An intermediate for `csr`: from the root's holder when this node
+    is it or can reach it, which keeps the chain one deep; else, with
+    `fallback`, signed with this node's own intermediate, and
+    re-anchored under the root at its first renewal. Raises StateError"""
+    from keel.mesh.memberlink import LinkError
+    holder = etcdstate.holder(etcd.root)
+    if etcdstate.holds_root(etcd.root) or holder is None:
+        return etcdstate.grant_for(etcd.root, csr, address)
+    try:
+        found = etcdmsg.grant(etcdmsg.loaded(said(
+            etcd, etcdmsg.ISSUE, holder, {"csr": csr, "address": address}
+        )).get("grant"))
+        if found is None:
+            raise ValueError("its answer holds no grant")
+        return found
+    except (LinkError, SigningError, ValueError, ProtocolError) as e:
+        if not fallback:
+            raise StateError(f"the root's holder at {holder} did not sign"
+                             f" ({e}); the next tend asks again") from None
+        etcd.err(f"etcd: the root's holder at {holder} did not sign ({e});"
+                 " this node signs, and the chain is re-anchored at the"
+                 " first renewal")
+    return etcdstate.grant_for(etcd.root, csr, address)
 
 
 def ready(doc: dict) -> bool:
@@ -150,7 +193,8 @@ def created(etcd: Etcd) -> None:
         if not ready(etcd.node.document()):
             return
         mesh_id = identity.read(etcd.root)
-        etcdstate.make_root(etcd.root, mesh_id.hex())
+        etcdstate.make_root(etcd.root, mesh_id.hex(),
+                            own_address(etcd.node))
     except (StateError, NodeError, ValueError, AttributeError) as e:
         etcd.err(f"etcd: the mesh's CA was not made ({e}); keel mesh etcd"
                  " form makes it")
@@ -183,6 +227,8 @@ class Admission:
     ready: dict[str, str] = field(default_factory=dict)
     notify: tuple[Member, ...] = ()
     learner: str | None = None
+    # what the new node prints about etcd, when there is more to say
+    said: str | None = None
 
     @property
     def state(self) -> str:
@@ -198,7 +244,7 @@ def admit(etcd: Etcd, csr: str | None, key: str, address: str) -> Admission:
         doc = etcd.node.document()
         if not ready(doc) or not etcdstate.credentials(etcd.root):
             return Admission(ready=known_ready(etcd))
-        grant = etcdstate.grant_for(etcd.root, csr, etcdstate.name(address))
+        grant = issued(etcd, csr, address)
         members = {**known_ready(etcd), key: address}
         formed = etcdstate.cluster(etcd.root)
         mesh = identity.read(etcd.root).hex()
@@ -214,9 +260,25 @@ def admit(etcd: Etcd, csr: str | None, key: str, address: str) -> Admission:
                  f" starts with ({MAX_FORMED}); keel mesh etcd form forms"
                  " it")
         return Admission(grant, None, {})
+    if not etcdstate.holds_root(etcd.root):
+        at = etcdstate.holder(etcd.root) or "the node that holds it"
+        line = (f"etcd: {len(members)} cloud advanced members are ready;"
+                f" run keel mesh etcd form on the root CA's holder ({at}),"
+                " which alone forms the cluster")
+        etcd.err(line)
+        return Admission(grant, None, members, said=line)
     own = own_key(etcd)
-    cluster = Cluster("new", tuple(
-        Member(one, members[one]) for one in sorted(members)), mesh)
+    try:
+        cluster = etcdca.record(etcd.root, tuple(
+            Member(one, members[one]) for one in sorted(members)), mesh)
+    except StateError as e:
+        etcd.err(f"etcd: no cluster formed ({e})")
+        return Admission(grant, None, members)
+    if not etcdca.reserve(etcd.root, cluster):
+        line = ("etcd: a formation is under way already; keel mesh etcd"
+                " form on this node brings the new node in once it is done")
+        etcd.err(line)
+        return Admission(grant, None, members, said=line)
     return Admission(grant, cluster, members, tuple(
         one for one in cluster.members if one.public_key not in (own, key)))
 
@@ -236,8 +298,15 @@ def learner(etcd: Etcd, grant: Grant, members: dict[str, str],
     keys = {v: k for k, v in members.items()}
     cluster = Cluster("existing", tuple(
         Member(keys.get(one.address), one.address) for one in listed
-        if one.address), formed.token)
+        if one.address), formed.token, formed.record, formed.signature)
     return Admission(grant, cluster, members, (), added.id)
+
+
+def abandoned(etcd: Etcd, admission: Admission) -> None:
+    """A join that was not confirmed: the formation it reserved, given
+    back"""
+    if admission.cluster is not None and admission.cluster.state == "new":
+        etcdca.release(etcd.root)
 
 
 def admitted(etcd: Etcd, admission: Admission, key: str,
@@ -277,10 +346,18 @@ def joined(etcd: Etcd, grant: Grant | None, cluster: Cluster | None,
     try:
         etcdstate.take_grant(etcd.root, grant)
         etcdstate.add_ready(etcd.root, vetted(etcd, members))
+        if cluster is None and len(members) >= QUORUM_AT:
+            return (f"etcd: {len(members)} cloud advanced members are"
+                    " ready; keel mesh etcd form on the root CA's holder"
+                    f" ({grant.holder or 'the first node'}) forms the"
+                    " cluster")
         if cluster is None:
             return (f"etcd: this node is ready; {len(members)} of"
                     f" {QUORUM_AT} ready members known, etcd forms at the"
                     " third")
+        problem = etcdca.problem(etcd.root, cluster)
+        if problem:
+            return f"etcd: not started: {problem}"
         etcdstate.save_cluster(etcd.root, cluster)
     except StateError as e:
         return f"etcd: not set up ({e}); keel mesh etcd form brings it in"
@@ -291,22 +368,40 @@ def joined(etcd: Etcd, grant: Grant | None, cluster: Cluster | None,
             f" member(s){'' if started else ', but did not start'}")
 
 
+def stray(etcd: Etcd) -> None:
+    """A data directory this node holds before keel ever started etcd
+    here, left by etcd-server's own start at its installation (a lone
+    member of no cluster): etcd stopped and the directory removed, said.
+    Never once keel started etcd for this mesh's cluster"""
+    found = etcdstate.path(etcd.root, MEMBER_DIR)
+    if not os.path.isdir(found) or \
+            os.path.exists(etcdstate.path(etcd.root, etcdstate.STARTED)):
+        return
+    etcd.node.run(("systemctl", "stop", "etcd.service"))
+    shutil.rmtree(found)
+    etcd.err(f"etcd: removed /{MEMBER_DIR}, a lone member etcd-server's own"
+             " start left at its installation; this node was never a"
+             " member of this mesh's cluster")
+
+
 def start(etcd: Etcd) -> bool:
     """This node's leaves issued and `overlays.etcd: enabled` in its own
     spec, applied: apply renders etcd's configuration and starts it"""
     try:
+        stray(etcd)
         etcdstate.leaves(etcd.root, own_address(etcd.node), etcd.clock())
         doc = etcd.node.document()
         overlays = dict(doc.get("overlays") or {})
         overlays[OVERLAY] = ENABLED
         change = etcd.node.change({**doc, "overlays": overlays})
-    except (StateError, NodeError) as e:
+    except (StateError, NodeError, OSError) as e:
         etcd.err(f"etcd: not started: {e}")
         return False
     if change.code != 0:
         change.shown(etcd.err)
         etcd.err(f"etcd: apply exited {change.code}; etcd may not run")
         return False
+    etcdstate.write(etcd.root, etcdstate.STARTED, "started\n")
     return True
 
 
@@ -327,128 +422,3 @@ def promote(etcd: Etcd, member_id: str | None, seconds: float) -> bool:
                          " keel-mesh-etcd.timer tries again")
                 return False
         etcd.sleep(PROMOTE_EVERY)
-
-
-def tend(etcd: Etcd) -> int:
-    """`keel mesh etcd tend`: learners in sync promoted, learners that
-    never started within an hour removed, the leaves renewed"""
-    try:
-        if etcdstate.cluster(etcd.root) is None:
-            return exits.OK
-        client = etcd.local()
-        listed = client.members()
-    except (StateError, EtcdError) as e:
-        etcd.err(f"etcd: {e}")
-        return exits.APPLY_FAILED
-    now = etcd.clock()
-    learners = [one for one in listed if one.learner]
-    seen = etcdstate.learners(etcd.root, [one.id for one in learners
-                                          if not one.started], now)
-    for one in learners:
-        try:
-            if one.started:
-                client.promote(one.id)
-                etcd.err(f"etcd: learner {one.name} promoted to a voter")
-            elif now - seen[one.id] >= STALE_LEARNER:
-                client.remove(one.id)
-                etcd.err(f"etcd: learner {one.id} at {one.address} never"
-                         " started within an hour: removed")
-        except EtcdError as e:
-            etcd.err(f"etcd: learner {one.name or one.id}: {e}")
-    try:
-        renewed = etcdstate.leaves(etcd.root, own_address(etcd.node), now)
-    except StateError as e:
-        etcd.err(f"etcd: {e}")
-        return exits.APPLY_FAILED
-    if renewed:
-        etcd.err("etcd: this member's certificates renewed")
-        return exits.OK if start(etcd) else exits.APPLY_FAILED
-    return exits.OK
-
-
-def leave(etcd: Etcd, address: str, may: bool) -> None:
-    """After `keel mesh remove`: the node's etcd member removed, only
-    when this node may remove it mesh-wide (third round, point 4)"""
-    try:
-        if etcdstate.cluster(etcd.root) is None:
-            return
-    except StateError as e:
-        etcd.err(f"etcd: {e}")
-        return
-    if not may:
-        etcd.err(f"etcd: the member at {address} stays: this node neither"
-                 " admitted it nor is it a trust root's, so the removal is"
-                 " local only; its admitter or a root removes it from etcd")
-        return
-    try:
-        client = etcd.local()
-        found = [one for one in client.members() if one.address == address]
-        for one in found:
-            client.remove(one.id)
-        left = [one for one in client.members() if not one.learner]
-    except EtcdError as e:
-        etcd.err(f"etcd: the member at {address} was not removed ({e})")
-        return
-    gone = {key for key, at in etcdstate.ready(etcd.root).items()
-            if at == address}
-    for key in gone:
-        etcdstate.drop_ready(etcd.root, key)
-    if found:
-        etcd.err(f"etcd: the member at {address} removed; {len(left)}"
-                 " voter(s) left")
-    if len(left) == 2:
-        etcd.err(f"etcd: {NO_TOLERANCE}")
-
-
-def status(etcd: Etcd, live: bool = True) -> list[str]:
-    """What `keel mesh status` says of etcd; never a secret, and etcd is
-    asked on the live system only"""
-    try:
-        doc = etcd.node.document()
-        formed = etcdstate.cluster(etcd.root)
-    except (NodeError, StateError) as e:
-        return [f"etcd: {e}"]
-    if not ready(doc):
-        mode = (doc.get("installation") or {}).get("mode", "not declared")
-        return [f"etcd: not on this node (installation.mode {mode}; etcd"
-                " runs on cloud advanced members only)"]
-    if formed is None:
-        found = known_ready(etcd)
-        return [f"etcd: not formed; {len(found)} of {QUORUM_AT} ready"
-                " member(s) known; it forms at the third join, or with keel"
-                " mesh etcd form"]
-    if not live:
-        return [f"etcd: this node is in a cluster of {len(formed.members)}"
-                " (not the live system: etcd is not asked)"]
-    try:
-        client = etcd.local()
-        listed = client.members()
-    except EtcdError as e:
-        return [f"etcd: this node is in a cluster of"
-                f" {len(formed.members)}, but its member does not answer:"
-                f" {e}"]
-    return members_lines(client, listed)
-
-
-def members_lines(client: Client, listed: list) -> list[str]:
-    voters = [one for one in listed if not one.learner]
-    lines = [f"etcd: {len(voters)} voter(s), {len(listed) - len(voters)}"
-             " learner(s)"]
-    leaders = set()
-    for one in listed:
-        url = one.client_urls[0] if one.client_urls else None
-        healthy, why = client.health(url) if url else (False, "not started")
-        if url and healthy:
-            try:
-                leaders.add(client.status(url).leader)
-            except EtcdError:
-                pass
-        role = "learner" if one.learner else "voter"
-        lines.append(f"  {one.name or '(not started)'}  {one.address}"
-                     f"  {role}  {'healthy' if healthy else why}")
-    leader = next((one for one in listed if one.id in leaders), None)
-    lines.append(f"leader: {leader.name if leader else 'none known'}"
-                 f"{'' if len(leaders) <= 1 else ' (members disagree)'}")
-    if len(voters) == 2:
-        lines.append(f"etcd: {NO_TOLERANCE}")
-    return lines

@@ -51,6 +51,16 @@ class TestPull(Case):
         self.assertIn(f"the overlay was tested: a WireGuard handshake from"
                       f" {OTHER}", self.said())
 
+    def test_a_roster_s_crl_goes_to_etcd(self):
+        from dataclasses import replace
+        crl = ("-----BEGIN X509 CRL-----\nAAAA\n"
+               "-----END X509 CRL-----\n")
+        host = "fd00:6b65:1::1"
+        self.net.rosters[host] = replace(self.net.rosters[host], crl=crl)
+        with mock.patch("keel.mesh.etcdcare.crl_taken") as taken:
+            sync.pull(self.syncer)
+        self.assertEqual(taken.call_args[0][1], crl)
+
     def test_the_handshake_is_waited_for_and_asked_for(self):
         self.net.handshakes = {}
 

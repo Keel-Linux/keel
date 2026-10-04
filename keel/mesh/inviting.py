@@ -116,6 +116,9 @@ class Inviter:
             self.etcd_after(admitter)
             return
         member = etcd.Etcd(self.node, self.clock, self.err)
+        if admitter is not None and not admitter.confirmed:
+            etcd.abandoned(member, admitter.etcd_admission)
+            return
         if admitter is not None:
             etcd.admitted(member, admitter.etcd_admission,
                           admitter.joined.public_key,
@@ -127,6 +130,11 @@ class Inviter:
                     not etcdstate.credentials(self.root):
                 return
         except NodeError:
+            return
+        if not etcdstate.holds_root(self.root):
+            self.err("etcd: keel mesh etcd form on the root CA's holder"
+                     f" ({etcdstate.holder(self.root) or 'the first node'})"
+                     " brings the new node into etcd")
             return
         self.err("etcd: bringing the new node in (keel mesh etcd form)")
         etcdform.form(member, False, self.err)
@@ -205,6 +213,7 @@ def serve_invite(inviter: Inviter, invite_id: str) -> int:
     inviter.err(stopped(admitter))
     if admitter.confirmed:
         inviter.announced(admitter.joined.public_key)
+    if admitter.joined is not None:
         inviter.etcd_joined(admitter)
     return code
 

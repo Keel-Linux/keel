@@ -7,7 +7,10 @@ the cluster in /var/lib/keel/etcd (keel.mesh.etcdstate) and this node's
 overlay address: peers on the overlay address, clients on the overlay
 address and on ::1, never a wildcard address; TLS for both, the client
 certificate required of both, TLS 1.3 at least (0048, second round,
-point 3); and the timeouts of the design case (0050).
+point 3), and the root's CRL checked against every certificate a peer
+or a client presents (keel.mesh.etcdca); /health and /metrics on a
+plain listener on ::1 for Monit; and the timeouts of the design case
+(0050).
 
 The timeouts, from etcd's tuning guide: the heartbeat interval "around
 the round-trip time between members", the election timeout "at least
@@ -44,6 +47,11 @@ TLS_DIR = "etc/etcd/keel"
 MEMBER_CERT = f"{TLS_DIR}/member.crt"
 MEMBER_KEY = f"{TLS_DIR}/member.key"
 TRUSTED = f"{TLS_DIR}/ca.crt"
+CRL = f"{TLS_DIR}/crl.pem"
+# /health and /metrics alone, plain, on the loopback: what Monit asks
+# (Keel-Linux/common, packages/etcd), since the client port wants TLS
+# and a client certificate
+METRICS = "http://[::1]:2381"
 DATA_DIR = "/var/lib/etcd/default"
 HEARTBEAT_MS = 300
 ELECTION_MS = 5000
@@ -51,8 +59,9 @@ HEADER = ("# Written by keel from /var/lib/keel/etcd (handbook decisions"
           " 0025, 0048);\n# keel spec apply rewrites it.\n")
 
 
-def environment(address: str, cluster: Cluster) -> str:
-    """/etc/default/etcd for the member at `address` of `cluster`"""
+def environment(address: str, cluster: Cluster, crl: bool = True) -> str:
+    """/etc/default/etcd for the member at `address` of `cluster`; with
+    `crl`, the root's CRL checked against every peer and client"""
     initial = ",".join(f"{name(one)}={peer_url(one)}"
                        for one in cluster.addresses())
     values = (
@@ -77,7 +86,9 @@ def environment(address: str, cluster: Cluster) -> str:
         ("ETCD_PEER_TRUSTED_CA_FILE", f"/{TRUSTED}"),
         ("ETCD_PEER_CLIENT_CERT_AUTH", "true"),
         ("ETCD_TLS_MIN_VERSION", "TLS1.3"),
-    )
+        ("ETCD_LISTEN_METRICS_URLS", METRICS),
+    ) + ((("ETCD_CLIENT_CRL_FILE", f"/{CRL}"),
+          ("ETCD_PEER_CRL_FILE", f"/{CRL}")) if crl else ())
     return HEADER + "".join(f"{key}={value}\n" for key, value in values)
 
 

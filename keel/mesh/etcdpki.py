@@ -16,8 +16,23 @@ asks for is ignored: the issuer takes only its public key, after
 checking the request's own signature, and sets the subject and every
 extension itself, so a request that asks for `CA:TRUE` or another
 address gets none of it.
+
+Short lives, so that a key that leaks stops working by itself: a leaf
+lasts 30 days and is renewed by its member with a third left
+(`keel mesh etcd tend`), an intermediate a year and is renewed by the
+root's holder. Every intermediate carries name constraints that permit
+only the mesh's overlay prefix and ::1, so no member can certify an
+address outside the mesh. Its path length cannot be limited to 0: an
+intermediate signs the intermediate of the node its member invites when
+the root's holder cannot be reached (keel.mesh.etcd), and the chain is
+re-anchored under the root at that node's first renewal.
+
+Revocation is a CRL the root signs (`crl`), which etcd checks against
+every certificate a peer or a client presents, chain included: revoking
+an intermediate revokes every certificate under it.
 """
 
+import base64
 import hashlib
 import ipaddress
 import os
@@ -33,9 +48,10 @@ CA, MEMBER, CLIENT = "ca", "member", "client"
 # the root outlives every intermediate it signs, and an intermediate
 # the leaves; a leaf is renewed with a third of its life left
 ROOT_DAYS = 7300
-CA_DAYS = 3650
-LEAF_DAYS = 365
-PEM_RE = re.compile(r"-----BEGIN (?P<label>[A-Z ]+)-----\n[A-Za-z0-9+/=\n]+"
+CA_DAYS = 365
+LEAF_DAYS = 30
+CRL_DAYS = 30
+PEM_RE = re.compile(r"-----BEGIN (?P<label>[A-Z0-9 ]+)-----\n[A-Za-z0-9+/=\n]+"
                     r"-----END (?P=label)-----\n")
 EXTENSIONS = {
     CA: ("basicConstraints=critical,CA:TRUE\n"
@@ -114,13 +130,29 @@ def root(path: str, mesh_id: str) -> str:
         "-addext", "subjectKeyIdentifier=hash")
 
 
+def constraints(prefix: str) -> str:
+    """The name constraints of an intermediate: the overlay prefix and
+    ::1, which every member certificate names, and nothing else"""
+    net = ipaddress.IPv6Network(prefix, strict=False)
+    loop = ipaddress.IPv6Network("::1/128")
+    return ("nameConstraints=critical,"
+            f"permitted;IP:{net.network_address}/{net.netmask},"
+            f"permitted;IP:{loop.network_address}/{loop.netmask}\n")
+
+
 def issue(kind: str, issuer_key: str, issuer: str, csr: str, name: str,
-          addresses: tuple[str, ...] = (), days: int | None = None) -> str:
+          addresses: tuple[str, ...] = (), days: int | None = None,
+          prefix: str | None = None) -> str:
     """A certificate of `kind` for the key of `csr`, named `name`, signed
     with the key at `issuer_key` whose certificate is `issuer`; a member
-    certificate carries `addresses` as its IP SANs. Raises PkiError"""
+    certificate carries `addresses` as its IP SANs, an intermediate the
+    name constraints of the overlay `prefix`. Raises PkiError"""
     request_key(csr)
     extensions = EXTENSIONS[kind] + IDS
+    if kind == CA:
+        if prefix is None:
+            raise PkiError("an intermediate needs the mesh's prefix")
+        extensions += constraints(prefix)
     if addresses:
         extensions += "subjectAltName=" + ",".join(
             f"IP:{ipaddress.ip_address(one)}" for one in addresses) + "\n"
@@ -210,3 +242,97 @@ def verified(certificate: str, chain: list[str], trusted: str) -> bool:
         except PkiError:
             return False
     return True
+
+
+def serial(certificate: str) -> str:
+    """The serial number, in upper case hex as a CRL names it"""
+    found = openssl("x509", "-noout", "-serial", data=certificate)
+    return found.strip().split("=", 1)[1].upper()
+
+
+def sign(key: str, data: bytes) -> str:
+    """The signature of `data` with the key at `key`, in base64"""
+    with tempfile.TemporaryDirectory(prefix="keel-etcd-") as scratch:
+        inside, out = (os.path.join(scratch, one) for one in ("in", "sig"))
+        with open(inside, "wb") as fob:
+            fob.write(data)
+        openssl("dgst", "-sha256", "-sign", key, "-out", out, inside)
+        with open(out, "rb") as fob:
+            return base64.b64encode(fob.read()).decode()
+
+
+def verified_by(certificate: str, data: bytes, signature: str) -> bool:
+    """Whether `signature` is the certified key's over `data`"""
+    try:
+        raw = base64.b64decode(signature, validate=True)
+        key = public(certificate)
+    except (ValueError, PkiError):
+        return False
+    with tempfile.TemporaryDirectory(prefix="keel-etcd-") as scratch:
+        files = {}
+        for label, body in (("in", data), ("sig", raw),
+                            ("key", key.encode())):
+            files[label] = os.path.join(scratch, label)
+            with open(files[label], "wb") as fob:
+                fob.write(body)
+        try:
+            openssl("dgst", "-sha256", "-verify", files["key"],
+                    "-signature", files["sig"], files["in"])
+        except PkiError:
+            return False
+    return True
+
+
+def crl(key: str, issuer: str, revoked: dict[str, tuple[str, str]],
+        number: int) -> str:
+    """A CRL signed with the key at `key` whose certificate is `issuer`:
+    `revoked` maps a serial to (its expiry, when it was revoked), both
+    as openssl's index writes them (YYMMDDHHMMSSZ)"""
+    with tempfile.TemporaryDirectory(prefix="keel-etcd-") as scratch:
+        index = os.path.join(scratch, "index.txt")
+        with open(index, "w") as fob:
+            for one, (expiry, when) in sorted(revoked.items()):
+                fob.write(f"R\t{expiry}\t{when}\t{one}\tunknown\t/CN=x\n")
+        with open(os.path.join(scratch, "crlnumber"), "w") as fob:
+            fob.write(f"{number:02X}\n")
+        conf = os.path.join(scratch, "ca.cnf")
+        with open(conf, "w") as fob:
+            fob.write(f"[ca]\ndefault_ca=c\n[c]\ndatabase={index}\n"
+                      f"crlnumber={scratch}/crlnumber\ndefault_md=sha256\n"
+                      f"default_crl_days={CRL_DAYS}\n")
+        with open(os.path.join(scratch, "issuer"), "w") as fob:
+            fob.write(issuer)
+        return openssl("ca", "-config", conf, "-gencrl", "-batch",
+                       "-keyfile", key, "-cert",
+                       os.path.join(scratch, "issuer"))
+
+
+def crl_number(found: str) -> int:
+    text = openssl("crl", "-noout", "-crlnumber", data=found)
+    return int(text.strip().split("=", 1)[1], 16)
+
+
+def crl_serials(found: str) -> set[str]:
+    text = openssl("crl", "-noout", "-text", data=found)
+    return {one.upper() for one in re.findall(
+        r"Serial Number: ([0-9A-Fa-f]+)", text)}
+
+
+def crl_verified(found: str, trusted: str) -> bool:
+    """Whether `found` is one CRL, signed by the root `trusted`"""
+    if len(blocks(found)) != 1 or "X509 CRL" not in found:
+        return False
+    with tempfile.TemporaryDirectory(prefix="keel-etcd-") as scratch:
+        root_file = os.path.join(scratch, "root")
+        with open(root_file, "w") as fob:
+            fob.write(trusted)
+        try:
+            openssl("crl", "-noout", "-CAfile", root_file, data=found)
+        except PkiError:
+            return False
+    return True
+
+
+def stamp(when: datetime) -> str:
+    """A time as openssl's index writes it"""
+    return when.astimezone(timezone.utc).strftime("%y%m%d%H%M%SZ")

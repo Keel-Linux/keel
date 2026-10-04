@@ -25,7 +25,7 @@ import ipaddress
 from collections.abc import Callable
 
 from keel import exits
-from keel.mesh import etcd, identity, signing, sync, trust
+from keel.mesh import etcd, etcdcare, identity, signing, sync, trust
 from keel.mesh.node import NodeError, without_peer
 from keel.mesh.signing import SigningError
 from keel.mesh.sync import Syncer
@@ -83,9 +83,10 @@ def remove(syncer: Syncer, which: str, out: Callable[[str], None]) -> int:
         syncer.err("the tombstone is kept: keel mesh sync drops the peer"
                    " again once the change can be confirmed")
         return code
+    etcdcare.leave(etcd.Etcd(syncer.node, syncer.clock, syncer.err),
+                   found[1], everywhere, found[0])
+    # the roster announced carries the CRL that revokes the node
     sync.announce(syncer, found[0], "the removal")
-    etcd.leave(etcd.Etcd(syncer.node, syncer.clock, syncer.err), found[1],
-               everywhere)
     out(f"removed {found[0]} at {found[1]}: the other members drop it on"
         " its tombstone, and no keel mesh sync adds it again")
     return exits.OK

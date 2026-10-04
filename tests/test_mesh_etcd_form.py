@@ -3,6 +3,7 @@
 a mesh adopted under keel 0.18, with no CA, in one process"""
 
 import json
+import os
 import unittest
 from datetime import timedelta
 from unittest import mock
@@ -20,7 +21,8 @@ class TestFormOnAnAdoptedMesh(Mesh):
         out = []
         self.assertEqual(etcdform.form(a, True, out.append), exits.OK)
         self.assertEqual(out, [
-            "would make the mesh's root CA on this node",
+            "would make the mesh's root CA on this node (run it on a trust"
+            " root: the root's key stays where it is made)",
             f"would enroll {address(1)}", f"would enroll {address(2)}",
             f"would form a cluster of 3: this node and {address(1)},"
             f" {address(2)}",
@@ -148,28 +150,30 @@ class TestFormRefused(Mesh):
 
     def test_two_roots(self):
         a, b, c = self.members(3)
-        etcdstate.make_root(a.root, MESH.hex())
-        etcdstate.make_root(b.root, MESH.hex())
+        etcdstate.make_root(a.root, MESH.hex(), address(0))
+        etcdstate.make_root(b.root, MESH.hex(), address(1))
         self.assertEqual(etcdform.form(a, False, print), exits.MESH_REFUSED)
         self.assertIn("different etcd roots", self.text(0))
         self.assertFalse(etcdstate.credentials(c.root))
 
     def test_another_member_holds_the_root(self):
         a, b, c = self.members(3)
-        etcdstate.make_root(b.root, MESH.hex())
+        etcdstate.make_root(b.root, MESH.hex(), address(1))
         self.assertEqual(etcdform.form(a, False, print), exits.MESH_REFUSED)
-        self.assertIn(f"{address(1)} does: run keel mesh etcd form there",
+        self.assertIn("only the node that holds the mesh's root CA forms"
+                      f" etcd: run keel mesh etcd form on {address(1)}",
                       self.text(0))
         self.assertEqual(etcdform.form(b, False, lambda line: None),
                          exits.OK)
 
     def test_a_cluster_this_node_is_not_in(self):
         a, b, c = self.members(3)
-        etcdform.form(b, False, lambda line: None)
+        etcdform.form(a, False, lambda line: None)
         import os
         os.remove(os.path.join(a.root, etcdstate.CLUSTER))
         self.assertEqual(etcdform.form(a, False, print), exits.MESH_REFUSED)
-        self.assertIn("an etcd cluster exists", self.text(0))
+        self.assertIn("in a cluster this node has no record of",
+                      self.text(0))
 
     def test_an_enrollment_that_fails_starts_nothing(self):
         a, b, c = self.members(3)
@@ -264,7 +268,7 @@ class TestTheReceiver(Mesh):
         self.assertEqual(found.status, 409)
 
     def test_cluster_messages_refused(self):
-        etcdstate.make_root(self.a.root, MESH.hex())
+        etcdstate.make_root(self.a.root, MESH.hex(), address(0))
         other = Cluster("new", (Member(KEYS[0], address(0)),), MESH.hex())
         self.assertIn("does not name this node", self.refused(self.message(
             etcdmsg.CLUSTER, {"cluster": other.dumps()})))
@@ -278,10 +282,47 @@ class TestTheReceiver(Mesh):
         self.assertIn("in a cluster already", self.refused(self.message(
             etcdmsg.CLUSTER, {"cluster": theirs.dumps()})))
 
+    def test_a_cluster_needs_the_root_s_record(self):
+        """A signed peer cannot make a waiting member start a cluster it
+        chose: the record must be the root's"""
+        etcdstate.make_root(self.a.root, MESH.hex(), address(0))
+        etcdstate.take_grant(self.b.root, etcdstate.grant_for(
+            self.a.root, etcdstate.ca_request(self.b.root), address(1)))
+        bare = Cluster("new", (Member(KEYS[1], address(1)),
+                               Member(KEYS[2], address(2))), MESH.hex())
+        self.assertIn("no record signed by the mesh's root", self.refused(
+            self.message(etcdmsg.CLUSTER, {"cluster": bare.dumps()},
+                         sender=2), KEYS[2]))
+        other = self.all[2]
+        etcdstate.make_root(other.root, MESH.hex(), address(2))
+        from keel.mesh import etcdca
+        rogue = etcdca.record(other.root, bare.members, MESH.hex())
+        self.assertIn("no record signed by the mesh's root", self.refused(
+            self.message(etcdmsg.CLUSTER, {"cluster": rogue.dumps()},
+                         sender=2), KEYS[2]))
+        good = etcdca.record(self.a.root, bare.members, MESH.hex())
+        from dataclasses import replace
+        swapped = replace(good, members=(Member(KEYS[1], address(1)),
+                                         Member(KEYS[3], address(3))))
+        self.assertIn("not the one its record names", self.refused(
+            self.message(etcdmsg.CLUSTER, {"cluster": swapped.dumps()})))
+        torn = replace(good, record="{", signature=etcdca.etcdpki.sign(
+            os.path.join(self.a.root, etcdstate.ROOT_KEY), b"{"))
+        self.assertIn("cannot be read", self.refused(self.message(
+            etcdmsg.CLUSTER, {"cluster": torn.dumps()})))
+        import json
+        data = json.loads(good.record)
+        data["token"] = "cd" * 16
+        body = json.dumps(data, sort_keys=True, separators=(",", ":"))
+        other_token = replace(good, record=body, signature=etcdca.etcdpki.sign(
+            os.path.join(self.a.root, etcdstate.ROOT_KEY), body.encode()))
+        self.assertIn("another root or token", self.refused(self.message(
+            etcdmsg.CLUSTER, {"cluster": other_token.dumps()})))
+
     def test_a_cluster_held_is_never_replaced(self):
         """Same mesh, same token, other members: refused (the token is
         always the mesh's identity)"""
-        etcdstate.make_root(self.a.root, MESH.hex())
+        etcdstate.make_root(self.a.root, MESH.hex(), address(0))
         etcdform.form(self.a, False, lambda line: None)
         rogue = Cluster("new", (Member(KEYS[1], address(1)),
                                 Member(KEYS[0], "fd00:6b65:1::99")),
@@ -295,9 +336,9 @@ class TestTheReceiver(Mesh):
 
     def test_a_grant_only_from_a_root_and_not_while_waiting(self):
         from keel.mesh import trust
-        etcdstate.make_root(self.a.root, MESH.hex())
+        etcdstate.make_root(self.a.root, MESH.hex(), address(0))
         grant = etcdstate.grant_for(self.a.root, etcdstate.ca_request(
-            self.b.root), "x")
+            self.b.root), address(1))
         store = trust.load(self.b.root)
         store.members[store.find(KEYS[0])].root = False
         trust.save(self.b.root, store)
@@ -311,7 +352,7 @@ class TestTheReceiver(Mesh):
                 etcdmsg.CLUSTER, {"cluster": cluster.dumps()})))
 
     def test_ready_members_vetted_against_the_peers(self):
-        etcdstate.make_root(self.b.root, MESH.hex())
+        etcdstate.make_root(self.b.root, MESH.hex(), address(1))
         found = etcdserve.answer(self.b, self.message(etcdmsg.CLUSTER, {
             "ready": {KEYS[0]: address(0), KEYS[2]: "fd00::77",
                       KEYS[3]: address(3)}}), KEYS[0])
@@ -319,7 +360,7 @@ class TestTheReceiver(Mesh):
         self.assertEqual(etcdstate.ready(self.b.root), {KEYS[0]: address(0)})
 
     def test_openssl_failing_is_a_503(self):
-        etcdstate.make_root(self.b.root, MESH.hex())
+        etcdstate.make_root(self.b.root, MESH.hex(), address(1))
         with mock.patch("keel.mesh.etcdstate.ca_request",
                         side_effect=OSError("disk full")):
             found = etcdserve.answer(self.b, self.message(etcdmsg.ENROLL),
@@ -327,10 +368,10 @@ class TestTheReceiver(Mesh):
         self.assertEqual(found.status, 503)
 
     def test_a_grant_under_another_root(self):
-        etcdstate.make_root(self.b.root, MESH.hex())
-        etcdstate.make_root(self.a.root, MESH.hex())
+        etcdstate.make_root(self.b.root, MESH.hex(), address(1))
+        etcdstate.make_root(self.a.root, MESH.hex(), address(0))
         grant = etcdstate.grant_for(self.a.root, etcdstate.ca_request(
-            self.c.root), "x")
+            self.c.root), address(2))
         self.assertIn("another root", self.refused(self.message(
             etcdmsg.CLUSTER, {"grant": etcdmsg.grant_data(grant)})))
 
@@ -341,9 +382,9 @@ class TestTheReceiver(Mesh):
         self.assertEqual(found.status, 503)
 
     def test_a_grant_alone_starts_nothing(self):
-        etcdstate.make_root(self.a.root, MESH.hex())
+        etcdstate.make_root(self.a.root, MESH.hex(), address(0))
         grant = etcdstate.grant_for(self.a.root, etcdstate.ca_request(
-            self.b.root), "x")
+            self.b.root), address(1))
         found = etcdserve.answer(self.b, self.message(
             etcdmsg.CLUSTER, {"grant": etcdmsg.grant_data(grant),
                               "ready": {KEYS[0]: address(0)}}), KEYS[0])

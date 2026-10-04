@@ -32,11 +32,12 @@ class TestRootAndChain(Case):
         self.assertTrue(etcdpki.is_ca(root))
         b_key = self.key("b.key")
         b = etcdpki.issue(etcdpki.CA, root_key, root,
-                          etcdpki.request(b_key), "keel-b")
+                          etcdpki.request(b_key), "keel-b",
+                          prefix="fd00::/64")
         c_key = self.key("c.key")
         # an intermediate issued by an intermediate: any member invites
         c = etcdpki.issue(etcdpki.CA, b_key, b, etcdpki.request(c_key),
-                          "keel-c")
+                          "keel-c", prefix="fd00::/64")
         m_key = self.key("m.key")
         leaf = etcdpki.issue(etcdpki.MEMBER, c_key, c,
                              etcdpki.request(m_key), "keel-m",
@@ -115,6 +116,58 @@ class TestRootAndChain(Case):
         root = etcdpki.root(self.key("root.key"), "ab" * 16)
         self.assertEqual(etcdpki.blocks(root + root), [root, root])
         self.assertEqual(etcdpki.blocks("none"), [])
+
+
+class TestConstraintsSignaturesCrl(Case):
+    def setUp(self):
+        super().setUp()
+        self.root_key = self.key("root.key")
+        self.root = etcdpki.root(self.root_key, "ab" * 16)
+        self.ca_key = self.key("ca.key")
+        self.ca = etcdpki.issue(etcdpki.CA, self.root_key, self.root,
+                                etcdpki.request(self.ca_key), "keel-a",
+                                prefix="fd00:6b65:1::1/64")
+
+    def leaf(self, *addresses):
+        return etcdpki.issue(etcdpki.MEMBER, self.ca_key, self.ca,
+                             etcdpki.request(self.key("m.key")), "m",
+                             addresses)
+
+    def test_an_intermediate_certifies_the_mesh_s_prefix_alone(self):
+        self.assertTrue(etcdpki.verified(
+            self.leaf("fd00:6b65:1::5", "::1"), [self.ca], self.root))
+        self.assertFalse(etcdpki.verified(
+            self.leaf("fd00:6b65:2::5"), [self.ca], self.root))
+        self.assertFalse(etcdpki.verified(
+            self.leaf("10.0.0.1"), [self.ca], self.root))
+        with self.assertRaisesRegex(PkiError, "prefix"):
+            etcdpki.issue(etcdpki.CA, self.root_key, self.root,
+                          etcdpki.request(self.ca_key), "x")
+        self.assertIn("FD00:6B65:1:0:0:0:0:0", etcdpki.text(self.ca))
+
+    def test_a_signature_by_the_root(self):
+        signature = etcdpki.sign(self.root_key, b"record")
+        self.assertTrue(etcdpki.verified_by(self.root, b"record", signature))
+        self.assertFalse(etcdpki.verified_by(self.root, b"recore",
+                                             signature))
+        self.assertFalse(etcdpki.verified_by(self.ca, b"record", signature))
+        self.assertFalse(etcdpki.verified_by(self.root, b"record", "!!"))
+        self.assertFalse(etcdpki.verified_by("x", b"record", signature))
+
+    def test_a_crl_the_root_signs(self):
+        serial = etcdpki.serial(self.ca)
+        expiry = etcdpki.stamp(etcdpki.not_after(self.ca))
+        found = etcdpki.crl(self.root_key, self.root,
+                            {serial: (expiry, etcdpki.stamp(
+                                datetime.now(timezone.utc)))}, 7)
+        self.assertTrue(etcdpki.crl_verified(found, self.root))
+        self.assertEqual(etcdpki.crl_serials(found), {serial})
+        self.assertEqual(etcdpki.crl_number(found), 7)
+        other = etcdpki.root(self.key("other.key"), "cd" * 16)
+        self.assertFalse(etcdpki.crl_verified(found, other))
+        self.assertFalse(etcdpki.crl_verified(self.root, self.root))
+        empty = etcdpki.crl(self.root_key, self.root, {}, 1)
+        self.assertEqual(etcdpki.crl_serials(empty), set())
 
 
 class TestOpensslFailing(Case):

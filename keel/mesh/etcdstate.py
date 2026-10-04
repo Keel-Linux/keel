@@ -15,7 +15,12 @@ is (keel.network.marker.write_private):
 | `chain.pem` | the intermediates above it, its issuer's first, not the root |
 | `member.key`, `member.crt` | its member certificate, with its chain |
 | `client.key`, `client.crt` | keel's client certificate, with its chain |
-| `cluster.json` | the cluster: `new` or `existing`, its members, its token |
+| `cluster.json` | the cluster, its members, token and signed record |
+| `holder` | the overlay address of the member that holds the root CA |
+| `crl.pem` | the CRL the root signed, the newest this member has seen |
+| `issued.json` | on the root's holder: the intermediates it signed |
+| `revoked.json` | on the root's holder: what it revoked (etcdca) |
+| `formation.json` | on the root's holder: the formation it reserved |
 | `ready.json` | the members known to be ready for etcd: key to address |
 | `learners.json` | when each learner was first seen, for `tend` |
 
@@ -53,6 +58,11 @@ CLIENT_CERT = f"{DIR}/client.crt"
 CLUSTER = f"{DIR}/cluster.json"
 READY = f"{DIR}/ready.json"
 LEARNERS = f"{DIR}/learners.json"
+HOLDER = f"{DIR}/holder"
+ISSUED = f"{DIR}/issued.json"
+# written once keel started etcd here for this mesh's cluster
+STARTED = f"{DIR}/started"
+CRL = f"{DIR}/crl.pem"
 PEER_PORT = 2380
 CLIENT_PORT = 2379
 STATES = ("new", "existing")
@@ -66,11 +76,14 @@ class StateError(Exception):
 @dataclass(frozen=True)
 class Grant:
     """A member's intermediate CA, the chain above it (its issuer's
-    first, the root left out), and the mesh's root"""
+    first, the root left out), the mesh's root, and, when the issuer
+    has them, the root's CRL and the root holder's overlay address"""
 
     certificate: str
     chain: tuple[str, ...]
     root: str
+    crl: str | None = None
+    holder: str | None = None
 
 
 @dataclass(frozen=True)
@@ -90,6 +103,10 @@ class Cluster:
     state: str
     members: tuple[Member, ...]
     token: str
+    # the formation record (canonical JSON) and the root's signature of
+    # it (keel.mesh.etcdca): what makes a cluster this mesh's
+    record: str | None = None
+    signature: str | None = None
 
     def addresses(self) -> tuple[str, ...]:
         return tuple(one.address for one in self.members)
@@ -98,7 +115,8 @@ class Cluster:
         return {"state": self.state, "token": self.token,
                 "members": [{"public_key": one.public_key,
                              "address": one.address}
-                            for one in self.members]}
+                            for one in self.members],
+                "record": self.record, "signature": self.signature}
 
     @staticmethod
     def loads(data: object) -> "Cluster":
@@ -112,7 +130,12 @@ class Cluster:
                        else str(one["public_key"]),
                        str(ipaddress.IPv6Address(one["address"])))
                 for one in data["members"])
-            return Cluster(data["state"], members, str(data["token"]))
+            record, signature = data.get("record"), data.get("signature")
+            if not all(one is None or isinstance(one, str)
+                       for one in (record, signature)):
+                raise ValueError("a record is text")
+            return Cluster(data["state"], members, str(data["token"]),
+                           record, signature)
         except (KeyError, TypeError, ValueError) as e:
             raise StateError(f"not a cluster: {e}") from None
 
@@ -187,9 +210,11 @@ def key(root: str, relative: str) -> str:
     return path(root, relative)
 
 
-def make_root(root: str, mesh_id: str) -> bool:
+def make_root(root: str, mesh_id: str, address: str) -> bool:
     """The mesh's root CA and this node's intermediate under it, when
-    this node holds no credentials; whether they were made now"""
+    this node holds no credentials, and the root's first CRL, empty;
+    whether they were made now. `address` is this node's overlay
+    address, whose prefix constrains every intermediate"""
     with locked(root):
         if credentials(root):
             return False
@@ -197,13 +222,27 @@ def make_root(root: str, mesh_id: str) -> bool:
             made = etcdpki.root(key(root, ROOT_KEY), mesh_id)
             own = etcdpki.issue(etcdpki.CA, path(root, ROOT_KEY), made,
                                 etcdpki.request(key(root, CA_KEY)),
-                                f"keel mesh {mesh_id[:16]} first member")
+                                name(address), prefix=prefix_of(address))
+            first = etcdpki.crl(path(root, ROOT_KEY), made, {}, 1)
         except PkiError as e:
             raise StateError(str(e)) from None
+        write(root, ROOT_CERT, made)
         write(root, CHAIN, "")
         write(root, CA_CERT, own)
-        write(root, ROOT_CERT, made)
+        write(root, CRL, first)
+        write(root, HOLDER, str(ipaddress.IPv6Address(address)) + "\n")
     return True
+
+
+def prefix_of(address: str) -> str:
+    """The overlay prefix of a member's address: the mesh's /64"""
+    return str(ipaddress.IPv6Network(f"{address}/64", strict=False))
+
+
+def holder(root: str) -> str | None:
+    """The overlay address of the member that holds the root CA"""
+    found = (read(root, HOLDER) or "").strip()
+    return found or None
 
 
 def ca_request(root: str) -> str:
@@ -215,18 +254,43 @@ def ca_request(root: str) -> str:
             raise StateError(str(e)) from None
 
 
-def grant_for(root: str, csr: str, who: str) -> Grant:
-    """An intermediate CA for the key of `csr`, named `who`, signed with
-    this member's own intermediate; raises StateError"""
+def grant_for(root: str, csr: str, address: str) -> Grant:
+    """An intermediate CA for the key of `csr`, for the member at
+    `address`: signed with the root on the root's holder, which keeps
+    every chain one deep, else with this member's own intermediate (the
+    root's holder cannot be reached, keel.mesh.etcd); the intermediate
+    is constrained to the mesh's prefix. Raises StateError"""
     if not credentials(root):
         raise StateError("this node holds no etcd CA to issue with")
-    own = read(root, CA_CERT)
+    rooted = holds_root(root)
+    issuer = read(root, ROOT_CERT) if rooted else read(root, CA_CERT)
     try:
-        made = etcdpki.issue(etcdpki.CA, path(root, CA_KEY), own, csr, who)
+        made = etcdpki.issue(
+            etcdpki.CA, path(root, ROOT_KEY if rooted else CA_KEY), issuer,
+            csr, name(address), prefix=prefix_of(address))
+        if rooted:
+            record_issued(root, address, made)
     except PkiError as e:
         raise StateError(f"the request cannot be signed: {e}") from None
-    return Grant(made, (own, *etcdpki.blocks(read(root, CHAIN) or "")),
-                 read(root, ROOT_CERT))
+    chain = () if rooted else (issuer, *etcdpki.blocks(read(root, CHAIN)
+                                                       or ""))
+    return Grant(made, chain, read(root, ROOT_CERT), read(root, CRL),
+                 holder(root))
+
+
+def record_issued(root: str, address: str, certificate: str) -> None:
+    """On the root's holder: an intermediate it signed, by its member's
+    address, so a removal can revoke it (keel.mesh.etcdca)"""
+    try:
+        data = json.loads(read(root, ISSUED) or "{}")
+    except ValueError:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    entry = [etcdpki.serial(certificate),
+             etcdpki.stamp(etcdpki.not_after(certificate))]
+    data.setdefault(str(ipaddress.IPv6Address(address)), []).append(entry)
+    write(root, ISSUED, json.dumps(data, sort_keys=True) + "\n")
 
 
 def take_grant(root: str, grant: Grant) -> None:
@@ -256,6 +320,27 @@ def take_grant(root: str, grant: Grant) -> None:
         write(root, ROOT_CERT, grant.root)
         write(root, CHAIN, "".join(grant.chain))
         write(root, CA_CERT, grant.certificate)
+        if grant.holder:
+            write(root, HOLDER, str(ipaddress.IPv6Address(grant.holder))
+                  + "\n")
+    if grant.crl:
+        take_crl(root, grant.crl)
+
+
+def take_crl(root: str, found: str) -> bool:
+    """Keep `found` as this member's CRL when the root signed it and it
+    is newer than the one held; whether it was kept"""
+    trusted = read(root, ROOT_CERT)
+    if not trusted or not etcdpki.crl_verified(found, trusted):
+        return False
+    held = read(root, CRL)
+    try:
+        if held and etcdpki.crl_number(held) >= etcdpki.crl_number(found):
+            return False
+    except PkiError:
+        pass
+    write(root, CRL, found)
+    return True
 
 
 def expires(root: str) -> datetime | None:

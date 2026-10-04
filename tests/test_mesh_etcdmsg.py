@@ -40,6 +40,16 @@ class TestJoinFields(unittest.TestCase):
             with self.assertRaises(ProtocolError):
                 etcdmsg.grant(bad)
 
+    def test_a_crl(self):
+        crl = ("-----BEGIN X509 CRL-----\nAAAA\n"
+               "-----END X509 CRL-----\n")
+        self.assertEqual(etcdmsg.crl(crl), crl)
+        for bad in (1, CERT, crl * 2):
+            with self.assertRaises(ProtocolError):
+                etcdmsg.crl(bad)
+        grant = Grant(CERT, (), CERT, crl, "fd00::1")
+        self.assertEqual(etcdmsg.grant(etcdmsg.grant_data(grant)), grant)
+
     def test_a_cluster_round_trip(self):
         found = Cluster("existing", (Member(KEY, "fd00::1"),
                                      Member(None, "fd00::4")), MESH)
@@ -50,6 +60,8 @@ class TestJoinFields(unittest.TestCase):
                     "members": [{"public_key": "x", "address": "fd00::1"}]},
                     {"state": "new", "token": "zz", "members": []},
                     {"state": "new", "token": MESH, "members": [1]},
+                    {"state": "new", "token": MESH, "members": [],
+                     "record": 1},
                     {"state": "new", "token": MESH, "members": [
                         {"public_key": None, "address": "x"}]},
                     {"state": "new", "token": MESH,

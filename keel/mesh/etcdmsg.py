@@ -23,7 +23,14 @@ verified by the receiver").
                  made once
     cluster   {"grant": ... or null, "cluster": ..., "ready": {...}}
               -> {"taken": true}: its intermediate if it had none, the
-                 cluster to start
+                 cluster to start, with its formation record signed by
+                 the root (keel.mesh.etcdca)
+    issue     {"csr": ..., "address": ...} -> {"grant": ...}: to the
+              root's holder, an intermediate signed by the root, for a
+              node an inviter admits or a member's renewal
+    revoke    {"address": ..., "public_key": ..., "serials": {...}}
+              -> {"crl": ...}: to the root's holder, a removed node's
+              certificates revoked, the new CRL
 """
 
 import base64
@@ -41,7 +48,9 @@ from keel.network.wireguard import is_key
 
 PATH = "/v1/etcd"
 PROBE, ENROLL, CLUSTER = "probe", "enroll", "cluster"
-KINDS = (PROBE, ENROLL, CLUSTER)
+ISSUE, REVOKE = "issue", "revoke"
+KINDS = (PROBE, ENROLL, CLUSTER, ISSUE, REVOKE)
+MAX_RECORD = 16384
 LABEL = b"keel mesh etcd 1\n"
 MAX_PEM = 4096
 MAX_CHAIN = 8
@@ -69,16 +78,29 @@ def grant(value: object) -> Grant | None:
                                                      list) or \
             len(value["chain"]) > MAX_CHAIN:
         raise ProtocolError("not an etcd grant")
+    found = value.get("crl")
+    at = value.get("holder")
     return Grant(pem(value.get("certificate"), "CERTIFICATE"),
                  tuple(pem(one, "CERTIFICATE") for one in value["chain"]),
-                 pem(value.get("root"), "CERTIFICATE"))
+                 pem(value.get("root"), "CERTIFICATE"),
+                 None if found is None else crl(found),
+                 None if at is None else address(at))
+
+
+def crl(value: object) -> str:
+    """One PEM CRL, of any size a roster can carry"""
+    if not isinstance(value, str) or len(value) > MAX_RECORD * 8 or \
+            len(blocks(value)) != 1 or blocks(value)[0] != value or \
+            "BEGIN X509 CRL-----" not in value:
+        raise ProtocolError("not one PEM CRL")
+    return value
 
 
 def grant_data(found: Grant | None) -> dict | None:
     if found is None:
         return None
     return {"certificate": found.certificate, "chain": list(found.chain),
-            "root": found.root}
+            "root": found.root, "crl": found.crl, "holder": found.holder}
 
 
 def cluster(value: object) -> Cluster | None:
@@ -98,7 +120,13 @@ def cluster(value: object) -> Cluster | None:
         if key is not None and (not isinstance(key, str) or not is_key(key)):
             raise ProtocolError("not an etcd cluster")
         members.append(Member(key, address(one.get("address"))))
-    return Cluster(value["state"], tuple(members), value["token"])
+    record, signature = value.get("record"), value.get("signature")
+    for one in (record, signature):
+        if one is not None and (not isinstance(one, str)
+                                or len(one) > MAX_RECORD):
+            raise ProtocolError("not an etcd cluster")
+    return Cluster(value["state"], tuple(members), value["token"], record,
+                   signature)
 
 
 def address(value: object) -> str:
@@ -184,18 +212,20 @@ def loads(data: bytes) -> Message:
 class Probe:
     """What a member says of itself: ready for etcd (cloud advanced,
     the overlay in its appliance), the fingerprint of the root it holds,
-    whether it is in a cluster, its overlay address"""
+    whether it is in a cluster, its overlay address, whether it holds
+    the root CA's key"""
 
     ready: bool
     root: str | None
     formed: bool
     address: str
+    holder: bool = False
 
 
 def probe_dumps(is_ready: bool, root: str | None, formed: bool,
-                address: str) -> bytes:
+                address: str, holder: bool = False) -> bytes:
     return json.dumps({"ready": is_ready, "root": root, "formed": formed,
-                       "address": address}).encode()
+                       "address": address, "holder": holder}).encode()
 
 
 def probe_answer(data: bytes) -> Probe:
@@ -208,7 +238,7 @@ def probe_answer(data: bytes) -> Probe:
                                           for c in root))):
         raise ProtocolError("not a probe's answer")
     return Probe(found["ready"], root, found["formed"],
-                 address(found.get("address")))
+                 address(found.get("address")), found.get("holder") is True)
 
 
 def enroll_answer(data: bytes) -> str:

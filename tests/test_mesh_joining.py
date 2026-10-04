@@ -150,8 +150,9 @@ class TestJoin(Case):
         issuer, other = tempfile.mkdtemp(), tempfile.mkdtemp()
         for one in (issuer, other):
             self.addCleanup(shutil.rmtree, one)
-        etcdstate.make_root(issuer, "ab" * 16)
-        grant = etcdstate.grant_for(issuer, etcdstate.ca_request(other), "x")
+        etcdstate.make_root(issuer, "ab" * 16, "fd00::1")
+        grant = etcdstate.grant_for(issuer, etcdstate.ca_request(other),
+                                     "fd00::2")
         asked = []
         self.admitter.etcd_admit = lambda csr, key, address: (
             asked.append(csr) or etcd.Admission(grant))

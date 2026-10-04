@@ -57,7 +57,7 @@ class Case(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.root = tempfile.mkdtemp()
-        etcdstate.make_root(cls.root, MESH)
+        etcdstate.make_root(cls.root, MESH, "fd00::1")
         etcdstate.leaves(cls.root, "fd00::1", NOW)
         server = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         server.load_cert_chain(f"{cls.root}/{etcdstate.MEMBER_CERT}",
@@ -175,7 +175,7 @@ class TestUnreachable(Case):
         """A server whose certificate the root did not sign is not etcd"""
         other = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, other)
-        etcdstate.make_root(other, MESH)
+        etcdstate.make_root(other, MESH, "fd00::1")
         etcdstate.leaves(other, "fd00::9", NOW)
         client = etcdclient.Client((f"https://[::1]:{self.port}",),
                                    etcdclient.context(other), timeout=2)

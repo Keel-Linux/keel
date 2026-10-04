@@ -36,6 +36,7 @@ from keel.mesh import (
     create,
     endpoint,
     etcd,
+    etcdcare,
     etcdform,
     identity,
     invites,
@@ -495,7 +496,7 @@ def mesh_status(args) -> int:
                              live.output if root == ROOT_DEFAULT else None):
         print(line)
     if overlay and overlay.get("address"):
-        for line in etcd.status(etcd.Etcd(Node(root, args.spec), utcnow,
+        for line in etcdcare.status(etcd.Etcd(Node(root, args.spec), utcnow,
                                           err), root == ROOT_DEFAULT):
             print(line)
     return exits.OK
@@ -518,4 +519,4 @@ def mesh_etcd_tend(args) -> int:
     code = as_root(args, "keel mesh etcd tend")
     if code != exits.OK:
         return code
-    return etcd.tend(member(args))
+    return etcdcare.tend(member(args))

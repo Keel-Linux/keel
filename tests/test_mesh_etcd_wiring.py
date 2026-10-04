@@ -16,7 +16,7 @@ from manifest_helpers import ManifestCase
 from keel import cli, exits
 from keel.diff.appliance import NO_CLUSTER, appliance_fields
 from keel.diff.report import NOT_COMPARED
-from keel.mesh import etcd, etcdstate, inviting, memberlink, trust
+from keel.mesh import etcd, etcdcare, etcdstate, inviting, memberlink, trust
 from keel.mesh.etcdstate import Cluster
 from keel.mesh.memberd import Members, Pending
 from keel.mesh.memberlink import Answer, LinkError
@@ -81,6 +81,26 @@ class TestTheInviterOnceConfirmed(Mesh):
             self.assertIsNone(send("member", "cluster"))
         self.assertEqual(sent.call_args[0][1:], ("member", "cluster"))
 
+    def test_a_join_not_confirmed_gives_its_formation_back(self):
+        a, = self.members(1)
+        admission = etcd.Admission()
+        admitter = mock.Mock(etcd_admission=admission, confirmed=False)
+        with mock.patch("keel.mesh.etcd.abandoned") as abandoned:
+            self.inviter(a).etcd_joined(admitter)
+        abandoned.assert_called_once()
+
+    def test_a_fallback_join_through_another_than_the_holder(self):
+        a, b = self.members(2)
+        etcd.created(a)
+        etcdstate.take_grant(b.root, etcdstate.grant_for(
+            a.root, etcdstate.ca_request(b.root), address(1)))
+        said = []
+        with mock.patch("keel.mesh.etcdform.form") as form:
+            inviting.Inviter(b.node, self.clock, print,
+                             said.append).etcd_joined(None)
+        form.assert_not_called()
+        self.assertIn(f"on the root CA's holder ({address(0)})", said[0])
+
     def test_the_fallback_s_node_brought_in_by_form(self):
         a, b = self.members(2, modes=("cloud_advanced", "cloud_simple"))
         with mock.patch("keel.mesh.etcdform.form") as form:
@@ -139,7 +159,7 @@ class TestTheCli(Mesh):
     def test_status_off_the_live_system_does_not_ask_etcd(self):
         a, = self.members(1)
         etcdstate.save_cluster(a.root, Cluster("new", (), MESH.hex()))
-        self.assertEqual(etcd.status(a, live=False), [
+        self.assertEqual(etcdcare.status(a, live=False), [
             "etcd: this node is in a cluster of 0 (not the live system:"
             " etcd is not asked)"])
 

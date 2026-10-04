@@ -44,6 +44,15 @@ class TestRoster(unittest.TestCase):
                 self.assertEqual(members.loads(members.dumps(one)), one)
 
     def test_the_wire_form(self):
+        crl = ("-----BEGIN X509 CRL-----\nAAAA\n"
+               "-----END X509 CRL-----\n")
+        with_crl = members.Roster(None, roster().public_key,
+                                  roster().sign_key, roster().address, (),
+                                  crl=crl)
+        self.assertEqual(members.loads(members.dumps(with_crl)).crl, crl)
+        unreadable = json.loads(members.dumps(with_crl))
+        unreadable["crl"] = "x"
+        self.assertIsNone(members.loads(json.dumps(unreadable).encode()).crl)
         data = json.loads(members.dumps(roster()))
         self.assertEqual(data["identity"], bytes(range(16)).hex())
         self.assertEqual(data["members"][0]["address"], "fd00:6b65:1::7")
