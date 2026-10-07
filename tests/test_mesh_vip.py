@@ -78,8 +78,7 @@ class TestTheFile(Scratch):
                             address(0))
 
     def test_written_and_read_back(self):
-        held = Held(VIP, self.signed(2), lease="77", renewed=5.5,
-                    released=True)
+        held = Held(VIP, self.signed(2), lease="77", released=True)
         vipstate.write(self.root, held)
         self.assertEqual(vipstate.read(self.root, VIP), held)
         self.assertEqual(vipstate.known(self.root), (VIP,))
@@ -95,8 +94,7 @@ class TestTheFile(Scratch):
     def test_a_damaged_file_is_refused_never_guessed(self):
         vipstate.ensure(self.root)
         for text in ("{", '{"vip": "fd00::1"}', '{"vip": "%s", "claim":'
-                     ' "!!", "fenced": false, "lease": null, "renewed":'
-                     ' null}' % VIP):
+                     ' "!!", "fenced": false, "lease": null}' % VIP):
             with open(os.path.join(self.root, vipstate.file_of(VIP)),
                       "w") as fob:
                 fob.write(text)

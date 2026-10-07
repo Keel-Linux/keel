@@ -49,6 +49,11 @@ DIR_MODE = 0o700
 FILE_MODE = 0o600
 HOST = 128
 PRIMARY, REPLICA = "primary", "replica"
+# the etcd lease of a holder's claim, and how long after the last
+# renewal the majority confirmed the holder still carries the VIP
+# (decision 0049, third round; keel.mesh.vipetcd says why)
+TTL = 20
+RELEASE_AFTER = 10.0
 
 
 @dataclass(frozen=True)
@@ -61,6 +66,8 @@ class Claim:
     holder: str
     address: str
     raw: bytes
+    # the pair record the claim rests on (keel.mesh.vippair.Pair)
+    pair: object = None
 
 
 @dataclass(frozen=True)
@@ -72,16 +79,16 @@ class Held:
     while another took it), and so claims it again only by a promote run
     here; `released` whether this node let it go when the other node of
     the pair asked, its claim still the newest until that node's comes;
-    `lease` the etcd lease of this node's own claim, and `renewed` when
-    it was last renewed, as the send time of the renewal etcd answered,
-    on the system's monotonic clock.
+    `lease` the etcd lease of this node's own claim. When the lease was
+    last renewed is never kept here: a time of one boot means nothing in
+    the next, so a controller carries the VIP only once it renewed the
+    lease itself (keel.mesh.vipetcd).
     """
 
     vip: str
     claim: Claim | None = None
     fenced: bool = False
     lease: str | None = None
-    renewed: float | None = None
     released: bool = False
 
     @property
@@ -168,7 +175,7 @@ def dumps(held: Held) -> str:
     claim = held.claim
     return json.dumps({
         "vip": held.vip, "fenced": held.fenced, "lease": held.lease,
-        "renewed": held.renewed, "released": held.released,
+        "released": held.released,
         "claim": None if claim is None
         else base64.b64encode(claim.raw).decode()}, sort_keys=True) + "\n"
 
@@ -184,13 +191,11 @@ def read(root: str, vip: str) -> Held | None:
         claim = None if raw is None else vipmsg.claim_of(
             base64.b64decode(raw, validate=True))
         lease = data["lease"]
-        renewed = data["renewed"]
         released = data.get("released", False)
         if data["vip"] != vip or type(data["fenced"]) is not bool or \
                 type(released) is not bool or \
                 not (lease is None or isinstance(lease, str)) or \
-                not (renewed is None or isinstance(renewed, (int, float))) \
-                or (claim is not None and claim.vip != vip):
+                (claim is not None and claim.vip != vip):
             raise ValueError(vip)
     except FileNotFoundError:
         return None
@@ -198,7 +203,7 @@ def read(root: str, vip: str) -> Held | None:
         raise ValueError(f"/{file_of(vip)} is damaged: keel does not guess"
                          " who holds a VIP; remove it, and keel vip check"
                          " learns the holder from the peers") from None
-    return Held(vip, claim, data["fenced"], lease, renewed, released)
+    return Held(vip, claim, data["fenced"], lease, released)
 
 
 def write(root: str, held: Held) -> None:
@@ -238,12 +243,12 @@ def held_all(root: str) -> list[Held]:
 
 def fenced(held: Held) -> Held:
     """`held` once this node lost the VIP without letting it go"""
-    return replace(held, fenced=True, lease=None, renewed=None)
+    return replace(held, fenced=True, lease=None)
 
 
 def released(held: Held) -> Held:
     """`held` once this node let the VIP go when asked"""
-    return replace(held, released=True, lease=None, renewed=None)
+    return replace(held, released=True, lease=None)
 
 
 def routed(overlay: dict, holders: dict[str, str]) -> dict:

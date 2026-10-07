@@ -3,7 +3,6 @@
 
 import json
 import os
-import threading
 from unittest import mock
 
 from vip_helpers import KEYS, NOW, VIP, Pair, address
@@ -189,44 +188,11 @@ class TestPromoteEdges(Pair):
         self.assertIn("etcd lease 77",
                       "\n".join(vippromote.lines(self.all[0], False)))
 
-    def test_the_controller_s_renewal_after_a_release(self):
-        self.with_etcd()
-        here = self.all[0]
-        made = vipnode.signed_claim(here, VIP, 1)
-        vipnode.hold(here, made, True, "77", 1.0)
-        self.kv.leases.add("77")
-        self.kv.kvs[f"/keel/{MESH_HEX}/vip/{VIP}/holder"] = (made.raw, 2,
-                                                             "77")
-        controller = vipetcd.Controller(here, threading.Event())
-        held = vipnode.current(here, VIP)
-        with mock.patch.object(vipnode, "current",
-                               return_value=vipstate.released(held)):
-            controller.renew(held, 5.0, 1.0)
-        self.assertEqual(vipstate.read(here.root, VIP).renewed, 1.0)
-
     def test_stopped_leaves_what_it_does_not_carry(self):
         self.nodes()
         first(self)
         self.nets[0].addresses.clear()
         self.assertEqual(vipetcd.stopped(self.all[0]), [])
-
-    def test_a_renewal_the_majority_does_not_confirm_drops_it(self):
-        """a cut-off etcd leader renews by itself; the read it cannot
-        answer for the majority, or a holder key that is not this lease's,
-        counts as no renewal"""
-        self.with_etcd()
-        here = self.all[0]
-        made = vipnode.signed_claim(here, VIP, 1)
-        vipnode.hold(here, made, True, "77", 1.0)
-        self.kv.leases.add("77")
-        controller = vipetcd.Controller(here, threading.Event())
-        held = vipnode.current(here, VIP)
-        self.kv.kvs[f"/keel/{MESH_HEX}/vip/{VIP}/holder"] = (made.raw, 2,
-                                                             "78")
-        self.assertIsNone(controller.renew(held, 5.0, 1.0))
-        self.assertFalse(self.carried(0))
-        self.assertIn("lease is gone", self.text(0))
-
 
 class TestCliEdges(Pair):
     def test_the_controller_stops_on_sigterm(self):
@@ -239,9 +205,11 @@ class TestCliEdges(Pair):
         with mock.patch("signal.signal",
                         side_effect=lambda sig, fn: handlers.update(
                             {sig: fn})), \
-                mock.patch.object(vipetcd.Controller, "run",
-                                  side_effect=lambda: handlers[15](15, None)):
-            self.assertEqual(vipcli.vip_tend(args), exits.OK)
+                mock.patch.object(vipcli.vipbridge, "serve",
+                                  side_effect=lambda here, stop:
+                                  handlers[15](15, None)), \
+                self.assertRaises(SystemExit):
+            vipcli.vip_tend(args)
         self.assertTrue(vipcli.utcnow().tzinfo)
 
     def test_a_damaged_state_file_is_skipped_by_held_all(self):

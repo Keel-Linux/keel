@@ -14,8 +14,10 @@ message is (keel.mesh.etcdserve); then:
   the holder's own overlay address; a stale one is refused with 409
   and the epoch this node knows;
 - `release` is taken only by a node whose own spec declares that VIP,
-  from the other node of the pair, fresh, for an epoch newer than any
-  this node knows: it drops the address, then answers.
+  from the other member its pair record names, fresh, for an epoch
+  newer than any this node knows: it drops the address, then answers;
+- `pair` is the other member's pair record (keel.mesh.vippair), signed
+  here too when this node's spec declares that VIP, and kept.
 
 Nothing here applies a change under 0018's window, and nothing waits:
 each answer is the time of an `ip` or a `wg set`.
@@ -23,11 +25,12 @@ each answer is the time of an `ip` or a `wg set`.
 
 import json
 
-from keel.mesh import etcdserve, vipmsg, vipnode
+from keel.mesh import etcdserve, signing, vipmsg, vipnode, vippair
 from keel.mesh import vip as vipstate
 from keel.mesh.memberlink import Answer, refused
 from keel.mesh.node import NodeError
 from keel.mesh.protocol import ProtocolError
+from keel.mesh.signing import SigningError
 from keel.mesh.vipnode import Here, VipError
 from keel.network.wireguard import same_key
 
@@ -64,6 +67,8 @@ def answer(here: Here, body: bytes, key: str) -> Answer:
             return Answer(200, vipmsg.epoch_answer(held.claim))
         if message.kind == vipmsg.CLAIM:
             return claimed(here, body)
+        if message.kind == vipmsg.PAIR:
+            return countersigned(here, message)
         return released(here, message)
     except ProtocolError as e:
         here.err(f"vip: refused a message from {key}: {e}")
@@ -92,6 +97,40 @@ def claimed(here: Here, body: bytes) -> Answer:
                   f" knows epoch {held.epoch} held by {held.holder}")
 
 
+def countersigned(here: Here, message: vipmsg.Message) -> Answer:
+    """The pair record from the other member: signed here too when this
+    node's spec declares that VIP and the record names both, and kept"""
+    if not message.fresh(here.clock()):
+        raise Refusal(403, "the message is stale")
+    pair = vippair.loads(message.body.get("pair"))
+    own = here.own_key()
+    try:
+        declared = vipstate.declared(here.node.document())
+    except ValueError:
+        declared = None
+    if declared != pair.vip or not pair.has(own) or \
+            not pair.has(message.sender):
+        raise Refusal(403, f"this node's appliance.vip is {declared}, and"
+                      " a pair record is signed only for that VIP, by the"
+                      " two nodes it names")
+    sender = vipnode.signer_of(here)(message.sender)
+    theirs = next((sig for key, sig in pair.signatures
+                   if same_key(key, message.sender)), None)
+    if not sender or theirs is None or not signing.verified(
+            sender, pair.message(), theirs):
+        raise Refusal(403, "the pair record is not signed by its sender")
+    try:
+        both = vippair.sign(here.root, pair, own)
+    except SigningError as e:
+        raise Refusal(503, str(e)) from None
+    problem = vipnode.record_problem(here, both)
+    if problem:
+        raise Refusal(409, problem)
+    vippair.write(here.root, both)
+    here.err(f"vip {pair.vip}: paired with {message.sender}")
+    return Answer(200, json.dumps({"pair": both.dumps()}).encode())
+
+
 def released(here: Here, message: vipmsg.Message) -> Answer:
     vip = message.vip()
     epoch = message.epoch()
@@ -104,6 +143,11 @@ def released(here: Here, message: vipmsg.Message) -> Answer:
     if own != vip:
         raise Refusal(403, f"{vip} is not this node's appliance.vip: only"
                       " the nodes of the pair release it")
+    pair = vipnode.kept(here, vip)
+    if not pair.has(here.own_key()) or not pair.has(message.sender):
+        raise Refusal(403, f"{message.sender} is not the other member of"
+                      f" the pair of {vip}: only the pair's nodes ask a"
+                      " release")
     held = vipnode.current(here, vip)
     if epoch <= held.epoch:
         raise Refusal(409, f"stale release: epoch {epoch}, and this node"

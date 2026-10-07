@@ -382,8 +382,11 @@ class TestTheNodeErrors(Pair):
         self.assertIsNone(vipnode.newest([]))
         self.nodes(count=1)
         self.assertEqual(vipnode.epochs(self.all[0], VIP), {})
-        made = vipnode.signed_claim(self.all[0], VIP, 1)
+        made = vipmsg.claim(self.all[0].root, MESH_HEX, KEYS[0], NOW, VIP, 1,
+                            address(0))
         self.assertEqual(vipnode.announce(self.all[0], made), {})
+        with self.assertRaisesRegex(VipError, "no pair record"):
+            vipnode.signed_claim(self.all[0], VIP, 1)
 
     def test_an_epoch_answer_for_another_vip_or_unverified(self):
         self.nodes()

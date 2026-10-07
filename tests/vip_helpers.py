@@ -22,7 +22,7 @@ from unittest import mock
 from etcd_helpers import KEYS, MESH, NOW, KeyedNode, address
 from manifest_helpers import build_root
 
-from keel.mesh import identity, signing, trust, vipserve
+from keel.mesh import identity, signing, trust, vippair, vipserve
 from keel.mesh.etcdclient import EtcdError, Value
 from keel.mesh.memberlink import LinkError
 from keel.mesh.vipnode import Here
@@ -197,8 +197,8 @@ class Pair(unittest.TestCase):
         self.ticks[0] += seconds
 
     def nodes(self, count: int = 3, vips: tuple = (VIP, VIP),
-              mode: str = "cloud_advanced",
-              etcd: str = "disabled") -> list[Here]:
+              mode: str = "cloud_advanced", etcd: str = "disabled",
+              paired: bool = True) -> list[Here]:
         made = []
         for index in range(count):
             root = build_root(os.path.join(self.parent, f"n{index}"))
@@ -228,7 +228,17 @@ class Pair(unittest.TestCase):
                                     signing.public(other.root))
             trust.save(one.root, store)
         self.all = made
+        if paired and count >= 2 and vips[:2] == (VIP, VIP):
+            self.pair_up(0, 1)
         return made
+
+    def pair_up(self, first: int, second: int, vip: str = VIP) -> None:
+        """The pair record `keel vip pair` leaves on both members"""
+        record = vippair.made(MESH.hex(), vip, (KEYS[first], KEYS[second]))
+        for index in (first, second):
+            record = vippair.sign(self.all[index].root, record, KEYS[index])
+        for index in (first, second):
+            vippair.write(self.all[index].root, record)
 
     def exchanger(self, index: int):
         def exchange(host: str, iface: str, body: bytes) -> bytes:

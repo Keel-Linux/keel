@@ -70,6 +70,18 @@ class TestTheCommands(Pair):
         here = self.all[index]
         return ["--spec", here.node.path, "--root", here.root]
 
+    def test_pair_reaches_its_flow(self):
+        self.nodes(paired=False)
+        with mock.patch.object(vipcli, "here_of",
+                               side_effect=lambda args: self.all[0]):
+            code, out, _ = self.run_cli("vip", "pair", address(1),
+                                        *self.args(0))
+        self.assertEqual(code, exits.OK, out)
+        self.assertIn("signed by both", out)
+        with mock.patch("os.geteuid", return_value=1000):
+            code, _, _ = self.run_cli("vip", "pair", address(1))
+        self.assertEqual(code, exits.APPLY_NEEDS_ROOT)
+
     def test_each_action_reaches_its_flow(self):
         self.nodes()
         with mock.patch.object(vipcli, "here_of",
@@ -84,9 +96,14 @@ class TestTheCommands(Pair):
             code, out, _ = self.run_cli("vip", "tend", "--stopped",
                                         *self.args(0))
             self.assertIn("dropped, the controller stopped", out)
-            with mock.patch.object(vipcli.vipetcd.Controller, "run") as ran:
+            with mock.patch.object(vipcli.vipbridge, "serve",
+                                   return_value=exits.OK) as ran:
                 code, _, _ = self.run_cli("vip", "tend", *self.args(0))
             self.assertEqual((code, ran.call_count), (exits.OK, 1))
+            with mock.patch.object(vipcli.vipbridge, "control",
+                                   return_value=exits.OK) as ran:
+                code, _, _ = self.run_cli("vip", "control", "/x")
+            self.assertEqual((code, ran.call_args[0][0]), (exits.OK, "/x"))
 
     def test_here_of_is_this_node(self):
         self.nodes(count=1)

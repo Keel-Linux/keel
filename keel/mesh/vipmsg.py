@@ -19,10 +19,13 @@ for the other: "signed by a member's key, verified by the receiver"
               holder drops the address first and answers after
     epoch     {"vip"} -> {"claim"}: the newest claim the receiver took,
               or null; changes nothing
+    pair      {"pair"} -> {"pair"}: the pair record, signed by the
+              sender, to the other member, which signs it too when its
+              own spec declares that VIP (keel.mesh.vippair)
 
-The signed `vip` of a claim is the sender's declaration that its spec
-names that VIP: keel signs a claim and a release only for this node's
-own `appliance.vip` (0049, third round, point 3).
+A claim carries the pair record it rests on: only the two nodes the
+record names, signed by both, may hold the VIP (0049, third round,
+point 3; keel.mesh.vippair).
 """
 
 import base64
@@ -31,18 +34,18 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 
-from keel.mesh import signing
+from keel.mesh import signing, vippair
 from keel.mesh.etcdmsg import canonical
 from keel.mesh.protocol import MESH_ID_RE, SKEW, ProtocolError, loaded
 from keel.mesh.vip import Claim, address
 from keel.network.wireguard import is_key
 
 PATH = "/v1/vip"
-CLAIM, RELEASE, EPOCH = "claim", "release", "epoch"
-KINDS = (CLAIM, RELEASE, EPOCH)
+CLAIM, RELEASE, EPOCH, PAIR = "claim", "release", "epoch", "pair"
+KINDS = (CLAIM, RELEASE, EPOCH, PAIR)
 LABEL = b"keel vip 1\n"
-# a claim is about 400 bytes; an answer carries one
-MAX_MESSAGE = 4096
+# a claim with its pair record is about 1200 bytes; an answer carries one
+MAX_MESSAGE = 8192
 MAX_EPOCH = 2 ** 62
 
 
@@ -120,14 +123,20 @@ def claim_of(data: bytes) -> Claim:
         at = address(message.body.get("address"))
     except ValueError:
         raise ProtocolError("no overlay address in the claim") from None
-    return Claim(message.vip(), message.epoch(), message.sender, at, data)
+    found = message.body.get("pair")
+    pair = None if found is None else vippair.loads(found)
+    return Claim(message.vip(), message.epoch(), message.sender, at, data,
+                 pair)
 
 
 def claim(root: str, mesh_id: str, sender: str, now: datetime, vip: str,
-          epoch: int, at: str) -> Claim:
-    """This node's claim, signed; raises SigningError"""
-    return claim_of(signed(root, CLAIM, mesh_id, sender, now,
-                           {"vip": vip, "epoch": epoch, "address": at}))
+          epoch: int, at: str, pair=None) -> Claim:
+    """This node's claim, signed, with the pair record it rests on;
+    raises SigningError"""
+    body = {"vip": vip, "epoch": epoch, "address": at}
+    if pair is not None:
+        body["pair"] = pair.dumps()
+    return claim_of(signed(root, CLAIM, mesh_id, sender, now, body))
 
 
 def answer_claim(data: bytes) -> Claim | None:

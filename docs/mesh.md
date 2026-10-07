@@ -458,7 +458,7 @@ encrypts).
 | `GET /v1/members` | none | 200, this node's roster |
 | `POST /v1/announce` | the sender's roster, the new node in it | 202, queued and applied after the answer |
 | `POST /v1/etcd` | a signed etcd message ("etcd", "The members' channel for etcd") | 200, answered by the root side at once |
-| `POST /v1/vip` | a signed VIP message: a claim, a release or an epoch ([docs/vip.md](vip.md)) | 200, answered by the root side at once; 409 for a stale one |
+| `POST /v1/vip` | a signed VIP message: a claim, a release, an epoch or a pair record ([docs/vip.md](vip.md)) | 200, answered by the root side at once; 409 for a stale one |
 
 A roster is the node's mesh identity (hex, or null), its WireGuard and
 signing keys, its overlay address, every peer its spec declares

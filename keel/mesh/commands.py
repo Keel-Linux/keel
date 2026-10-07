@@ -111,7 +111,8 @@ def mesh_invite(args) -> int:
         expires=now + LIFETIME, secret=secret, etcd=state,
         etcd_port=CLIENT_PORT if state == "running" else None)
     try:
-        made, line = invite(root, now, draft, overlay, (tls_key, cert))
+        made, line = invite(root, now, draft, overlay, (tls_key, cert),
+                            reserved_vips(root, doc))
     except (allocate.AllocationError, TokenError, invites.InviteError) as e:
         error(str(e))
         return exits.MESH_REFUSED
@@ -157,7 +158,8 @@ def listening(made: invites.Pending, path: str, root: str,
 
 
 def invite(root: str, now: datetime, draft: Token, overlay: dict,
-           tls: tuple[str, str]) -> tuple[invites.Pending, str]:
+           tls: tuple[str, str],
+           reserved: tuple[str, ...] = ()) -> tuple[invites.Pending, str]:
     """The pending invite, reserved, and its token
 
     The token is written before the invite is, so one that cannot be
@@ -174,7 +176,7 @@ def invite(root: str, now: datetime, draft: Token, overlay: dict,
                     " this one another with --port, or wait")
         assigned = allocate.free_address(
             draft.address,
-            allocate.taken(overlay) + [
+            allocate.taken(overlay) + list(reserved) + [
                 str(ipaddress.IPv6Interface(one.address).ip)
                 for one in others])
         lines.append(encode(replace(draft, assigned=assigned)))
@@ -186,6 +188,17 @@ def invite(root: str, now: datetime, draft: Token, overlay: dict,
 
     made = invites.reserve(root, now, make)
     return made, lines[0]
+
+
+def reserved_vips(root: str, doc: dict) -> tuple[str, ...]:
+    """Every VIP this node knows or declares (decision 0049: the
+    allocator reserves the VIP and never hands it to a node)"""
+    from keel.mesh import vip as vipstate
+    try:
+        own = vipstate.declared(doc)
+    except ValueError:
+        own = None
+    return vipstate.known(root) + ((own,) if own else ())
 
 
 def report(made: invites.Pending, opened: str) -> None:

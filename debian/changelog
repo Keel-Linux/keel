@@ -18,6 +18,24 @@ keel (0.20.0) unstable; urgency=medium
     once the lease expired, and a node that lost the VIP never claims it
     again by itself. keel vip check, at boot and every minute, learns
     newer claims from the peers and drops a VIP not held.
+  * Only the pair holds its VIP: keel vip pair records the pair, signed
+    by both members (or a trust root); every claim carries the record and
+    every claim and release is checked against it; a VIP that is a
+    member's address or outside its region's /112, and an epoch more than
+    64 above the one a node knows, are refused. A promote before etcd
+    carries the VIP only when a majority of the peers that answered took
+    its claim. keel mesh invite never hands out a VIP.
+  * keel-vip.service is split as keel#75 splits an invite: keel vip tend,
+    the root helper, alone changes wg0 after checking the pair record, and
+    starts keel vip control, the controller facing etcd and the overlay,
+    as a transient unit with a dynamic user and no capability, its socket
+    0600 in a 0700 runtime directory, checked by SO_PEERCRED, the client
+    key handed as a memfd. The controller carries the VIP only while the
+    last renewal the majority confirmed is under 10 s old, timed on
+    CLOCK_BOOTTIME in memory: a restarted or rebooted holder carries
+    nothing until it renewed its lease again, and any error of etcd is no
+    renewal. A holder key that is not a valid claim neither holds the VIP
+    nor blocks a failover.
   * keel vip status and keel mesh status show the role, the epoch and
     holder, the lease, whether wg0 carries the VIP and where it is
     routed; keel inspect reports appliance.vip and the same as machine

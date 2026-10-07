@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from keel import exits, system
 from keel.commands import error
 from keel.inspect import ROOT_DEFAULT
-from keel.mesh import vipetcd, vippromote
+from keel.mesh import vipbridge, vipetcd, vippromote
 from keel.mesh.node import Node
 from keel.mesh.vipnode import Here
 
@@ -45,6 +45,17 @@ def add(subparsers, options) -> None:
     )
     options.root(promote_parser, "promote the VIP of")
     promote_parser.set_defaults(handler=vip_promote)
+    pair_parser = actions.add_parser(
+        "pair",
+        help="record this node's appliance.vip as the pair's with the peer"
+        " at ADDRESS, which declares the same VIP: both sign the record"
+        " every claim carries (root)",
+    )
+    options.common(pair_parser)
+    pair_parser.add_argument("address", metavar="ADDRESS",
+                             help="the other node's overlay address")
+    options.root(pair_parser, "pair the VIP of")
+    pair_parser.set_defaults(handler=vip_pair)
     check_parser = actions.add_parser(
         "check",
         help="ask every peer its epoch, take a newer claim, drop the VIP"
@@ -56,9 +67,11 @@ def add(subparsers, options) -> None:
     check_parser.set_defaults(handler=vip_check)
     tend_parser = actions.add_parser(
         "tend",
-        help="the controller with etcd: renew the holder's lease, drop the"
-        " VIP 10 s after the last renewal, follow and fail over; what"
-        " keel-vip.service runs (root)",
+        help="the VIP's root helper with etcd, which starts the"
+        " unprivileged controller (renew the holder's lease, drop the VIP"
+        " 10 s after the last renewal the majority confirmed, follow and"
+        " fail over) and alone changes wg0; what keel-vip.service runs"
+        " (root)",
     )
     options.common(tend_parser)
     tend_parser.add_argument(
@@ -68,6 +81,14 @@ def add(subparsers, options) -> None:
     )
     options.root(tend_parser, "tend the VIPs of")
     tend_parser.set_defaults(handler=vip_tend)
+    control_parser = actions.add_parser(
+        "control",
+        help="the unprivileged controller keel vip tend starts as the unit"
+        " keel-vip-control; not run by hand",
+    )
+    control_parser.add_argument("socket", metavar="SOCKET",
+                                help="the root helper's unix socket")
+    control_parser.set_defaults(handler=vip_control)
     status_parser = actions.add_parser(
         "status",
         help="each VIP: the role, the epoch and holder, whether this node"
@@ -109,6 +130,13 @@ def vip_promote(args) -> int:
     return vippromote.promote(here_of(args), args.old_primary_gone, out)
 
 
+def vip_pair(args) -> int:
+    code = as_root(args, "keel vip pair")
+    if code != exits.OK:
+        return code
+    return vippromote.pair(here_of(args), args.address, out)
+
+
 def vip_check(args) -> int:
     code = as_root(args, "keel vip check")
     if code != exits.OK:
@@ -126,9 +154,18 @@ def vip_tend(args) -> int:
             out(f"vip {vip}: dropped, the controller stopped")
         return exits.OK
     stop = threading.Event()
-    signal.signal(signal.SIGTERM, lambda signum, frame: stop.set())
-    vipetcd.Controller(here, stop).run()
-    return exits.OK
+
+    def stopped(signum, frame):
+        stop.set()
+        # out of the bridge's read, through serve's cleanup
+        raise SystemExit(0)
+    signal.signal(signal.SIGTERM, stopped)
+    return vipbridge.serve(here, stop)
+
+
+def vip_control(args) -> int:
+    """What keel-vip-control runs: the unprivileged controller"""
+    return vipbridge.control(args.socket, err)
 
 
 def vip_status(args) -> int:

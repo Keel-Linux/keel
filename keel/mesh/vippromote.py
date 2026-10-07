@@ -35,15 +35,18 @@ the epoch and holder, whether this node carries it, which peer the table
 routes it to, whether this node is fenced, and the lease.
 """
 
+import json
 from collections.abc import Callable
 from datetime import datetime
 
 from keel import exits
-from keel.mesh import etcd, etcdstate, vipetcd, vipnet, vipnode
+from keel.mesh import etcd, etcdstate, vipetcd, vipmsg, vipnet, vipnode
+from keel.mesh import vippair
 from keel.mesh import vip as vipstate
 from keel.mesh.etcdclient import EtcdError
 from keel.mesh.memberlink import LinkError
 from keel.mesh.node import NodeError
+from keel.mesh.protocol import ProtocolError
 from keel.mesh.signing import SigningError
 from keel.mesh.vip import Claim
 from keel.mesh.vipnode import Here, VipError
@@ -56,6 +59,7 @@ CARRY_WAIT = 15.0
 # leader change extends by an election timeout
 GONE_WAIT = vipetcd.TTL + 20.0
 POLL = 0.5
+ACCEPTED = ("applied", "known")
 
 
 def with_etcd(here: Here) -> bool:
@@ -86,6 +90,43 @@ def promote(here: Here, gone: bool, out: Callable[[str], None]) -> int:
     except (VipError, NodeError, ValueError, SigningError) as e:
         out(f"keel vip promote: {e}")
         return exits.APPLY_FAILED
+
+
+def pair(here: Here, at: str, out: Callable[[str], None]) -> int:
+    """`keel vip pair ADDRESS`: the pair record of this node's VIP with
+    the peer at ADDRESS, signed by both and kept by both"""
+    try:
+        vip = vipstate.declared(here.node.document())
+        if vip is None:
+            out("this node declares no appliance.vip: there is no pair to"
+                " record")
+            return exits.MESH_REFUSED
+        peer = next((one.public_key for one in here.node.peers("")
+                     if one.address == at), None)
+        if peer is None:
+            out(f"{at} is no peer of this node")
+            return exits.MESH_REFUSED
+        own = here.own_key()
+        draft = vippair.made(here.mesh_id(), vip, (own, peer))
+        problem = vippair.placed(draft, vipnode.addresses(here))
+        if problem:
+            out(problem)
+            return exits.MESH_REFUSED
+        mine = vippair.sign(here.root, draft, own)
+        answer = here.say(vipmsg.PAIR, at, {"pair": mine.dumps()})
+        both = vippair.loads(json.loads(answer.decode()).get("pair"))
+        if both.record() != draft.record():
+            raise VipError("the peer answered another pair record")
+        problem = vipnode.record_problem(here, both)
+        if problem:
+            raise VipError(problem)
+        vippair.write(here.root, both)
+    except (LinkError, VipError, NodeError, ValueError, SigningError,
+            ProtocolError) as e:
+        out(f"keel vip pair: {e}")
+        return exits.MESH_REFUSED
+    out(f"{vip} is the VIP of {own} and {peer}, signed by both")
+    return exits.OK
 
 
 def released(here: Here, vip: str, newest: Claim, epoch: int, gone: bool,
@@ -130,27 +171,44 @@ def promoted(here: Here, vip: str, gone: bool,
             not released(here, vip, newest, epoch, gone, out):
         return exits.MESH_REFUSED
     made = vipnode.signed_claim(here, vip, epoch)
-    vipnode.hold(here, made, True)
-    out(f"this node holds {vip} at epoch {epoch}, on {here.iface()}")
-    return told(here, made, out)
+    vipnode.hold(here, made, False)
+    said = told(here, made, out)
+    accepted = sum(1 for what in said.values() if what in ACCEPTED)
+    answered = accepted + sum(1 for what in said.values()
+                              if what.startswith("refused"))
+    if not answered or accepted * 2 <= answered:
+        vipnode.release(here, vip, lambda lease: None)
+        out(f"the claim at epoch {epoch} was taken by {accepted} of the"
+            f" {answered} peer(s) that answered: not a majority, so this"
+            f" node does not carry {vip}. Nothing routes it here but the"
+            " peers that took it; keel vip status on them says which")
+        return exits.MESH_REFUSED
+    if not vipnode.carry_held(here, vip):
+        out(f"the VIP could not be added to {here.iface()}")
+        return exits.APPLY_FAILED
+    out(f"this node holds {vip} at epoch {epoch}, on {here.iface()},"
+        f" taken by {accepted} of {answered} peer(s)")
+    return exits.OK
 
 
-def told(here: Here, made: Claim, out: Callable[[str], None]) -> int:
+def told(here: Here, made: Claim,
+         out: Callable[[str], None]) -> dict[str, str]:
     said = vipnode.announce(here, made)
     for at, what in sorted(said.items()):
         out(f"  {at}: {what}")
-    missed = [at for at, what in said.items()
-              if what not in ("applied", "known")]
+    missed = [at for at, what in said.items() if what not in ACCEPTED]
     if missed:
         out(f"{len(missed)} peer(s) did not take the claim now; each takes"
             " it at its next keel vip check, and routes the VIP to the old"
             " primary until then")
-    return exits.OK
+    return said
 
 
 def gone_key(here: Here, vip: str, wait: float) -> vipetcd.Seen | None:
-    """The VIP's keys once no holder key is left, waited for; None when
-    it stays"""
+    """The VIP's keys once no other node's holder key is left, waited
+    for (this node's own controller may have claimed meanwhile); None
+    when it stays"""
+    own = here.own_key()
     deadline = here.monotonic() + wait
     while True:
         try:
@@ -158,7 +216,8 @@ def gone_key(here: Here, vip: str, wait: float) -> vipetcd.Seen | None:
                                here.err).get(vip) or vipetcd.Seen(vip)
         except EtcdError:
             now = None
-        if now is not None and now.holder is None:
+        if now is not None and (now.holder is None or
+                                same_key(now.holder.holder, own)):
             return now
         if here.monotonic() >= deadline:
             return None
@@ -192,14 +251,20 @@ def promoted_etcd(here: Here, vip: str, gone: bool,
             out("the primary's lease is still alive: nothing was claimed."
                 " keel never revokes another node's lease")
             return exits.MESH_REFUSED
+        if now.holder is not None:
+            return raced(here, vip, own, out)
     try:
-        made = vipetcd.claim(here, vipetcd.local(here), vip, now)
+        made = vipetcd.claim(
+            vipetcd.local(here), here.mesh_id(), vip, now,
+            vipnode.current(here, vip).epoch,
+            lambda which, epoch: vipnode.signed_claim(here, which, epoch),
+            here.monotonic)
     except EtcdError as e:
         out(f"etcd did not take the claim: {e}")
         return exits.APPLY_FAILED
     if made is None:
         return raced(here, vip, own, out)
-    vipnode.hold(here, made[0], False, made[1], made[2])
+    vipnode.hold(here, made[0], False, made[1])
     out(f"this node holds {vip} at epoch {made[0].epoch}, by etcd's lease"
         f" {made[1]}")
     if not carried_soon(here, vip):
@@ -207,7 +272,8 @@ def promoted_etcd(here: Here, vip: str, gone: bool,
             f" {CARRY_WAIT:g} s: is it running? Its lease expires"
             f" {vipetcd.TTL} s after its last renewal")
         return exits.APPLY_FAILED
-    return told(here, made[0], out)
+    told(here, made[0], out)
+    return exits.OK
 
 
 def raced(here: Here, vip: str, own: str,
