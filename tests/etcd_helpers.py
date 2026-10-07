@@ -17,10 +17,10 @@ import os
 import shutil
 import tempfile
 import unittest
-from datetime import datetime, timezone
 from unittest import mock
 
 from manifest_helpers import build_root
+from pki_clock import NOW
 
 from keel.mesh import etcdserve, identity, signing, trust
 from keel.mesh.etcd import Etcd
@@ -30,7 +30,6 @@ from keel.mesh.memberlink import LinkError
 from keel.mesh.node import Node
 
 MESH = bytes(range(16))
-NOW = datetime(2026, 10, 4, 12, 0, tzinfo=timezone.utc)
 KEYS = ("nb9/izIukqWXM7gnBpe7hki4jKZZChWOW1wEfONn82E=",
         "FHKH10gOWeK2bXHZPg8y+oPTprv556bwrmmRkbyEPgg=",
         "9vm/AzCVQQsWt1cU2eyjom4cABkNuodiHL8nDjKohEE=",
