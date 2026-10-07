@@ -30,7 +30,9 @@ from keel.mesh.memberlink import LinkError
 from keel.mesh.node import Node
 
 MESH = bytes(range(16))
-NOW = datetime(2026, 10, 4, 12, 0, tzinfo=timezone.utc)
+# openssl dates the certificates these tests issue by the real clock,
+# and renewal is judged against NOW: they must be the same day
+NOW = datetime.now(timezone.utc).replace(microsecond=0)
 KEYS = ("nb9/izIukqWXM7gnBpe7hki4jKZZChWOW1wEfONn82E=",
         "FHKH10gOWeK2bXHZPg8y+oPTprv556bwrmmRkbyEPgg=",
         "9vm/AzCVQQsWt1cU2eyjom4cABkNuodiHL8nDjKohEE=",

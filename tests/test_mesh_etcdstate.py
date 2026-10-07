@@ -16,7 +16,9 @@ from keel.mesh.etcdpki import PkiError
 from keel.mesh.etcdstate import Cluster, Grant, Member, StateError
 
 MESH = "ab" * 16
-NOW = datetime(2026, 10, 4, 12, 0, tzinfo=timezone.utc)
+# openssl dates the certificates these tests issue by the real clock,
+# and renewal is judged against NOW: they must be the same day
+NOW = datetime.now(timezone.utc).replace(microsecond=0)
 
 
 class Case(unittest.TestCase):
