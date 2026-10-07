@@ -76,7 +76,8 @@ class TestTheVipOnAPoorNetwork(unittest.TestCase):
         self.assertIn("rtt_min_ms", link, link)
         self.assertGreater(link["rtt_min_ms"], 220, link)
         self.assertLess(link["rtt_min_ms"], 280, link)
-        self.assertLess(link["rtt_ms"], 400, link)
+        # the median, not the mean (tests/test_etcd_netns.py says why)
+        self.assertLess(link["rtt_median_ms"], 300, link)
         self.assertGreater(link["loss"], 0.005, link)
         self.assertLess(link["loss"], 0.08, link)
 
