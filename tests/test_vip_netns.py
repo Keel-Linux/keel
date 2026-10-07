@@ -105,20 +105,46 @@ class TestTheVipOnAPoorNetwork(unittest.TestCase):
         # each a few round trips at 250 ms
         self.assertLess(found["b_downtime_s"], 15, found)
 
-    def test_c_a_partitioned_primary_drops_it_and_the_replica_claims(self):
+    def partitioned(self, key: str):
         found = self.found
-        self.assertIsNotNone(found["c_b_dropped_s"], found)
-        self.assertIsNotNone(found["c_a_carried_s"], found)
+        dropped, carried = found[f"{key}_dropped_s"], found[f"{key}_carried_s"]
+        self.assertIsNotNone(dropped, found)
+        self.assertIsNotNone(carried, found)
         # B drops it RELEASE_AFTER after its last renewal the majority
         # confirmed, a renewal period and a call's timeout late at most,
-        # whether or not it was etcd's leader: within the TTL
-        self.assertLess(found["c_b_dropped_s"], 10 + 2 + 2 + 1, found)
-        self.assertLess(found["c_b_dropped_s"], found["ttl_s"], found)
+        # leader or not: within the TTL
+        self.assertLess(dropped, 10 + 2 + 2 + 1, found)
+        self.assertLess(dropped, found["ttl_s"], found)
         # never before B dropped it: the lease outlives the release
-        self.assertGreater(found["c_a_carried_s"], found["c_b_dropped_s"],
-                           found)
-        self.assertEqual(found["c_holder"], ["A"], found)
-        self.assertIsNotNone(found["c_reachable_again_s"], found)
+        self.assertGreater(carried, dropped, found)
+        self.assertEqual(found[f"{key}_holder"], ["A"], found)
+        self.assertIsNotNone(found[f"{key}_reachable_again_s"], found)
+
+    def test_c_the_cut_off_primary_and_etcd_leader(self):
+        self.assertTrue(self.found["c_was_etcd_leader"], self.found)
+        self.partitioned("c")
+
+    def test_f_the_cut_off_primary_and_etcd_follower(self):
+        self.assertEqual(self.found["f_promote_b"]["code"], 0, self.found)
+        self.assertFalse(self.found["f_was_etcd_leader"], self.found)
+        self.partitioned("f")
+
+    def test_the_pair_and_the_units_hardening(self):
+        found = self.found
+        self.assertEqual(found["paired"]["code"], 0, found["paired"])
+        for name, seen in found["hardening"].items():
+            with self.subTest(node=name):
+                controller, helper = seen["controller"], seen["helper"]
+                # a dynamic user, no capability at all, no new privileges
+                self.assertNotEqual(controller.get("Uid"), "0", seen)
+                self.assertEqual(int(controller["CapEff"], 16), 0, seen)
+                self.assertEqual(int(controller["CapBnd"], 16), 0, seen)
+                self.assertEqual(controller.get("NoNewPrivs"), "1", seen)
+                # the root helper: CAP_NET_ADMIN (bit 12), and
+                # CAP_DAC_OVERRIDE (bit 1) to reach the controller's 0600
+                # socket, which its dynamic user owns; nothing else
+                self.assertEqual(int(helper["CapBnd"], 16),
+                                 (1 << 12) | (1 << 1), seen)
 
     def test_c_no_two_nodes_ever_carry_it(self):
         self.assertGreater(self.found["samples"], 100, self.found)

@@ -16,7 +16,11 @@ wg-quick.
 Each node runs, in its namespace, what keel-mesh-members and
 keel-vip.service run: the members' channel (its root helper, and the
 listener as a process of its own with every capability dropped, as
-tests/mesh_netns.py runs it) and the VIP's controller (keel vip tend).
+tests/mesh_netns.py runs it), and keel vip tend as a transient systemd
+unit joined to the node's namespace, with keel-vip.service's sandbox,
+which starts the VIP's controller as its own unit with a dynamic user
+and no capability (keel.mesh.vipbridge): the hardening of both is read
+from the kernel. A and B are paired with `keel vip pair` first.
 The driver tells a node's agent to run `keel vip promote` and reads
 what it said. From the start of the scenario a sampler asks every node
 every 200 ms whether wg0 carries the VIP, and C pings the VIP every 50
@@ -26,15 +30,18 @@ ms.
    at A;
 2. **(b)** B promotes, planned: A releases, B claims; the downtime is
    the longest gap between C's answered pings across the move;
-3. **(c)** the primary, B, is cut off (100% loss, both ways): it drops
-   the VIP within RELEASE_AFTER of its last renewal, and A claims it
-   once B's lease expired; the times from the cut, as the sampler and
-   C's pings saw them;
+3. **(c)** the primary, B, made etcd's leader (what `etcdctl
+   move-leader` does), is cut off (100% loss, both ways): it drops the
+   VIP within RELEASE_AFTER of its last renewal the majority confirmed,
+   and A claims it once B's lease expired; the times from the cut, as
+   the sampler and C's pings saw them;
 4. **(d)** healed: B takes A's newer claim and never carries the VIP
    again, for HEALED seconds;
 5. **(e)** a stale claim is refused: B's claim at its old epoch, signed
    again, sent to C over the members' channel (409), and written to
-   etcd against the counter's old revision (the compare fails).
+   etcd against the counter's old revision (the compare fails);
+6. **(f)** the follower case: B promoted again by hand, C made etcd's
+   leader, and B, the primary and a follower, cut off; A claims.
 
 At no sample may two nodes carry the VIP. The result is one JSON line,
 `RESULT {...}`.
@@ -98,8 +105,10 @@ ROOTS: list[str] = []
 # The listener holds no capability, so as root without
 # CAP_DAC_READ_SEARCH it cannot traverse a home directory the checkout
 # may be in: it imports a copy of keel (tests/mesh_netns.py)
-LISTENER_HOME = os.environ.get("KEEL_VIP_LISTENER_HOME") or \
-    tempfile.mkdtemp(prefix="keel-vip-listener-")
+# The controller's unit has PrivateTmp, so its copy is under /run, which
+# a private /tmp and /var/tmp do not hide
+RUN_BASE = "/run/keel-vip-test"
+LISTENER_HOME = os.environ.get("KEEL_VIP_LISTENER_HOME") or ""
 
 
 def child(index: int) -> int:
@@ -291,11 +300,19 @@ def wait_until(test, seconds: float, step: float = 0.2) -> float | None:
 
 
 def driver() -> None:
+    global LISTENER_HOME
+    os.makedirs(RUN_BASE, mode=0o755, exist_ok=True)
+    LISTENER_HOME = tempfile.mkdtemp(prefix="listener-", dir=RUN_BASE)
     sh("ip", "link", "set", "lo", "up")
     with open("/proc/sys/net/ipv6/conf/all/forwarding", "w") as fob:
         fob.write("1\n")
     shutil.copytree(os.path.dirname(os.path.dirname(os.path.abspath(
         memberd.__file__))), os.path.join(LISTENER_HOME, "keel"))
+    # the controller's dynamic user reads the copy of keel it runs
+    for where, dirs, files in os.walk(LISTENER_HOME):
+        os.chmod(where, 0o755)
+        for name in files:
+            os.chmod(os.path.join(where, name), 0o644)
     os.environ["KEEL_VIP_LISTENER_HOME"] = LISTENER_HOME
     pids = [child(index) for index in range(len(NAMES))]
     roots = [tempfile.mkdtemp(prefix=f"keel-vip-{name}-") for name in NAMES]
@@ -343,6 +360,11 @@ def driver() -> None:
     for name in NAMES:
         report.setdefault("agents", {})[name] = agent_send(name, "ready",
                                                            120)
+    # the operator's `keel vip pair`, on A, with B's overlay address
+    report["paired"] = agent_send("A", f"pair {OVERLAY.format(n=2)}")
+    for index, pid in enumerate(pids):
+        tended(index, pid, roots[index], specs[index])
+    report["hardening"] = wait_for_hardening(roots)
     samples: list[dict] = []
     stop = threading.Event()
     sampling = threading.Thread(target=sampler, args=(pids, samples, stop))
@@ -364,6 +386,157 @@ def driver() -> None:
     print("RESULT " + json.dumps(report), flush=True)
     if not os.environ.get("VIP_KEEP"):
         ROOTS.extend(roots)
+
+
+# keel-overlay-vip's keel-vip.service, as a transient unit in a node's
+# namespace: the root helper, which starts the controller as its own
+# unit with a dynamic user and no capability (keel.mesh.vipbridge)
+# PrivateTmp is left out here alone: the nodes' scratch roots are in the
+# host's temporary directory, which it would hide; each helper's
+# temporary files (openssl's) go under its root instead
+HELPER_PROPERTIES = (
+    "CapabilityBoundingSet=CAP_NET_ADMIN CAP_DAC_OVERRIDE",
+    "NoNewPrivileges=yes",
+    "PrivateDevices=yes",
+    "ProtectSystem=strict",
+    "ProtectHome=yes",
+    "ProtectKernelTunables=yes",
+    "ProtectKernelModules=yes",
+    "ProtectKernelLogs=yes",
+    "ProtectControlGroups=yes",
+    "ProtectClock=yes",
+    "RestrictAddressFamilies=AF_UNIX AF_NETLINK",
+    "RestrictNamespaces=yes",
+    "LockPersonality=yes",
+    "SystemCallArchitectures=native",
+    "SystemCallFilter=@system-service",
+)
+HELPERS: list[str] = []
+
+
+def tended(index: int, pid: int, root: str, spec: str) -> None:
+    unit = f"keel-vip-test-{NAMES[index]}"
+    HELPERS.append(unit)
+    scratch = os.path.join(root, "tmp")
+    os.makedirs(scratch, mode=0o700, exist_ok=True)
+    sh("systemd-run", f"--unit={unit}", "--collect", "--quiet",
+       f"--setenv=TMPDIR={scratch}",
+       f"--property=NetworkNamespacePath=/proc/{pid}/ns/net",
+       f"--property=ReadWritePaths={root}",
+       *(f"--property={one}" for one in HELPER_PROPERTIES),
+       f"--setenv=PYTHONPATH={LISTENER_HOME}",
+       f"--setenv=PATH={os.environ.get('PATH', '')}",
+       sys.executable, "-m", "keel", "vip", "tend", "--root", root,
+       "--spec", spec)
+
+
+def status_of(pid: int) -> dict:
+    found = {}
+    try:
+        with open(f"/proc/{pid}/status") as fob:
+            for line in fob:
+                key, _, value = line.partition(":")
+                if key in ("Uid", "CapEff", "CapBnd", "NoNewPrivs"):
+                    found[key] = value.split()[0]
+    except OSError:
+        pass
+    return found
+
+
+def main_pid(unit: str) -> int:
+    found = sh("systemctl", "show", "--property=MainPID", "--value",
+               unit).strip()
+    return int(found) if found.isdigit() else 0
+
+
+def wait_for_hardening(roots: list[str]) -> dict:
+    """The helper's and the controller's processes, as the kernel sees
+    them: the controller a dynamic user with no capability"""
+    from keel.mesh import vipbridge
+    found = {}
+    for index, root in enumerate(roots):
+        control = vipbridge.names(root)[0]
+        wait_until(lambda: main_pid(control) > 0, 60)
+        helper = f"keel-vip-test-{NAMES[index]}"
+        found[NAMES[index]] = {
+            "helper": status_of(main_pid(helper)),
+            "controller": status_of(main_pid(control))}
+    return found
+
+
+def lead(pid: int, root: str) -> dict:
+    """etcd's leadership moved to the member in `pid`'s namespace, what
+    `etcdctl move-leader` does"""
+    done = subprocess.run(
+        ["nsenter", "-t", str(pid), "-n", sys.executable, __file__, "lead",
+         root], capture_output=True, text=True, check=False,
+        env=os.environ.copy(), timeout=120)
+    try:
+        return json.loads(done.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return {"error": done.stderr[-500:]}
+
+
+def move_leader(root: str) -> None:
+    """In a member's namespace: the leader asked to hand its leadership
+    to this member, retried while an election settles"""
+    from keel.mesh import etcdclient, etcdstate
+    local = etcdclient.local(root)
+    said = ""
+    for _ in range(30):
+        try:
+            own = local.status(etcdstate.client_url(etcdstate.LOOPBACK))
+            if own.leader == own.member_id:
+                print(json.dumps({"leader": own.member_id}), flush=True)
+                return
+            leader = next(one for one in local.members()
+                          if one.id == own.leader)
+            etcdclient.Client(leader.client_urls, local.tls, 10).ask(
+                "/v3/maintenance/transfer-leadership",
+                {"targetID": own.member_id})
+        except (etcdclient.EtcdError, StopIteration) as e:
+            said = str(e)
+        time.sleep(2)
+    print(json.dumps({"error": said or "not the leader"}), flush=True)
+
+
+def was_leader(roots: list[str], index: int) -> bool:
+    latest = etcd_netns.samples(os.path.join(roots[index], "watch.jsonl"),
+                                time.time() - 10)[-1:]
+    return bool(latest) and latest[0].get("leader") == latest[0].get("id")
+
+
+def partition(report: dict, key: str, pids: list[int], roots: list[str],
+              samples: list[dict], cut: int, claimant: int, log: str,
+              keys: dict[str, str]) -> float:
+    """The primary `cut` cut off from the majority, both ways, until the
+    other node of the pair carries the VIP; the times from the cut"""
+    report[f"{key}_was_etcd_leader"] = was_leader(roots, cut)
+    leg(f"to{cut + 1}", "100%")
+    sh("tc", "qdisc", "replace", "dev", "uplink", "root", "netem", "loss",
+       "100%", pid=pids[cut])
+    cut_at = time.time()
+    report[f"{key}_claimed_s"] = wait_until(
+        lambda: holds(pids[claimant]), 120)
+    report[f"{key}_routed_s"] = wait_until(
+        lambda: routed_to(pids[2]) == keys[NAMES[claimant]], 60)
+    time.sleep(5)
+    report[f"{key}_dropped_s"] = first(samples, cut_at,
+                                       lambda h: NAMES[cut] not in h)
+    report[f"{key}_carried_s"] = first(samples, cut_at,
+                                       lambda h: NAMES[claimant] in h)
+    # an answer in flight when the link was cut is the old primary's
+    after = [one for one in answers(log) if one > cut_at + 1.0]
+    report[f"{key}_reachable_again_s"] = round(after[0] - cut_at, 2) \
+        if after else None
+    report[f"{key}_holder"] = [n for n, p in zip(NAMES, pids) if holds(p)]
+    return cut_at
+
+
+def heal(pids: list[int], cut: int) -> float:
+    leg(f"to{cut + 1}")
+    sh("tc", "qdisc", "del", "dev", "uplink", "root", pid=pids[cut])
+    return time.time()
 
 
 def scenario(report: dict, pids: list[int], pairs, roots: list[str],
@@ -390,35 +563,14 @@ def scenario(report: dict, pids: list[int], pairs, roots: list[str],
     report["b_downtime_s"] = gap(answers(log), moved_at - 1, time.time())
     report["b_holder"] = [n for n, p in zip(NAMES, pids) if holds(p)]
 
-    # (c) B, the primary, cut off from the majority, both ways; whether
-    # it was etcd's leader, which renews leases by itself until it steps
-    # down (the controller counts only renewals the majority confirmed)
-    latest = etcd_netns.samples(os.path.join(roots[1], "watch.jsonl"),
-                                time.time() - 10)[-1:]
-    report["c_b_was_etcd_leader"] = bool(latest) and \
-        latest[0].get("leader") == latest[0].get("id")
-    leg("to2", "100%")
-    sh("tc", "qdisc", "replace", "dev", "uplink", "root", "netem", "loss",
-       "100%", pid=b_pid)
-    cut_at = time.time()
-    report["c_a_claimed_s"] = wait_until(lambda: holds(a_pid), 120)
-    report["c_c_routed_s"] = wait_until(
-        lambda: routed_to(c_pid) == key["A"], 60)
-    time.sleep(5)
-    report["c_b_dropped_s"] = first(samples, cut_at,
-                                    lambda h: "B" not in h)
-    report["c_a_carried_s"] = first(samples, cut_at, lambda h: "A" in h)
-    times = answers(log)
-    # an answer in flight when the link was cut is B's, not A's
-    after = [one for one in times if one > cut_at + 1.0]
-    report["c_reachable_again_s"] = round(after[0] - cut_at, 2) \
-        if after else None
-    report["c_holder"] = [n for n, p in zip(NAMES, pids) if holds(p)]
+    # (c) B, the primary and etcd's leader, cut off from the majority:
+    # a leader renews leases by itself until it steps down, and only
+    # renewals the majority confirmed count
+    report["c_lead"] = lead(b_pid, roots[1])
+    partition(report, "c", pids, roots, samples, 1, 0, log, key)
 
     # (d) healed: B takes A's newer claim and never carries it again
-    leg("to2")
-    sh("tc", "qdisc", "del", "dev", "uplink", "root", pid=b_pid)
-    healed_at = time.time()
+    healed_at = heal(pids, 1)
     time.sleep(HEALED)
     report["d_b_carried_after_heal"] = any(
         "B" in one["holders"] for one in samples if one["t"] >= healed_at)
@@ -430,6 +582,16 @@ def scenario(report: dict, pids: list[int], pairs, roots: list[str],
     report["e"] = agent_send("B", "stale")
     report["e_c_routes_to_a"] = routed_to(c_pid) == key["A"]
     report["e_holder"] = [n for n, p in zip(NAMES, pids) if holds(p)]
+
+    # (f) the follower case: B, fenced since (c), promoted again by
+    # hand (A releases), C given etcd's leadership, and B, a follower and
+    # the primary, cut off; A claims
+    report["f_promote_b"] = agent_send("B", "promote")
+    report["f_b_holds_s"] = wait_until(lambda: holds(b_pid), 60)
+    report["f_lead"] = lead(c_pid, roots[2])
+    partition(report, "f", pids, roots, samples, 1, 0, log, key)
+    heal(pids, 1)
+    time.sleep(10)
     report["a_status"] = agent_send("A", "status")
     for process in AGENTS.values():
         try:
@@ -474,9 +636,6 @@ def agent(root: str, path: str) -> None:
         sync.Syncer(here.node, utc, log), served),
         kwargs={"start": Spawned}, daemon=True)
     members.start()
-    controller = threading.Thread(
-        target=vipetcd.Controller(here, stop).run, daemon=True)
-    controller.start()
     for line in sys.stdin:
         try:
             found = command(here, line.split())
@@ -504,6 +663,10 @@ def command(here: vipnode.Here, words: list[str]) -> dict | None:
                 "took_s": round(time.monotonic() - started, 2)}
     if words[:1] == ["status"]:
         return {"lines": vippromote.lines(here, True)}
+    if words[:1] == ["pair"]:
+        said = []
+        return {"code": vippromote.pair(here, words[1], said.append),
+                "said": said}
     if words[:1] == ["stale"]:
         return stale(here)
     return None
@@ -552,10 +715,15 @@ def stale(here: vipnode.Here) -> dict:
 if __name__ == "__main__":
     if sys.argv[1:2] == ["agent"]:
         agent(sys.argv[2], sys.argv[3])
+    elif sys.argv[1:2] == ["lead"]:
+        move_leader(sys.argv[2])
     else:
         try:
             driver()
         finally:
+            for unit in HELPERS:
+                subprocess.run(["systemctl", "stop", unit],
+                               capture_output=True, check=False)
             for one in list(AGENTS.values()) + OTHERS + etcd_netns.ETCDS + \
                     CHILDREN:
                 one.kill()

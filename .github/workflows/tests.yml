@@ -62,10 +62,14 @@ jobs:
   # 250 ms ±25 ms with 2% loss measured first; a planned promote, the
   # primary cut off, the heal and a stale claim, the VIP's holders read
   # every 200 ms (tests/test_vip_netns.py). The check is "vip / trixie".
+  # The helper and the controller run as systemd units joined to each
+  # node's namespace, so the container boots systemd, and their
+  # hardening is read from the kernel.
   vip:
     uses: keel-linux/.github/.github/workflows/lxc-trixie.yml@main
     with:
-      timeout: 20
+      systemd: true
+      timeout: 30
       run: |
         apt-get update -qq
         apt-get install -y -qq --no-install-recommends python3-pytest \
