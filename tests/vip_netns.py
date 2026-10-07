@@ -378,6 +378,7 @@ def driver() -> None:
     for index, pid in enumerate(pids):
         tended(index, pid, roots[index], specs[index])
     report["hardening"] = wait_for_hardening(roots)
+    report["nnp_probe"] = nnp_probe()
     samples: list[dict] = []
     stop = threading.Event()
     sampling = threading.Thread(target=sampler, args=(pids, samples, stop))
@@ -483,6 +484,18 @@ def wait_for_hardening(roots: list[str]) -> dict:
                 "journalctl", "--no-pager", "-o", "cat", "-u",
                 helper).splitlines() if "NoNewPrivs" in line][:2]}
     return found
+
+
+def nnp_probe() -> dict:
+    """What this systemd makes of NoNewPrivileges= in a bare transient
+    unit, and its version: the helper's flag read 0 in the CI container"""
+    probe = subprocess.run(
+        ["systemd-run", "--wait", "--pipe", "--quiet",
+         "--property=NoNewPrivileges=yes", "grep", "NoNewPrivs",
+         "/proc/self/status"], capture_output=True, text=True, check=False)
+    return {"systemd": sh("systemctl", "--version").splitlines()[:1],
+            "bare_unit": (probe.stdout + probe.stderr).strip()[:300],
+            "container": sh("systemd-detect-virt", check=False).strip()}
 
 
 def lead(pid: int, root: str) -> dict:
