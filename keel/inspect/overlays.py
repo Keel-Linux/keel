@@ -68,6 +68,13 @@ def probe_appliance_sections(tree: Tree) -> tuple[dict, list[Finding]]:
         return sections, findings + [missing(
             "overlays", "; ".join(facts.problems))]
     emitted, where = read_emitted(tree)
+    vip = (emitted.get("appliance") or {}).get("vip")
+    if vip is not None:
+        # the pair's VIP is chosen at installation, and nothing on the
+        # machine says it is this node's rather than another pair's it
+        # routes (decision 0049): the emitted spec says it
+        sections["appliance"]["vip"] = vip
+        findings.append(inferred("appliance.vip", vip, where))
     mode = (emitted.get("installation") or {}).get("mode")
     if mode in INSTALLATION_MODES:
         sections["installation"] = {"mode": mode}

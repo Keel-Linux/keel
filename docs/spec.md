@@ -866,6 +866,7 @@ spec holds this machine's choices.
 ```yaml
 appliance:
   name: core
+  vip: fd2a:9c41:7e03::100  # optional: the pair's VIP (0049)
 installation:
   mode: simple              # simple, cloud_simple or cloud_advanced (0028)
 overlays:                   # every overlay of the chain, written out (0027)
@@ -878,6 +879,7 @@ overlays:                   # every overlay of the chain, written out (0027)
 | Field | State | Notes |
 | --- | --- | --- |
 | `appliance.name` | system | The appliance manifest this machine runs, `[a-z][a-z0-9-]*`, at most 32 characters. It must be installed under `/usr/share/keel/appliances/` of the root the command works on, valid, and resolve along its `base` chain |
+| `appliance.vip` | read | The service VIP of this node's replicated pair (decision 0049): one IPv6 address, the same on both nodes of the pair, a `/128` of the overlay prefix that is neither this node's address nor inside a peer's `allowed_ips`. Optional; a node that replicates nothing has none. Who holds it is state, never the spec: the holder is the primary ([docs/vip.md](vip.md)). Chosen once, at installation, by the primary's installer, and handed to the replica; nothing converges it |
 | `installation.mode` | read | `simple`, `cloud_simple` or `cloud_advanced`. Chosen once, at installation: it picks the column of defaults the installer starts from, and nothing converges it. Moving a machine between modes is out of scope |
 | `overlays.<name>` | system | `enabled` or `disabled`, for every overlay of the resolved chain, none left out and none added. `apply --system` enables and starts, or stops and disables, the overlay's units, and derives Monit's checks from what is enabled ([docs/apply.md](apply.md)). `etcd: enabled` is refused unless `installation.mode` is `cloud_advanced` (decisions 0041 and 0048); it says only that etcd runs: its members and certificates are state ([docs/mesh.md](mesh.md), "etcd") |
 

@@ -48,6 +48,8 @@ from keel.mesh import (
     remove,
     status,
     sync,
+    vipnode,
+    vippromote,
 )
 from keel.mesh.etcdstate import CLIENT_PORT
 from keel.mesh.node import Node, NodeError, static_addresses
@@ -498,6 +500,10 @@ def mesh_status(args) -> int:
     if overlay and overlay.get("address"):
         for line in etcdcare.status(etcd.Etcd(Node(root, args.spec), utcnow,
                                           err), root == ROOT_DEFAULT):
+            print(line)
+        for line in vippromote.lines(vipnode.Here(Node(root, args.spec),
+                                                  utcnow, err),
+                                     root == ROOT_DEFAULT):
             print(line)
     return exits.OK
 

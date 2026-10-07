@@ -1,0 +1,399 @@
+# Copyright (c) 2026 KeelLinux maintainers
+"""The VIP before etcd: promote, release, the announcement, the check,
+and what the members' channel refuses (decision 0049), with a pair and
+a third node in one process (tests/vip_helpers.py)"""
+
+import json
+import os
+import unittest
+
+from vip_helpers import KEYS, NOW, VIP, FakeNet, Pair, address
+
+from keel import exits
+from keel.mesh import signing, trust, vipmsg, vipnet, vipnode, vippromote
+from keel.mesh import vip as vipstate
+from keel.mesh.vipnode import VipError
+from keel.network import wireguard
+
+MESH_HEX = bytes(range(16)).hex()
+
+
+class TestPromote(Pair):
+    def promote(self, index: int, gone: bool = False) -> tuple[int, str]:
+        said: list[str] = []
+        code = vippromote.promote(self.all[index], gone, said.append)
+        return code, "\n".join(said)
+
+    def test_the_first_claim_is_epoch_one_and_every_peer_routes_it(self):
+        self.nodes()
+        code, said = self.promote(0)
+        self.assertEqual(code, exits.OK, said)
+        self.assertIn("at epoch 1", said)
+        self.assertTrue(self.carried(0))
+        self.assertEqual((self.routed(1), self.routed(2)), (KEYS[0],) * 2)
+        self.assertIsNone(self.routed(0))
+        self.assertEqual(vipstate.role(self.all[0].node.document(),
+                                       vipnode.current(self.all[0], VIP),
+                                       KEYS[0]), "primary")
+        # again: nothing to do
+        code, said = self.promote(0)
+        self.assertEqual(code, exits.OK)
+        self.assertIn("holds", said)
+
+    def test_a_planned_promote_releases_first(self):
+        self.nodes()
+        self.promote(0)
+        code, said = self.promote(1)
+        self.assertEqual(code, exits.OK, said)
+        self.assertIn("released by", said)
+        self.assertIn("at epoch 2", said)
+        self.assertEqual((self.carried(0), self.carried(1)), (False, True))
+        self.assertEqual((self.routed(0), self.routed(2)), (KEYS[1],) * 2)
+        # released, then the new claim taken: a replica, never fenced
+        old = vipnode.current(self.all[0], VIP)
+        self.assertFalse(old.released)
+        self.assertFalse(old.fenced)
+        self.assertEqual(old.holder, KEYS[1])
+        self.assertIn("released by this node", self.text(0))
+
+    def test_an_old_primary_that_does_not_answer_is_refused(self):
+        self.nodes()
+        self.promote(0)
+        self.down.add(address(0))
+        code, said = self.promote(1)
+        self.assertEqual(code, exits.MESH_REFUSED)
+        self.assertIn("--old-primary-gone", said)
+        self.assertFalse(self.carried(1))
+        self.assertEqual(self.routed(2), KEYS[0])
+
+    def test_old_primary_gone_takes_it_and_the_old_one_drops_it_later(self):
+        self.nodes()
+        self.promote(0)
+        self.down.add(address(0))
+        code, said = self.promote(1, gone=True)
+        self.assertEqual(code, exits.OK, said)
+        self.assertIn("did not take the claim now", said)
+        self.assertTrue(self.carried(1))
+        self.assertTrue(self.carried(0))
+        self.assertEqual(self.routed(2), KEYS[1])
+        # it comes back: its check learns the newer claim, drops the VIP,
+        # and is fenced: it never claims it again by itself
+        self.down.clear()
+        said = []
+        self.assertEqual(vippromote.check(self.all[0], said.append),
+                         exits.OK)
+        self.assertFalse(self.carried(0))
+        self.assertEqual(self.routed(0), KEYS[1])
+        held = vipnode.current(self.all[0], VIP)
+        self.assertTrue(held.fenced)
+        self.assertIn("took epoch 2", "\n".join(said))
+        self.assertEqual(vipstate.role(self.all[0].node.document(), held,
+                                       KEYS[0]), "replica")
+
+    def test_a_node_that_declares_no_vip_promotes_nothing(self):
+        self.nodes()
+        code, said = self.promote(2)
+        self.assertEqual(code, exits.MESH_REFUSED)
+        self.assertIn("declares no appliance.vip", said)
+
+    def test_a_vip_outside_the_prefix_is_refused(self):
+        self.nodes(vips=("fd00:1::5", "fd00:1::5"))
+        code, said = self.promote(0)
+        self.assertEqual(code, exits.MESH_REFUSED)
+        self.assertIn("outside", said)
+
+    def test_a_vip_that_cannot_be_carried_fails(self):
+        self.nodes()
+        self.nets[0].fail[("ip", "-6", "addr", "replace")] = "ip: no"
+        code, said = self.promote(0)
+        self.assertEqual(code, exits.APPLY_FAILED)
+        self.assertIn("could not be added", said)
+
+    def test_no_mesh_identity_is_said(self):
+        self.nodes()
+        os.remove(os.path.join(self.all[0].root, "var/lib/keel/mesh/"
+                               "identity"))
+        code, said = self.promote(0)
+        self.assertEqual(code, exits.APPLY_FAILED)
+        self.assertIn("mesh identity", said)
+
+    def test_a_peer_that_does_not_answer_is_said(self):
+        self.nodes()
+        self.down.add(address(2))
+        code, said = self.promote(0)
+        self.assertEqual(code, exits.OK)
+        self.assertIn(f"{address(2)}: [{address(2)}]:51821", said)
+
+
+class TestTheChannelRefuses(Pair):
+    def setUp(self):
+        super().setUp()
+        self.nodes()
+        vippromote.promote(self.all[0], False, lambda line: None)
+
+    def answer(self, index: int, body: bytes, sender: int):
+        from keel.mesh import vipserve
+        return vipserve.answer(self.all[index], body, KEYS[sender])
+
+    def message(self, sender: int, kind: str, body: dict,
+                mesh: str = MESH_HEX, now=NOW) -> bytes:
+        return vipmsg.signed(self.all[sender].root, kind, mesh, KEYS[sender],
+                             now, body)
+
+    def test_a_stale_claim(self):
+        for index in (1, 0):
+            vippromote.promote(self.all[index], False, lambda line: None)
+        old = vipnode.signed_claim(self.all[1], VIP, 2)
+        found = self.answer(2, old.raw, 1)
+        self.assertEqual(found.status, 409)
+        self.assertIn(b"stale claim", found.body)
+        self.assertEqual(self.routed(2), KEYS[0])
+
+    def test_the_same_claim_again_is_known(self):
+        held = vipnode.current(self.all[2], VIP)
+        found = self.answer(2, held.claim.raw, 0)
+        self.assertEqual(found.status, 200)
+        self.assertEqual(json.loads(found.body)["applied"], False)
+
+    def test_a_claim_from_another_sender_than_its_holder(self):
+        made = vipnode.signed_claim(self.all[1], VIP, 5)
+        found = self.answer(2, made.raw, 0)
+        self.assertEqual(found.status, 403)
+        self.assertIn(b"not the sender", found.body)
+
+    def test_a_claim_for_another_mesh_or_unsigned(self):
+        found = self.answer(2, self.message(1, "claim", {
+            "vip": VIP, "epoch": 5, "address": address(1)},
+            mesh="ab" * 16), 1)
+        self.assertEqual(found.status, 403)
+        store = trust.load(self.all[2].root)
+        store.members[KEYS[1]].sign_key = signing.public(self.all[0].root)
+        trust.save(self.all[2].root, store)
+        found = self.answer(2, self.message(1, "claim", {
+            "vip": VIP, "epoch": 5, "address": address(1)}), 1)
+        self.assertEqual(found.status, 403)
+        self.assertIn(b"not signed", found.body)
+
+    def test_a_claim_at_another_address_or_off_the_prefix(self):
+        found = self.answer(2, self.message(1, "claim", {
+            "vip": VIP, "epoch": 5, "address": address(0)}), 1)
+        self.assertEqual(found.status, 403)
+        self.assertIn(b"not a peer", found.body)
+        found = self.answer(2, self.message(1, "claim", {
+            "vip": "fd00:9::1", "epoch": 5, "address": address(1)}), 1)
+        self.assertEqual(found.status, 403)
+        self.assertIn(b"outside", found.body)
+
+    def test_malformed(self):
+        found = self.answer(2, b"{", 1)
+        self.assertEqual(found.status, 400)
+        found = self.answer(2, self.message(1, "claim", {"vip": VIP}), 1)
+        self.assertEqual(found.status, 400)
+
+    def test_a_release_only_from_the_pair_fresh_and_newer(self):
+        found = self.answer(2, self.message(1, "release", {
+            "vip": VIP, "epoch": 2}), 1)
+        self.assertEqual(found.status, 403)
+        self.assertIn(b"only the nodes of the pair", found.body)
+        found = self.answer(0, self.message(1, "release", {
+            "vip": VIP, "epoch": 1}), 1)
+        self.assertEqual(found.status, 409)
+        from datetime import timedelta
+        found = self.answer(0, self.message(1, "release", {
+            "vip": VIP, "epoch": 2}, now=NOW - timedelta(hours=1)), 1)
+        self.assertEqual(found.status, 403)
+        self.assertIn(b"stale", found.body)
+        self.assertTrue(self.carried(0))
+
+    def test_a_release_that_cannot_drop_the_address(self):
+        self.nets[0].fail[("ip", "-6", "addr", "del")] = "ip: busy"
+        found = self.answer(0, self.message(1, "release", {
+            "vip": VIP, "epoch": 2}), 1)
+        self.assertEqual(found.status, 503)
+        self.assertFalse(vipnode.current(self.all[0], VIP).released)
+
+    def test_the_epoch_is_answered(self):
+        found = self.answer(2, self.message(1, "epoch", {"vip": VIP}), 1)
+        self.assertEqual(found.status, 200)
+        self.assertEqual(vipmsg.answer_claim(found.body).epoch, 1)
+
+
+class TestTheCheck(Pair):
+    def check(self, index: int) -> str:
+        said: list[str] = []
+        self.assertEqual(vippromote.check(self.all[index], said.append),
+                         exits.OK)
+        return "\n".join(said)
+
+    def test_the_holder_carries_it_again_after_a_restart(self):
+        self.nodes()
+        vippromote.promote(self.all[0], False, lambda line: None)
+        self.nets[0].addresses.clear()
+        self.assertIn("carried again", self.check(0))
+        self.assertTrue(self.carried(0))
+
+    def test_not_carried_again_when_no_peer_answers(self):
+        self.nodes()
+        vippromote.promote(self.all[0], False, lambda line: None)
+        self.nets[0].addresses.clear()
+        self.down.update({address(1), address(2)})
+        self.check(0)
+        self.assertFalse(self.carried(0))
+
+    def test_a_vip_not_held_is_dropped_and_the_table_set_again(self):
+        self.nodes()
+        vippromote.promote(self.all[0], False, lambda line: None)
+        self.nets[1].addresses.append(f"{VIP}/128")
+        self.nets[2].routes[KEYS[1]].append(f"{VIP}/128")
+        self.assertIn("dropped", self.check(1))
+        self.assertFalse(self.carried(1))
+        self.check(2)
+        self.assertEqual(self.routed(2), KEYS[0])
+
+    def test_a_damaged_file_is_said(self):
+        self.nodes()
+        vipstate.ensure(self.all[0].root)
+        with open(os.path.join(self.all[0].root, vipstate.file_of(VIP)),
+                  "w") as fob:
+            fob.write("{")
+        said: list[str] = []
+        self.assertEqual(vippromote.check(self.all[0], said.append),
+                         exits.APPLY_FAILED)
+        self.assertIn("damaged", "\n".join(said))
+
+
+class TestStatus(Pair):
+    def test_the_lines(self):
+        self.nodes()
+        self.assertIn("vip: none", vippromote.lines(self.all[2], True)[0])
+        vippromote.promote(self.all[0], False, lambda line: None)
+        primary = "\n".join(vippromote.lines(self.all[0], True))
+        self.assertIn("role: primary", primary)
+        self.assertIn("carried here: yes", primary)
+        third = "\n".join(vippromote.lines(self.all[2], True))
+        self.assertIn("another pair's", third)
+        self.assertIn(f"routed to: {KEYS[0]}", third)
+        self.nets[2].down = True
+        offline = "\n".join(vippromote.lines(self.all[2], False))
+        self.assertIn("not the live system", offline)
+        self.assertIn("unknown", "\n".join(vippromote.lines(self.all[2],
+                                                            True)))
+
+    def test_fenced_released_and_damaged(self):
+        self.nodes()
+        vippromote.promote(self.all[0], False, lambda line: None)
+        vippromote.promote(self.all[1], False, lambda line: None)
+        held = vipnode.current(self.all[0], VIP)
+        vipstate.write(self.all[0].root, vipstate.released(held))
+        self.assertIn("released:", "\n".join(vippromote.lines(self.all[0],
+                                                              False)))
+        held = vipnode.current(self.all[1], VIP)
+        vipstate.write(self.all[1].root, vipstate.fenced(held))
+        self.assertIn("fenced:", "\n".join(vippromote.lines(self.all[1],
+                                                            False)))
+        with open(os.path.join(self.all[1].root, vipstate.file_of(VIP)),
+                  "w") as fob:
+            fob.write("{")
+        self.assertIn("damaged", "\n".join(vippromote.lines(self.all[1],
+                                                            False)))
+        with open(self.all[1].node.path, "w") as fob:
+            fob.write("version: [")
+        self.assertIn("vip:", vippromote.lines(self.all[1], False)[0])
+
+
+class TestTheNet(unittest.TestCase):
+    def test_a_table_that_does_not_answer(self):
+        net = FakeNet({})
+        net.down = True
+        self.assertIsNone(vipnet.carried("wg0", VIP, net.output))
+        self.assertEqual(vipnet.route("wg0", {}, VIP, None, net.run,
+                                      net.output)[0][:7], "wg show")
+        self.assertIsNone(vipnet.routed_to("wg0", VIP, net.output))
+
+    def test_a_failed_wg_set_is_said(self):
+        net = FakeNet({KEYS[1]: [f"{address(1)}/128"]})
+        net.fail[("wg", "set")] = "wg: no"
+        overlay = {"peers": [{"public_key": KEYS[1],
+                              "allowed_ips": [f"{address(1)}/128"]}]}
+        self.assertEqual(vipnet.route("wg0", overlay, VIP, KEYS[1], net.run,
+                                      net.output), ["wg: no"])
+
+    def test_the_file_is_written_only_when_it_differs(self):
+        import shutil
+        import tempfile
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root)
+        overlay = {"address": f"{address(0)}/64", "peers": [
+            {"public_key": KEYS[1], "allowed_ips": [f"{address(1)}/128"]}]}
+        self.assertIsNone(vipnet.written(root, overlay))
+        os.makedirs(os.path.join(root, "etc/wireguard"))
+        conf = os.path.join(root, "etc/wireguard/wg0.conf")
+        with open(conf, "w") as fob:
+            fob.write(wireguard.render(overlay))
+        self.assertIsNone(vipnet.written(root, overlay))
+        vipstate.write(root, vipstate.Held(VIP, vipstate.Claim(
+            VIP, 1, KEYS[1], address(1), b"")))
+        # read() needs a real claim; the routing reads the holders
+        from unittest import mock
+        with mock.patch.object(vipstate, "holders_of",
+                               return_value={VIP: KEYS[1]}):
+            self.assertIsNone(vipnet.written(root, overlay))
+        with open(conf) as fob:
+            self.assertIn(f"{VIP}/128", fob.read())
+        os.chmod(os.path.join(root, "etc/wireguard"), 0o500)
+        self.addCleanup(os.chmod, os.path.join(root, "etc/wireguard"),
+                        0o700)
+        if os.geteuid() != 0:
+            self.assertIn("wg0.conf", vipnet.written(root, overlay))
+        os.chmod(conf, 0)
+        if os.geteuid() != 0:
+            self.assertIn("wg0.conf", vipnet.written(root, overlay))
+
+
+class TestTheNodeErrors(Pair):
+    def test_no_key_and_no_overlay(self):
+        self.nodes()
+        here = self.all[0]
+        here.node.key = None
+        with self.assertRaises(VipError):
+            here.own_key()
+        with open(here.node.path, "w") as fob:
+            fob.write("version: 1\n")
+        with self.assertRaises(VipError):
+            here.own_address()
+
+    def test_a_damaged_identity(self):
+        self.nodes()
+        with open(os.path.join(self.all[0].root,
+                               "var/lib/keel/mesh/identity"), "w") as fob:
+            fob.write("nonsense\n")
+        with self.assertRaises(VipError):
+            self.all[0].mesh_id()
+
+    def test_hold_refuses_an_older_claim_than_it_knows(self):
+        self.nodes()
+        vippromote.promote(self.all[0], False, lambda line: None)
+        vippromote.promote(self.all[1], False, lambda line: None)
+        old = vipnode.signed_claim(self.all[0], VIP, 1)
+        with self.assertRaises(VipError):
+            vipnode.hold(self.all[0], old, True)
+
+    def test_newest_of_none_and_epochs_without_peers(self):
+        self.assertIsNone(vipnode.newest([]))
+        self.nodes(count=1)
+        self.assertEqual(vipnode.epochs(self.all[0], VIP), {})
+        made = vipnode.signed_claim(self.all[0], VIP, 1)
+        self.assertEqual(vipnode.announce(self.all[0], made), {})
+
+    def test_an_epoch_answer_for_another_vip_or_unverified(self):
+        self.nodes()
+        vippromote.promote(self.all[0], False, lambda line: None)
+        other = "fd00:6b65:1::200"
+        vipstate.write(self.all[1].root, vipstate.Held(
+            other, vipnode.current(self.all[1], VIP).claim))
+        found = vipnode.epochs(self.all[1], other)
+        self.assertEqual(set(found.values()) - {None}, set())
+
+
+if __name__ == "__main__":
+    unittest.main()

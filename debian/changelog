@@ -1,3 +1,33 @@
+keel (0.20.0) unstable; urgency=medium
+
+  * The service VIP of a replicated appliance pair on the WireGuard mesh
+    (handbook decision 0049, its third round): appliance.vip in the spec,
+    a /128 of the overlay prefix the primary carries on wg0 and every
+    other node routes to it through the primary's allowed_ips. The
+    primary is the VIP's holder; there is no role field. A move is one
+    wg set per node and the address on the holder, outside 0018's window.
+  * keel vip promote: the old primary releases the VIP before this node
+    takes it at the next epoch, and every peer is told on the members'
+    channel (POST /v1/vip, signed claims checked against the trust
+    store). It refuses while the old primary does not answer, unless
+    --old-primary-gone. keel database promote moves the VIP first.
+  * With etcd, keel vip tend (keel-vip.service of keel-overlay-vip): the
+    holder renews a lease of 20 s every 2 s and drops the VIP after 10 s
+    without a renewal; a claim is a compare-and-swap on the counter key,
+    so a stale claim is never written; the other node of the pair claims
+    once the lease expired, and a node that lost the VIP never claims it
+    again by itself. keel vip check, at boot and every minute, learns
+    newer claims from the peers and drops a VIP not held.
+  * keel vip status and keel mesh status show the role, the epoch and
+    holder, the lease, whether wg0 carries the VIP and where it is
+    routed; keel inspect reports appliance.vip and the same as machine
+    state, and reads the peers back without the VIP, so a move is never
+    drift. apply renders wg0.conf with the VIP routed to its holder.
+  * Tests: the etcd tests date their fixed clock by the real one, which
+    the certificates openssl issues carry.
+
+ -- Marcos Mendez <mendez.foto@gmail.com>  Wed, 07 Oct 2026 12:00:00 +0000
+
 keel (0.19.0) unstable; urgency=medium
 
   * etcd, the mesh's registry (handbook decisions 0025 and 0048, its

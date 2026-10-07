@@ -67,6 +67,16 @@ class Status:
     learner: bool
 
 
+@dataclass(frozen=True)
+class Value:
+    """One key as a range gives it; `lease` the lease it is attached to"""
+
+    key: str
+    value: bytes
+    mod_revision: int
+    lease: str | None
+
+
 def context(root: str) -> ssl.SSLContext:
     """TLS trusting the mesh's root alone, with keel's client
     certificate; raises EtcdError without one"""
@@ -152,6 +162,54 @@ class Client:
             "value": base64.b64encode(value.encode()).decode()})
         return int(found["header"]["revision"])
 
+    def grant(self, ttl: int) -> str:
+        """A lease of `ttl` seconds; its ID"""
+        found = self.ask("/v3/lease/grant", {"TTL": ttl})
+        try:
+            return str(found["ID"])
+        except KeyError:
+            raise EtcdError("an answer that is not etcd's") from None
+
+    def keepalive(self, lease: str) -> int:
+        """The lease renewed once; the TTL etcd gives it again, 0 when the
+        lease is gone (expired or revoked)"""
+        found = self.ask("/v3/lease/keepalive", {"ID": lease})
+        result = found.get("result")
+        if not isinstance(result, dict):
+            raise EtcdError(str((found.get("error") or {}).get("message")
+                                or "an answer that is not etcd's"))
+        return int(result.get("TTL") or 0)
+
+    def revoke(self, lease: str) -> None:
+        """The lease revoked, and every key attached to it deleted"""
+        self.ask("/v3/lease/revoke", {"ID": lease})
+
+    def prefix(self, key: str) -> list[Value]:
+        """Every key under `key`, linearizable: a member cut off from the
+        majority answers nothing"""
+        found = self.ask("/v3/kv/range", {
+            "key": encoded(key), "range_end": encoded(range_end(key))})
+        try:
+            return [Value(base64.b64decode(one["key"]).decode(),
+                          base64.b64decode(one.get("value") or ""),
+                          int(one.get("mod_revision") or 0),
+                          str(one.get("lease") or "") or None)
+                    for one in found.get("kvs") or []]
+        except (KeyError, TypeError, ValueError, AttributeError):
+            raise EtcdError("an answer that is not etcd's") from None
+
+    def swap(self, compare: list[dict], puts: list[tuple[str, bytes,
+                                                         str | None]]) -> bool:
+        """A transaction: every put, with its lease, only when every
+        comparison holds; whether it did"""
+        found = self.ask("/v3/kv/txn", {
+            "compare": compare,
+            "success": [{"request_put": {
+                "key": encoded(key), "value": base64.b64encode(
+                    value).decode(), **({"lease": lease} if lease else {})}}
+                for key, value, lease in puts]})
+        return found.get("succeeded") is True
+
     def status(self, endpoint: str) -> Status:
         """One member's own status, asked of it alone"""
         found = Client((endpoint,), self.tls, self.timeout).ask(
@@ -172,6 +230,27 @@ class Client:
             return False, str(e)
         return (status == 200 and found.get("health") == "true",
                 str(found.get("reason") or ""))
+
+
+def encoded(key: str) -> str:
+    return base64.b64encode(key.encode()).decode()
+
+
+def range_end(key: str) -> str:
+    """The end of the range of keys under `key`: its last byte plus one"""
+    return key[:-1] + chr(ord(key[-1]) + 1)
+
+
+def modified(key: str, revision: int) -> dict:
+    """A comparison: `key` last modified at `revision` (0: absent)"""
+    return {"key": encoded(key), "target": "MOD", "result": "EQUAL",
+            "mod_revision": str(revision)}
+
+
+def absent(key: str) -> dict:
+    """A comparison: `key` does not exist"""
+    return {"key": encoded(key), "target": "VERSION", "result": "EQUAL",
+            "version": "0"}
 
 
 def answered(status: int, data: bytes) -> dict:

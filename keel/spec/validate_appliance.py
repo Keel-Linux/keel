@@ -10,6 +10,7 @@ to 27 of docs/manifest-v1.md, needs facts the manifests declare
 this module reads no file and imports nothing of keel.manifest.
 """
 
+import ipaddress
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -24,6 +25,8 @@ MAX_NAME = 32
 NAME_RULE = "[a-z][a-z0-9-]*, at most 32 characters"
 ASK = "ask"
 SECTION_KEYS = {"appliance": ("name",), "installation": ("mode",)}
+# optional keys of a section, checked by their own rule
+OPTIONAL_KEYS = {"appliance": ("vip",)}
 ETCD = "etcd"
 ETCD_MODE = "cloud_advanced"
 
@@ -69,7 +72,7 @@ def validate_appliance(doc: dict) -> list[str]:
     for name, state in (overlays or {}).items():
         errors += _state(name, state)
     errors += _etcd_mode(doc, overlays or {})
-    return errors
+    return errors + validate_vip(doc)
 
 
 def _etcd_mode(doc: dict, overlays: dict) -> list[str]:
@@ -91,7 +94,7 @@ def _section(key: str, value: Any, fields: tuple[str, ...]) -> list[str]:
     if error or value is None:
         return [error] if error else []
     errors = [f"{key}.{name}: unknown key" for name in value
-              if name not in fields]
+              if name not in fields + OPTIONAL_KEYS.get(key, ())]
     for name in fields:
         if name not in value:
             errors.append(f"{key}.{name}: required")
@@ -101,7 +104,42 @@ def _section(key: str, value: Any, fields: tuple[str, ...]) -> list[str]:
     if "mode" in value and value["mode"] not in INSTALLATION_MODES:
         errors.append(f"{key}.mode: must be simple, cloud_simple or"
                       " cloud_advanced")
+    if key == "appliance" and "vip" in value:
+        errors += _vip(value["vip"])
     return errors
+
+
+def _vip(value: Any) -> list[str]:
+    """appliance.vip: one IPv6 address, the pair's VIP (decision 0049);
+    held against the overlay by validate_vip"""
+    try:
+        if not isinstance(value, str) or "/" in value:
+            raise ValueError(value)
+        ipaddress.IPv6Address(value)
+    except ValueError:
+        return [f"appliance.vip: must be one IPv6 address, a /128 of the"
+                f" overlay prefix ({value})"]
+    return []
+
+
+def validate_vip(doc: dict) -> list[str]:
+    """appliance.vip inside the overlay prefix, nobody's address, and
+    only beside an overlay (decision 0049)"""
+    appliance = doc.get("appliance")
+    value = appliance.get("vip") if isinstance(appliance, dict) else None
+    if value is None or _vip(value):
+        return []
+    overlay = ((doc.get("network") or {}).get("overlay") or {}).get(
+        "wireguard")
+    if not isinstance(overlay, dict) or not overlay.get("address"):
+        return ["appliance.vip: needs network.overlay.wireguard: the VIP is"
+                " an address of the mesh"]
+    from keel.mesh.vip import problem
+    try:
+        found = problem(str(ipaddress.IPv6Address(value)), overlay)
+    except ValueError:
+        return []
+    return [found] if found else []
 
 
 def _state(name: Any, state: Any) -> list[str]:

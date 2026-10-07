@@ -63,6 +63,9 @@ class Inspection:
     spec: dict
     findings: tuple[Finding, ...]
     channel: State | None = None
+    # the VIPs this node knows (decision 0049): machine state, never a
+    # field of the spec
+    vip: tuple[str, ...] = ()
 
     @property
     def missing_required(self) -> tuple[str, ...]:

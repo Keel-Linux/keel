@@ -2,10 +2,11 @@
 """The members' channel: HTTP on the overlay, WireGuard its proof
 
 What `keel mesh sync` pulls and what the inviter announces
-(keel.mesh.members), and what members say of etcd (`POST /v1/etcd`,
-keel.mesh.etcdmsg), goes between two members' overlay addresses, on
-TCP 51821, and both ends bind their socket to the overlay's interface
-(SO_BINDTODEVICE): the server takes only what arrived through
+(keel.mesh.members), what members say of etcd (`POST /v1/etcd`,
+keel.mesh.etcdmsg) and of a VIP (`POST /v1/vip`, keel.mesh.vipmsg),
+goes between two members' overlay addresses, on TCP 51821, and both
+ends bind their socket to the overlay's interface (SO_BINDTODEVICE):
+the server takes only what arrived through
 WireGuard, and the client's request leaves, and its answer comes back,
 only through it. WireGuard accepts a packet on that interface only when
 it was decrypted with the key of the peer whose allowed_ips hold its
@@ -47,6 +48,7 @@ from keel.mesh.listener import (
     shut,
 )
 from keel.mesh.members import ANNOUNCE, LIST, MAX_BODY, PORT, Roster
+from keel.mesh.vipmsg import PATH as VIP
 from keel.mesh.protocol import CONTENT_TYPE, ProtocolError
 
 # two lost SYNs on a poor link still connect (keel.mesh.channel)
@@ -138,6 +140,16 @@ def etcd_exchange(host: str, iface: str, body: bytes,
     return data
 
 
+def vip_exchange(host: str, iface: str, body: bytes,
+                 port: int = PORT) -> bytes:
+    """The answer of the member at `host` to a signed VIP message
+    (keel.mesh.vipmsg); raises LinkError"""
+    status, data = exchange(host, iface, POST, VIP, body, port=port)
+    if status != 200:
+        raise LinkError(f"{shown(host, port)} refused: {reason(data, status)}")
+    return data
+
+
 def touch(host: str, iface: str, port: int = PORT) -> None:
     """Send `host` a packet through `iface`, so that WireGuard starts a
     handshake with its peer; whatever answers, or nothing"""
@@ -179,7 +191,7 @@ class Front:
     def handle(self, method: str, path: str, body: bytes | None,
                source: str) -> Answer:
         if (method, path) not in ((GET, LIST), (POST, ANNOUNCE),
-                                  (POST, ETCD)):
+                                  (POST, ETCD), (POST, VIP)):
             found = refused(404, "no such request")
         elif body is None:
             found = refused(413, "longer than any roster")

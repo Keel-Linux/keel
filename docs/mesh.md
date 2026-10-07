@@ -33,9 +33,11 @@ the mesh's registry, on the cloud advanced members: its CA, its
 formation at the third of them, learners promoted from the fourth,
 `keel mesh etcd form` for a mesh that never saw a third join, `keel
 mesh etcd tend`, the etcd member removed under the amendment's rule,
-and its section of `keel mesh status` ("etcd"). Not yet: members
+and its section of `keel mesh status` ("etcd"); and the service VIP of
+a replicated pair, `keel vip` ([docs/vip.md](vip.md), decision 0049),
+whose section closes `keel mesh status`. Not yet: members
 learning of each other through etcd's registry (they still do through
-the members' channel), the VIP controller of decision 0049, rotating
+the members' channel), rotating
 an intermediate CA or the root, the rotation of a node's signing key, `keel mesh invites` and `invite
 --cancel`, and the boot unit that removes invites
 which expired while the machine was down. confconsole's "Invite a node"
@@ -456,6 +458,7 @@ encrypts).
 | `GET /v1/members` | none | 200, this node's roster |
 | `POST /v1/announce` | the sender's roster, the new node in it | 202, queued and applied after the answer |
 | `POST /v1/etcd` | a signed etcd message ("etcd", "The members' channel for etcd") | 200, answered by the root side at once |
+| `POST /v1/vip` | a signed VIP message: a claim, a release or an epoch ([docs/vip.md](vip.md)) | 200, answered by the root side at once; 409 for a stale one |
 
 A roster is the node's mesh identity (hex, or null), its WireGuard and
 signing keys, its overlay address, every peer its spec declares

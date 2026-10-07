@@ -392,6 +392,9 @@ def database_promote(args) -> int:
         if refusal:
             error(refusal)
             return exits.APPLY_NEEDS_ROOT
+    code = promote_vip(args, doc, root, dry_run)
+    if code != exits.OK:
+        return code
     state = system.observe(root, doc, start=not dry_run)
     plan = system.Plan(tuple(system.plan_promote(doc, state.database)))
     outcome = system.execute(
@@ -401,6 +404,26 @@ def database_promote(args) -> int:
         print(line)
     print(outcome.summary())
     return exits.APPLY_FAILED if outcome.failed else exits.OK
+
+
+def promote_vip(args, doc: dict, root: str, dry_run: bool) -> int:
+    """The pair's VIP first, when the spec declares one (decision 0049,
+    third round): the old primary releases it before this node's
+    database takes writes, so writes never reach two primaries; a
+    database left read only by a promote that failed after it is
+    reachable at the VIP and refuses them until the promote is run
+    again"""
+    from keel.mesh import vipcli, vippromote
+    appliance = doc.get("appliance")
+    if not isinstance(appliance, dict) or not appliance.get("vip"):
+        return exits.OK
+    if dry_run:
+        print(f"would move the VIP {appliance['vip']} to this node first"
+              " (keel vip promote)")
+        return exits.OK
+    return vippromote.promote(vipcli.here_of(args),
+                              getattr(args, "old_primary_gone", False),
+                              print)
 
 
 def manifest_validate(args) -> int:
