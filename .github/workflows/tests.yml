@@ -13,7 +13,7 @@ on:
     branches: [main]
 jobs:
   tests:
-    uses: keel-linux/.github/.github/workflows/test-python.yml@main
+    uses: keel-linux/.github/.github/workflows/test-python.yml@ci/node24-actions
     with:
       threshold: 95
       package: keel
@@ -29,7 +29,7 @@ jobs:
   # the real wg-quick and TLS, as root in the container
   # (tests/test_mesh_netns.py). The check is "mesh / trixie".
   mesh:
-    uses: keel-linux/.github/.github/workflows/lxc-trixie.yml@main
+    uses: keel-linux/.github/.github/workflows/lxc-trixie.yml@ci/node24-actions
     with:
       timeout: 20
       run: |
@@ -46,7 +46,7 @@ jobs:
   # 5 and 2 minutes of the brief run by hand, ETCD_SOAK=full). The
   # check is "etcd / trixie".
   etcd:
-    uses: keel-linux/.github/.github/workflows/lxc-trixie.yml@main
+    uses: keel-linux/.github/.github/workflows/lxc-trixie.yml@ci/node24-actions
     with:
       timeout: 20
       run: |
@@ -62,4 +62,4 @@ jobs:
   # "package / changelog"; it runs on pull requests only.
   package:
     if: github.event_name == 'pull_request'
-    uses: keel-linux/.github/.github/workflows/require-changelog.yml@main
+    uses: keel-linux/.github/.github/workflows/require-changelog.yml@ci/node24-actions
