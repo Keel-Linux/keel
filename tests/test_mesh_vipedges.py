@@ -146,8 +146,11 @@ class TestPromoteEdges(Pair):
                 raise found
             return found
         with mock.patch.object(vipetcd, "seen", side_effect=seen):
-            found = vippromote.gone_key(self.all[0], VIP, 5)
+            found = vippromote.gone_lease(self.all[0], VIP, None, 5)
         self.assertEqual(found, vipetcd.Seen(VIP))
+        # a lease that lives on past the wait
+        self.kv.leases["9"] = self.monotonic() + 1000
+        self.assertIsNone(vippromote.gone_lease(self.all[0], VIP, "9", 2))
 
     def test_the_race_lost_and_etcd_away_after_it(self):
         self.with_etcd()

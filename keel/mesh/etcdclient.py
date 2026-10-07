@@ -180,6 +180,15 @@ class Client:
                                 or "an answer that is not etcd's"))
         return int(result.get("TTL") or 0)
 
+    def time_to_live(self, lease: str) -> int:
+        """The seconds a lease has left; -1 once it expired or was
+        revoked, which is for good: a lease never comes back"""
+        found = self.ask("/v3/lease/timetolive", {"ID": lease})
+        try:
+            return int(found.get("TTL", -1))
+        except (TypeError, ValueError):
+            raise EtcdError("an answer that is not etcd's") from None
+
     def revoke(self, lease: str) -> None:
         """The lease revoked, and every key attached to it deleted"""
         self.ask("/v3/lease/revoke", {"ID": lease})

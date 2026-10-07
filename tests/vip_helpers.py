@@ -111,12 +111,14 @@ class FakeNet:
 
 class FakeKv:
     """etcd's keys, revisions and leases, as keel.mesh.etcdclient asks
-    them; `refuse` makes every call fail, `dead` leases it no longer
-    renews (cut off)"""
+    them, on the test's clock: a lease not renewed for its TTL expires,
+    and its keys go with it; `refuse` makes a call fail ("all": every
+    call, "connect": the connection)"""
 
-    def __init__(self):
+    def __init__(self, clock=lambda: 0.0):
+        self.clock = clock
         self.kvs: dict[str, tuple[bytes, int, str | None]] = {}
-        self.leases: set[str] = set()
+        self.leases: dict[str, float] = {}
         self.revision = 1
         self.next_lease = 7000
         self.refuse: str | None = None
@@ -132,26 +134,50 @@ class FakeKv:
         self.calls.append(call)
         if self.refuse in (call, "all"):
             raise EtcdError(f"{call}: etcdserver: request timed out")
+        self.reap()
+
+    def reap(self) -> None:
+        for lease, until in list(self.leases.items()):
+            if until <= self.clock():
+                self.expire(lease)
 
     def grant(self, ttl: int) -> str:
         self.check("grant")
         self.next_lease += 1
-        self.leases.add(str(self.next_lease))
+        self.leases[str(self.next_lease)] = self.clock() + ttl
         return str(self.next_lease)
 
     def keepalive(self, lease: str) -> int:
         self.check("keepalive")
-        return 20 if lease in self.leases else 0
+        if lease not in self.leases:
+            return 0
+        self.leases[lease] = self.clock() + 20
+        return 20
+
+    def time_to_live(self, lease: str) -> int:
+        self.check("time_to_live")
+        if lease not in self.leases:
+            return -1
+        return max(1, int(self.leases[lease] - self.clock()))
 
     def revoke(self, lease: str) -> None:
         self.check("revoke")
         self.expire(lease)
 
     def expire(self, lease: str) -> None:
-        self.leases.discard(lease)
+        self.leases.pop(lease, None)
         for key in [k for k, v in self.kvs.items() if v[2] == lease]:
             del self.kvs[key]
             self.revision += 1
+
+    def put(self, key: str, value: bytes, lease: str | None = None) -> None:
+        """What any member may write, without a transaction"""
+        self.revision += 1
+        self.kvs[key] = (value, self.revision, lease)
+
+    def delete(self, key: str) -> None:
+        self.kvs.pop(key, None)
+        self.revision += 1
 
     def prefix(self, key: str) -> list[Value]:
         self.check("prefix")
@@ -183,12 +209,18 @@ class Pair(unittest.TestCase):
         patcher = mock.patch("keel.manifest.machine.ROOT_UID", os.getuid())
         patcher.start()
         self.addCleanup(patcher.stop)
+        # keel vip tend sets no-new-privs on its own process: never on
+        # the test runner's, whose later tests may need sudo
+        patcher = mock.patch("keel.mesh.vipbridge.no_new_privileges",
+                             return_value=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.all: list[Here] = []
         self.nets: list[FakeNet] = []
         self.said: dict[int, list[str]] = {}
         self.down: set[str] = set()
-        self.kv = FakeKv()
         self.ticks = [1000.0]
+        self.kv = FakeKv(self.monotonic)
 
     def monotonic(self) -> float:
         return self.ticks[0]

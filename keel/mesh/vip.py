@@ -68,6 +68,8 @@ class Claim:
     raw: bytes
     # the pair record the claim rests on (keel.mesh.vippair.Pair)
     pair: object = None
+    # with etcd, the lease the claim is held by, signed with it
+    lease: str | None = None
 
 
 @dataclass(frozen=True)

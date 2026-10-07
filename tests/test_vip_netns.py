@@ -129,6 +129,23 @@ class TestTheVipOnAPoorNetwork(unittest.TestCase):
         self.assertFalse(self.found["f_was_etcd_leader"], self.found)
         self.partitioned("f")
 
+    def test_g_a_member_outside_the_pair_writing_and_revoking(self):
+        found = self.found
+        self.assertEqual(found["g_promote_b"]["code"], 0, found)
+        self.assertNotIn("error", found["g_keys"], found)
+        # the holder key written and deleted: B alone, all along
+        self.assertEqual(found["g_holders_after_keys"], [["B"]], found)
+        self.assertNotIn("error", found["g_revoke"], found)
+        dropped, carried = found["g_b_dropped_s"], found["g_a_carried_s"]
+        self.assertIsNotNone(dropped, found)
+        self.assertIsNotNone(carried, found)
+        # B learns the revoke at its next renewal (2 s), a call late
+        self.assertLess(dropped, 2 + 2 + 2, found)
+        # A waits its grace after it saw the lease end early
+        self.assertGreaterEqual(carried, 14 - 1, found)
+        self.assertLess(carried - dropped, found["ttl_s"], found)
+        self.assertEqual(found["g_holder"], ["A"], found)
+
     def test_the_pair_and_the_units_hardening(self):
         found = self.found
         self.assertEqual(found["paired"]["code"], 0, found["paired"])
@@ -140,11 +157,10 @@ class TestTheVipOnAPoorNetwork(unittest.TestCase):
                 self.assertEqual(int(controller["CapEff"], 16), 0, seen)
                 self.assertEqual(int(controller["CapBnd"], 16), 0, seen)
                 self.assertEqual(controller.get("NoNewPrivs"), "1", seen)
-                # the root helper: CAP_NET_ADMIN (bit 12), and
-                # CAP_DAC_OVERRIDE (bit 1) to reach the controller's 0600
-                # socket, which its dynamic user owns; nothing else
-                self.assertEqual(int(helper["CapBnd"], 16),
-                                 (1 << 12) | (1 << 1), seen)
+                # the root helper: CAP_NET_ADMIN (bit 12) and nothing
+                # else, and no new privileges
+                self.assertEqual(int(helper["CapBnd"], 16), 1 << 12, seen)
+                self.assertEqual(helper.get("NoNewPrivs"), "1", seen)
 
     def test_c_no_two_nodes_ever_carry_it(self):
         self.assertGreater(self.found["samples"], 100, self.found)

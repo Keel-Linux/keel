@@ -2,21 +2,20 @@
 """keel-vip.service, split as keel#75 splits an invite (decision 0049)
 
 - **the root helper**, `keel vip tend` in keel-vip.service (with
-  CAP_NET_ADMIN, and CAP_DAC_OVERRIDE to reach the controller's socket,
-  which the controller's dynamic user owns: keel-overlay-vip's unit),
-  which alone holds the
+  CAP_NET_ADMIN alone, keel-overlay-vip's unit), which alone holds the
   spec, the state under /var/lib/keel/vip, the trust store and this
   node's signing key, and alone adds or removes the VIP on wg0 and sets
   a peer's allowed-ips, each after checking it against the pair record
   (keel.mesh.vipetcd.Ops). It starts the controller as the transient
   unit keel-vip-control, with a dynamic user, no capability, the
   sandbox of keel.mesh.bridge.LISTENER_PROPERTIES and the helper's own
-  network namespace, connects to the unix socket the controller binds in
-  its RuntimeDirectory (/run/keel/vip-control, 0700, the socket 0600),
-  checks with SO_PEERCRED that the other end is the unit's MainPID and
-  not root, and sends it what it needs: the facts, and etcd's root
-  certificate, this member's client certificate and its key as memfds,
-  so the key is written nowhere the controller could keep it;
+  network namespace, connects to the abstract unix socket the controller
+  binds in that namespace, checks with SO_PEERCRED that the other end is
+  the unit's MainPID and not root (an abstract socket has no file mode:
+  the check is the credentials, as the controller's is of the helper),
+  and sends it what it needs: the facts, and etcd's root certificate,
+  this member's client certificate and its key as memfds, so the key is
+  written nowhere the controller could keep it;
 - **the controller**, `keel vip control SOCKET`, which refuses to run
   with any capability, faces etcd and the overlay (keel.mesh.vipetcd's
   Controller), and asks the root side for every change of the machine,
@@ -48,26 +47,35 @@ from keel.mesh.vipnode import Here, VipError
 from keel.network.marker import path as rooted
 
 UNIT = "keel-vip-control"
-RUNTIME = "keel/vip-control"
-SOCKET = "bridge.sock"
 CREDENTIALS = 3
 OPS = ("facts", "held", "take", "sign", "hold", "carry", "drop", "carried")
 
 
 def names(root: str) -> tuple[str, str]:
-    """The controller's unit and runtime directory: keel-vip-control and
-    /run/keel/vip-control for the live system, and their own for another
+    """The controller's unit and its socket's abstract name:
+    keel-vip-control for the live system, and their own for another
     root, so several nodes' helpers can run on one host (the tests)"""
     if os.path.abspath(root) == "/":
-        return UNIT, RUNTIME
+        return UNIT, f"@{UNIT}"
     digest = hashlib.sha256(os.path.abspath(root).encode()).hexdigest()[:8]
-    return f"{UNIT}-{digest}", f"{RUNTIME}-{digest}"
+    return f"{UNIT}-{digest}", f"@{UNIT}-{digest}"
+
+
+def address_of(path: str) -> str:
+    """A socket's address: `@name` is the abstract `name` (a NUL first,
+    which no command line can carry), anything else a file"""
+    return "\0" + path[1:] if path.startswith("@") else path
 
 
 def socket_path(root: str) -> str:
-    """Where the controller binds its socket: its RuntimeDirectory, which
-    systemd makes under the host's /run whatever the root"""
-    return os.path.join("/run", names(root)[1], SOCKET)
+    """Where the controller listens, as `@name`: an abstract unix socket
+    of the
+    network namespace it shares with the helper. It has no file, so no
+    mode keeps anyone off it: the helper takes it only from the
+    controller's unit's MainPID, a dynamic user, by SO_PEERCRED, and the
+    controller takes only root or itself; nothing else of the machine
+    needs to reach a file the other one owns"""
+    return names(root)[1]
 
 
 def control_command(path: str) -> tuple[str, ...]:
@@ -76,7 +84,7 @@ def control_command(path: str) -> tuple[str, ...]:
 
 def start_unit(path: str, run: Callable[[tuple[str, ...]], str | None],
                output: Callable[[tuple[str, ...]], str | None],
-               unit: str = UNIT, runtime: str = RUNTIME) -> Unit:
+               unit: str = UNIT) -> Unit:
     """Start keel-vip-control in this process's network namespace (the
     host's on a machine), with this process's PYTHONPATH when it has
     one; raises BridgeError"""
@@ -84,8 +92,6 @@ def start_unit(path: str, run: Callable[[tuple[str, ...]], str | None],
     pythonpath = os.environ.get("PYTHONPATH")
     run(("systemctl", "stop", unit))
     problem = run(("systemd-run", f"--unit={unit}", "--collect", "--quiet",
-                   f"--property=RuntimeDirectory={runtime}",
-                   "--property=RuntimeDirectoryMode=0700",
                    f"--property=NetworkNamespacePath={found}",
                    *(f"--property={one}"
                      for one in bridge.LISTENER_PROPERTIES),
@@ -133,7 +139,9 @@ def answered(ops: Ops, data: bytes) -> dict:
         if op == "take":
             return {"ok": ops.take(raw(found))}
         if op == "sign":
-            made = ops.sign(str(found["vip"]), int(found["epoch"]))
+            lease = found.get("lease")
+            made = ops.sign(str(found["vip"]), int(found["epoch"]),
+                            None if lease is None else str(lease))
             return {"ok": base64.b64encode(made.raw).decode()}
         if op == "hold":
             ops.hold(raw(found), str(found["lease"]))
@@ -196,10 +204,10 @@ class Remote(Ops):
     def take(self, raw_claim: bytes) -> str | None:
         return self.ask("take", raw=base64.b64encode(raw_claim).decode())
 
-    def sign(self, vip: str, epoch: int):
+    def sign(self, vip: str, epoch: int, lease: str | None = None):
         from keel.mesh import vipmsg
         return vipmsg.claim_of(base64.b64decode(
-            self.ask("sign", vip=vip, epoch=epoch)))
+            self.ask("sign", vip=vip, epoch=epoch, lease=lease)))
 
     def hold(self, raw_claim: bytes, lease: str) -> None:
         self.ask("hold", raw=base64.b64encode(raw_claim).decode(),
@@ -245,8 +253,9 @@ def serve(here: Here, stop: threading.Event,
     try:
         started = (start or (lambda where: start_unit(
             where, here.node.run, here.node.output,
-            *names(here.root))))(path)
-        with bridge.connected(path, started, sleep, lambda pid, uid: (
+            names(here.root)[0])))(path)
+        with bridge.connected(address_of(path), started, sleep,
+                              lambda pid, uid: (
                 here.err(f"vip: the controller (pid {pid}, uid {uid})"
                          " runs")), lambda pid, uid: here.err(
                 f"vip: skipped process {pid} (uid {uid}) at {path}: it is"
@@ -268,6 +277,28 @@ def serve(here: Here, stop: threading.Event,
     return code
 
 
+PR_SET_NO_NEW_PRIVS = 38
+
+
+def no_new_privileges(err: Callable[[str], None],
+                      status: str = bridge.STATUS,
+                      prctl=None) -> bool:
+    """This process and its children never gain privileges, whatever
+    the unit set (keel-vip.service sets NoNewPrivileges=yes); says so
+    when it was not set already. Whether it is set now"""
+    with open(status) as fob:
+        found = next((line.split()[1] for line in fob
+                      if line.startswith("NoNewPrivs:")), "0")
+    if found == "1":
+        return True
+    err("vip: this process could gain privileges (NoNewPrivs 0): setting"
+        " it now")
+    if prctl is None:
+        import ctypes
+        prctl = ctypes.CDLL(None, use_errno=True).prctl
+    return prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0
+
+
 def control(path: str, err: Callable[[str], None],
             status: str = bridge.STATUS,
             stop: threading.Event | None = None) -> int:
@@ -278,9 +309,10 @@ def control(path: str, err: Callable[[str], None],
         err(f"the VIP's controller runs without capabilities, and this"
             f" process has {found:#x}: refused")
         return exits.APPLY_FAILED
-    sock = bridge.helper(path, os.getuid())
+    sock = listened(path, os.getuid())
     if sock is None:
-        err(f"no root helper came to {path} within {bridge.CONNECT_WAIT} s")
+        err(f"no root helper came to {path!r} within"
+            f" {bridge.CONNECT_WAIT} s")
         return exits.APPLY_FAILED
     with sock:
         message, fds, _, _ = socket.recv_fds(sock, bridge.MAX_MESSAGE,
@@ -302,6 +334,27 @@ def control(path: str, err: Callable[[str], None],
         vipetcd.Controller(Remote(sock, stop), lambda: client, stop,
                            err).run()
     return exits.OK
+
+
+def listened(path: str, own_uid: int,
+             wait: float = bridge.CONNECT_WAIT) -> socket.socket | None:
+    """The root helper's connection to the controller's socket at `path`
+    (abstract when it starts with a NUL); None when none came. A peer
+    that is neither root nor this user is dropped"""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+        server.bind(address_of(path))
+        server.listen(1)
+        server.settimeout(wait)
+        while True:
+            try:
+                conn, _ = server.accept()
+            except TimeoutError:
+                return None
+            _, uid, _ = bridge.PEERCRED.unpack(conn.getsockopt(
+                socket.SOL_SOCKET, socket.SO_PEERCRED, bridge.PEERCRED.size))
+            if uid in (0, own_uid):
+                return conn
+            conn.close()
 
 
 def context(ca: str, certificate: str, key: str) -> ssl.SSLContext:

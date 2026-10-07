@@ -149,6 +149,7 @@ def vip_tend(args) -> int:
     if code != exits.OK:
         return code
     here = here_of(args)
+    vipbridge.no_new_privileges(err)
     if args.stopped:
         for vip in vipetcd.stopped(here):
             out(f"vip {vip}: dropped, the controller stopped")

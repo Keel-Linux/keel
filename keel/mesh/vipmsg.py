@@ -125,17 +125,23 @@ def claim_of(data: bytes) -> Claim:
         raise ProtocolError("no overlay address in the claim") from None
     found = message.body.get("pair")
     pair = None if found is None else vippair.loads(found)
+    lease = message.body.get("lease")
+    if lease is not None and (not isinstance(lease, str) or
+                              not lease.isdigit() or len(lease) > 20):
+        raise ProtocolError("not an etcd lease in the claim")
     return Claim(message.vip(), message.epoch(), message.sender, at, data,
-                 pair)
+                 pair, lease)
 
 
 def claim(root: str, mesh_id: str, sender: str, now: datetime, vip: str,
-          epoch: int, at: str, pair=None) -> Claim:
-    """This node's claim, signed, with the pair record it rests on;
-    raises SigningError"""
+          epoch: int, at: str, pair=None, lease: str | None = None) -> Claim:
+    """This node's claim, signed, with the pair record it rests on and,
+    with etcd, the lease that holds it; raises SigningError"""
     body = {"vip": vip, "epoch": epoch, "address": at}
     if pair is not None:
         body["pair"] = pair.dumps()
+    if lease is not None:
+        body["lease"] = lease
     return claim_of(signed(root, CLAIM, mesh_id, sender, now, body))
 
 

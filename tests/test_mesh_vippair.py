@@ -229,6 +229,24 @@ class TestPromoteNeedsAMajority(Pair):
                                        vipnode.current(self.all[1], VIP),
                                        KEYS[1]), "replica")
 
+    def test_a_two_node_mesh_with_the_old_primary_gone(self):
+        """the only peer is the old primary: none answers, and the
+        operator's flag is the acceptance"""
+        self.nodes(count=2)
+        self.assertEqual(promote(self.all[0])[0], exits.OK)
+        self.down.add(address(0))
+        code, said = promote(self.all[1])
+        self.assertEqual(code, exits.MESH_REFUSED, said)
+        self.assertFalse(self.carried(1))
+        code, said = promote(self.all[1], gone=True)
+        self.assertEqual(code, exits.OK, said)
+        self.assertTrue(self.carried(1))
+        # the old primary comes back, learns the newer claim and drops it
+        self.down.clear()
+        vippromote.check(self.all[0], lambda line: None)
+        self.assertFalse(self.carried(0))
+        self.assertTrue(vipnode.current(self.all[0], VIP).fenced)
+
     def test_no_peer_answering_is_no_majority(self):
         self.nodes()
         self.down.update({address(1), address(2)})

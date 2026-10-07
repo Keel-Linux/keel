@@ -176,7 +176,12 @@ def promoted(here: Here, vip: str, gone: bool,
     accepted = sum(1 for what in said.values() if what in ACCEPTED)
     answered = accepted + sum(1 for what in said.values()
                               if what.startswith("refused"))
-    if not answered or accepted * 2 <= answered:
+    # a majority of the peers that answered refusing it, or none
+    # answering, is no acceptance; with --old-primary-gone, none answering
+    # is what the operator said (in a two-node mesh, the only peer is the
+    # one that is gone), and the flag is the acceptance
+    if (answered and accepted * 2 <= answered) or (not answered and
+                                                   not gone):
         vipnode.release(here, vip, lambda lease: None)
         out(f"the claim at epoch {epoch} was taken by {accepted} of the"
             f" {answered} peer(s) that answered: not a majority, so this"
@@ -204,21 +209,35 @@ def told(here: Here, made: Claim,
     return said
 
 
-def gone_key(here: Here, vip: str, wait: float) -> vipetcd.Seen | None:
-    """The VIP's keys once no other node's holder key is left, waited
-    for (this node's own controller may have claimed meanwhile); None
-    when it stays"""
+def current_claim(here: Here, vip: str,
+                  now: vipetcd.Seen) -> Claim | None:
+    """The newest claim this node knows: its own record, or the
+    counter's when that one is newer and verified here"""
+    held = vipnode.current(here, vip).claim
+    found = now.epoch
+    if found is not None and (held is None or found.epoch > held.epoch) \
+            and vipnode.verified(here, found) is None:
+        return found
+    return held
+
+
+def gone_lease(here: Here, vip: str, lease: str | None,
+               wait: float) -> vipetcd.Seen | None:
+    """The VIP's keys once `lease` is gone, or once this node's own
+    controller claimed meanwhile, waited for; None when it lives on"""
     own = here.own_key()
     deadline = here.monotonic() + wait
     while True:
         try:
-            now = vipetcd.seen(vipetcd.local(here), here.mesh_id(),
+            client = vipetcd.local(here)
+            now = vipetcd.seen(client, here.mesh_id(),
                                here.err).get(vip) or vipetcd.Seen(vip)
+            if now.epoch is not None and same_key(now.epoch.holder, own):
+                return now
+            if lease is None or client.time_to_live(lease) <= 0:
+                return now
         except EtcdError:
-            now = None
-        if now is not None and (now.holder is None or
-                                same_key(now.holder.holder, own)):
-            return now
+            pass
         if here.monotonic() >= deadline:
             return None
         here.sleep(POLL)
@@ -235,30 +254,30 @@ def promoted_etcd(here: Here, vip: str, gone: bool,
         out(f"etcd did not answer: {e}. With etcd, the VIP moves only"
             " through it")
         return exits.APPLY_FAILED
-    holder = now.holder
-    if holder is not None and same_key(holder.holder, own):
+    holder = current_claim(here, vip, now)
+    if holder is not None and same_key(holder.holder, own) and \
+            vipnode.current(here, vip).holds(own):
         out(f"this node holds {vip} already, at epoch {holder.epoch}")
         return exits.OK
-    if holder is not None:
-        epoch = max(now.epoch.epoch if now.epoch else 0,
-                    vipnode.current(here, vip).epoch) + 1
+    if holder is not None and not same_key(holder.holder, own):
+        epoch = max(now.epoch.epoch if now.epoch else 0, holder.epoch) + 1
         if not released(here, vip, holder, epoch, gone, out):
             return exits.MESH_REFUSED
         out("waiting for the primary's lease to go"
             f" (at most {GONE_WAIT:g} s)…")
-        now = gone_key(here, vip, GONE_WAIT)
+        now = gone_lease(here, vip, holder.lease, GONE_WAIT)
         if now is None:
             out("the primary's lease is still alive: nothing was claimed."
                 " keel never revokes another node's lease")
             return exits.MESH_REFUSED
-        if now.holder is not None:
+        if now.epoch is not None and same_key(now.epoch.holder, own):
             return raced(here, vip, own, out)
     try:
         made = vipetcd.claim(
             vipetcd.local(here), here.mesh_id(), vip, now,
             vipnode.current(here, vip).epoch,
-            lambda which, epoch: vipnode.signed_claim(here, which, epoch),
-            here.monotonic)
+            lambda which, epoch, lease: vipnode.signed_claim(
+                here, which, epoch, lease), here.monotonic)
     except EtcdError as e:
         out(f"etcd did not take the claim: {e}")
         return exits.APPLY_FAILED
@@ -278,21 +297,21 @@ def promoted_etcd(here: Here, vip: str, gone: bool,
 
 def raced(here: Here, vip: str, own: str,
           out: Callable[[str], None]) -> int:
-    """The compare-and-swap lost: to this node's own controller, which
-    claims as soon as the released lease is gone, or to another node"""
+    """The compare-and-swap lost: to this node's own controller, or to
+    another node"""
     try:
         now = vipetcd.seen(vipetcd.local(here), here.mesh_id(),
                            here.err).get(vip)
     except EtcdError as e:
         out(f"etcd did not answer: {e}")
         return exits.APPLY_FAILED
-    if now is None or now.holder is None or \
-            not same_key(now.holder.holder, own):
+    if now is None or now.epoch is None or \
+            not same_key(now.epoch.holder, own):
         out("another claim came first: nothing was claimed here; keel vip"
             " status says who holds it")
         return exits.MESH_REFUSED
-    out(f"this node holds {vip} at epoch {now.holder.epoch}, claimed by its"
-        " controller once the lease was released")
+    out(f"this node holds {vip} at epoch {now.epoch.epoch}, claimed by its"
+        " controller")
     if not carried_soon(here, vip):
         out(f"keel-vip.service did not add {vip} to {here.iface()} within"
             f" {CARRY_WAIT:g} s: is it running?")

@@ -1,57 +1,63 @@
 # Copyright (c) 2026 KeelLinux maintainers
 """The VIP with etcd: the lease is the fence (decisions 0049, 0025)
 
-Two keys per VIP, under the mesh's prefix in etcd, each holding a
-signed claim (keel.mesh.vipmsg):
+A claim with etcd carries, signed into it, the ID of the lease that
+holds it. Two keys per VIP, under the mesh's prefix in etcd:
 
     /keel/<mesh id>/vip/<vip>/epoch    the newest claim, kept for good:
                                        the counter
-    /keel/<mesh id>/vip/<vip>/holder   the same claim, attached to the
-                                       holder's lease
+    /keel/<mesh id>/vip/<vip>/holder   the same claim, attached to its
+                                       lease; shown, and read by no
+                                       decision
 
-A node claims only by one transaction: the epoch key still at the
-revision it read (no claim came in between) and no holder key (no lease
-alive), then both keys written, the holder's on a new lease of TTL
-seconds, the epoch one higher than the counter's. A stale claim, made
-from a counter another claim has since moved, fails that comparison and
-is never written.
+A node claims only by one transaction: a new lease, the claim signed
+with it at the next epoch, both keys written only when the counter is
+still at the revision the node read. A stale claim, from a counter
+another write has since moved, fails that comparison and is never
+written.
 
-The controller (`Controller`) runs on every cloud advanced member, as
-the unprivileged half of keel-vip.service (keel.mesh.vipbridge): it
-faces etcd and the overlay, and asks the root half (`Ops`) for every
-change of the machine, which checks it against the pair record:
+etcd's access control is not enabled (docs/vip.md says why), so any
+member can write or delete these keys, or revoke a lease by its ID.
+What a member outside the pair can do is therefore bounded by what each
+node checks, not by etcd, as defence in depth until etcd's users can be
+made to mean something:
 
-- **the holder renews its lease** every RENEW seconds, and **carries the
-  address only while the last renewal the majority confirmed is less
-  than RELEASE_AFTER seconds old**, counted from the renewal's send on
-  CLOCK_BOOTTIME (suspend counts), in this process's memory: a
-  controller that starts, after a restart or a reboot, carries nothing
-  until it renewed the lease itself. A renewal counts once a
-  linearizable read, which needs the majority, finds the holder's key on
-  this lease with this node's claim: etcd's leader renews leases by
-  itself, so a leader cut off answers renewals until it steps down. Any
-  error of etcd is no renewal. etcd cannot expire the lease before TTL
-  seconds after that send, so a holder cut off from the majority has
-  dropped the VIP RELEASE_AFTER seconds before any other node can win
-  it. Against etcd's 5 s election timeout (keel.mesh.etcdconf): a
-  re-election in the majority takes 5 to 10 s, during which renewals
-  fail, but etcd gives every lease its TTL again on a leader change, so
-  10 s rides out one re-election without a move. A lease etcd says is
-  gone, or a holder key that is not this lease's, fences the node: it
-  never claims again by itself (0049: an old primary "must never
-  re-claim");
-- **every node follows the keys**: a newer claim is taken as one from
-  the members' channel is (keel.mesh.vipnode.take), so the VIP is routed
-  to its holder on every member;
-- **the other node of the pair claims when no valid holder key is
-  left**, the lease expired, once it has taken the counter's claim and
-  is not fenced (0020's automatic failover, which etcd's three voters
-  make possible). A holder key whose value is not a valid claim counts
-  as none: the transaction compares its revision, so a key written by
-  anything else neither holds the VIP nor blocks the failover;
+- no node takes a claim it cannot verify (signed by a member of the
+  pair record, newer than what it holds): an old or forged value is
+  ignored, wherever it is written;
+- **the holder decides only by its own lease**: it renews it every
+  RENEW seconds, and carries the address only while the last renewal
+  the majority confirmed is less than RELEASE_AFTER seconds old,
+  counted from the renewal's send on CLOCK_BOOTTIME (suspend counts),
+  in this process's memory: a controller that starts, after a restart
+  or a reboot, carries nothing until it renewed the lease itself. A
+  renewal counts once a linearizable read, which needs the majority,
+  answers after it (etcd's leader renews leases by itself, so a leader
+  cut off answers renewals until it steps down); any error of etcd is no
+  renewal. A lease etcd says is gone (expired, or revoked by anyone)
+  fences the node at that renewal: it never claims again by itself
+  (0049: an old primary "must never re-claim"). A value written to a key
+  neither fences it nor keeps it;
+- **the other node of the pair claims only once the lease of the newest
+  claim it verified is gone**, asked of etcd by the ID signed into the
+  claim (TimeToLive): never because the holder key was deleted or
+  rewritten. A lease that ends before its TTL ran out was revoked, and
+  the holder learns that only at its next renewal, so the other node
+  waits GRACE first. etcd cannot expire the lease before TTL seconds
+  after the last renewal it answered, so a holder cut off from the
+  majority has dropped the VIP RELEASE_AFTER seconds before any other
+  node can win it. Against etcd's 5 s election timeout
+  (keel.mesh.etcdconf): a re-election in the majority takes 5 to 10 s,
+  during which renewals fail, but etcd gives every lease its TTL again
+  on a leader change, so 10 s rides out one re-election without a move.
+  This is 0020's automatic failover, which etcd's three voters make
+  possible;
+- every node follows the counter, and only the counter, and takes a
+  newer verified claim as one from the members' channel
+  (keel.mesh.vipnode.take), so the VIP is routed to its holder on every
+  member;
 - only the controller adds the address on a node with etcd, once its own
-  claim stands and its lease is fresh, so a VIP is never carried by a
-  node whose lease nobody renews.
+  claim stands and its lease is fresh.
 
 The new holder also announces its claim on the members' channel, for the
 nodes that are not cloud advanced (0049, third round, point 4).
@@ -78,6 +84,12 @@ RENEW = 2.0
 CALL_TIMEOUT = 2.0
 TICK = 1.0
 HOLD_TICK = 0.2
+# a lease gone this much before it was due ended early: revoked
+EARLY = 2.0
+# how long after a lease ended early the other node waits before it
+# claims: the longest a holder goes on carrying the VIP after its last
+# confirmed renewal (RELEASE_AFTER), a renewal period and a call late
+GRACE = RELEASE_AFTER + RENEW + CALL_TIMEOUT
 EPOCH, HOLDER = "epoch", "holder"
 # what a turn of the controller survives, said: a spec being edited, a
 # damaged state file, a key not readable for a moment, the root half
@@ -95,17 +107,15 @@ def key_of(mesh_id: str, vip: str, which: str) -> str:
 
 @dataclass(frozen=True)
 class Seen:
-    """One VIP's keys: the counter's claim and its revision (0 when it
-    has none); the holder's claim and lease, None when no valid one is
-    alive; and the holder key's revision, valid or not (0 when there is
-    no key)"""
+    """One VIP's keys: the counter's claim and its revision, the
+    revision whatever its value is (0 when there is no key), and the
+    holder key's claim and lease, which are shown and decide nothing"""
 
     vip: str
     epoch: Claim | None = None
     revision: int = 0
     holder: Claim | None = None
     lease: str | None = None
-    holder_revision: int = 0
 
 
 def seen(client: Client, mesh_id: str,
@@ -124,8 +134,8 @@ def seen(client: Client, mesh_id: str,
             err(f"vip: etcd's {value.key} is not a VIP's key")
             continue
         now = found.get(vip) or Seen(vip)
-        if which == HOLDER:
-            now = replace(now, holder_revision=value.mod_revision)
+        if which == EPOCH:
+            now = replace(now, revision=value.mod_revision)
         try:
             claim = vipmsg.claim_of(value.value)
             if claim.vip != vip or which not in (EPOCH, HOLDER):
@@ -150,19 +160,28 @@ def local(here: Here) -> Client:
 
 
 def claim(client: Client, mesh_id: str, vip: str, now: Seen,
-          known: int, sign: Callable[[str, int], Claim],
+          known: int, sign: Callable[[str, int, str], Claim],
           clock: Callable[[], float]) -> tuple[Claim, str, float] | None:
-    """A claim by compare-and-swap on the counter: the claim `sign`
-    makes, its lease and when the lease was asked for; None when another
-    claim came first or a valid holder key appeared. `known` is the epoch
-    this node holds. Raises EtcdError, VipError."""
+    """A claim by compare-and-swap on the counter: a new lease, the
+    claim `sign` makes with it, at the next epoch, written in one
+    transaction that holds only when the counter is still at the
+    revision read; the claim, its lease and when the lease was asked
+    for, or None when another write came first. `known` is the epoch
+    this node holds. The holder key is written beside it, for show: no
+    decision reads it. Raises EtcdError, VipError."""
     epoch = max(now.epoch.epoch if now.epoch else 0, known) + 1
-    made = sign(vip, epoch)
     asked = clock()
     lease = client.grant(TTL)
+    try:
+        made = sign(vip, epoch, lease)
+    except VipError:
+        try:
+            client.revoke(lease)
+        except EtcdError:
+            pass
+        raise
     ok = client.swap(
-        [modified(key_of(mesh_id, vip, EPOCH), now.revision),
-         modified(key_of(mesh_id, vip, HOLDER), now.holder_revision)],
+        [modified(key_of(mesh_id, vip, EPOCH), now.revision)],
         [(key_of(mesh_id, vip, EPOCH), made.raw, None),
          (key_of(mesh_id, vip, HOLDER), made.raw, lease)])
     if not ok:
@@ -229,14 +248,15 @@ class Ops:
         vipnode.take(self.here, found)
         return None
 
-    def sign(self, vip: str, epoch: int) -> Claim:
-        """This node's claim of its own VIP, above every epoch it knows"""
+    def sign(self, vip: str, epoch: int, lease: str | None = None) -> Claim:
+        """This node's claim of its own VIP, above every epoch it knows,
+        with the lease that will hold it"""
         if vip != self.facts().vip:
             raise VipError(f"{vip} is not this node's appliance.vip")
         held = vipnode.current(self.here, vip)
         if not held.epoch < epoch <= held.epoch + vipnode.MAX_STEP:
             raise VipError(f"epoch {epoch} is not above {held.epoch}")
-        return vipnode.signed_claim(self.here, vip, epoch)
+        return vipnode.signed_claim(self.here, vip, epoch, lease)
 
     def hold(self, raw: bytes, lease: str) -> None:
         """This node's own claim, as etcd took it, recorded with its lease"""
@@ -285,6 +305,10 @@ class Controller:
         self.exchange = exchange
         self.renewed: dict[str, float] = {}
         self.tried: dict[str, float] = {}
+        # when each lease seen alive was due to expire, and when each
+        # was first seen gone, on this process's clock
+        self.alive: dict[str, float] = {}
+        self.gone: dict[str, float] = {}
 
     def own(self, facts: Facts) -> list[Held]:
         """The VIPs this node holds by its own claim on a lease"""
@@ -315,18 +339,15 @@ class Controller:
 
     def renew(self, facts: Facts, held: Held, sent: float) -> bool:
         """One renewal; False when the lease is gone and the VIP was
-        dropped. It counts once a linearizable read finds the holder's
-        key on this lease, with this node's claim; any error of etcd is
-        no renewal."""
+        dropped. It counts once a linearizable read, which needs the
+        majority, answers after it; any error of etcd is no renewal.
+        What the keys hold decides nothing here: only this node's lease,
+        which no write to a key can bring back or take away."""
         try:
             client = self.client()
             ttl = client.keepalive(held.lease)
             if ttl > 0:
-                key = key_of(facts.mesh_id, held.vip, HOLDER)
-                found = client.prefix(key)
-                if not any(one.key == key and one.lease == held.lease and
-                           one.value == held.claim.raw for one in found):
-                    ttl = 0
+                client.prefix(key_of(facts.mesh_id, held.vip, EPOCH))
         except EtcdError:
             return True
         if ttl <= 0:
@@ -344,28 +365,55 @@ class Controller:
             keys = seen(client, facts.mesh_id, self.err)
         except EtcdError:
             return
+        # the counter alone: the holder key is shown, and decides nothing
         for now in keys.values():
-            for one in (now.epoch, now.holder):
-                if one is None:
-                    continue
-                problem = self.ops.take(one.raw)
-                if problem:
-                    self.err(f"vip {now.vip}: etcd's claim refused:"
-                             f" {problem}")
+            if now.epoch is None:
+                continue
+            problem = self.ops.take(now.epoch.raw)
+            if problem:
+                self.err(f"vip {now.vip}: etcd's claim refused: {problem}")
         self.fail_over(facts, client, keys)
 
     def fail_over(self, facts: Facts, client: Client,
                   keys: dict[str, Seen]) -> None:
-        """Claim this node's VIP when no valid holder key is left"""
+        """Claim this node's VIP once the lease of the newest claim this
+        node verified has expired
+
+        The newest claim is this node's own record of it, never what the
+        holder key says; its lease is the one signed into it, asked of
+        etcd by its ID. A lease that ends before its TTL ran out was
+        revoked: the holder learns it only at its next renewal, so this
+        node waits GRACE first, the longest a holder can go on carrying
+        the VIP after its last renewal the majority confirmed."""
         vip = facts.vip
-        now = keys.get(vip) if vip else None
-        if now is None or now.holder is not None or now.epoch is None:
-            return
         held = next((one for one in self.ops.held() if one.vip == vip),
-                    None)
-        if held is None or held.fenced or held.epoch < now.epoch.epoch or \
-                same_key(now.epoch.holder, facts.own_key):
+                    None) if vip else None
+        if held is None or held.fenced or held.claim is None or \
+                same_key(held.claim.holder, facts.own_key) or \
+                held.claim.lease is None:
             return
+        now = keys.get(vip) or Seen(vip)
+        if now.epoch is not None and now.epoch.epoch > held.epoch:
+            return
+        lease = held.claim.lease
+        try:
+            ttl = client.time_to_live(lease)
+        except EtcdError:
+            return
+        moment = self.clock()
+        if ttl > 0:
+            self.alive[lease] = moment + ttl
+            return
+        expected = self.alive.get(lease)
+        if expected is None or moment < expected - EARLY:
+            first = self.gone.setdefault(lease, moment)
+            if moment - first < GRACE:
+                return
+        self.claimed(facts, client, now, held)
+
+    def claimed(self, facts: Facts, client: Client, now: Seen,
+                held: Held) -> None:
+        vip = held.vip
         try:
             made = claim(client, facts.mesh_id, vip, now, held.epoch,
                          self.ops.sign, self.clock)
@@ -378,7 +426,7 @@ class Controller:
         self.renewed[vip] = made[2]
         self.tried[vip] = made[2]
         self.err(f"vip {vip}: claimed at epoch {made[0].epoch}: the"
-                 " holder's lease expired")
+                 f" lease of epoch {held.epoch} is gone")
         threading.Thread(target=self.announce, args=(facts, made[0]),
                          daemon=True).start()
 

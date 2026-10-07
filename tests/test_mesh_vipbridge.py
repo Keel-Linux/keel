@@ -9,6 +9,7 @@ import socket
 import tempfile
 import threading
 import time
+import unittest
 from datetime import datetime, timezone
 from unittest import mock
 
@@ -177,14 +178,14 @@ class TestServeAndControl(Pair):
         self.assertIn("without capabilities", said[0])
         with open(status, "w") as fob:
             fob.write("CapEff:\t0000000000000000\n")
-        with mock.patch.object(bridge, "helper", return_value=None):
+        with mock.patch.object(vipbridge, "listened", return_value=None):
             self.assertEqual(vipbridge.control(self.path, said.append,
                                                status), exits.APPLY_FAILED)
         self.assertIn("no root helper", said[-1])
         ours, theirs = socket.socketpair()
         theirs.sendall(b"not json\n")
         theirs.close()
-        with mock.patch.object(bridge, "helper", return_value=ours):
+        with mock.patch.object(vipbridge, "listened", return_value=ours):
             self.assertEqual(vipbridge.control(self.path, said.append,
                                                status), exits.APPLY_FAILED)
         self.assertIn("nothing the controller can use", said[-1])
@@ -212,7 +213,7 @@ class TestServeAndControl(Pair):
         server = threading.Thread(target=root_side)
         server.start()
         said: list[str] = []
-        with mock.patch.object(bridge, "helper", return_value=ours), \
+        with mock.patch.object(vipbridge, "listened", return_value=ours), \
                 mock.patch.object(vipetcd, "TICK", 0.05), \
                 mock.patch.object(vipetcd, "HOLD_TICK", 0.05):
             self.assertEqual(vipbridge.control(self.path, said.append,
@@ -226,28 +227,87 @@ class TestTheUnit(Pair):
     def test_the_controller_s_unit(self):
         run = Recorder()
         with mock.patch.dict(os.environ, {"PYTHONPATH": "/opt/keel"}):
-            found = vipbridge.start_unit("/run/keel/vip-control/bridge.sock",
-                                         run, lambda argv: "")
+            found = vipbridge.start_unit("@keel-vip-control", run,
+                                         lambda argv: "")
         argv = run.calls[-1]
         self.assertEqual(run.calls[0], ("systemctl", "stop", vipbridge.UNIT))
         for one in ("--property=DynamicUser=yes",
                     "--property=CapabilityBoundingSet=",
-                    "--property=RuntimeDirectory=keel/vip-control",
                     f"--property=NetworkNamespacePath=/proc/{os.getpid()}"
                     "/ns/net", "--setenv=PYTHONPATH=/opt/keel"):
             self.assertIn(one, argv)
-        self.assertEqual(argv[-3:], ("vip", "control",
-                                     "/run/keel/vip-control/bridge.sock"))
+        self.assertEqual(argv[-3:], ("vip", "control", "@keel-vip-control"))
         self.assertEqual(found.name, vipbridge.UNIT)
         failing = Recorder()
         with self.assertRaises(BridgeError):
             vipbridge.start_unit("/x", lambda argv: failing(argv) or (
                 "no" if argv[0] == "systemd-run" else None),
                 lambda argv: "")
-        self.assertEqual(vipbridge.socket_path("/"),
-                         "/run/keel/vip-control/bridge.sock")
-        unit, runtime = vipbridge.names("/r")
+        self.assertEqual(vipbridge.socket_path("/"), "@keel-vip-control")
+        unit, name = vipbridge.names("/r")
         self.assertTrue(unit.startswith("keel-vip-control-"))
-        self.assertEqual(vipbridge.socket_path("/r"),
-                         f"/run/{runtime}/bridge.sock")
+        self.assertEqual(vipbridge.socket_path("/r"), name)
+        self.assertEqual(vipbridge.address_of("@x"), "\0x")
+        self.assertEqual(vipbridge.address_of("/x"), "/x")
         self.assertIsNotNone(vipnode.boottime())
+
+
+class TestTheAbstractSocket(unittest.TestCase):
+    def test_the_controller_takes_root_or_itself_and_none_else(self):
+        name = f"@keel-vip-test-{os.getpid()}-{time.monotonic_ns()}"
+        got = {}
+
+        def controller():
+            got["conn"] = vipbridge.listened(name, os.getuid(), wait=5)
+        thread = threading.Thread(target=controller)
+        thread.start()
+        for _ in range(100):
+            try:
+                client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                client.connect(vipbridge.address_of(name))
+                break
+            except OSError:
+                client.close()
+                time.sleep(0.02)
+        thread.join(10)
+        self.assertIsNotNone(got["conn"])
+        got["conn"].close()
+        client.close()
+        self.assertIsNone(vipbridge.listened(name + "-none", os.getuid(),
+                                             wait=0.1))
+
+    def test_a_stranger_is_dropped(self):
+        name = f"@keel-vip-test-{os.getpid()}-{time.monotonic_ns()}"
+        got = {}
+
+        def controller():
+            got["conn"] = vipbridge.listened(name, os.getuid() + 12345,
+                                             wait=1)
+        thread = threading.Thread(target=controller)
+        thread.start()
+        time.sleep(0.2)
+        if os.getuid() != 0:
+            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            client.connect(vipbridge.address_of(name))
+            client.close()
+        thread.join(10)
+        self.assertIsNone(got["conn"])
+
+
+class TestNoNewPrivileges(unittest.TestCase):
+    def test_set_when_the_unit_did_not(self):
+        scratch = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, scratch)
+        status = os.path.join(scratch, "status")
+        said: list[str] = []
+        with open(status, "w") as fob:
+            fob.write("NoNewPrivs:\t1\n")
+        self.assertTrue(vipbridge.no_new_privileges(said.append, status))
+        self.assertEqual(said, [])
+        with open(status, "w") as fob:
+            fob.write("NoNewPrivs:\t0\n")
+        asked = []
+        self.assertTrue(vipbridge.no_new_privileges(
+            said.append, status, lambda *args: asked.append(args) or 0))
+        self.assertEqual(asked, [(38, 1, 0, 0, 0)])
+        self.assertIn("NoNewPrivs 0", said[0])

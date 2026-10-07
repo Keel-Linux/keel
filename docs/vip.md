@@ -108,8 +108,11 @@ record:
    revokes another node's lease** (third round, point 5);
 3. it claims at the next epoch. Before etcd, the claim is announced to
    every peer, and **this node carries the VIP only when a majority of
-   the peers that answered took it**; with none answering, or a
-   majority refusing, it exits non-zero and does not carry it. With
+   the peers that answered took it**; with a majority refusing, or none
+   answering without `--old-primary-gone`, it exits non-zero and does
+   not carry it. With `--old-primary-gone` and no peer answering (a mesh
+   of the two nodes alone, the other one gone), the operator's flag is
+   the acceptance. With
    etcd, the claim is the counter's compare-and-swap, and the controller
    adds the address once it renewed the claim's lease;
 4. each peer routes the VIP with one `wg set`; one that did not answer
@@ -122,29 +125,46 @@ replica is the database's part of 0049, not yet built.
 
 ## With etcd: the lease is the fence
 
-Two keys per VIP in etcd, each a signed claim:
+A claim with etcd carries, signed into it, the ID of the lease that
+holds it. Two keys per VIP:
 
 | Key | What it holds |
 | --- | --- |
 | `/keel/<mesh id>/vip/<vip>/epoch` | the newest claim, kept for good: the counter |
-| `/keel/<mesh id>/vip/<vip>/holder` | the same claim, attached to the holder's lease |
+| `/keel/<mesh id>/vip/<vip>/holder` | the same claim, attached to its lease; shown, and read by no decision |
 
-A node claims only by one transaction: the epoch key still at the
-revision it read and the holder key still at its revision (none, or one
-that holds no valid claim), then both written, the holder's on a new
-lease. A stale claim, from a counter another claim has moved since,
-fails that comparison and is never written. Every node takes from etcd
-only claims it verifies as above; a value that is no valid claim neither
-holds the VIP nor blocks a failover. The VIP's address is under its
-region's /112 (0051), so the keys need no region of their own.
+A node claims only by one transaction: a new lease, the claim signed
+with it at the next epoch, both keys written only when the counter is
+still at the revision the node read. A stale claim, from a counter
+another write has moved since, fails that comparison and is never
+written. Every node takes from etcd only counter values it verifies as
+above. The VIP's address is under its region's /112 (0051), so the keys
+need no region of their own.
 
-**etcd has no access control here.** Each member issues its own client
+**etcd has no access control here, and what follows is defence in
+depth until it can have one.** Each member issues its own client
 certificates with its own intermediate CA (0048, third round, point 1),
 and etcd takes a client certificate's CN as its user: any member could
 issue itself a certificate in any user's name, so etcd's RBAC would
-stop no member. The keys are guarded by the signed claims every node
-checks. Making etcd's users mean something needs a change to who issues
-client certificates, which is the maintainer's decision.
+stop no member. Whether the root CA should issue every client
+certificate, which would make RBAC meaningful, is the maintainer's
+decision. Until then any member can write or delete these keys and
+revoke a lease by its ID, so no decision rests on a key's value alone:
+
+- **the holder decides only by its own lease.** A value written to the
+  holder key, or the key deleted, neither fences it nor keeps it. A
+  lease etcd says is gone, expired or revoked by anyone, fences it at
+  its next renewal, two seconds at most;
+- **the other node of the pair claims only once the lease of the newest
+  claim it verified is gone**, asked of etcd by the ID signed into that
+  claim (TimeToLive), never because the holder key was deleted or
+  rewritten. A lease that ends before its TTL ran out was revoked, and
+  the holder learns that only at its next renewal, or, cut off, at its
+  release time, so the other node waits a grace of 14 s (the release
+  time, a renewal period and a call) after it saw the lease gone early.
+  No double holder follows, and no outage longer than the TTL;
+- a counter value that is no valid claim, or an older one, is ignored,
+  and a claim's transaction replaces it.
 
 keel-vip.service runs on every cloud advanced member of a formed
 cluster, split as keel#75 splits an invite:
@@ -154,10 +174,13 @@ cluster, split as keel#75 splits an invite:
   adds or removes the address and sets a peer's allowed-ips, each
   checked against the pair record. It starts the controller as the
   transient unit `keel-vip-control`, with a dynamic user, no capability
-  and the listener's sandbox, in its own network namespace, checks its
-  peer with SO_PEERCRED against the unit's MainPID over a 0600 socket in
-  a 0700 runtime directory, and hands it etcd's root certificate and
-  this member's client certificate and key as memfds;
+  and the listener's sandbox, in its own network namespace. They meet on
+  an abstract unix socket of that namespace, which has no file mode:
+  each end checks the other by SO_PEERCRED, the helper against the
+  controller's unit's MainPID, the controller for root. The helper hands
+  it etcd's root certificate and this member's client certificate and
+  key as memfds, and sets no-new-privileges on itself when its unit did
+  not;
 - **the controller**, `keel vip control`, which faces etcd and the
   overlay and asks the helper for every change:
   - **the holder renews its lease every 2 s, and carries the address
@@ -166,16 +189,14 @@ cluster, split as keel#75 splits an invite:
     counts), kept in the controller's memory alone: a controller that
     starts, after a restart or a reboot, carries nothing until it renewed
     the lease itself. A renewal counts once a linearizable read, which
-    needs the majority, finds the holder's key on this lease with this
-    node's claim; any error of etcd is no renewal. A lease etcd says is
-    gone, or a holder key that is not this lease's, fences the node;
-  - every node follows the keys and takes a newer claim as from the
+    needs the majority, answers after it; any error of etcd is no
+    renewal;
+  - every node follows the counter and takes a newer claim as from the
     channel;
-  - the other node of the pair **claims once no valid holder key is
-    left** (the lease expired), when it has taken the counter's claim and
-    is not fenced: 0020's automatic failover, which etcd's three voters
-    make possible. It announces the claim on the channel for the nodes
-    that are not cloud advanced (third round, point 4).
+  - the other node of the pair claims as above: 0020's automatic
+    failover, which etcd's three voters make possible. It announces the
+    claim on the channel for the nodes that are not cloud advanced
+    (third round, point 4).
 
 `--stopped`, the unit's `ExecStopPost`, drops every VIP the node carries,
 so a helper that died never leaves an unrenewed one behind it, and the
@@ -222,16 +243,22 @@ and the peers without the VIP.
 - promote, release, the announcement, the check and the channel's
   refusals, before etcd, with a pair and a third node in one process
   (`tests/test_mesh_vipmove.py`, `tests/vip_helpers.py`);
-- the counter's compare-and-swap, a holder key that is no claim, the
-  root half's checks, the controller's renewal, carry, following and
-  failover, a holder restarted or rebooted with its state, an error of
-  etcd, and promote through etcd, on a fake etcd
+- the counter's compare-and-swap, the lease signed into a claim, a
+  counter value that is no claim, the root half's checks, the
+  controller's renewal, carry, following and failover, a holder
+  restarted or rebooted with its state, an error of etcd, a member
+  outside the pair putting an old claim or the current one without its
+  lease under the holder key, deleting it, putting an old claim under
+  the counter, and revoking the holder's lease (with the holder cut off
+  too), and promote through etcd, on a fake etcd with a clock
   (`tests/test_mesh_vipetcd.py`), the client's lease and transaction
   calls against a fake gateway over real TLS
   (`tests/test_mesh_etcdclient.py`);
-- the helper and the controller over their socket, the credentials as
-  memfds, a controller with capabilities refused, and the controller's
-  unit (`tests/test_mesh_vipbridge.py`);
+- the helper and the controller over their socket, the abstract socket
+  and its credentials check, the credentials as memfds, a controller
+  with capabilities refused, no-new-privileges, and the controller's
+  unit (`tests/test_mesh_vipbridge.py`); a two-node mesh promoted with
+  `--old-primary-gone` (`tests/test_mesh_vippair.py`);
 - the wiring: the channel, the commands, `keel database promote`, the
   spec, inspect and apply's rendering (`tests/test_mesh_vipwiring.py`,
   `tests/test_mesh_vipedges.py`);
@@ -251,5 +278,9 @@ and the peers without the VIP.
   release time and A claims it once B's lease expired; (d) healed, B
   never carries it again; (e) B's claim at its old epoch is refused by C
   on the channel and by etcd's compare; (f) B promoted again, C made
-  etcd's leader, and B, a follower, cut off: the same. At no sample do
+  etcd's leader, and B, a follower, cut off: the same; (g) B promoted
+  again, C, outside the pair, writes the old claim and the current one
+  without its lease under the holder key and deletes it (nothing moves),
+  then revokes B's lease: B drops the VIP at its next renewal, A claims
+  it after its grace. At no sample do
   two nodes carry it. In CI, `vip / trixie`, with systemd booted.

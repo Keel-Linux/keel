@@ -41,7 +41,12 @@ ms.
    again, sent to C over the members' channel (409), and written to
    etcd against the counter's old revision (the compare fails);
 6. **(f)** the follower case: B promoted again by hand, C made etcd's
-   leader, and B, the primary and a follower, cut off; A claims.
+   leader, and B, the primary and a follower, cut off; A claims;
+7. **(g)** C, a trusted member outside the pair, without RBAC to stop
+   it: an old claim and the current one without its lease written under
+   the holder key, then the key deleted, move nothing; B's lease revoked
+   makes B drop the VIP at its next renewal and A claim it after its
+   grace, never both at once.
 
 At no sample may two nodes carry the VIP. The result is one JSON line,
 `RESULT {...}`.
@@ -108,6 +113,8 @@ ROOTS: list[str] = []
 # The controller's unit has PrivateTmp, so its copy is under /run, which
 # a private /tmp and /var/tmp do not hide
 RUN_BASE = "/run/keel-vip-test"
+# /run is mounted noexec: the helper's copy of wg is under /var/lib
+TOOLS = "/var/lib/keel-vip-test/bin"
 LISTENER_HOME = os.environ.get("KEEL_VIP_LISTENER_HOME") or ""
 
 
@@ -314,6 +321,12 @@ def driver() -> None:
         for name in files:
             os.chmod(os.path.join(where, name), 0o644)
     os.environ["KEEL_VIP_LISTENER_HOME"] = LISTENER_HOME
+    # wg, where the helper, root without CAP_DAC_OVERRIDE, can reach it
+    # (a checkout's tool directory may be in a home it cannot traverse)
+    os.makedirs(TOOLS, mode=0o755, exist_ok=True)
+    found = shutil.which("wg")
+    if found:
+        shutil.copy(found, os.path.join(TOOLS, "wg"))
     pids = [child(index) for index in range(len(NAMES))]
     roots = [tempfile.mkdtemp(prefix=f"keel-vip-{name}-") for name in NAMES]
     pairs = keys()
@@ -395,7 +408,7 @@ def driver() -> None:
 # host's temporary directory, which it would hide; each helper's
 # temporary files (openssl's) go under its root instead
 HELPER_PROPERTIES = (
-    "CapabilityBoundingSet=CAP_NET_ADMIN CAP_DAC_OVERRIDE",
+    "CapabilityBoundingSet=CAP_NET_ADMIN",
     "NoNewPrivileges=yes",
     "PrivateDevices=yes",
     "ProtectSystem=strict",
@@ -425,7 +438,7 @@ def tended(index: int, pid: int, root: str, spec: str) -> None:
        f"--property=ReadWritePaths={root}",
        *(f"--property={one}" for one in HELPER_PROPERTIES),
        f"--setenv=PYTHONPATH={LISTENER_HOME}",
-       f"--setenv=PATH={os.environ.get('PATH', '')}",
+       f"--setenv=PATH={TOOLS}:{os.environ.get('PATH', '')}",
        sys.executable, "-m", "keel", "vip", "tend", "--root", root,
        "--spec", spec)
 
@@ -460,7 +473,15 @@ def wait_for_hardening(roots: list[str]) -> dict:
         helper = f"keel-vip-test-{NAMES[index]}"
         found[NAMES[index]] = {
             "helper": status_of(main_pid(helper)),
-            "controller": status_of(main_pid(control))}
+            "controller": status_of(main_pid(control)),
+            # what systemd says it set, and what the helper said of
+            # itself at its start (keel.mesh.vipbridge.no_new_privileges)
+            "helper_unit": sh("systemctl", "show", "--property",
+                              "NoNewPrivileges,SystemCallFilter",
+                              "--value", helper).split()[:1],
+            "helper_said": [line for line in sh(
+                "journalctl", "--no-pager", "-o", "cat", "-u",
+                helper).splitlines() if "NoNewPrivs" in line][:2]}
     return found
 
 
@@ -554,6 +575,9 @@ def scenario(report: dict, pids: list[int], pairs, roots: list[str],
     report["a_answers"] = len(answers(log))
     report["a_holder"] = [n for n, p in zip(NAMES, pids) if holds(p)]
 
+    # C keeps the claim of epoch 1, for (g)
+    report["remembered"] = agent_send("C", "remember")
+
     # (b) planned: B promotes, A releases first
     moved_at = time.time()
     report["b"] = agent_send("B", "promote")
@@ -592,6 +616,30 @@ def scenario(report: dict, pids: list[int], pairs, roots: list[str],
     partition(report, "f", pids, roots, samples, 1, 0, log, key)
     heal(pids, 1)
     time.sleep(10)
+
+    # (g) C, a trusted member outside the pair, attacks etcd's keys. B
+    # promoted again by hand (A releases); then C writes the old claim of
+    # epoch 1 and the current claim without its lease under the holder
+    # key, and deletes it: nothing moves for 25 s. Then C revokes B's
+    # lease: B drops the VIP at its next renewal, and A claims only after
+    # its grace, never while B carries it
+    report["g_promote_b"] = agent_send("B", "promote")
+    wait_until(lambda: holds(b_pid), 60)
+    time.sleep(5)
+    keys_at = time.time()
+    report["g_keys"] = agent_send("C", "attack-keys")
+    time.sleep(25)
+    report["g_holders_after_keys"] = sorted({
+        tuple(one["holders"]) for one in samples if one["t"] >= keys_at})
+    revoked_at = time.time()
+    report["g_revoke"] = agent_send("C", "attack-revoke")
+    report["g_a_claimed_s"] = wait_until(lambda: holds(a_pid), 60)
+    time.sleep(3)
+    report["g_b_dropped_s"] = first(samples, revoked_at,
+                                    lambda h: "B" not in h)
+    report["g_a_carried_s"] = first(samples, revoked_at,
+                                    lambda h: "A" in h)
+    report["g_holder"] = [n for n, p in zip(NAMES, pids) if holds(p)]
     report["a_status"] = agent_send("A", "status")
     for process in AGENTS.values():
         try:
@@ -669,7 +717,41 @@ def command(here: vipnode.Here, words: list[str]) -> dict | None:
                 "said": said}
     if words[:1] == ["stale"]:
         return stale(here)
+    if words[:1] == ["remember"]:
+        now = vipetcd.seen(vipetcd.local(here), here.mesh_id()).get(VIP)
+        REMEMBERED.append(now.epoch.raw)
+        return {"epoch": now.epoch.epoch}
+    if words[:1] == ["attack-keys"]:
+        return attack_keys(here)
+    if words[:1] == ["attack-revoke"]:
+        client = vipetcd.local(here)
+        now = vipetcd.seen(client, here.mesh_id()).get(VIP)
+        client.revoke(now.epoch.lease)
+        return {"revoked": now.epoch.lease, "epoch": now.epoch.epoch}
     return None
+
+
+REMEMBERED: list[bytes] = []
+
+
+def attack_keys(here: vipnode.Here) -> dict:
+    """What any member can do to etcd's keys without RBAC: the old claim
+    and the current one, without its lease, under the holder key, then
+    the key deleted"""
+    import base64
+    client = vipetcd.local(here)
+    mesh = here.mesh_id()
+    holder = vipetcd.key_of(mesh, VIP, vipetcd.HOLDER)
+    now = vipetcd.seen(client, mesh).get(VIP)
+    client.ask("/v3/kv/put", {
+        "key": base64.b64encode(holder.encode()).decode(),
+        "value": base64.b64encode(REMEMBERED[0]).decode()})
+    client.ask("/v3/kv/put", {
+        "key": base64.b64encode(holder.encode()).decode(),
+        "value": base64.b64encode(now.epoch.raw).decode()})
+    client.ask("/v3/kv/deleterange", {
+        "key": base64.b64encode(holder.encode()).decode()})
+    return {"epoch": now.epoch.epoch}
 
 
 def listening(here: vipnode.Here) -> bool:
@@ -730,5 +812,5 @@ if __name__ == "__main__":
             for one in list(AGENTS.values()) + etcd_netns.ETCDS:
                 one.wait(30)
             for root in ROOTS + ([] if os.environ.get("VIP_KEEP")
-                                 else [LISTENER_HOME]):
+                                 else [LISTENER_HOME, TOOLS]):
                 shutil.rmtree(root, ignore_errors=True)

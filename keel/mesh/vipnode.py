@@ -446,14 +446,16 @@ def newest(claims: list[Claim]) -> Claim | None:
     return found
 
 
-def signed_claim(here: Here, vip: str, epoch: int) -> Claim:
-    """This node's claim, with the pair record it keeps; VipError"""
+def signed_claim(here: Here, vip: str, epoch: int,
+                 lease: str | None = None) -> Claim:
+    """This node's claim, with the pair record it keeps and, with etcd,
+    the lease that holds it; VipError"""
     pair = kept(here, vip)
     if not pair.has(here.own_key()):
         raise VipError(f"this node is not a member of the pair of {vip}")
     try:
         return vipmsg.claim(here.root, here.mesh_id(), here.own_key(),
                             here.clock(), vip, epoch, here.own_address(),
-                            pair)
+                            pair, lease)
     except SigningError as e:
         raise VipError(str(e)) from None
