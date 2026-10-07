@@ -52,6 +52,9 @@ from keel.mesh.vip import Claim
 from keel.mesh.vipnode import Here, VipError
 from keel.network.wireguard import same_key
 
+# a promote asks this member's etcd with keel's usual timeout (10 s), not
+# the controller's short one: a member just back from a partition answers
+# once it caught up, and an operator's command can wait for it
 # how long a promote with etcd waits for the controller to carry the VIP
 CARRY_WAIT = 15.0
 # how long it waits for the old holder's key to go: a lease revoked by a
@@ -229,7 +232,7 @@ def gone_lease(here: Here, vip: str, lease: str | None,
     deadline = here.monotonic() + wait
     while True:
         try:
-            client = vipetcd.local(here)
+            client = here.local()
             now = vipetcd.seen(client, here.mesh_id(),
                                here.err).get(vip) or vipetcd.Seen(vip)
             if now.epoch is not None and same_key(now.epoch.holder, own):
@@ -248,7 +251,7 @@ def promoted_etcd(here: Here, vip: str, gone: bool,
     """With etcd: release, compare-and-swap, the controller carries"""
     own = here.own_key()
     try:
-        now = vipetcd.seen(vipetcd.local(here), here.mesh_id(),
+        now = vipetcd.seen(here.local(), here.mesh_id(),
                            here.err).get(vip) or vipetcd.Seen(vip)
     except EtcdError as e:
         out(f"etcd did not answer: {e}. With etcd, the VIP moves only"
@@ -274,7 +277,7 @@ def promoted_etcd(here: Here, vip: str, gone: bool,
             return raced(here, vip, own, out)
     try:
         made = vipetcd.claim(
-            vipetcd.local(here), here.mesh_id(), vip, now,
+            here.local(), here.mesh_id(), vip, now,
             vipnode.current(here, vip).epoch,
             lambda which, epoch, lease: vipnode.signed_claim(
                 here, which, epoch, lease), here.monotonic)
@@ -300,7 +303,7 @@ def raced(here: Here, vip: str, own: str,
     """The compare-and-swap lost: to this node's own controller, or to
     another node"""
     try:
-        now = vipetcd.seen(vipetcd.local(here), here.mesh_id(),
+        now = vipetcd.seen(here.local(), here.mesh_id(),
                            here.err).get(vip)
     except EtcdError as e:
         out(f"etcd did not answer: {e}")
