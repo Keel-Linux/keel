@@ -76,6 +76,7 @@ from keel.mesh import (
     vipnode,
     vippromote,
 )
+from keel.mesh.etcdclient import EtcdError
 from keel.mesh.etcdstate import Member
 from keel.mesh.memberlink import LinkError
 from keel.mesh.node import Node
@@ -389,7 +390,13 @@ def scenario(report: dict, pids: list[int], pairs, roots: list[str],
     report["b_downtime_s"] = gap(answers(log), moved_at - 1, time.time())
     report["b_holder"] = [n for n, p in zip(NAMES, pids) if holds(p)]
 
-    # (c) B, the primary, cut off from the majority, both ways
+    # (c) B, the primary, cut off from the majority, both ways; whether
+    # it was etcd's leader, which renews leases by itself until it steps
+    # down (the controller counts only renewals the majority confirmed)
+    latest = etcd_netns.samples(os.path.join(roots[1], "watch.jsonl"),
+                                time.time() - 10)[-1:]
+    report["c_b_was_etcd_leader"] = bool(latest) and \
+        latest[0].get("leader") == latest[0].get("id")
     leg("to2", "100%")
     sh("tc", "qdisc", "replace", "dev", "uplink", "root", "netem", "loss",
        "100%", pid=b_pid)
@@ -471,25 +478,35 @@ def agent(root: str, path: str) -> None:
         target=vipetcd.Controller(here, stop).run, daemon=True)
     controller.start()
     for line in sys.stdin:
-        words = line.split()
-        said: list[str] = []
-        if words[:1] == ["ready"]:
-            found = {"members": wait_until(lambda: listening(here), 60)}
-        elif words[:1] == ["promote"]:
-            started = time.monotonic()
-            code = vippromote.promote(here, "gone" in words, said.append)
-            found = {"code": code, "said": said,
-                     "took_s": round(time.monotonic() - started, 2)}
-        elif words[:1] == ["status"]:
-            found = {"lines": vippromote.lines(here, True)}
-        elif words[:1] == ["stale"]:
-            found = stale(here)
-        else:
+        try:
+            found = command(here, line.split())
+        except Exception as e:  # noqa: BLE001 - the driver reads why
+            import traceback
+            found = {"error": repr(e),
+                     "trace": traceback.format_exc()[-1500:]}
+        if found is None:
             break
         print("ANSWER " + json.dumps(found), flush=True)
     stop.set()
     served.set()
     vipetcd.stopped(here)
+
+
+def command(here: vipnode.Here, words: list[str]) -> dict | None:
+    """One of the driver's commands; None to quit"""
+    if words[:1] == ["ready"]:
+        return {"members": wait_until(lambda: listening(here), 60)}
+    if words[:1] == ["promote"]:
+        said: list[str] = []
+        started = time.monotonic()
+        code = vippromote.promote(here, "gone" in words, said.append)
+        return {"code": code, "said": said,
+                "took_s": round(time.monotonic() - started, 2)}
+    if words[:1] == ["status"]:
+        return {"lines": vippromote.lines(here, True)}
+    if words[:1] == ["stale"]:
+        return stale(here)
+    return None
 
 
 def listening(here: vipnode.Here) -> bool:
@@ -512,7 +529,16 @@ def stale(here: vipnode.Here) -> dict:
     except LinkError as e:
         found["channel"] = f"refused: {e}"
     client = vipetcd.local(here)
-    now = vipetcd.seen(client, here.mesh_id()).get(VIP)
+    # B's etcd member has just come back from its partition: it answers
+    # a linearizable read once it caught up with the leader
+    now = None
+    for _ in range(30):
+        try:
+            now = vipetcd.seen(client, here.mesh_id()).get(VIP)
+            break
+        except EtcdError as e:
+            found["etcd_retry"] = str(e)[:200]
+            time.sleep(1)
     found["counter_epoch"] = now.epoch.epoch if now and now.epoch else None
     revision = (now.revision if now else 1) - 1
     found["etcd_refused"] = vipetcd.stale(client, here.mesh_id(), VIP, old,

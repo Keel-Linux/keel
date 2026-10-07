@@ -21,7 +21,9 @@ runs on every cloud advanced member:
 
 - **the holder renews its lease** every RENEW seconds, and **drops the
   address when no renewal was answered for RELEASE_AFTER seconds**,
-  counted from the send of the last renewal etcd answered. etcd cannot
+  counted from the send of the last renewal etcd answered and a
+  linearizable read confirmed (the majority's word, not a cut-off
+  leader's). etcd cannot
   expire the lease before TTL seconds after that send, so a holder cut
   off from the majority has dropped the VIP RELEASE_AFTER seconds before
   any other node can win it. Against etcd's 5 s election timeout
@@ -197,9 +199,23 @@ class Controller:
     def renew(self, held: vipstate.Held, sent: float,
               base: float) -> float | None:
         """One renewal; the base the deadline counts from, None when the
-        lease is gone and the VIP was dropped"""
+        lease is gone and the VIP was dropped
+
+        A renewal counts only once a linearizable read confirms it: etcd's
+        leader renews a lease by itself, without the majority, so a
+        leader cut off answers renewals until it steps down, which can
+        take two election timeouts; it cannot answer a linearizable read,
+        which needs the majority. The read also says the holder's key is
+        still this lease's."""
         try:
-            ttl = local(self.here).keepalive(held.lease)
+            client = local(self.here)
+            ttl = client.keepalive(held.lease)
+            if ttl > 0:
+                key = key_of(self.here.mesh_id(), held.vip, HOLDER)
+                found = client.prefix(key)
+                if not any(one.key == key and one.lease == held.lease
+                           for one in found):
+                    ttl = 0
         except EtcdError:
             return base
         if ttl <= 0:

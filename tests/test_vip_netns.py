@@ -109,9 +109,11 @@ class TestTheVipOnAPoorNetwork(unittest.TestCase):
         found = self.found
         self.assertIsNotNone(found["c_b_dropped_s"], found)
         self.assertIsNotNone(found["c_a_carried_s"], found)
-        # B drops it within RELEASE_AFTER of its last renewal; while it
-        # is etcd's leader it renews until it steps down (5 s)
-        self.assertLess(found["c_b_dropped_s"], 10 + 5 + 2, found)
+        # B drops it RELEASE_AFTER after its last renewal the majority
+        # confirmed, a renewal period and a call's timeout late at most,
+        # whether or not it was etcd's leader: within the TTL
+        self.assertLess(found["c_b_dropped_s"], 10 + 2 + 2 + 1, found)
+        self.assertLess(found["c_b_dropped_s"], found["ttl_s"], found)
         # never before B dropped it: the lease outlives the release
         self.assertGreater(found["c_a_carried_s"], found["c_b_dropped_s"],
                            found)

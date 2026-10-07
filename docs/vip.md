@@ -114,7 +114,8 @@ region of their own.
 
 - **the holder renews its lease every 2 s, and drops the address when no
   renewal was answered for 10 s**, counted from the send of the last
-  renewal etcd answered, then is fenced;
+  renewal etcd answered and a linearizable read confirmed, then is
+  fenced;
 - every node follows the keys, and takes a newer claim as from the
   channel;
 - the other node of the pair **claims once the holder key is gone** (the
@@ -133,11 +134,16 @@ the majority has dropped the VIP 10 s before any other node can win it.
 Against etcd's 5 s election timeout ([docs/mesh.md](mesh.md),
 "Timeouts"): a re-election in the majority takes 5 to 10 s, during which
 renewals fail, but etcd gives every lease its full TTL again on a leader
-change, so 10 s rides out one re-election without a move. A holder that
-is etcd's leader when it is cut off renews locally until it steps down
-(an election timeout), so it drops the VIP at most 15 s after the cut;
-the new leader gives the lease its TTL and an election timeout more, so
-it expires no sooner than 30 s after the cut. A container has no watchdog (0020): the
+change, so 10 s rides out one re-election without a move. etcd's leader
+renews a lease by itself, without the majority, so a leader cut off
+would answer renewals until it steps down, up to two election timeouts:
+a renewal counts only once a linearizable read, which needs the
+majority, confirms that the holder's key is still this lease's. The cut
+off holder so drops the VIP at most 14 s after the last renewal the
+majority confirmed (one renewal period and a call's timeout late), and
+the lease expires no sooner than 20 s after it (25 s when the majority
+elects a new leader, which gives the lease an election timeout more).
+A container has no watchdog (0020): the
 guarantee rests on the controller running, which the unit restarts.
 
 ## What status, inspect and diff show

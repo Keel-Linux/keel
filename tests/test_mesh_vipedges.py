@@ -195,6 +195,8 @@ class TestPromoteEdges(Pair):
         made = vipnode.signed_claim(here, VIP, 1)
         vipnode.hold(here, made, True, "77", 1.0)
         self.kv.leases.add("77")
+        self.kv.kvs[f"/keel/{MESH_HEX}/vip/{VIP}/holder"] = (made.raw, 2,
+                                                             "77")
         controller = vipetcd.Controller(here, threading.Event())
         held = vipnode.current(here, VIP)
         with mock.patch.object(vipnode, "current",
@@ -207,6 +209,23 @@ class TestPromoteEdges(Pair):
         first(self)
         self.nets[0].addresses.clear()
         self.assertEqual(vipetcd.stopped(self.all[0]), [])
+
+    def test_a_renewal_the_majority_does_not_confirm_drops_it(self):
+        """a cut-off etcd leader renews by itself; the read it cannot
+        answer for the majority, or a holder key that is not this lease's,
+        counts as no renewal"""
+        self.with_etcd()
+        here = self.all[0]
+        made = vipnode.signed_claim(here, VIP, 1)
+        vipnode.hold(here, made, True, "77", 1.0)
+        self.kv.leases.add("77")
+        controller = vipetcd.Controller(here, threading.Event())
+        held = vipnode.current(here, VIP)
+        self.kv.kvs[f"/keel/{MESH_HEX}/vip/{VIP}/holder"] = (made.raw, 2,
+                                                             "78")
+        self.assertIsNone(controller.renew(held, 5.0, 1.0))
+        self.assertFalse(self.carried(0))
+        self.assertIn("lease is gone", self.text(0))
 
 
 class TestCliEdges(Pair):
@@ -233,3 +252,4 @@ class TestCliEdges(Pair):
             json.dump({"vip": "fd00::9", "claim": None, "fenced": False,
                        "lease": None, "renewed": None}, fob)
         self.assertEqual(vipstate.held_all(self.all[0].root), [])
+
