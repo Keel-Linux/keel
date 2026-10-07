@@ -1,0 +1,5 @@
+# Security scan baseline (keel-linux/.github, security-scan.yml): findings
+# that were read and are not a risk, one per line, the fingerprint and why.
+bandit:B310:keel/layers/source.py:e5d5aafcfd2d urlopen only for a location whose scheme is in URL_SCHEMES (http, https), never file: or custom schemes
+bandit:B108:keel/manifest/constants.py:99afdb5658fe a list of system paths never replicated, not a temporary file being created
+bandit:B506:keel/manifest/load.py:b24a7bcccad1 _Loader subclasses yaml.SafeLoader (adds a duplicate-key check), so this is a safe load

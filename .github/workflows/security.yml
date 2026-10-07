@@ -1,0 +1,19 @@
+# Security scanning (keel-linux/.github, profile/WORKFLOWS.md "Security
+# scanning"): gitleaks, bandit, semgrep and shellcheck on GitHub-hosted
+# runners, no secrets. Findings that are not a risk are listed, each with its
+# justification, in .github/security-baseline; gitleaks fixtures, if any, in
+# .github/gitleaks.toml.
+name: security
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  security:
+    uses: keel-linux/.github/.github/workflows/security-scan.yml@main
+    permissions:
+      contents: read
+      security-events: write
