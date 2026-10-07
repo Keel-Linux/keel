@@ -18,6 +18,7 @@ from vip_helpers import KEYS, MESH, VIP, Pair, address
 from keel import exits
 from keel.mesh import bridge, etcdstate, vipbridge, vipetcd, vipnode
 from keel.mesh.bridge import BridgeError
+from keel.mesh.channel import pem_fds
 from keel.mesh.vipnode import VipError
 
 NOW = datetime.now(timezone.utc)
@@ -101,6 +102,34 @@ class TestTheBridge(Pair):
             vipbridge.Remote(ours, stop).facts()
 
 
+def connect(path: str) -> socket.socket:
+    """A plain client of the helper's socket, retried until it binds"""
+    for _ in range(200):
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            client.connect(vipbridge.address_of(path))
+            return client
+        except OSError:
+            client.close()
+            time.sleep(0.02)
+    raise AssertionError(f"nothing at {path}")
+
+
+class Started:
+    """The controller's unit, as serve sees it; `trust` says which of the
+    peers that connect are its MainPID"""
+
+    def __init__(self, trust=(True,)):
+        self.trust = list(trust)
+        self.stopped = False
+
+    def trusted(self, pid, uid):
+        return self.trust.pop(0) if self.trust else True
+
+    def stop(self):
+        self.stopped = True
+
+
 class TestServeAndControl(Pair):
     def setUp(self):
         super().setUp()
@@ -108,52 +137,87 @@ class TestServeAndControl(Pair):
         here = self.all[0]
         etcdstate.make_root(here.root, MESH.hex(), address(0))
         etcdstate.leaves(here.root, address(0), NOW)
-        # a short path: a unix socket's is at most 107 bytes
-        self.run_dir = tempfile.mkdtemp(prefix="vb-", dir="/tmp")
+        self.run_dir = tempfile.mkdtemp(prefix="vb-", dir="/var/tmp")
         self.addCleanup(lambda: os.path.exists(self.run_dir) and
                         __import__("shutil").rmtree(self.run_dir))
-        self.path = os.path.join(self.run_dir, "s")
+
+    def controller(self, got: dict, where: str) -> None:
+        with connect(where) as sock:
+            message, fds, _, _ = socket.recv_fds(sock, 65536, 3)
+            got["endpoint"] = json.loads(message)["endpoint"]
+            got["fds"] = len(fds)
+            got["context"] = vipbridge.context(
+                *(f"/proc/self/fd/{one}" for one in fds))
+            for one in fds:
+                os.close(one)
+            got["facts"] = vipbridge.Remote(sock, threading.Event()).facts()
+
+    def serve(self, here, started: Started, got: dict, path=None) -> int:
+        threads = []
+
+        def start(where):
+            got["where"] = where
+            thread = threading.Thread(target=self.controller,
+                                      args=(got, where))
+            thread.start()
+            threads.append(thread)
+            return started
+        code = vipbridge.serve(here, threading.Event(), start=start,
+                               path=path)
+        for thread in threads:
+            thread.join(10)
+        return code
 
     def test_serve_hands_the_credentials_and_answers(self):
         here = self.all[0]
-        got = {}
-
-        def controller():
-            sock = bridge.helper(self.path, os.getuid())
-            with sock:
-                message, fds, _, _ = socket.recv_fds(sock, 65536, 3)
-                got["endpoint"] = json.loads(message)["endpoint"]
-                got["fds"] = len(fds)
-                got["context"] = vipbridge.context(
-                    *(f"/proc/self/fd/{one}" for one in fds))
-                for one in fds:
-                    os.close(one)
-                remote = vipbridge.Remote(sock, threading.Event())
-                got["facts"] = remote.facts()
-
-        class Started:
-            stopped = False
-
-            def trusted(self, pid, uid):
-                return True
-
-            def stop(self):
-                Started.stopped = True
-        thread = threading.Thread(target=controller)
-        thread.start()
         vipnode.hold(here, vipnode.signed_claim(here, VIP, 1), True)
         self.assertTrue(self.carried(0))
-        code = vipbridge.serve(here, threading.Event(),
-                               start=lambda where: Started(),
-                               path=self.path, sleep=time.sleep)
-        thread.join(10)
-        self.assertEqual(code, exits.OK)
+        started, got = Started(), {}
+        self.assertEqual(self.serve(here, started, got), exits.OK)
         self.assertEqual(got["fds"], 3)
         self.assertEqual(got["facts"].vip, VIP)
         self.assertIn("[::1]", got["endpoint"])
-        self.assertTrue(Started.stopped)
+        self.assertTrue(got["where"].startswith("@keel-vip-"))
+        self.assertEqual(len(got["where"]), len("@keel-vip-") + 32)
+        self.assertTrue(started.stopped)
         # whatever ends it, the VIP is dropped
         self.assertFalse(self.carried(0))
+
+    def test_the_old_fixed_name_taken_by_another_process(self):
+        """someone sits on @keel-vip-control: the helper binds its own
+        fresh name first, and the controller still reaches it"""
+        squatter = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(squatter.close)
+        squatter.bind(vipbridge.address_of(f"@{vipbridge.UNIT}"))
+        squatter.listen(1)
+        got = {}
+        self.assertEqual(self.serve(self.all[0], Started(), got), exits.OK)
+        self.assertEqual(got["facts"].vip, VIP)
+        self.assertNotEqual(got["where"], f"@{vipbridge.UNIT}")
+
+    def test_a_peer_that_is_not_the_controller_is_dropped(self):
+        here = self.all[0]
+        name = vipbridge.fresh_name()
+        got = {}
+        with vipbridge.bound(name) as server:
+            stranger = connect(name)
+            thread = threading.Thread(target=self.controller,
+                                      args=(got, name))
+            thread.start()
+            with vipbridge.accepted(server, Started((False, True)),
+                                    here.err) as conn:
+                with pem_fds(*vipbridge.credentials(here.root)) as fds:
+                    socket.send_fds(conn, [b'{"endpoint": "x"}\n'], fds)
+                data = bridge.line(conn)
+                bridge.send(conn, vipbridge.answered(vipetcd.Ops(here),
+                                                     data))
+            thread.join(10)
+            stranger.close()
+        self.assertIn("is not the controller", self.text(0))
+        self.assertEqual(got["facts"].vip, VIP)
+        with vipbridge.bound(vipbridge.fresh_name()) as server, \
+                self.assertRaises(BridgeError):
+            vipbridge.accepted(server, Started(), here.err, wait=0.1)
 
     def test_serve_without_credentials_or_a_controller(self):
         said = self.said[1]
@@ -164,7 +228,7 @@ class TestServeAndControl(Pair):
         def failing(where):
             raise BridgeError("systemd-run: no")
         self.assertEqual(vipbridge.serve(self.all[0], threading.Event(),
-                                         start=failing, path=self.path),
+                                         start=failing),
                          exits.APPLY_FAILED)
         self.assertIn("the controller stopped", self.text(0))
 
@@ -173,21 +237,23 @@ class TestServeAndControl(Pair):
         with open(status, "w") as fob:
             fob.write("CapEff:\t0000000000001000\n")
         said: list[str] = []
-        self.assertEqual(vipbridge.control(self.path, said.append, status),
+        self.assertEqual(vipbridge.control("@x", said.append, status),
                          exits.APPLY_FAILED)
         self.assertIn("without capabilities", said[0])
         with open(status, "w") as fob:
             fob.write("CapEff:\t0000000000000000\n")
-        with mock.patch.object(vipbridge, "listened", return_value=None):
-            self.assertEqual(vipbridge.control(self.path, said.append,
-                                               status), exits.APPLY_FAILED)
+        with mock.patch.object(vipbridge, "connected_to_helper",
+                               return_value=None):
+            self.assertEqual(vipbridge.control("@x", said.append, status),
+                             exits.APPLY_FAILED)
         self.assertIn("no root helper", said[-1])
         ours, theirs = socket.socketpair()
         theirs.sendall(b"not json\n")
         theirs.close()
-        with mock.patch.object(vipbridge, "listened", return_value=ours):
-            self.assertEqual(vipbridge.control(self.path, said.append,
-                                               status), exits.APPLY_FAILED)
+        with mock.patch.object(vipbridge, "connected_to_helper",
+                               return_value=ours):
+            self.assertEqual(vipbridge.control("@x", said.append, status),
+                             exits.APPLY_FAILED)
         self.assertIn("nothing the controller can use", said[-1])
 
     def test_control_runs_the_controller_until_the_root_side_goes(self):
@@ -213,11 +279,12 @@ class TestServeAndControl(Pair):
         server = threading.Thread(target=root_side)
         server.start()
         said: list[str] = []
-        with mock.patch.object(vipbridge, "listened", return_value=ours), \
+        with mock.patch.object(vipbridge, "connected_to_helper",
+                               return_value=ours), \
                 mock.patch.object(vipetcd, "TICK", 0.05), \
                 mock.patch.object(vipetcd, "HOLD_TICK", 0.05):
-            self.assertEqual(vipbridge.control(self.path, said.append,
-                                               status), exits.OK)
+            self.assertEqual(vipbridge.control("@x", said.append, status),
+                             exits.OK)
         server.join(10)
         self.assertIn("without capabilities", said[0])
         self.assertTrue(any("root side is gone" in one for one in said))
@@ -227,7 +294,7 @@ class TestTheUnit(Pair):
     def test_the_controller_s_unit(self):
         run = Recorder()
         with mock.patch.dict(os.environ, {"PYTHONPATH": "/opt/keel"}):
-            found = vipbridge.start_unit("@keel-vip-control", run,
+            found = vipbridge.start_unit("@keel-vip-ab", run,
                                          lambda argv: "")
         argv = run.calls[-1]
         self.assertEqual(run.calls[0], ("systemctl", "stop", vipbridge.UNIT))
@@ -236,62 +303,37 @@ class TestTheUnit(Pair):
                     f"--property=NetworkNamespacePath=/proc/{os.getpid()}"
                     "/ns/net", "--setenv=PYTHONPATH=/opt/keel"):
             self.assertIn(one, argv)
-        self.assertEqual(argv[-3:], ("vip", "control", "@keel-vip-control"))
+        self.assertEqual(argv[-3:], ("vip", "control", "@keel-vip-ab"))
         self.assertEqual(found.name, vipbridge.UNIT)
         failing = Recorder()
         with self.assertRaises(BridgeError):
             vipbridge.start_unit("/x", lambda argv: failing(argv) or (
                 "no" if argv[0] == "systemd-run" else None),
                 lambda argv: "")
-        self.assertEqual(vipbridge.socket_path("/"), "@keel-vip-control")
-        unit, name = vipbridge.names("/r")
-        self.assertTrue(unit.startswith("keel-vip-control-"))
-        self.assertEqual(vipbridge.socket_path("/r"), name)
+        self.assertEqual(vipbridge.unit_name("/"), vipbridge.UNIT)
+        self.assertTrue(vipbridge.unit_name("/r").startswith(
+            "keel-vip-control-"))
+        self.assertNotEqual(vipbridge.fresh_name(), vipbridge.fresh_name())
         self.assertEqual(vipbridge.address_of("@x"), "\0x")
         self.assertEqual(vipbridge.address_of("/x"), "/x")
         self.assertIsNotNone(vipnode.boottime())
 
 
-class TestTheAbstractSocket(unittest.TestCase):
-    def test_the_controller_takes_root_or_itself_and_none_else(self):
-        name = f"@keel-vip-test-{os.getpid()}-{time.monotonic_ns()}"
-        got = {}
-
-        def controller():
-            got["conn"] = vipbridge.listened(name, os.getuid(), wait=5)
-        thread = threading.Thread(target=controller)
-        thread.start()
-        for _ in range(100):
-            try:
-                client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                client.connect(vipbridge.address_of(name))
-                break
-            except OSError:
-                client.close()
-                time.sleep(0.02)
-        thread.join(10)
-        self.assertIsNotNone(got["conn"])
-        got["conn"].close()
-        client.close()
-        self.assertIsNone(vipbridge.listened(name + "-none", os.getuid(),
-                                             wait=0.1))
-
-    def test_a_stranger_is_dropped(self):
-        name = f"@keel-vip-test-{os.getpid()}-{time.monotonic_ns()}"
-        got = {}
-
-        def controller():
-            got["conn"] = vipbridge.listened(name, os.getuid() + 12345,
-                                             wait=1)
-        thread = threading.Thread(target=controller)
-        thread.start()
-        time.sleep(0.2)
-        if os.getuid() != 0:
-            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            client.connect(vipbridge.address_of(name))
-            client.close()
-        thread.join(10)
-        self.assertIsNone(got["conn"])
+class TestTheControllerSide(unittest.TestCase):
+    def test_the_controller_takes_root_alone_and_waits_for_it(self):
+        name = vipbridge.fresh_name()
+        with vipbridge.bound(name) as server:
+            found = vipbridge.connected_to_helper(name, wait=2)
+            if os.getuid() == 0:
+                self.assertIsNotNone(found)
+            else:
+                # its peer is this test, not root: refused
+                self.assertIsNone(found)
+            if found is not None:
+                found.close()
+            server.accept()[0].close()
+        self.assertIsNone(vipbridge.connected_to_helper(
+            vipbridge.fresh_name(), wait=0.1, sleep=lambda s: None))
 
 
 class TestNoNewPrivileges(unittest.TestCase):

@@ -29,8 +29,8 @@ keel (0.20.0) unstable; urgency=medium
     the root helper, alone changes wg0 after checking the pair record, and
     starts keel vip control, the controller facing etcd and the overlay,
     as a transient unit with a dynamic user and no capability, its socket
-    an abstract socket of their namespace, each end checked by
-    SO_PEERCRED, the client key handed as a memfd; the helper holds
+    an abstract socket of their namespace, under a fresh random name the
+    helper binds first, each end checked by SO_PEERCRED, the client key handed as a memfd; the helper holds
     CAP_NET_ADMIN alone and sets no-new-privileges on itself. The controller carries the VIP only while the
     last renewal the majority confirmed is under 10 s old, timed on
     CLOCK_BOOTTIME in memory: a restarted or rebooted holder carries
@@ -40,7 +40,10 @@ keel (0.20.0) unstable; urgency=medium
     claims only once the lease of the newest claim it verified is gone,
     by one transaction on the counter, never because the holder key was
     deleted or rewritten; a lease that ended early (revoked) is followed
-    by a grace of 14 s, so the holder has dropped the VIP first. etcd's
+    by a grace of 14 s, so the holder has dropped the VIP first, and a
+    holder whose lease was revoked while it renewed it with the majority
+    claims again at the next epoch, so revokes in a row never leave the
+    pair fenced. etcd's
     access control is not enabled: this is defence in depth until it
     can be.
   * keel vip status and keel mesh status show the role, the epoch and

@@ -153,16 +153,22 @@ revoke a lease by its ID, so no decision rests on a key's value alone:
 
 - **the holder decides only by its own lease.** A value written to the
   holder key, or the key deleted, neither fences it nor keeps it. A
-  lease etcd says is gone, expired or revoked by anyone, fences it at
-  its next renewal, two seconds at most;
+  lease etcd says is gone after the holder was cut off past its release
+  time expired: it fences the holder. One gone while the holder still
+  renewed it with the majority was revoked, by anyone: the holder drops
+  the address at that renewal (two seconds at most), lost nothing, and
+  claims again at the next epoch by the counter's transaction, which
+  serialises it with any claim of the other node. Revokes in a row
+  never leave the pair fenced;
 - **the other node of the pair claims only once the lease of the newest
   claim it verified is gone**, asked of etcd by the ID signed into that
   claim (TimeToLive), never because the holder key was deleted or
   rewritten. A lease that ends before its TTL ran out was revoked, and
   the holder learns that only at its next renewal, or, cut off, at its
   release time, so the other node waits a grace of 14 s (the release
-  time, a renewal period and a call) after it saw the lease gone early.
-  No double holder follows, and no outage longer than the TTL;
+  time, a renewal period and a call) after it saw the lease gone early,
+  and by then the holder, connected, has usually claimed again. No
+  double holder follows, and no outage longer than the TTL;
 - a counter value that is no valid claim, or an older one, is ignored,
   and a claim's transaction replaces it.
 
@@ -175,9 +181,11 @@ cluster, split as keel#75 splits an invite:
   checked against the pair record. It starts the controller as the
   transient unit `keel-vip-control`, with a dynamic user, no capability
   and the listener's sandbox, in its own network namespace. They meet on
-  an abstract unix socket of that namespace, which has no file mode:
-  each end checks the other by SO_PEERCRED, the helper against the
-  controller's unit's MainPID, the controller for root. The helper hands
+  an abstract unix socket of that namespace, under a fresh name of 16
+  random bytes the helper binds before it starts the controller and
+  hands to it, so no process can take the name first: each end checks
+  the other by SO_PEERCRED, the helper against the controller's unit's
+  MainPID, the controller for root. The helper hands
   it etcd's root certificate and this member's client certificate and
   key as memfds, and sets no-new-privileges on itself when its unit did
   not;
@@ -249,13 +257,14 @@ and the peers without the VIP.
   restarted or rebooted with its state, an error of etcd, a member
   outside the pair putting an old claim or the current one without its
   lease under the holder key, deleting it, putting an old claim under
-  the counter, and revoking the holder's lease (with the holder cut off
-  too), and promote through etcd, on a fake etcd with a clock
+  the counter, and revoking the holder's lease, twice in a row and with
+  the holder cut off too, and promote through etcd, on a fake etcd with a clock
   (`tests/test_mesh_vipetcd.py`), the client's lease and transaction
   calls against a fake gateway over real TLS
   (`tests/test_mesh_etcdclient.py`);
-- the helper and the controller over their socket, the abstract socket
-  and its credentials check, the credentials as memfds, a controller
+- the helper and the controller over their socket, the fresh abstract
+  name the helper binds (the old fixed name taken by another process
+  changes nothing) and the credentials checks, the credentials as memfds, a controller
   with capabilities refused, no-new-privileges, and the controller's
   unit (`tests/test_mesh_vipbridge.py`); a two-node mesh promoted with
   `--old-primary-gone` (`tests/test_mesh_vippair.py`);
@@ -281,6 +290,7 @@ and the peers without the VIP.
   etcd's leader, and B, a follower, cut off: the same; (g) B promoted
   again, C, outside the pair, writes the old claim and the current one
   without its lease under the holder key and deletes it (nothing moves),
-  then revokes B's lease: B drops the VIP at its next renewal, A claims
-  it after its grace. At no sample do
+  then revokes the holder's lease twice in a row: each time it drops the
+  VIP at its next renewal and a node carries it again within the TTL.
+  At no sample do
   two nodes carry it. In CI, `vip / trixie`, with systemd booted.

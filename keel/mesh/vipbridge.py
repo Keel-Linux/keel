@@ -9,13 +9,14 @@
   (keel.mesh.vipetcd.Ops). It starts the controller as the transient
   unit keel-vip-control, with a dynamic user, no capability, the
   sandbox of keel.mesh.bridge.LISTENER_PROPERTIES and the helper's own
-  network namespace, connects to the abstract unix socket the controller
-  binds in that namespace, checks with SO_PEERCRED that the other end is
-  the unit's MainPID and not root (an abstract socket has no file mode:
-  the check is the credentials, as the controller's is of the helper),
-  and sends it what it needs: the facts, and etcd's root certificate,
-  this member's client certificate and its key as memfds, so the key is
-  written nowhere the controller could keep it;
+  network namespace. The helper binds a fresh abstract unix socket name
+  of that namespace (16 random bytes) before it starts the controller and
+  gives it the name, so no process can sit on it first; it takes the
+  connection only from the unit's MainPID, not root, by SO_PEERCRED, and
+  the controller takes it only from root. It sends it what it needs:
+  the facts, and etcd's root certificate, this member's client
+  certificate and its key as memfds, so the key is written nowhere the
+  controller could keep it;
 - **the controller**, `keel vip control SOCKET`, which refuses to run
   with any capability, faces etcd and the overlay (keel.mesh.vipetcd's
   Controller), and asks the root side for every change of the machine,
@@ -27,6 +28,7 @@ import binascii
 import hashlib
 import json
 import os
+import secrets
 import socket
 import ssl
 import sys
@@ -51,31 +53,27 @@ CREDENTIALS = 3
 OPS = ("facts", "held", "take", "sign", "hold", "carry", "drop", "carried")
 
 
-def names(root: str) -> tuple[str, str]:
-    """The controller's unit and its socket's abstract name:
-    keel-vip-control for the live system, and their own for another
-    root, so several nodes' helpers can run on one host (the tests)"""
+def unit_name(root: str) -> str:
+    """The controller's unit: keel-vip-control for the live system, its
+    own for another root, so several nodes' helpers can run on one host
+    (the tests)"""
     if os.path.abspath(root) == "/":
-        return UNIT, f"@{UNIT}"
+        return UNIT
     digest = hashlib.sha256(os.path.abspath(root).encode()).hexdigest()[:8]
-    return f"{UNIT}-{digest}", f"@{UNIT}-{digest}"
+    return f"{UNIT}-{digest}"
+
+
+def fresh_name() -> str:
+    """A new abstract socket name, `@keel-vip-` and 16 random bytes: the
+    helper binds it before the controller exists, so no other process can
+    have taken it first, and nobody can guess it to take it before"""
+    return f"@keel-vip-{secrets.token_hex(16)}"
 
 
 def address_of(path: str) -> str:
     """A socket's address: `@name` is the abstract `name` (a NUL first,
     which no command line can carry), anything else a file"""
     return "\0" + path[1:] if path.startswith("@") else path
-
-
-def socket_path(root: str) -> str:
-    """Where the controller listens, as `@name`: an abstract unix socket
-    of the
-    network namespace it shares with the helper. It has no file, so no
-    mode keeps anyone off it: the helper takes it only from the
-    controller's unit's MainPID, a dynamic user, by SO_PEERCRED, and the
-    controller takes only root or itself; nothing else of the machine
-    needs to reach a file the other one owns"""
-    return names(root)[1]
 
 
 def control_command(path: str) -> tuple[str, ...]:
@@ -235,37 +233,73 @@ def credentials(root: str) -> tuple[str, str, str]:
     return found[0], found[1], found[2]
 
 
+def bound(path: str) -> socket.socket:
+    """The helper's listening socket at `path`; raises OSError"""
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        server.bind(address_of(path))
+        server.listen(4)
+    except OSError:
+        server.close()
+        raise
+    return server
+
+
+def accepted(server: socket.socket, started,
+             err: Callable[[str], None],
+             wait: float = bridge.CONNECT_WAIT) -> socket.socket:
+    """The controller's connection: its peer the controller's unit's
+    MainPID, not root (SO_PEERCRED); others are dropped until it comes or
+    `wait` passes. Raises BridgeError"""
+    deadline = time.monotonic() + wait
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise BridgeError(f"the controller did not connect within"
+                              f" {wait:g} s")
+        server.settimeout(left)
+        try:
+            conn, _ = server.accept()
+        except TimeoutError:
+            continue
+        pid, uid, _ = bridge.PEERCRED.unpack(conn.getsockopt(
+            socket.SOL_SOCKET, socket.SO_PEERCRED, bridge.PEERCRED.size))
+        if started.trusted(pid, uid):
+            err(f"vip: the controller (pid {pid}, uid {uid}) runs")
+            return conn
+        err(f"vip: dropped process {pid} (uid {uid}): it is not the"
+            " controller")
+        conn.close()
+
+
 def serve(here: Here, stop: threading.Event,
           start: Callable[[str], object] | None = None,
-          path: str | None = None,
-          sleep: Callable[[float], None] = time.sleep) -> int:
+          path: str | None = None) -> int:
     """`keel vip tend`: the root helper, until `stop` or the controller
-    is gone; every VIP this node carries is dropped when it ends"""
+    is gone; every VIP this node carries is dropped when it ends. It
+    binds a fresh abstract name before it starts the controller and
+    hands the name to it, so no process can sit on the name first"""
     try:
         texts = credentials(here.root)
     except OSError as e:
         here.err(f"vip: this member holds no etcd client certificate: {e}")
         return exits.APPLY_FAILED
-    path = path or socket_path(here.root)
+    path = path or fresh_name()
     ops = Ops(here)
     code = exits.OK
     started = None
     try:
-        started = (start or (lambda where: start_unit(
-            where, here.node.run, here.node.output,
-            names(here.root)[0])))(path)
-        with bridge.connected(address_of(path), started, sleep,
-                              lambda pid, uid: (
-                here.err(f"vip: the controller (pid {pid}, uid {uid})"
-                         " runs")), lambda pid, uid: here.err(
-                f"vip: skipped process {pid} (uid {uid}) at {path}: it is"
-                " not the controller")) as conn:
-            with pem_fds(*texts) as fds:
-                socket.send_fds(conn, [json.dumps({
-                    "endpoint": etcdstate.client_url(
-                        etcdstate.LOOPBACK)}).encode() + b"\n"], fds)
-            while (data := memberd.message(conn, stop)) is not None:
-                send(conn, answered(ops, data))
+        with bound(path) as server:
+            started = (start or (lambda where: start_unit(
+                where, here.node.run, here.node.output,
+                unit_name(here.root))))(path)
+            with accepted(server, started, here.err) as conn:
+                with pem_fds(*texts) as fds:
+                    socket.send_fds(conn, [json.dumps({
+                        "endpoint": etcdstate.client_url(
+                            etcdstate.LOOPBACK)}).encode() + b"\n"], fds)
+                while (data := memberd.message(conn, stop)) is not None:
+                    send(conn, answered(ops, data))
     except (BridgeError, OSError) as e:
         here.err(f"vip: the controller stopped: {e}")
         code = exits.APPLY_FAILED
@@ -309,9 +343,9 @@ def control(path: str, err: Callable[[str], None],
         err(f"the VIP's controller runs without capabilities, and this"
             f" process has {found:#x}: refused")
         return exits.APPLY_FAILED
-    sock = listened(path, os.getuid())
+    sock = connected_to_helper(path)
     if sock is None:
-        err(f"no root helper came to {path!r} within"
+        err(f"no root helper answered at {path!r} within"
             f" {bridge.CONNECT_WAIT} s")
         return exits.APPLY_FAILED
     with sock:
@@ -336,25 +370,28 @@ def control(path: str, err: Callable[[str], None],
     return exits.OK
 
 
-def listened(path: str, own_uid: int,
-             wait: float = bridge.CONNECT_WAIT) -> socket.socket | None:
-    """The root helper's connection to the controller's socket at `path`
-    (abstract when it starts with a NUL); None when none came. A peer
-    that is neither root nor this user is dropped"""
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
-        server.bind(address_of(path))
-        server.listen(1)
-        server.settimeout(wait)
-        while True:
-            try:
-                conn, _ = server.accept()
-            except TimeoutError:
-                return None
-            _, uid, _ = bridge.PEERCRED.unpack(conn.getsockopt(
-                socket.SOL_SOCKET, socket.SO_PEERCRED, bridge.PEERCRED.size))
-            if uid in (0, own_uid):
-                return conn
+def connected_to_helper(path: str,
+                        wait: float = bridge.CONNECT_WAIT,
+                        sleep: Callable[[float], None] = time.sleep
+                        ) -> socket.socket | None:
+    """The controller's connection to the helper's socket at `path`;
+    None when none answers within `wait`, or its peer is not root"""
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline:
+        conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            conn.connect(address_of(path))
+        except OSError:
             conn.close()
+            sleep(bridge.RETRY)
+            continue
+        _, uid, _ = bridge.PEERCRED.unpack(conn.getsockopt(
+            socket.SOL_SOCKET, socket.SO_PEERCRED, bridge.PEERCRED.size))
+        if uid == 0:
+            return conn
+        conn.close()
+        return None
+    return None
 
 
 def context(ca: str, certificate: str, key: str) -> ssl.SSLContext:

@@ -34,10 +34,13 @@ made to mean something:
   renewal counts once a linearizable read, which needs the majority,
   answers after it (etcd's leader renews leases by itself, so a leader
   cut off answers renewals until it steps down); any error of etcd is no
-  renewal. A lease etcd says is gone (expired, or revoked by anyone)
-  fences the node at that renewal: it never claims again by itself
-  (0049: an old primary "must never re-claim"). A value written to a key
-  neither fences it nor keeps it;
+  renewal. A lease etcd says is gone fences the node when it expired (the
+  node was cut off past RELEASE_AFTER): it never claims again by itself
+  (0049: an old primary "must never re-claim"). One gone while the node
+  still renewed it with the majority was revoked, by anyone: the node
+  drops the address, lost nothing, and claims again at the next epoch by
+  the counter's transaction, which serialises it with any claim of the
+  other node. A value written to a key neither fences it nor keeps it;
 - **the other node of the pair claims only once the lease of the newest
   claim it verified is gone**, asked of etcd by the ID signed into the
   claim (TimeToLive): never because the holder key was deleted or
@@ -309,6 +312,8 @@ class Controller:
         # was first seen gone, on this process's clock
         self.alive: dict[str, float] = {}
         self.gone: dict[str, float] = {}
+        # this node's VIPs whose lease was revoked while it renewed it
+        self.reclaim: set[str] = set()
 
     def own(self, facts: Facts) -> list[Held]:
         """The VIPs this node holds by its own claim on a lease"""
@@ -320,6 +325,8 @@ class Controller:
         facts = self.ops.facts()
         for held in self.own(facts):
             vip = held.vip
+            if vip in self.reclaim:
+                continue
             now = self.clock()
             if now - self.tried.get(vip, float("-inf")) >= RENEW:
                 self.tried[vip] = now
@@ -351,8 +358,17 @@ class Controller:
         except EtcdError:
             return True
         if ttl <= 0:
+            base = self.renewed.pop(held.vip, None)
+            if base is not None and sent - base < RELEASE_AFTER:
+                # gone while this node renewed it with the majority: not
+                # expired, so revoked, by anyone; this node lost nothing
+                # and claims again at the next epoch, through the
+                # counter's transaction, which no other claim can share
+                self.ops.drop(held.vip, False, "its lease was revoked:"
+                              " claiming again at the next epoch")
+                self.reclaim.add(held.vip)
+                return False
             self.ops.drop(held.vip, True, "its lease is gone", held.lease)
-            self.renewed.pop(held.vip, None)
             return False
         self.renewed[held.vip] = sent
         return True
@@ -372,6 +388,7 @@ class Controller:
             problem = self.ops.take(now.epoch.raw)
             if problem:
                 self.err(f"vip {now.vip}: etcd's claim refused: {problem}")
+        self.claim_again(facts, client, keys)
         self.fail_over(facts, client, keys)
 
     def fail_over(self, facts: Facts, client: Client,
@@ -411,17 +428,36 @@ class Controller:
                 return
         self.claimed(facts, client, now, held)
 
+    def claim_again(self, facts: Facts, client: Client,
+                    keys: dict[str, Seen]) -> None:
+        """This node's VIP claimed again after its lease was revoked while
+        it renewed it: still in the pair, its own claim still the newest
+        it verified, by the counter's transaction at the next epoch, so a
+        claim of the other node can only come first, never beside it"""
+        for vip in sorted(self.reclaim):
+            held = next((one for one in self.ops.held() if one.vip == vip),
+                        None)
+            if held is None or not held.holds(facts.own_key):
+                self.reclaim.discard(vip)
+                continue
+            now = keys.get(vip) or Seen(vip)
+            if now.epoch is not None and now.epoch.epoch > held.epoch:
+                self.reclaim.discard(vip)
+                continue
+            if self.claimed(facts, client, now, held):
+                self.reclaim.discard(vip)
+
     def claimed(self, facts: Facts, client: Client, now: Seen,
-                held: Held) -> None:
+                held: Held) -> bool:
         vip = held.vip
         try:
             made = claim(client, facts.mesh_id, vip, now, held.epoch,
                          self.ops.sign, self.clock)
         except (EtcdError, VipError) as e:
             self.err(f"vip {vip}: the claim failed: {e}")
-            return
+            return False
         if made is None:
-            return
+            return False
         self.ops.hold(made[0].raw, made[1])
         self.renewed[vip] = made[2]
         self.tried[vip] = made[2]
@@ -429,6 +465,7 @@ class Controller:
                  f" lease of epoch {held.epoch} is gone")
         threading.Thread(target=self.announce, args=(facts, made[0]),
                          daemon=True).start()
+        return True
 
     def announce(self, facts: Facts, made: Claim) -> None:
         """The claim told to every peer, for those without etcd"""

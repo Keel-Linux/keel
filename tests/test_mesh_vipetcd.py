@@ -456,10 +456,21 @@ class TestTheController(WithEtcd):
         vipnode.release(self.all[0], VIP, self.kv.revoke)
         self.controllers[0].renew(vipetcd.Ops(self.all[0]).facts(), held,
                                   self.monotonic())
+        self.turn(0)
         after = vipnode.current(self.all[0], VIP)
         self.assertFalse(after.fenced)
         self.assertTrue(after.released)
-        self.assertIn("not fenced", self.text(0))
+        # it released it: it claims nothing again
+        self.assertNotIn(VIP, self.controllers[0].reclaim)
+        self.assertEqual(vipetcd.seen(self.kv, MESH_HEX)[VIP].epoch.epoch, 1)
+        # a lease gone long after its last renewal (cut off) still fences
+        self.promote(1)
+        held = vipnode.current(self.all[1], VIP)
+        self.controllers[1].renewed[VIP] = self.monotonic() - 60
+        self.kv.revoke(held.lease)
+        self.controllers[1].renew(vipetcd.Ops(self.all[1]).facts(), held,
+                                  self.monotonic())
+        self.assertTrue(vipnode.current(self.all[1], VIP).fenced)
 
 
 class TestAMemberOutsideThePair(WithEtcd):
@@ -504,26 +515,72 @@ class TestAMemberOutsideThePair(WithEtcd):
         self.assertEqual(self.both, [])
         self.assertIsNotNone(older)
 
-    def test_the_holder_s_lease_revoked(self):
-        """the holder learns it at its next renewal and fences; B waits
-        GRACE after it saw the lease gone early, and never both carry"""
-        revoked_at = self.monotonic()
-        self.kv.revoke(self.lease())
-        for _ in range(int(vipetcd.GRACE) + 10):
+    def recovered(self, revoked_at: float) -> float:
+        """The seconds until a node carries the VIP again after a revoke;
+        the holder drops it at its next renewal first"""
+        dropped = None
+        for _ in range(int(vipetcd.TTL) + 10):
             self.sleep(1.0)
             self.turn()
-            if not self.carried(0) and not hasattr(self, "dropped"):
-                self.dropped = self.monotonic() - revoked_at
-            if self.carried(1):
-                break
-        self.assertLessEqual(self.dropped, vipetcd.RENEW + 1)
-        self.assertTrue(vipnode.current(self.all[0], VIP).fenced)
-        self.assertTrue(self.carried(1))
-        claimed = self.monotonic() - revoked_at
-        self.assertGreaterEqual(claimed, vipetcd.GRACE)
-        # no outage beyond the lease's TTL
-        self.assertLessEqual(claimed - self.dropped, vipetcd.TTL)
+            if dropped is None and not self.holds():
+                dropped = self.monotonic()
+            if dropped is not None and self.holds():
+                return self.monotonic() - revoked_at
+        self.fail(f"nobody carries the VIP: {self.text(0)}\n{self.text(1)}")
+
+    def test_the_holder_s_lease_revoked(self):
+        """the holder learns it at its next renewal, drops the VIP, and,
+        having lost nothing, claims again at the next epoch; nobody stays
+        fenced and nobody carries it twice"""
+        revoked_at = self.monotonic()
+        self.kv.revoke(self.lease())
+        took = self.recovered(revoked_at)
+        self.assertLess(took, vipetcd.TTL)
+        self.assertEqual(self.holds(), [0])
+        self.assertEqual(vipnode.current(self.all[0], VIP).epoch, 2)
+        self.assertFalse(vipnode.current(self.all[0], VIP).fenced)
+        self.assertIn("claiming again", self.text(0))
         self.assertEqual(self.both, [])
+
+    def test_two_revokes_in_a_row(self):
+        for expected in (2, 3):
+            revoked_at = self.monotonic()
+            self.kv.revoke(self.lease())
+            took = self.recovered(revoked_at)
+            self.assertLess(took, vipetcd.TTL)
+            self.assertEqual(len(self.holds()), 1)
+            self.assertEqual(vipetcd.seen(self.kv, MESH_HEX)[VIP].epoch.epoch,
+                             expected)
+            self.run_for(3)
+        self.assertFalse(any(vipnode.current(one, VIP).fenced
+                             for one in self.all[:2]))
+        self.assertEqual(self.both, [])
+
+    def test_a_revoke_the_other_node_s_claim_beats(self):
+        """B claims first (A slow to retry): the counter's transaction
+        lets only one claim through, and A takes B's"""
+        self.kv.revoke(self.lease())
+        self.sleep(vipetcd.RENEW)
+        self.controllers[0].holding()
+        self.assertFalse(self.carried(0))
+        self.assertIn(VIP, self.controllers[0].reclaim)
+        # B's claim lands first
+        made = vipetcd.claim(
+            self.kv, MESH_HEX, VIP, vipetcd.seen(self.kv, MESH_HEX)[VIP], 1,
+            lambda vip, epoch, lease: vipnode.signed_claim(
+                self.all[1], vip, epoch, lease), self.monotonic)
+        vipnode.hold(self.all[1], made[0], False, made[1])
+        self.turn(0)
+        self.assertNotIn(VIP, self.controllers[0].reclaim)
+        self.assertFalse(self.carried(0))
+        self.assertEqual(vipnode.current(self.all[0], VIP).holder, KEYS[1])
+        self.assertEqual(self.both, [])
+
+    def test_a_reclaim_whose_state_moved_on(self):
+        self.controllers[0].reclaim.add(VIP)
+        vipnode.release(self.all[0], VIP, lambda lease: None)
+        self.turn(0)
+        self.assertNotIn(VIP, self.controllers[0].reclaim)
 
     def test_the_holder_s_lease_revoked_while_it_is_cut_off(self):
         """the worst case for the grace: A cannot renew and does not learn

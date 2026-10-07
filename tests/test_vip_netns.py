@@ -136,16 +136,19 @@ class TestTheVipOnAPoorNetwork(unittest.TestCase):
         self.assertNotIn("error", found["g_keys"], found)
         # the holder key written and deleted: B alone, all along
         self.assertEqual(found["g_holders_after_keys"], [["B"]], found)
-        self.assertNotIn("error", found["g_revoke"], found)
-        dropped, carried = found["g_b_dropped_s"], found["g_a_carried_s"]
-        self.assertIsNotNone(dropped, found)
-        self.assertIsNotNone(carried, found)
-        # B learns the revoke at its next renewal (2 s), a call late
-        self.assertLess(dropped, 2 + 2 + 2, found)
-        # A waits its grace after it saw the lease end early
-        self.assertGreaterEqual(carried, 14 - 1, found)
-        self.assertLess(carried - dropped, found["ttl_s"], found)
-        self.assertEqual(found["g_holder"], ["A"], found)
+        self.assertEqual(len(found["g_revokes"]), 2, found)
+        for one in found["g_revokes"]:
+            with self.subTest(revoke=one["said"].get("epoch")):
+                self.assertNotIn("error", one["said"], one)
+                # the holder learns it at its next renewal (2 s), a call
+                # late, and drops the VIP
+                self.assertIsNotNone(one["dropped_sampled_s"], one)
+                self.assertLess(one["dropped_sampled_s"], 2 + 2 + 2, one)
+                # and a node carries it again within the lease's TTL
+                self.assertIsNotNone(one["recovered_s"], one)
+                self.assertLess(one["recovered_s"], found["ttl_s"], one)
+                self.assertEqual(len(one["holder_after"]), 1, one)
+        self.assertEqual(len(found["g_holder"]), 1, found)
 
     def test_the_pair_and_the_units_hardening(self):
         found = self.found

@@ -469,7 +469,7 @@ def wait_for_hardening(roots: list[str]) -> dict:
     from keel.mesh import vipbridge
     found = {}
     for index, root in enumerate(roots):
-        control = vipbridge.names(root)[0]
+        control = vipbridge.unit_name(root)
         wait_until(lambda: main_pid(control) > 0, 60)
         helper = f"keel-vip-test-{NAMES[index]}"
         found[NAMES[index]] = {
@@ -633,9 +633,10 @@ def scenario(report: dict, pids: list[int], pairs, roots: list[str],
     # (g) C, a trusted member outside the pair, attacks etcd's keys. B
     # promoted again by hand (A releases); then C writes the old claim of
     # epoch 1 and the current claim without its lease under the holder
-    # key, and deletes it: nothing moves for 25 s. Then C revokes B's
-    # lease: B drops the VIP at its next renewal, and A claims only after
-    # its grace, never while B carries it
+    # key, and deletes it: nothing moves for 25 s. Then C revokes the
+    # holder's lease twice in a row: each time the holder drops the VIP at
+    # its next renewal and, having lost nothing, claims it again at the
+    # next epoch; nobody stays fenced, never two at once
     report["g_promote_b"] = agent_send("B", "promote")
     wait_until(lambda: holds(b_pid), 60)
     time.sleep(5)
@@ -644,14 +645,23 @@ def scenario(report: dict, pids: list[int], pairs, roots: list[str],
     time.sleep(25)
     report["g_holders_after_keys"] = sorted({
         tuple(one["holders"]) for one in samples if one["t"] >= keys_at})
-    revoked_at = time.time()
-    report["g_revoke"] = agent_send("C", "attack-revoke")
-    report["g_a_claimed_s"] = wait_until(lambda: holds(a_pid), 60)
-    time.sleep(3)
-    report["g_b_dropped_s"] = first(samples, revoked_at,
-                                    lambda h: "B" not in h)
-    report["g_a_carried_s"] = first(samples, revoked_at,
-                                    lambda h: "A" in h)
+    report["g_revokes"] = []
+    for _ in range(2):
+        revoked_at = time.time()
+        said = agent_send("C", "attack-revoke")
+        holder = said.get("holder")
+        dropped = wait_until(lambda: not any(holds(p) for p in pids[:2]),
+                             20, 0.1)
+        back = wait_until(lambda: any(holds(p) for p in pids[:2]), 40)
+        time.sleep(3)
+        report["g_revokes"].append({
+            "said": said, "dropped_s": dropped,
+            "dropped_sampled_s": first(samples, revoked_at,
+                                       lambda h: not h),
+            "recovered_s": first(samples, revoked_at + (dropped or 0),
+                                 lambda h: bool(h)),
+            "waited_back_s": back, "holder_before": holder,
+            "holder_after": [n for n, p in zip(NAMES, pids) if holds(p)]})
     report["g_holder"] = [n for n, p in zip(NAMES, pids) if holds(p)]
     report["a_status"] = agent_send("A", "status")
     for process in AGENTS.values():
@@ -740,7 +750,8 @@ def command(here: vipnode.Here, words: list[str]) -> dict | None:
         client = vipetcd.local(here)
         now = vipetcd.seen(client, here.mesh_id()).get(VIP)
         client.revoke(now.epoch.lease)
-        return {"revoked": now.epoch.lease, "epoch": now.epoch.epoch}
+        return {"revoked": now.epoch.lease, "epoch": now.epoch.epoch,
+                "holder": now.epoch.address}
     return None
 
 
