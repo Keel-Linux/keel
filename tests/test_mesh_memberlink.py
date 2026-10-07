@@ -133,12 +133,35 @@ class TestChannel(Served):
         self.assertEqual(data, b"")
         self.assertEqual(memberlink.fetch("::1", "lo", self.port), ROSTER)
 
+    def held(self) -> socket.socket | None:
+        """A connection that holds a slot: one the server keeps open
+        while its request is incomplete. setUp's readiness probe may
+        still hold a slot of its own for a moment, and a connection the
+        server refused for it is closed at once: None then"""
+        held = socket.create_connection(("::1", self.port), 5)
+        held.sendall(b"GET /v1/members HTTP/1.1\r\n")
+        held.settimeout(0.3)
+        try:
+            closed = held.recv(1) == b""
+        except TimeoutError:
+            closed = False
+        except OSError:
+            closed = True
+        if closed:
+            held.close()
+            return None
+        self.addCleanup(held.close)
+        return held
+
     def test_connections_per_source_are_capped(self):
-        for _ in range(memberlink.PER_SOURCE):
-            held = socket.create_connection(("::1", self.port), 5)
-            self.addCleanup(held.close)
-            held.sendall(b"GET /v1/members HTTP/1.1\r\n")
-        self.stop.wait(0.2)
+        kept = []
+        for _ in range(20):
+            found = self.held()
+            if found is not None:
+                kept.append(found)
+            if len(kept) == memberlink.PER_SOURCE:
+                break
+        self.assertEqual(len(kept), memberlink.PER_SOURCE)
         self.assertEqual(self.raw(b"GET /v1/members HTTP/1.1\r\n\r\n"),
                          b"")
 
