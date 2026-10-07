@@ -8,17 +8,16 @@ import shutil
 import stat
 import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from unittest import mock
+
+from pki_clock import NOW
 
 from keel.mesh import etcdpki, etcdstate
 from keel.mesh.etcdpki import PkiError
 from keel.mesh.etcdstate import Cluster, Grant, Member, StateError
 
 MESH = "ab" * 16
-# openssl dates the certificates these tests issue by the real clock,
-# and renewal is judged against NOW: they must be the same day
-NOW = datetime.now(timezone.utc).replace(microsecond=0)
 
 
 class Case(unittest.TestCase):

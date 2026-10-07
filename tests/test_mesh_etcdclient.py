@@ -10,14 +10,14 @@ import ssl
 import tempfile
 import threading
 import unittest
-from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from pki_clock import NOW
 
 from keel.mesh import etcdclient, etcdstate
 from keel.mesh.etcdclient import EtcdError
 
 MESH = "ab" * 16
-NOW = datetime(2026, 10, 4, tzinfo=timezone.utc)
 LIST = {"header": {"member_id": "11"}, "members": [
     {"ID": "11", "name": "keel-fd00--1", "peerURLs": [
         "https://[fd00::1]:2380"], "clientURLs": ["https://[fd00::1]:2379"]},
