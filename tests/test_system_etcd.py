@@ -10,9 +10,9 @@ import os
 import shutil
 import tempfile
 import unittest
-from datetime import datetime, timezone
 
 from manifest_helpers import ManifestCase
+from pki_clock import NOW
 from test_system_appliance import PlanCase, units
 
 from keel.inspect.tree import Tree
@@ -23,7 +23,6 @@ from keel.system.actions import Note, Refuse, Run, WriteFile
 from keel.system.appstate import observe_appliance
 
 MESH = "ab" * 16
-NOW = datetime(2026, 10, 4, tzinfo=timezone.utc)
 THREE = Cluster("new", tuple(Member(None, f"fd00::{n}") for n in (1, 2, 3)),
                 MESH)
 DOC = {"network": {"overlay": {"wireguard": {"address": "fd00::1/64"}}}}

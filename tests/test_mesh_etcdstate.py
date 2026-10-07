@@ -8,15 +8,16 @@ import shutil
 import stat
 import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from unittest import mock
+
+from pki_clock import NOW
 
 from keel.mesh import etcdpki, etcdstate
 from keel.mesh.etcdpki import PkiError
 from keel.mesh.etcdstate import Cluster, Grant, Member, StateError
 
 MESH = "ab" * 16
-NOW = datetime(2026, 10, 4, 12, 0, tzinfo=timezone.utc)
 
 
 class Case(unittest.TestCase):
