@@ -91,7 +91,9 @@ class TestThreeMembersOnAPoorNetwork(unittest.TestCase):
         # retransmitted round trips on top of it
         self.assertGreater(link["rtt_min_ms"], 220, link)
         self.assertLess(link["rtt_min_ms"], 280, link)
-        self.assertLess(link["rtt_ms"], 400, link)
+        # the median, not the mean: one handshake retried after a loss,
+        # or a busy runner, puts seconds into a few of the 400
+        self.assertLess(link["rtt_median_ms"], 300, link)
         # 400 round trips at 2% on each of their two legs: about 4%
         # lost, and with that many, between 0.5% and 8%
         self.assertGreater(link["loss"], 0.005, link)

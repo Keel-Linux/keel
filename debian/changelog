@@ -1,3 +1,61 @@
+keel (0.20.0) unstable; urgency=medium
+
+  * The service VIP of a replicated appliance pair on the WireGuard mesh
+    (handbook decision 0049, its third round): appliance.vip in the spec,
+    a /128 of the overlay prefix the primary carries on wg0 and every
+    other node routes to it through the primary's allowed_ips. The
+    primary is the VIP's holder; there is no role field. A move is one
+    wg set per node and the address on the holder, outside 0018's window.
+  * keel vip promote: the old primary releases the VIP before this node
+    takes it at the next epoch, and every peer is told on the members'
+    channel (POST /v1/vip, signed claims checked against the trust
+    store). It refuses while the old primary does not answer, unless
+    --old-primary-gone. keel database promote moves the VIP first.
+  * With etcd, keel vip tend (keel-vip.service of keel-overlay-vip): the
+    holder renews a lease of 20 s every 2 s and drops the VIP after 10 s
+    without a renewal; a claim is a compare-and-swap on the counter key,
+    so a stale claim is never written; the other node of the pair claims
+    once the lease expired, and a node that lost the VIP never claims it
+    again by itself. keel vip check, at boot and every minute, learns
+    newer claims from the peers and drops a VIP not held.
+  * Only the pair holds its VIP: keel vip pair records the pair, signed
+    by both members (or a trust root); every claim carries the record and
+    every claim and release is checked against it; a VIP that is a
+    member's address or outside its region's /112, and an epoch more than
+    64 above the one a node knows, are refused. A promote before etcd
+    carries the VIP only when a majority of the peers that answered took
+    its claim, or, with --old-primary-gone, when none answered. keel mesh invite never hands out a VIP.
+  * keel-vip.service is split as keel#75 splits an invite: keel vip tend,
+    the root helper, alone changes wg0 after checking the pair record, and
+    starts keel vip control, the controller facing etcd and the overlay,
+    as a transient unit with a dynamic user and no capability, its socket
+    an abstract socket of their namespace, under a fresh random name the
+    helper binds first, each end checked by SO_PEERCRED, the client key handed as a memfd; the helper holds
+    CAP_NET_ADMIN alone and sets no-new-privileges on itself. The controller carries the VIP only while the
+    last renewal the majority confirmed is under 10 s old, timed on
+    CLOCK_BOOTTIME in memory: a restarted or rebooted holder carries
+    nothing until it renewed its lease again, and any error of etcd is no
+    renewal. With etcd a claim carries, signed into it, the ID of its
+    lease: the holder decides only by its own lease, and the other node
+    claims only once the lease of the newest claim it verified is gone,
+    by one transaction on the counter, never because the holder key was
+    deleted or rewritten; a lease that ended early (revoked) is followed
+    by a grace of 14 s, so the holder has dropped the VIP first, and a
+    holder whose lease was revoked while it renewed it with the majority
+    claims again at the next epoch, so revokes in a row never leave the
+    pair fenced. etcd's
+    access control is not enabled: this is defence in depth until it
+    can be.
+  * keel vip status and keel mesh status show the role, the epoch and
+    holder, the lease, whether wg0 carries the VIP and where it is
+    routed; keel inspect reports appliance.vip and the same as machine
+    state, and reads the peers back without the VIP, so a move is never
+    drift. apply renders wg0.conf with the VIP routed to its holder.
+  * Tests: the etcd tests date their fixed clock by the real one, which
+    the certificates openssl issues carry.
+
+ -- Marcos Mendez <mendez.foto@gmail.com>  Wed, 07 Oct 2026 12:00:00 +0000
+
 keel (0.19.0) unstable; urgency=medium
 
   * etcd, the mesh's registry (handbook decisions 0025 and 0048, its

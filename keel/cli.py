@@ -29,6 +29,7 @@ from keel.layers import (
 )
 from keel.manifest import KINDS as MANIFEST_KINDS
 from keel.mesh import parser as mesh_parser
+from keel.mesh import vipcli
 from keel.monitor.channelfile import PATH as NOTIFY_SETTINGS
 from keel.monitor.notify import CHECKS as NOTIFY_CHECKS
 from keel.monitor.notify import DIRECTIONS as NOTIFY_DIRECTIONS
@@ -155,6 +156,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print what would be done and change nothing; needs no root",
     )
+    promote_parser.add_argument(
+        "--old-primary-gone",
+        action="store_true",
+        help="with appliance.vip: the old primary does not answer and you"
+        " know it is gone; the VIP moves without its release (keel vip"
+        " promote --old-primary-gone)",
+    )
     add_root_option(promote_parser, "promote")
     promote_parser.set_defaults(handler=commands.database_promote)
 
@@ -187,8 +195,10 @@ def build_parser() -> argparse.ArgumentParser:
     add_root_option(revert_parser, "revert the change of")
     revert_parser.set_defaults(handler=commands.network_revert)
     add_wireguard_parser(network_actions)
-    mesh_parser.add(subparsers, mesh_parser.Options(
-        add_common_options, add_root_option, port_number, window_seconds))
+    mesh_options = mesh_parser.Options(
+        add_common_options, add_root_option, port_number, window_seconds)
+    mesh_parser.add(subparsers, mesh_options)
+    vipcli.add(subparsers, mesh_options)
 
     # no --spec: notify reads the settings apply wrote, never the spec
     notify_parser = subparsers.add_parser(
@@ -676,7 +686,7 @@ def main(argv: list[str] | None = None) -> int:
         return exits.USAGE
     system = getattr(args, "system", False) or getattr(
         args, "system_only", False
-    ) or args.command in ("database", "mesh")
+    ) or args.command in ("database", "mesh", "vip")
     if getattr(args, "dry_run", False) and not system:
         parser.error("--dry-run requires --system or --system-only")
     if getattr(args, "defer_certificate", False) and not system:

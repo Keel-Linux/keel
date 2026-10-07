@@ -30,7 +30,10 @@ from keel.inspect.tls import probe_tls
 from keel.inspect.tree import File, Tree
 from keel.inspect.users import probe_users
 from keel.inspect.wireguard import Module, probe_overlay
+from keel.mesh import vip, vipnet
+from keel.network import live as live_system
 from keel.network import wgkeys
+from keel.network import wireguard
 from keel.network.wireguard import CONF_DIR, MODULE
 from keel.spec import SCHEMA_VERSION
 
@@ -146,8 +149,39 @@ def inspect_root(
 
     return Inspection(
         tree.root, str(appliance or "unknown appliance"), spec,
-        tuple(findings), channel,
+        tuple(findings), channel, vip_lines(tree, spec),
     )
+
+
+def vip_lines(tree: Tree, spec: dict) -> tuple[str, ...]:
+    """The VIPs this node knows, as machine state beside the spec
+    (decision 0049): the holder and epoch, whether this node is fenced,
+    and on the live system whether wg0 carries it and which peer the
+    table routes it to"""
+    overlay = ((spec.get("network") or {}).get("overlay") or {}).get(
+        "wireguard") or {}
+    iface = overlay.get("interface") or "wg0"
+    is_live = tree.root == paths.ROOT_DEFAULT
+    own_key = wgkeys.public(tree.path(
+        wireguard.key_path(overlay).lstrip("/")))[0] if overlay else None
+    declared = (spec.get("appliance") or {}).get("vip")
+    found = []
+    for held in vip.held_all(tree.root):
+        line = f"vip {held.vip}: "
+        if held.vip == declared:
+            line += f"role {vip.role(spec, held, own_key)}; "
+        line += (f"epoch {held.epoch}, held by {held.holder} at"
+                 f" {held.claim.address}" if held.claim
+                 else "no holder known")
+        if held.fenced:
+            line += "; fenced here"
+        if is_live:
+            carried = vipnet.carried(iface, held.vip, live_system.output)
+            to = vipnet.routed_to(iface, held.vip, live_system.output)
+            line += (f"; carried here: {'yes' if carried else 'no'}; routed"
+                     f" to {to or 'no peer'}")
+        found.append(line)
+    return tuple(found)
 
 
 def _add(spec: dict, key: str, section: dict | None) -> None:
@@ -159,12 +193,18 @@ def overlay_section(tree: Tree) -> tuple[dict | None, list[Finding]]:
     """The WireGuard files, the public key of the key file they name, and
     on the live system whether the kernel module is loaded"""
     live = tree.root == paths.ROOT_DEFAULT
-    return probe_overlay(
+    overlay, found = probe_overlay(
         [tree.read(name) for name in tree.glob(OVERLAY_FILES)],
         lambda key: wgkeys.public(tree.path(key.lstrip("/"))),
         Module(tree.exists(MODULE) if live else None,
                tree.exists(paths.LXC_MARKER)),
     )
+    # a VIP is routed at runtime, never declared: the peers read back
+    # are the spec's (decision 0049), so a VIP move is never drift
+    if overlay is not None:
+        overlay = {"wireguard": vip.unrouted(overlay["wireguard"],
+                                             vip.known(tree.root))}
+    return overlay, found
 
 
 def run_command(tree: Tree, argv: tuple[str, ...]) -> File:

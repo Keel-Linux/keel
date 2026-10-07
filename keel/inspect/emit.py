@@ -24,5 +24,6 @@ def to_yaml(inspection: Inspection) -> str:
 def report_lines(inspection: Inspection) -> list[str]:
     """One line per finding, then the summary"""
     lines = [finding.line() for finding in inspection.findings]
+    lines += list(inspection.vip)
     lines.append(inspection.summary())
     return lines

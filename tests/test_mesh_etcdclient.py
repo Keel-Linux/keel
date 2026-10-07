@@ -158,6 +158,59 @@ class TestStatusAndHealth(Case):
                          ("/v3/kv/put", {"key": "aw==", "value": "dg=="}))
 
 
+class TestLeasesAndTransactions(Case):
+    """What the VIP's controller asks (keel.mesh.vipetcd)"""
+
+    def test_a_lease_granted_renewed_and_revoked(self):
+        Gateway.answers["/v3/lease/grant"] = (200, {"ID": "77", "TTL": "20"})
+        Gateway.answers["/v3/lease/keepalive"] = (200, {"result": {
+            "ID": "77", "TTL": "20"}})
+        Gateway.answers["/v3/lease/revoke"] = (200, {})
+        self.assertEqual(self.client.grant(20), "77")
+        self.assertEqual(self.client.keepalive("77"), 20)
+        self.client.revoke("77")
+        Gateway.answers["/v3/lease/keepalive"] = (200, {"result": {
+            "ID": "77"}})
+        self.assertEqual(self.client.keepalive("77"), 0)
+        self.assertEqual([one[0] for one in Gateway.seen], [
+            "/v3/lease/grant", "/v3/lease/keepalive", "/v3/lease/revoke",
+            "/v3/lease/keepalive"])
+
+    def test_answers_that_are_not_etcd_s(self):
+        Gateway.answers["/v3/lease/grant"] = (200, {"TTL": "20"})
+        with self.assertRaisesRegex(EtcdError, "not etcd's"):
+            self.client.grant(20)
+        Gateway.answers["/v3/lease/keepalive"] = (200, {"error": {
+            "message": "no leader"}})
+        with self.assertRaisesRegex(EtcdError, "no leader"):
+            self.client.keepalive("77")
+        Gateway.answers["/v3/kv/range"] = (200, {"kvs": [{"value": "x"}]})
+        with self.assertRaisesRegex(EtcdError, "not etcd's"):
+            self.client.prefix("/k/")
+
+    def test_a_prefix_and_a_swap(self):
+        Gateway.answers["/v3/kv/range"] = (200, {"kvs": [
+            {"key": "L2svYQ==", "value": "b25l", "mod_revision": "4",
+             "lease": "77"}, {"key": "L2svYg==", "mod_revision": "5"}]})
+        found = self.client.prefix("/k/")
+        self.assertEqual(found, [
+            etcdclient.Value("/k/a", b"one", 4, "77"),
+            etcdclient.Value("/k/b", b"", 5, None)])
+        self.assertEqual(Gateway.seen[-1], ("/v3/kv/range", {
+            "key": "L2sv", "range_end": "L2sw"}))
+        Gateway.answers["/v3/kv/txn"] = (200, {"succeeded": True})
+        self.assertTrue(self.client.swap(
+            [etcdclient.modified("/k/a", 4), etcdclient.absent("/k/b")],
+            [("/k/a", b"two", None), ("/k/b", b"two", "77")]))
+        sent = Gateway.seen[-1][1]
+        self.assertEqual(sent["compare"][0]["mod_revision"], "4")
+        self.assertEqual(sent["compare"][1]["version"], "0")
+        self.assertEqual(sent["success"][1]["request_put"]["lease"], "77")
+        self.assertNotIn("lease", sent["success"][0]["request_put"])
+        Gateway.answers["/v3/kv/txn"] = (200, {})
+        self.assertFalse(self.client.swap([], []))
+
+
 class TestUnreachable(Case):
     def test_every_endpoint_tried_then_refused(self):
         Gateway.answers["/v3/cluster/member/list"] = (200, LIST)

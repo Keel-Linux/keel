@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from keel.inspect import constants as paths
 from keel.inspect.tree import Tree
+from keel.mesh import vip
 from keel.network import live, marker, wireguard
 from keel.network.wireguard import MODULE, WANTS
 from keel.spec.secretstore import secret_file_error
@@ -58,7 +59,7 @@ def observe_overlay(root: str, doc: dict) -> OverlayState | None:
         iface=iface,
         key_path=key,
         current=current,
-        rendered=wireguard.render(overlay),
+        rendered=wireguard.render(vip.routed_here(overlay, tree.root)),
         key_present=present,
         key_problem=(secret_file_error(key_file) if present and is_live
                      else None),

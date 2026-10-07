@@ -185,7 +185,7 @@ def measured(pid: int, address: str) -> dict:
             "-c", "10", "-i", "0.5", "-W", "3", address]
     subprocess.run(warm, capture_output=True, check=False, timeout=120)
     done = subprocess.run(
-        ["nsenter", "-t", str(pid), "-n", "ping", "-6", "-I", "wg0", "-q",
+        ["nsenter", "-t", str(pid), "-n", "ping", "-6", "-I", "wg0", "-n",
          "-c", str(PINGS), "-i", "0.1", "-W", "3", address],
         capture_output=True, text=True, check=False, timeout=600)
     found = {"said": (done.stdout + done.stderr).strip().splitlines()[-3:]}
@@ -201,6 +201,13 @@ def measured(pid: int, address: str) -> dict:
         # mean from 250 to 300 ms)
         found["rtt_min_ms"] = float(rtt.group(1))
         found["rtt_ms"] = float(rtt.group(2))
+    # the median: one WireGuard handshake lost to the 2% (a 5 s retry) or
+    # a busy runner puts seconds into a few round trips and moves the
+    # mean far more than the link
+    times = sorted(float(one) for one in re.findall(r"time=([\d.]+) ms",
+                                                    done.stdout))
+    if times:
+        found["rtt_median_ms"] = times[len(times) // 2]
     return found
 
 

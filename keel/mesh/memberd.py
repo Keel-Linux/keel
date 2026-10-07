@@ -21,11 +21,11 @@ two processes:
 The root side (`Members`) treats what the listener forwards as
 untrusted: the source must be in a spec peer's allowed_ips, an
 announcement must parse whole and name its sender's key. A message
-about etcd is answered at once by keel.mesh.etcdserve, which checks its
-signature. It answers the roster at once and queues an announcement
-(`Pending`): one per sender, the latest replacing an earlier one, at
-most MAX_PENDING senders. One
-worker applies everything pending in one change, under one window
+about etcd is answered at once by keel.mesh.etcdserve, and one about a
+VIP by keel.mesh.vipserve, each of which checks its signature. It
+answers the roster at once and queues an announcement (`Pending`): one
+per sender, the latest replacing an earlier one, at most MAX_PENDING
+senders. One worker applies everything pending in one change, under one window
 (keel.mesh.sync.announced), after verifying each entry's evidence
 (keel.mesh.trust).
 """
@@ -50,6 +50,8 @@ from keel.mesh import (
     members,
     signing,
     sync,
+    vipnode,
+    vipserve,
 )
 from keel.mesh.bridge import BridgeError, Unit, capabilities, line, send
 from keel.mesh.memberlink import (
@@ -58,6 +60,7 @@ from keel.mesh.memberlink import (
     GET,
     LIST,
     POST,
+    VIP,
     Answer,
     refused,
 )
@@ -129,12 +132,14 @@ class Members:
     def __init__(self, roster: Callable[[], Roster],
                  member_of: Callable[[str], str | None], pending: Pending,
                  log: Callable[[str], None],
-                 etcd_answer: Callable[[bytes, str], Answer] | None = None):
+                 etcd_answer: Callable[[bytes, str], Answer] | None = None,
+                 vip_answer: Callable[[bytes, str], Answer] | None = None):
         self.roster = roster
         self.member_of = member_of
         self.pending = pending
         self.log = log
         self.etcd_answer = etcd_answer
+        self.vip_answer = vip_answer
 
     def handle(self, method: str, path: str, body: bytes | None,
                source: str) -> Answer:
@@ -152,6 +157,9 @@ class Members:
         if (method, path) == (POST, ETCD) and body is not None and \
                 self.etcd_answer is not None:
             return self.etcd_answer(body, key)
+        if (method, path) == (POST, VIP) and body is not None and \
+                self.vip_answer is not None:
+            return self.vip_answer(body, key)
         if (method, path) != (POST, ANNOUNCE) or body is None:
             return refused(404, "no such request")
         try:
@@ -329,10 +337,12 @@ def serve(syncer: sync.Syncer, stop: threading.Event,
     worker = threading.Thread(target=work, args=(syncer, pending, stop))
     worker.start()
     member = etcd.Etcd(syncer.node, syncer.clock, syncer.err)
+    here = vipnode.Here(syncer.node, syncer.clock, syncer.err)
     handler = Members(lambda: sync.offered(syncer),
                       lambda source: sync.member_of(syncer.node, source),
                       pending, syncer.err,
-                      lambda body, key: etcdserve.answer(member, body, key))
+                      lambda body, key: etcdserve.answer(member, body, key),
+                      lambda body, key: vipserve.answer(here, body, key))
     code = exits.OK
     started = None
     try:
