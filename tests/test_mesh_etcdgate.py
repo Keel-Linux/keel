@@ -49,6 +49,10 @@ class FakeEtcd(FakeKv):
         self.check("delete")
         FakeKv.delete(self, key)
 
+    def status(self, endpoint):
+        self.check("status")
+        return mock.Mock(member_id="1")
+
 
 class Gate(unittest.TestCase):
     def setUp(self):
@@ -68,8 +72,8 @@ class Gate(unittest.TestCase):
     def stop(self, index: int = 0, wait: float = 30, **kw) -> int:
         return etcdgate.before_stop(
             self.root, address(index), self.said.append, client=self.kv,
-            wait=wait, monotonic=lambda: self.ticks[0], sleep=self.sleep,
-            now=lambda: NOW, **kw)
+            local=self.kv, wait=wait, monotonic=lambda: self.ticks[0],
+            sleep=self.sleep, now=lambda: NOW, **kw)
 
     def started(self, index: int = 0, wait: float = 30) -> int:
         return etcdgate.after_start(
@@ -111,8 +115,8 @@ class TestStop(Gate):
                 self.kv.healthy[address(2)] = True
         code = etcdgate.before_stop(
             self.root, address(0), self.said.append, client=self.kv,
-            wait=60, monotonic=lambda: self.ticks[0], sleep=sleep,
-            now=lambda: NOW)
+            local=self.kv, wait=60, monotonic=lambda: self.ticks[0],
+            sleep=sleep, now=lambda: NOW)
         self.assertEqual(code, exits.OK)
         self.assertEqual(self.ticks[0], 6)
 
@@ -147,8 +151,18 @@ class TestStop(Gate):
         self.assertEqual(self.stop(), exits.OK)
         self.assertEqual(self.lock()["member"], address(0))
 
+    def test_this_member_not_answering_stops_at_once(self):
+        """A crash: ExecStop runs too, and the member is no part of the
+        majority to keep"""
+        self.kv.healthy[address(2)] = False
+        self.kv.refuse = "status"
+        self.assertEqual(self.stop(), exits.OK)
+        self.assertIn("does not answer", self.said[-1])
+        self.assertEqual(self.ticks[0], 0.0)
+        self.assertIsNone(self.lock())
+
     def test_etcd_not_answering_or_failing_the_lock(self):
-        self.kv.refuse = "all"
+        self.kv.refuse = "members"
         self.assertEqual(self.stop(wait=4), exits.APPLY_FAILED)
         self.assertIn("etcd does not answer", "\n".join(self.said))
         self.kv.refuse = "grant"

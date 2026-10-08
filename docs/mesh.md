@@ -781,8 +781,10 @@ lose the majority while both restart, and with it every VIP's renewal
 drop-in whose ExecStop runs `keel mesh etcd gate stop` and whose
 ExecStartPost runs `keel mesh etcd gate started` (root):
 
-- **stop**, before etcd is sent SIGTERM, waits until every other voter
-  says it is healthy and no other member holds the **restart lock**,
+- **stop**, before etcd is sent SIGTERM, passes at once when this
+  member does not answer (it crashed: systemd runs ExecStop then too, and
+  a member that does not answer is no part of the majority); otherwise
+  it waits until every other voter says it is healthy and no other member holds the **restart lock**,
   `/keel/<mesh id>/etcd/restarting`, then takes it by compare-and-swap
   on a lease of 120 s: two members never pass at once. A stop cannot be
   refused for good, so after `--wait` (300 s) it says so and lets the

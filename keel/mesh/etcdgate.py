@@ -9,8 +9,10 @@ would lose the majority for as long as both restart. keel-overlay-etcd
 puts this gate around etcd.service (a drop-in):
 
 - `keel mesh etcd gate stop`, its ExecStop, before etcd is sent SIGTERM:
-  waits until every other voter is healthy and no other member holds the
-  restart lock, then takes the lock, a key written by compare-and-swap
+  passes at once when this member does not answer (it crashed: no part of
+  the majority, and its restart is the way back); otherwise waits until
+  every other voter is healthy and no other member holds the restart
+  lock, then takes the lock, a key written by compare-and-swap
   on a lease of LOCK_TTL seconds, so two members never pass at once. A
   stop cannot be refused for good (a shutdown, an operator who means
   it): after `wait` seconds it says so and lets the stop go on. At
@@ -132,7 +134,8 @@ def stopping(output: Callable[[tuple[str, ...]], str | None]) -> bool:
 
 
 def before_stop(root: str, own: str, err: Callable[[str], None],
-                client: Client | None = None, wait: float = WAIT,
+                client: Client | None = None, local: Client | None = None,
+                wait: float = WAIT,
                 output: Callable[[tuple[str, ...]], str | None] =
                 lambda argv: None,
                 monotonic: Callable[[], float] = time.monotonic,
@@ -146,6 +149,16 @@ def before_stop(root: str, own: str, err: Callable[[str], None],
         return exits.OK
     if stopping(output):
         err("etcd: the system is shutting down; this member stops now")
+        return exits.OK
+    local = local or etcdclient.local(root)
+    local.timeout = CALL_TIMEOUT
+    try:
+        local.status(etcdstate.client_url(etcdstate.LOOPBACK))
+    except EtcdError as e:
+        # not serving (crashed, or never up): it is no part of the
+        # majority now, and its stop costs nothing; its restart is the
+        # way back
+        err(f"etcd: this member does not answer ({e}); it stops now")
         return exits.OK
     mesh_id = identity.read(root).hex()
     client = client or client_of(root)
