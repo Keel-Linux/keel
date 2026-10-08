@@ -464,6 +464,14 @@ def status_of(pid: int) -> dict:
     return found
 
 
+def cmdline(pid: int) -> bytes:
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as fob:
+            return fob.read()
+    except OSError:
+        return b""
+
+
 def main_pid(unit: str) -> int:
     found = sh("systemctl", "show", "--property=MainPID", "--value",
                unit).strip()
@@ -477,7 +485,9 @@ def wait_for_hardening(roots: list[str]) -> dict:
     found = {}
     for index, root in enumerate(roots):
         control = vipbridge.unit_name(root)
-        wait_until(lambda: main_pid(control) > 0, 60)
+        # the controller itself, once systemd's executor exec'd it: before,
+        # the MainPID is systemd's, with systemd's capabilities
+        wait_until(lambda: b"control" in cmdline(main_pid(control)), 60)
         helper = f"keel-vip-test-{NAMES[index]}"
         found[NAMES[index]] = {
             "helper": status_of(main_pid(helper)),

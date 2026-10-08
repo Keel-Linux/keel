@@ -26,14 +26,16 @@ HOST = f"{VIP}/128"
 class TestTheLifetime(unittest.TestCase):
     def test_it_ends_before_the_release_deadline(self):
         # the kernel removes an address up to EXPIRY_SLACK late
-        for age in (0.0, 0.4, 1.7, 2.0, 3.9, 6.5):
+        for age in (0.0, 0.4, 1.7, 2.0, 3.9, 6.5, 7.9):
             with self.subTest(age=age):
                 valid = vipnet.lifetime(age)
                 self.assertGreaterEqual(valid, 1)
                 self.assertLessEqual(age + valid + vipnet.EXPIRY_SLACK,
                                      RELEASE_AFTER)
-        self.assertEqual(vipnet.lifetime(0.0), 8)
-        self.assertIsNone(vipnet.lifetime(7.5))
+        self.assertEqual(vipnet.lifetime(0.0), 9)
+        self.assertEqual(vipnet.lifetime(0.6), 8)
+        self.assertEqual(vipnet.lifetime(8.5), None)
+        self.assertIsNone(vipnet.lifetime(9.0))
         self.assertIsNone(vipnet.lifetime(RELEASE_AFTER))
         self.assertIsNone(vipnet.lifetime(-1.0))
 
@@ -86,7 +88,7 @@ class TestTheHolder(WithEtcd):
         self.assertFalse(vipnode.carry_held(self.all[0], VIP, 1.0))
         self.promote(0)
         self.nets[0].addresses.clear()
-        self.assertFalse(vipnode.carry_held(self.all[0], VIP, 7.9))
+        self.assertFalse(vipnode.carry_held(self.all[0], VIP, 8.9))
         self.assertFalse(self.carried(0))
         self.assertTrue(vipnode.carry_held(self.all[0], VIP, 0.5))
         self.assertEqual(self.lifetime(), vipnet.lifetime(0.5))

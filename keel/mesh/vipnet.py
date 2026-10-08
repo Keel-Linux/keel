@@ -43,9 +43,11 @@ Run = Callable[[tuple[str, ...]], str | None]
 Output = Callable[[tuple[str, ...]], str | None]
 
 
-# how late the kernel may remove an address whose valid_lft ran out: it
-# checks lifetimes on a timer rounded up to the second
-EXPIRY_SLACK = 2
+# how late the kernel may remove an address whose valid_lft ran out:
+# addrconf's check runs at the expiry, rounded up by a quarter of a second
+# at most (net/ipv6/addrconf.c, ADDRCONF_TIMER_FUZZ), and every change of
+# the address runs it again; a second covers that and a busy workqueue
+EXPIRY_SLACK = 1
 
 
 def host(vip: str) -> str:

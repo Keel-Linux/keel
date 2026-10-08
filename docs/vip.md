@@ -52,7 +52,7 @@ refused. A release is taken only from the other member of the record.
   so the members' channel and every other node-to-node exchange keep the
   node's own overlay address. With etcd, N is what is left of the
   release time after the last renewal the majority confirmed, less the
-  kernel's 2 s of slack, so the kernel itself removes the address by that
+  1 s the kernel may be late, so the kernel itself removes the address by that
   deadline unless a renewal gives it a new lifetime; before etcd it is
   carried for good.
 - **Every other node routes it to the holder**: `wg set wg0 peer <holder>
