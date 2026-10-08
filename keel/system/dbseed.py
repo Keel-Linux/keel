@@ -79,7 +79,12 @@ POSITION_VALUE = re.compile(r"^(\d+-\d+-\d+(,\d+-\d+-\d+)*)?$")
 # MariaDB's escapes inside a quoted value of an options file.
 OPTION_ESCAPES = {"\\": "\\\\", '"': '\\"', "\n": "\\n", "\r": "\\r",
                   "\t": "\\t"}
-LOCAL_CLIENT = ("mariadb", "--batch")
+# the local statements and the load, as the server's mysql account
+# (keel.system.dbmariadb): on a paired node root cannot write through
+# read_only, and the load must not enter this node's binary log, which a
+# pair has on both nodes (its GTIDs are the primary's, not this node's)
+LOCAL_CLIENT = mariadb.CLIENT
+LOAD_CLIENT = LOCAL_CLIENT + ("--init-command=SET SESSION sql_log_bin=0",)
 REMOTE = ("mariadb",)
 # --raw so a value is printed as it is and not with batch escapes, which
 # would change a statement copied from one server to the other.
@@ -134,7 +139,8 @@ def seed(root: str, action, runner=subprocess.run) -> str | None:
     try:
         with spool(root) as directory:
             options = write_options(
-                directory, action.host, action.port, action.password
+                directory, action.host, action.port, action.password,
+                action.options
             )
             return _seed(directory, os.path.join(root, DATADIR), options,
                          action, runner)
@@ -146,16 +152,19 @@ def seed(root: str, action, runner=subprocess.run) -> str | None:
 
 def reach(
     root: str, host: str, port: int, password: str, runner=subprocess.run,
+    tls: str = "",
 ) -> "Reach":
     """Why the primary cannot be copied from, and the accounts both hold
 
     Asked before the plan is made, so a replica that cannot be seeded is
     refused before its configuration is rewritten or anything dropped,
     and the plan can name the accounts that keep this server's password.
+    `tls` is the clients' TLS, as keel.system.dbtls.options_lines writes
+    it, on a pair.
     """
     try:
         with spool(root) as directory:
-            options = write_options(directory, host, port, password)
+            options = write_options(directory, host, port, password, tls)
             problem = _privileges(options, host, port, runner)
             if problem:
                 return Reach(problem)
@@ -215,7 +224,7 @@ def _seed(
             drop=", ".join(action.drop) or "nothing", detail=problem
         )
     with open(dump, "rb") as fob:
-        problem = _run(runner, LOCAL_CLIENT, stdin=fob)
+        problem = _run(runner, LOAD_CLIENT, stdin=fob)
     if problem:
         return LOAD_FAILED.format(detail=problem, **where)
     if copy:
@@ -223,7 +232,7 @@ def _seed(
         if problem:
             return ACCOUNTS_FAILED.format(detail=problem, **where)
     start = mariadb.replicate_from(
-        action.host, action.port, action.password, position
+        action.host, action.port, action.password, position, action.tls
     )
     problem = _run(runner, LOCAL_CLIENT, text=start.text)
     if problem:
@@ -390,24 +399,28 @@ def spool(root: str):
         shutil.rmtree(directory, ignore_errors=True)
 
 
-def write_options(directory: str, host: str, port: int, password: str) -> str:
+def write_options(directory: str, host: str, port: int, password: str,
+                  more: str = "") -> str:
     """The options file, created exclusively at mode 0600; its path"""
     path = os.path.join(directory, OPTIONS)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                  OPTIONS_MODE)
     with os.fdopen(fd, "w") as fob:
-        fob.write(options_text(host, port, password))
+        fob.write(options_text(host, port, password, more))
     return path
 
 
-def options_text(host: str, port: int, password: str) -> str:
-    """What the clients read instead of a password on their command line"""
+def options_text(host: str, port: int, password: str,
+                 more: str = "") -> str:
+    """What the clients read instead of a password on their command
+    line; `more` is the TLS of a pair (keel.system.dbtls.options_lines)"""
     return (
         "[client]\n"
         f"user={mariadb.REPLICATION_USER}\n"
         f"password={option_value(password)}\n"
         f"host={option_value(host)}\n"
         f"port={int(port)}\n"
+        f"{more}"
     )
 
 

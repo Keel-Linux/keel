@@ -385,14 +385,20 @@ def drop_fenced(here: Here, vip: str, why: str,
     and is not fenced"""
     with vipstate.locked(here.root):
         held = current(here, vip)
-        problem = vipnet.drop(here.iface(), vip, here.node.run,
-                              here.node.output)
         if lease is not None and (held.lease != lease or
                                   not held.holds(here.own_key())):
+            problem = vipnet.drop(here.iface(), vip, here.node.run,
+                                  here.node.output)
             here.err(f"vip {vip}: its lease {lease} is gone, and this node"
-                     " no longer holds the VIP on it: not fenced")
+                     " no longer holds the VIP on it: not fenced"
+                     f"{'; ' + problem if problem else ''}")
             return
+        # fenced first, so that what follows the state (keel database
+        # follow turning the database read only) starts before the
+        # address is gone, never after
         vipstate.write(here.root, vipstate.fenced(held))
+        problem = vipnet.drop(here.iface(), vip, here.node.run,
+                              here.node.output)
     here.err(f"vip {vip}: dropped, {why}"
              f"{'; ' + problem if problem else ''}")
 

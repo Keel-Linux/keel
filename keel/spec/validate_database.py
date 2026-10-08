@@ -18,6 +18,10 @@ Three rules this file enforces that come from defects, not from taste:
   nothing. A primary's authorization list is *not* refused on a replica:
   an operator prepares a promotion before making it, exactly as with a
   certificate configuration behind `tls.acme.enabled` (decision 0009).
+  On a paired node (`appliance.vip`, decision 0049) the primary is the
+  VIP's holder and the other member of the pair record, so the endpoint,
+  the authorizations and the credential are derived and each is
+  optional (keel.system.dbpair).
 """
 
 from typing import Any
@@ -46,9 +50,10 @@ REPLICA_ROLE = "replica"
 
 
 def validate_database(
-    database: Any, check_secret_files: bool = True
+    database: Any, check_secret_files: bool = True, paired: bool = False,
 ) -> list[str]:
-    """Every error in the database section, empty when it is valid"""
+    """Every error in the database section, empty when it is valid;
+    `paired` is whether the spec declares appliance.vip"""
     error = mapping_error("database", database)
     if error or not database:
         return [error] if error else []
@@ -59,7 +64,7 @@ def validate_database(
         if key not in DATABASE_SUBJECTS
     ]
     errors.extend(
-        _validate_server(database.get("server"), check_secret_files)
+        _validate_server(database.get("server"), check_secret_files, paired)
     )
     errors.extend(
         _validate_client(database.get("client"), check_secret_files)
@@ -67,7 +72,8 @@ def validate_database(
     return errors
 
 
-def _validate_server(server: Any, check_secret_files: bool) -> list[str]:
+def _validate_server(server: Any, check_secret_files: bool,
+                     paired: bool = False) -> list[str]:
     error = mapping_error("database.server", server)
     if error or not server:
         return [error] if error else []
@@ -88,7 +94,7 @@ def _validate_server(server: Any, check_secret_files: bool) -> list[str]:
     errors.extend(
         _replication(
             server.get("replication"), str(role), check_secret_files,
-            str(server.get("engine")),
+            str(server.get("engine")), paired,
         )
     )
     return errors
@@ -117,6 +123,7 @@ def _listen(listen: Any) -> list[str]:
 
 def _replication(
     replication: Any, role: str, check_secret_files: bool, engine: str,
+    paired: bool = False,
 ) -> list[str]:
     key = "database.server.replication"
     error = mapping_error(key, replication)
@@ -130,7 +137,7 @@ def _replication(
         if name not in REPLICATION_KEYS
     ]
     primary = replication.get("primary")
-    if role == REPLICA_ROLE and not isinstance(primary, dict):
+    if role == REPLICA_ROLE and not paired and not isinstance(primary, dict):
         errors.append(
             f"{key}.primary: required when the role is {REPLICA_ROLE},"
             " because a replica replicates from somewhere"

@@ -29,15 +29,18 @@ from keel.spec.constants import DEFAULT_PORTS
 from keel.spec.errors import SpecError
 from keel.spec.origins import canonical
 from keel.spec.secretstore import resolve_secret
-from keel.system import dbready, dbseed
+from keel.system import dbpair, dbready, dbsecret, dbseed, dbtls
 from keel.system.actions import READ_ONLY_RECORD
 from keel.system.dbmariadb import (
     DROPIN,
+    NONLOCAL_BIND_LIVE,
     PING,
+    ROLE_DROPIN,
     SCHEMAS_QUESTION,
-    SERVICE,
+    service,
     unquotable,
 )
+from keel.system.dbpair import PairState
 
 MACHINE_ID = "etc/machine-id"
 NO_SECRET = (
@@ -49,6 +52,7 @@ GENERATED = (
     " of a pair must hold the same value, so declare it as a file the"
     " operator puts on each node"
 )
+SPEC_DEFAULT = "etc/keel/instance.yaml"
 
 
 @dataclass(frozen=True)
@@ -93,6 +97,15 @@ class DatabaseState:
     # What systemctl is-enabled says of the server's unit, read once it
     # answers; empty when it was not read.
     enabled: str = ""
+    # The pair this node is in (appliance.vip), or None (keel.system.dbpair)
+    pair: PairState | None = None
+    # The role's drop-in, the sysctl's live value, and whether the
+    # database leaf is in place (keel.system.dbtls), on a paired node
+    role_dropin: File = field(default_factory=lambda: File(""))
+    nonlocal_bind: File = field(default_factory=lambda: File(""))
+    tls_ready: bool = False
+    # the mesh root's name, for the authorization's REQUIRE ... ISSUER
+    tls_issuer: str = ""
 
     @property
     def installed(self) -> bool:
@@ -149,7 +162,7 @@ def declared_server(doc: dict) -> dict:
 
 
 def observe_database(
-    root: str, doc: dict, start: bool = False,
+    root: str, doc: dict, start: bool = False, spec: str | None = None,
 ) -> DatabaseState | None:
     """Read everything the database plan for `doc` depends on
 
@@ -161,6 +174,9 @@ def observe_database(
     (keel.system.dbready): `start` is whether this run may start it, which
     a dry run may not. One that does not answer within the bound is asked
     nothing else, and `down` says why.
+
+    `spec` is the spec's path, which a paired node needs to speak on the
+    members' channel (the credential asked of the other member).
     """
     server = declared_server(doc)
     if not server:
@@ -169,13 +185,14 @@ def observe_database(
     name = str(server.get("engine") or "")
     engine = _engine(name)
     live = tree.root == paths.ROOT_DEFAULT
+    pair = dbpair.observe_pair(root, doc) if name == "mariadb" else None
     if engine is None:
-        return DatabaseState(engine=name, live=live)
+        return DatabaseState(engine=name, live=live, pair=pair)
 
     binary = engine.installed(tree.glob)
     enabled = ""
     if live and binary is not None and name == "mariadb":
-        down = dbready.ready(SERVICE, PING, start, dbready.READY_TIMEOUT)
+        down = dbready.ready(service(), PING, start, dbready.READY_TIMEOUT)
         if down:
             return DatabaseState(
                 engine=name,
@@ -184,8 +201,9 @@ def observe_database(
                 machine_id=tree.read(MACHINE_ID),
                 dropin=tree.read(DROPIN),
                 down=down,
+                pair=pair,
             )
-        enabled = dbready.enabled(SERVICE)
+        enabled = dbready.enabled(service())
     answers = {} if binary is None else {
         key: run_command(tree, argv)
         for key, argv in engine.questions.items()
@@ -194,10 +212,11 @@ def observe_database(
         tree, paths.LISTENING_COMMAND
     )
     status = answers.get("status", File(""))
-    secret = credential(server)
+    secret = credential(server, root, pair, live and start,
+                        spec or tree.path(SPEC_DEFAULT))
     found = _reach(
         tree, server, status, secret,
-        live and bool(binary) and name == "mariadb",
+        live and bool(binary) and name == "mariadb", pair,
     )
     return DatabaseState(
         engine=name,
@@ -215,22 +234,66 @@ def observe_database(
         reach=found.problem,
         shared=found.shared,
         enabled=enabled,
+        pair=pair,
+        role_dropin=tree.read(ROLE_DROPIN),
+        nonlocal_bind=tree.read(NONLOCAL_BIND_LIVE),
+        tls_ready=dbtls.present(root),
+        tls_issuer=dbtls.issuer_name(root) if pair is not None else "",
     )
 
 
 def _reach(
     tree: Tree, server: dict, status: File, secret: Credential, asks: bool,
+    pair: PairState | None = None,
 ) -> dbseed.Reach:
     """Ask the declared primary whether it can be copied from, if it would be
 
     Only on the live system with a server installed, with a credential,
     and only when a copy would follow: dialling another machine at every
     boot of a healthy replica would be a question nobody needs answered.
+    On a paired node the role is the VIP's and the primary the holder's
+    address (keel.system.dbpair); a paired node that would rejoin rather
+    than seed (keel.system.dbfollow) is not asked here.
     """
+    if pair is not None:
+        role = dbpair.role_of(pair, str(server.get("role") or ""))
+        host = dbpair.primary_host(pair, server)
+        if not (asks and secret.known and role == "replica" and host
+                and not pair.claimed and needs_copy(
+                    {**server, "role": role,
+                     "replication": {"primary": {"host": host}}}, status)):
+            return dbseed.Reach()
+        return dbseed.reach(tree.root, host, endpoint(server)[1],
+                            secret.value, tls=dbtls.options_lines(tree.root)
+                            if dbtls.present(tree.root) else "")
     if not (asks and secret.known and needs_copy(server, status)):
         return dbseed.Reach()
     host, port = endpoint(server)
     return dbseed.reach(tree.root, host, port, secret.value)
+
+
+def _shared(server: dict, root: str, pair: PairState, ask: bool,
+            spec: str) -> Credential:
+    """The pair's credential (keel.system.dbsecret), or why not yet"""
+    found = dbsecret.read(root)
+    if found is not None:
+        return Credential(value=found)
+    if not ask:
+        return Credential(problem=(
+            "the pair's replication credential is not held here yet; a run"
+            " that may change the machine makes or asks for it"))
+    from keel.mesh.node import Node
+    from keel.mesh.vipnode import Here, VipError
+    from datetime import datetime, timezone
+    import sys
+    role = dbpair.role_of(pair, str(server.get("role") or ""))
+    here = Here(Node(root, spec), lambda: datetime.now(timezone.utc),
+                lambda line: print(line, file=sys.stderr))
+    try:
+        return Credential(value=dbsecret.shared(
+            here, pair.vip, role == "primary", pair.peer_address))
+    except (VipError, OSError) as e:
+        return Credential(problem=str(e))
 
 
 def _engine(name: str) -> Engine | None:
@@ -240,7 +303,8 @@ def _engine(name: str) -> Engine | None:
     return None
 
 
-def credential(server: dict) -> Credential:
+def credential(server: dict, root: str = "", pair: PairState | None = None,
+               ask: bool = False, spec: str = "") -> Credential:
     """Read the replication password, or say why there is none
 
     The one secret the database phase resolves. `apply --system-only`
@@ -248,8 +312,15 @@ def credential(server: dict) -> Credential:
     boot hooks already set is never regenerated behind them; this one is
     read here, and only here, because a grant and a CHANGE MASTER cannot
     be written without it.
+
+    On a paired node with no `replication.secret` declared, the pair's
+    (keel.system.dbsecret): held, made here on the primary, or asked of
+    the other member over the members' channel when `ask` (a live run
+    that may change the machine).
     """
     reference = (server.get("replication") or {}).get("secret")
+    if pair is not None and not isinstance(reference, dict):
+        return _shared(server, root, pair, ask, spec)
     if not isinstance(reference, dict):
         return Credential(problem=NO_SECRET)
     if reference.get("generate"):

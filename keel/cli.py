@@ -165,6 +165,42 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_root_option(promote_parser, "promote")
     promote_parser.set_defaults(handler=commands.database_promote)
+    follow_parser = database_actions.add_parser(
+        "follow",
+        help="make the server follow the pair's VIP (decisions 0020, 0049):"
+        " the holder writable, the other node read only and replicating"
+        " from the holder, an old primary rejoined by GTID when it holds"
+        " nothing the holder lacks; what keel-database-follow.service runs"
+        " when the VIP moves (root)",
+    )
+    add_common_options(follow_parser)
+    follow_parser.add_argument(
+        "--destroy-local-database",
+        action="store_true",
+        help="confirm, for this run only, that a diverged old primary may"
+        " be reseeded from the holder, its errant transactions discarded"
+        " (a dump is kept first under /var/backups/keel/mariadb)",
+    )
+    add_root_option(follow_parser, "follow the VIP of")
+    follow_parser.set_defaults(handler=commands.database_follow)
+    watch_parser = database_actions.add_parser(
+        "watch",
+        help="report the semi-synchronous fallback and its recovery through"
+        " the monitor's channels, and renew the database certificate; what"
+        " keel-database-watch.timer runs (root)",
+    )
+    add_common_options(watch_parser)
+    add_root_option(watch_parser, "watch the database of")
+    watch_parser.set_defaults(handler=commands.database_watch)
+    status_parser = database_actions.add_parser(
+        "status",
+        help="the role from the VIP and from the server, semi-synchronous"
+        " status, the replica's lag, GTID positions, the certificate, a"
+        " divergence; never a secret",
+    )
+    add_common_options(status_parser)
+    add_root_option(status_parser, "read the database of")
+    status_parser.set_defaults(handler=commands.database_status)
 
     network_parser = subparsers.add_parser(
         "network", help="a network change apply made, waiting to be kept;"

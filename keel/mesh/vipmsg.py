@@ -22,6 +22,12 @@ for the other: "signed by a member's key, verified by the receiver"
     pair      {"pair"} -> {"pair"}: the pair record, signed by the
               sender, to the other member, which signs it too when its
               own spec declares that VIP (keel.mesh.vippair)
+    secret    {"vip", "name"} -> {"value"}: a secret the pair shares
+              (0041's `shared` policy; the database's replication
+              credential first, keel.system.dbsecret), answered only to
+              the other member of the pair record, fresh, over the
+              channel's TLS inside WireGuard; 404 while this node holds
+              none
 
 A claim carries the pair record it rests on: only the two nodes the
 record names, signed by both, may hold the VIP (0049, third round,
@@ -42,7 +48,11 @@ from keel.network.wireguard import is_key
 
 PATH = "/v1/vip"
 CLAIM, RELEASE, EPOCH, PAIR = "claim", "release", "epoch", "pair"
-KINDS = (CLAIM, RELEASE, EPOCH, PAIR)
+SECRET = "secret"
+KINDS = (CLAIM, RELEASE, EPOCH, PAIR, SECRET)
+# the names of the secrets a pair shares, and their size
+SECRET_NAMES = ("database/replication",)
+MAX_SECRET = 256
 LABEL = b"keel vip 1\n"
 # a claim with its pair record is about 1200 bytes; an answer carries one
 MAX_MESSAGE = 8192

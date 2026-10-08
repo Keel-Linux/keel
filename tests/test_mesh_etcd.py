@@ -44,12 +44,25 @@ class TestReady(Mesh):
 
 class TestTheFirstNodes(Mesh):
     def test_create_makes_the_root_on_a_ready_node(self):
-        a, b = self.members(2, modes=("cloud_advanced", "cloud_simple"))
+        a, b = self.members(2, modes=("cloud_advanced", "simple"))
         etcd.created(a)
         self.assertTrue(etcdstate.holds_root(a.root))
         self.assertIn("holds the mesh's root CA", self.text(0))
         etcd.created(b)
         self.assertFalse(etcdstate.credentials(b.root))
+
+    def test_create_makes_the_root_in_cloud_simple_too(self):
+        """The maintainer, 2026-10-11: the root is made in every cloud
+        mode; in cloud simple it signs the database's certificates"""
+        a, = self.members(1, modes=("cloud_simple",))
+        etcd.created(a)
+        self.assertTrue(etcdstate.holds_root(a.root))
+        self.assertIn("database certificates of a cloud simple pair",
+                      self.text(0))
+        self.assertTrue(etcd.pki_ready({"installation": {"mode":
+                                                         "cloud_simple"}}))
+        self.assertFalse(etcd.pki_ready({"installation": {"mode":
+                                                          "simple"}}))
 
     def test_create_says_why_no_root(self):
         a, = self.members(1)

@@ -66,6 +66,11 @@ class Reading:
     listen: Value = field(default_factory=Value)
     read_only: Value = field(default_factory=Value)
     bypass: Value = field(default_factory=Value)
+    # MariaDB on a pair (0031, 0049): the semi-synchronous status by
+    # short name, the GTID positions, and the replica's lag in seconds
+    semi_sync: Value = field(default_factory=Value)
+    gtid: Value = field(default_factory=Value)
+    lag: Value = field(default_factory=Value)
 
 
 def field_lines(output: File) -> dict[str, str]:

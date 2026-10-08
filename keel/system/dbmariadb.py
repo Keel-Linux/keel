@@ -22,17 +22,34 @@ Three things about MariaDB that shape the rest:
 
 import hashlib
 import ipaddress
+import os
 from dataclasses import dataclass
 
 from keel.spec.origins import host_pattern
 
 DROPIN = "etc/mysql/mariadb.conf.d/99-keel-database.cnf"
-CLIENT = ("mariadb", "--batch")
-QUIET_CLIENT = ("mariadb", "--batch", "--skip-column-names")
+# The role's file, beside it: `read_only = ON` on a replica, so a restart
+# comes up read only before keel database follow runs; rewritten on each
+# role change without a restart (SET GLOBAL did the live change).
+ROLE_DROPIN = "etc/mysql/mariadb.conf.d/99-keel-role.cnf"
+SYSCTL = "etc/sysctl.d/90-keel-database.conf"
+NONLOCAL_BIND = "net.ipv6.ip_nonlocal_bind"
+NONLOCAL_BIND_LIVE = "proc/sys/net/ipv6/ip_nonlocal_bind"
+# keel's own statements go through the server's `mysql` account, by the
+# unix socket as the system's mysql user (0049): on a replica root has
+# lost READ_ONLY ADMIN, and this account alone keeps it. runuser keeps
+# the environment, so the clients' own MYSQL_HOME names another options
+# file in the tests, where a server per node has a socket of its own.
+AS_MYSQL = ("runuser", "-u", "mysql", "--")
+CLIENT = AS_MYSQL + ("mariadb", "--batch")
+QUIET_CLIENT = AS_MYSQL + ("mariadb", "--batch", "--skip-column-names")
 # Whether the server answers at all, asked before anything else
-# (keel.system.dbready).
-PING = QUIET_CLIENT + ("--execute", "SELECT 1")
-SERVICE = "mariadb"
+# (keel.system.dbready): as root, by the socket, which needs no privilege.
+PING = ("mariadb", "--batch", "--skip-column-names", "--execute", "SELECT 1")
+SERVICE_DEFAULT = "mariadb"
+# the unit's name: mariadb, or what KEEL_MARIADB_SERVICE says (the tests
+# run a server per node in one container, each its own unit)
+SERVICE_ENV = "KEEL_MARIADB_SERVICE"
 # The account both ends of a pair name. It is a constant and not a field
 # of the description on purpose: the primary grants to it and the replica
 # connects as it, so a field each operator could set differently on their
@@ -70,6 +87,46 @@ HEADER = (
     "# description. Edited by hand, it is overwritten on the next run.\n"
     "[mysqld]\n"
 )
+# A pair (appliance.vip): the same file on both nodes whatever the role
+# (0031, 0049). The binary log on both, since either may be promoted and
+# the other must rejoin it; GTIDs kept as they came (log_slave_updates),
+# which the rejoin's comparison reads; gtid_strict_mode (0049);
+# semi-synchronous replication, both sides enabled on both nodes
+# (AFTER_SYNC, 10 s; MariaDB waits for one replica's acknowledgement by
+# design and has no wait_for_slave_count, which is MySQL's: measured, 11.8
+# refuses to start with it), so a promotion flips nothing here. A node
+# with no replica connected does not wait (wait_no_slave OFF): with it
+# ON, the replica's own SQL thread, a master with no slave since both
+# sides are on, waited the 10 s on the first transaction it applied
+# (measured: "Waiting for semi-sync ACK from slave" for 9.9 s). A
+# connected replica that does not answer still costs the 10 s;
+# a replica that hears nothing from its primary for 10 s (heartbeats
+# every 5) reconnects, instead of MariaDB's 60.
+PAIR_LINES = (
+    "log_bin = {binlog}\n"
+    "binlog_format = ROW\n"
+    "log_slave_updates = ON\n"
+    "gtid_strict_mode = ON\n"
+    "rpl_semi_sync_master_enabled = ON\n"
+    "rpl_semi_sync_slave_enabled = ON\n"
+    "rpl_semi_sync_master_wait_point = AFTER_SYNC\n"
+    "rpl_semi_sync_master_timeout = {timeout}\n"
+    "rpl_semi_sync_master_wait_no_slave = OFF\n"
+    "slave_net_timeout = 10\n"
+)
+SEMI_SYNC_TIMEOUT_MS = 10000
+ROLE_HEADER = (
+    "# Written by keel database follow (decision 0049). Both nodes of a\n"
+    "# pair boot read only: an old primary that crashed must not take a\n"
+    "# write before it learns the newer epoch. keel database follow turns\n"
+    "# read_only off on the node that holds the VIP, at every boot.\n"
+    "[mysqld]\n"
+)
+# the account and grant statements of a node are its own, never its
+# replica's: on a pair both nodes write a binary log, and a grant logged
+# under the replica's server id stops it at the primary's next event
+# under gtid_strict_mode (ER 1950)
+NO_BINLOG = "SET SESSION sql_log_bin = 0;\n"
 # MariaDB's own escapes inside a single quoted literal.
 ESCAPES = {
     "\\": "\\\\", "'": "\\'", "\n": "\\n", "\r": "\\r", "\x1a": "\\Z",
@@ -181,6 +238,38 @@ def dropin_text(
     return "".join(lines)
 
 
+def service() -> str:
+    """The server's unit"""
+    return os.environ.get(SERVICE_ENV) or SERVICE_DEFAULT
+
+
+def pair_dropin_text(
+    identity: int, bind: list[str], resolve_names: bool, tls: str,
+) -> str:
+    """The one file both nodes of a pair carry (keel.system.dbpair)"""
+    lines = [HEADER, f"server_id = {identity}\n",
+             "bind-address = " + ",".join(bind) + "\n"]
+    if not resolve_names:
+        lines.append("skip_name_resolve = ON\n")
+    lines.append(PAIR_LINES.format(binlog=BINLOG,
+                                   timeout=SEMI_SYNC_TIMEOUT_MS))
+    lines.append(tls)
+    return "".join(lines)
+
+
+def role_dropin_text() -> str:
+    """The role's drop-in of a paired node: read only at boot, on both"""
+    return ROLE_HEADER + READ_ONLY_LINE
+
+
+def sysctl_text() -> str:
+    return ("# Written by keel spec apply for a database pair (decision"
+            " 0049):\n# both nodes bind the pair's VIP, and the primary"
+            " answers on it the\n# moment it carries the address, with no"
+            " restart.\n"
+            f"{NONLOCAL_BIND} = 1\n")
+
+
 def writable(text: str) -> str:
     """The configuration file without its read_only line, for a promotion"""
     return "".join(
@@ -217,7 +306,9 @@ def as_host(origin: str) -> str | None:
     return host_pattern(str(origin))
 
 
-def grants(hosts: list[str], password: str) -> Statements | None:
+def grants(hosts: list[str], password: str, x509: bool = False,
+           subject: str | None = None,
+           issuer: str | None = None) -> Statements | None:
     """Authorize replication from each origin, and the copy that seeds it
 
     `REPLICATION SLAVE` streams the binary log. The rest (`SEED_GRANTS`)
@@ -231,22 +322,38 @@ def grants(hosts: list[str], password: str) -> Statements | None:
     created rather than failing, and GRANT only adds, so a primary set up
     by an older keel gains them at its next apply.
     """
-    text = ""
+    text = NO_BINLOG
+    # a client certificate the mesh's root signed, over TLS, and only the
+    # other member's database certificate: its subject and the root's
+    # name, so an etcd member's leaf of the same root opens nothing here
+    # (REQUIRE SSL and more: the maintainer, 2026-10-03; keel.system.dbtls)
+    require = ""
+    if subject and issuer:
+        require = (f" REQUIRE SUBJECT {literal(subject)}"
+                   f" AND ISSUER {literal(issuer)}")
+    elif x509:
+        require = " REQUIRE X509"
     for host in hosts:
         quoted = literal(host)
         text += (
             f"CREATE USER IF NOT EXISTS '{REPLICATION_USER}'@{quoted}"
             f" IDENTIFIED BY {literal(password)};\n"
             f"ALTER USER '{REPLICATION_USER}'@{quoted}"
-            f" IDENTIFIED BY {literal(password)};\n"
+            f" IDENTIFIED BY {literal(password)}{require};\n"
             f"GRANT {GRANTED} ON *.* TO"
             f" '{REPLICATION_USER}'@{quoted};\n"
         )
     if not text:
         return None
+    if text == NO_BINLOG:
+        return None
     return Statements(
         text + "FLUSH PRIVILEGES;\n",
-        "authorize replication from " + ", ".join(hosts),
+        "authorize replication from " + ", ".join(hosts)
+        + (f" with the certificate {subject} of the mesh's root"
+           if subject and issuer else
+           " with a certificate of the mesh's root" if x509 else "")
+        + ", outside the binary log",
     )
 
 
@@ -259,18 +366,20 @@ def revoke(hosts: list[str]) -> Statements | None:
     """
     if not hosts:
         return None
-    text = "".join(
+    text = NO_BINLOG + "".join(
         f"DROP USER IF EXISTS '{REPLICATION_USER}'@{literal(host)};\n"
         for host in hosts
     )
     return Statements(
         text + "FLUSH PRIVILEGES;\n",
-        "withdraw the authorization of " + ", ".join(hosts),
+        "withdraw the authorization of " + ", ".join(hosts)
+        + ", outside the binary log",
     )
 
 
 def replicate_from(
     host: str, port: int, password: str, position: str = "",
+    tls: str = "",
 ) -> Statements:
     """Make this node a replica of that endpoint, with GTID
 
@@ -278,7 +387,8 @@ def replicate_from(
     with (keel.system.dbseed), so replication resumes exactly after the
     last transaction the copy holds. Empty means from the start of the
     primary's binary log, which is only right when the primary has never
-    logged anything yet.
+    logged anything yet. `tls` is the connection's TLS, as
+    keel.system.dbtls.master_options writes it, on a pair.
     """
     return Statements(
         "STOP SLAVE;\n"
@@ -287,9 +397,10 @@ def replicate_from(
         f"CHANGE MASTER TO MASTER_HOST={literal(host)}, MASTER_PORT={port},"
         f" MASTER_USER='{REPLICATION_USER}',"
         f" MASTER_PASSWORD={literal(password)},"
-        " MASTER_USE_GTID=slave_pos, MASTER_CONNECT_RETRY=2;\n"
+        f" MASTER_USE_GTID=slave_pos, MASTER_CONNECT_RETRY=2{tls};\n"
         "START SLAVE;\n",
-        f"replicate from [{host}]:{port} as '{REPLICATION_USER}'",
+        f"replicate from [{host}]:{port} as '{REPLICATION_USER}'"
+        + (" over TLS, the primary's certificate verified" if tls else ""),
     )
 
 

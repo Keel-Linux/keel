@@ -204,6 +204,10 @@ class SeedReplica:
     port: int
     password: str = field(repr=False)
     drop: tuple[str, ...] = ()
+    # on a pair: the clients' TLS options and the CHANGE MASTER's
+    # (keel.system.dbtls)
+    options: str = ""
+    tls: str = ""
 
     def describe(self) -> str:
         dropped = (
@@ -213,8 +217,11 @@ class SeedReplica:
             f"copy [{self.host}]:{self.port} with mariadb-dump"
             f" --single-transaction --gtid{dropped}, load the copy and the"
             " primary's accounts this server lacks, and replicate from"
-            " its GTID position (the credential in an"
-            " options file of mode 0600, removed afterwards)"
+            " its GTID position"
+            + (" over TLS, the primary's certificate verified" if self.tls
+               else "")
+            + " (the credential in an options file of mode 0600, removed"
+            " afterwards)"
         )
 
 
@@ -274,6 +281,41 @@ class PromoteReplica:
             " received, then stop replicating, forget the primary and turn"
             " read_only off"
         )
+
+
+@dataclass(frozen=True)
+class EnsureDatabaseTls:
+    """The database leaf of the mesh root CA made or renewed
+    (keel.system.dbtls): this node's address and the pair's VIP as its
+    SANs, signed by the root here or asked of its holder, or of the
+    other member of the pair, over the members' channel"""
+
+    address: str
+    vip: str
+    peer: str | None
+    spec: str
+
+    def describe(self) -> str:
+        return (f"make or renew the database certificate for {self.address}"
+                f" and {self.vip}, signed by the mesh's root CA (here, or"
+                " asked of its holder over the members' channel), under"
+                " /etc/mysql/keel-tls")
+
+
+@dataclass(frozen=True)
+class FollowVip:
+    """The server made to match the VIP's role (keel.system.dbfollow):
+    the primary writable, its replica read only and replicating from it,
+    an old primary rejoined when it holds nothing the new one lacks"""
+
+    spec: str
+    confirmed: bool = False
+
+    def describe(self) -> str:
+        return ("make the server follow the pair's VIP (keel database"
+                " follow): the holder writable, the other node read only"
+                " and replicating from the holder over TLS, an old primary"
+                " rejoined by GTID when it holds nothing the holder lacks")
 
 
 @dataclass(frozen=True)
@@ -388,7 +430,8 @@ class Refuse:
 Change = (Run | RunSql | WriteFile | RemoveFile | MakeDir | Symlink
           | SwitchNetwork | GenerateKey | AdoptKey | SeedReplica
           | LockReplica | UnlockAccounts | PromoteReplica | Attempt
-          | AddBouncer | SetBouncerMode | InstallRuleset)
+          | AddBouncer | SetBouncerMode | InstallRuleset
+          | EnsureDatabaseTls | FollowVip)
 Action = Change | Note | Refuse
 
 

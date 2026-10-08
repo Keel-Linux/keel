@@ -24,6 +24,12 @@ is (keel.network.marker.write_private):
 | `ready.json` | the members known to be ready for etcd: key to address |
 | `learners.json` | when each learner was first seen, for `tend` |
 
+The database's leaf (keel.system.dbtls) is the root's too, kind
+`database` (keel.mesh.etcdpki): CN `<member name> mariadb`, no etcd
+user, its IP SANs the member's address and its pair's VIP, so a client
+verifying the VIP works later. It lives under /etc/mysql/keel-tls,
+where the mysql user reads it, never here.
+
 A member's certificate is its peer, server and client certificate
 alike; the holder's admin certificate is CN `root`, etcd's root user
 (keel.mesh.etcdauth). The root signs every member's certificate itself
@@ -89,7 +95,7 @@ LOOPBACK = "::1"
 # etcd's root user: the CN of the holder's admin certificate alone; a
 # member's name always starts with keel-, so no member is ever it
 ROOT_USER = "root"
-LEAF, INTERMEDIATE = "leaf", "intermediate"
+LEAF, INTERMEDIATE, DATABASE_LEAF = "leaf", "intermediate", "database"
 
 
 class StateError(Exception):
@@ -285,6 +291,32 @@ def member_request(root: str) -> str:
             return etcdpki.request(key(root, MEMBER_KEY))
         except PkiError as e:
             raise StateError(str(e)) from None
+
+
+def database_grant(root: str, csr: str, address: str, vip: str | None,
+                   public_key: str | None = None) -> Grant:
+    """On the root's holder: the database leaf of the member at
+    `address`, kind database, named after the member with ` mariadb`,
+    its SANs the address and `vip`; recorded for revocation with the
+    member's. Raises StateError off the holder"""
+    if not holds_root(root):
+        raise StateError("only the node that holds the mesh's root CA signs"
+                         " a database certificate")
+    issuer = read(root, ROOT_CERT)
+    at = str(ipaddress.IPv6Address(address))
+    sans = (at,) + ((str(ipaddress.IPv6Address(vip)),) if vip else ())
+    try:
+        made = etcdpki.issue(etcdpki.DATABASE, path(root, ROOT_KEY), issuer,
+                             csr, database_name(at), sans)
+        record_issued(root, at, made, public_key, DATABASE_LEAF)
+    except PkiError as e:
+        raise StateError(f"the request cannot be signed: {e}") from None
+    return Grant(made, (), issuer, read(root, CRL), holder(root))
+
+
+def database_name(address: str) -> str:
+    """The CN of a member's database leaf: never an etcd user"""
+    return name(address) + " mariadb"
 
 
 def grant_for(root: str, csr: str, address: str,

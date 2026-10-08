@@ -10,6 +10,7 @@ debian/keel/
 debian/*.debhelper.log
 debian/*.substvars
 .coverage
+.coverage*
 
 # Public test certificates, committed on purpose and without their keys
 # (tests/fixtures/certificates/README.md); a global *.pem rule would

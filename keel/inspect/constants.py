@@ -1,7 +1,14 @@
 # Copyright (c) 2026 KeelLinux maintainers
 """Paths inspect reads, relative to the root it is given, and its defaults"""
 
-ROOT_DEFAULT = "/"
+import os
+
+# The live system is /. KEEL_LIVE_ROOT names a tree that stands for it:
+# the multi-node tests run several nodes in one container, each on a
+# scratch root in a network namespace of its own, and keel there asks
+# the servers, runs systemctl and writes under that root as it does on
+# a machine (tests/mariadb_netns.py). Never set on a machine.
+ROOT_DEFAULT = os.path.abspath(os.environ.get("KEEL_LIVE_ROOT") or "/")
 SECRETS_DIR_DEFAULT = "/etc/keel/secrets"
 
 HOSTNAME = "etc/hostname"

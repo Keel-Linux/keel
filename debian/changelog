@@ -1,3 +1,46 @@
+keel (0.23.0) unstable; urgency=medium
+
+  * A MariaDB pair on the mesh (decisions 0013, 0020, 0031, 0049; the
+    maintainer's answers of 2026-10-03 and 2026-10-11; docs/replication.md).
+    On a node that declares appliance.vip the primary is the VIP's holder:
+    database.server.role is the installation's, decides who seeds from
+    whom before the first claim, and is runtime state from then on;
+    inspect reports the VIP's role, diff shows the difference as
+    information, apply never converges it. With the pair record,
+    replication.primary, allowed_from and secret are derived and optional.
+  * Semi-synchronous replication: AFTER_SYNC, a 10 s timeout, one replica,
+    both sides enabled on both nodes; the fallback to asynchronous is drift
+    in keel diff (database.server.semi_sync) and alerted once, with its
+    recovery, by keel database watch (keel-database-watch.timer, 30 s).
+  * The replica serves nothing: read_only, and READ_ONLY ADMIN revoked
+    from root too, so Webmin's module and root at a shell get 1290; keel's
+    own statements go through 'mysql'@'localhost' (runuser -u mysql).
+  * TLS on replication beside WireGuard: a database leaf per node from the
+    mesh root CA (CN no etcd user, SANs the node's /128 and the VIP), the
+    root made by keel mesh create in every cloud mode, REQUIRE X509 on the
+    replication account, MASTER_SSL_VERIFY_SERVER_CERT; renewed by watch.
+  * The replication credential is made on the primary and asked for by
+    the other member over the members' channel (POST /v1/vip, secret),
+    the first shared secret of 0041; never typed.
+  * Both nodes bind the VIP through net.ipv6.ip_nonlocal_bind, so the
+    primary answers on it the moment it carries the address and no role
+    change restarts MariaDB; one drop-in for both nodes.
+  * keel database follow: the database follows the VIP, run by
+    keel-database-follow.path when the VIP's state changes and at boot:
+    the holder drained and promoted, the other node read only, locked and
+    following the holder, an old primary rejoined by GTID when it holds
+    nothing the holder lacks (a dump kept first), else left read only,
+    reported (database.server.diverged, keel database status) and alerted;
+    --destroy-local-database reseeds it. keel database promote moves the
+    VIP, then follows. A write in flight when a primary is cut off commits
+    after the 10 s and is errant: such a primary comes back diverged.
+  * keel database status, one screen for the operator; the role file
+    /var/lib/keel/role for tracker#57.
+  * tests/test_mariadb_netns.py, the CI job mariadb / trixie: three nodes
+    on 250 ms ±25 ms with 2% loss, a MariaDB server per node.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Sat, 11 Oct 2026 12:00:00 +0000
+
 keel (0.22.0) unstable; urgency=medium
 
   * etcd's certificates are the root's (keel#83, amending decision 0048's

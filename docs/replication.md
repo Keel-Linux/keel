@@ -6,8 +6,10 @@ whose primary is the holder of the pair's VIP (handbook decisions 0013,
 maintainer's answers of 2026-10-03: semi-synchronous replication with a
 10 s timeout and the fallback reported as drift, TLS on the replication
 channel in addition to WireGuard, dumps on the standby as the interim
-backup). **Status: design, not yet implemented**; the questions at the
-end are for the maintainer.
+backup; and the four points of 2026-10-11 under "Decided" at the end).
+Implemented in keel 0.23.0 (Keel-Linux/keel#93); measured under the
+design case of 0050 in CI (`mariadb / trixie`), the numbers under
+"Measured".
 
 What keel 0.11 built is kept and corrected: a replica seeded from a
 dump, GTID, `--destroy-local-database`, the root lock, `keel database
@@ -77,8 +79,21 @@ rpl_semi_sync_master_enabled = ON
 rpl_semi_sync_slave_enabled = ON
 rpl_semi_sync_master_wait_point = AFTER_SYNC
 rpl_semi_sync_master_timeout = 10000
-rpl_semi_sync_master_wait_for_slave_count = 1
+rpl_semi_sync_master_wait_no_slave = OFF
+slave_net_timeout = 10
 ```
+
+MariaDB waits for one replica's acknowledgement by design; MySQL's
+`rpl_semi_sync_master_wait_for_slave_count` does not exist in MariaDB,
+and 11.8 refuses to start with it (the first thing the end to end test
+found). A node with no replica connected does not wait
+(`wait_no_slave = OFF`): with MariaDB's default both sides on made the
+replica's own SQL thread a master with no slave, and it waited the 10 s
+on the first transaction it applied ("Waiting for semi-sync ACK from
+slave" for 9.9 s, the end to end test's trace); a connected replica that
+does not answer still costs the primary the 10 s, which is the fallback
+below. A replica that hears nothing for 10 s reconnects (heartbeats every
+5 s) instead of MariaDB's 60.
 
 Both sides enabled on both nodes, so a promotion flips nothing here: a
 replica with `master_enabled` has no replica of its own and waits for
@@ -142,15 +157,25 @@ mariadb`, IP SANs the node's own /128 and **the pair's VIP** (so a client
 verifying the VIP works later), `extendedKeyUsage serverAuth, clientAuth`,
 30 days, renewed with a third left as the member certificate is, through
 the members' channel. Its CN is no etcd user, so the key, readable by the
-`mysql` system user (`/var/lib/keel/database/tls/`, 0640 root:mysql),
+`mysql` system user (`/etc/mysql/keel-tls/`, 0640 root:mysql),
 opens nothing in etcd if it leaks. The server side: `ssl_ca` the root
 (the trust bundle of 0051 when it has several), `ssl_cert`, `ssl_key`.
 The replica: `MASTER_SSL=1, MASTER_SSL_CA, MASTER_SSL_CERT, MASTER_SSL_KEY,
 MASTER_SSL_VERIFY_SERVER_CERT=1`, the server's certificate verified
 against the root and the IP SAN of the address it dialled. The `repl`
-account carries `REQUIRE X509`, a client certificate the root signed,
-which is `REQUIRE SSL` and more. The seed's `mariadb-dump` and the
-rejoin's comparison use the same files.
+account carries `REQUIRE SUBJECT '/CN=<the other member's name> mariadb'
+AND ISSUER '/CN=<the root's name>'`: the other member's database
+certificate alone, which is `REQUIRE SSL` and more, and refuses an etcd
+member's or the admin's leaf of the same root (measured: 1045). The
+server checks a client's certificate against the root's CRL
+(`ssl_crl`), which `keel database watch` copies from the mesh's when it
+changes and reloads with `FLUSH SSL`. The VIP goes into a certificate's
+SANs only on the pair's signed record, which the request carries and the
+root's holder verifies (both members' signatures, the asker among them).
+The seed's `mariadb-dump` and the rejoin's comparison use the same
+files. The files live under `/etc/mysql/keel-tls`, which the server
+reaches as the `mysql` user: `ca.pem`, `server.pem` and `crl.pem` 0644,
+`server.key` 0640 root:mysql.
 
 Why not a separate database CA signed by the root: two CAs per node,
 two renewal paths, and 0051's federation would have to carry both. Why
@@ -159,11 +184,14 @@ not the member certificate itself: its key is etcd's, and a key the
 
 **The root does not exist in cloud simple today** (docs/mesh.md: made
 by `keel mesh create` on a cloud advanced node, or `keel mesh etcd
-form`). This design makes `keel mesh create` make it in every cloud
-mode and issue the member and database leaves at every join, as the
-cloud advanced join does; cloud simple then holds certificates it uses
-for the database alone, and the etcd overlay stays disabled there
-(0041). See question 1.
+form`). So `keel mesh create` makes it in every cloud mode (the
+maintainer, 2026-10-11): in cloud simple the root signs the database's
+certificates alone, and the etcd overlay stays disabled there (0041).
+The database leaf is asked of the root's holder over the members'
+channel (`issue`, kind `database`), or of the other member of the pair
+when the holder is not known yet, which in a cloud simple pair is the
+node that made the mesh; the holder signs only for the address its own
+spec gives the asker's key.
 
 ## The replication credential
 
@@ -234,8 +262,9 @@ own address, under TLS.
 The spec is not rewritten by the rejoin: the role in the spec is the one
 chosen at installation (0020), `inspect` writes the observed role out,
 and keel#69 (one writer for instance.yaml) is open. 0049's "writes
-`role: replica` into its own spec" is read as the emitted spec. See
-question 3.
+`role: replica` into its own spec" is read as the emitted spec, a
+precision the maintainer approved on 2026-10-11 and the handbook records
+under 0049.
 
 ## Dumps on the standby (interim backup)
 
@@ -243,8 +272,8 @@ question 3.
 daily; it dumps only while the node is the replica (a hot standby that
 serves nothing has the room and the idle time), `mariadb-dump
 --single-transaction --gtid --all-databases` compressed with zstd into
-`/var/backups/keel/mariadb/`, keeping the last 7. Proposed as a
-follow-up pull request, not this one. See question 4.
+`/var/backups/keel/mariadb/`, keeping the last 7. The pull request after
+this one (the maintainer, 2026-10-11).
 
 ## What `keel inspect`, `keel diff` and `keel database status` show
 
@@ -264,59 +293,102 @@ with the VIP's role, epoch and holder (`keel vip status`). The role file
 by `keel database follow`, is what tracker#57's Webmin binding and banner
 read; Webmin itself is out of scope here.
 
+## How it is wired
+
+| Piece | Where |
+| --- | --- |
+| the pair as the planner sees it: the record, the VIP's role, the other member, what is derived | `keel.system.dbpair` |
+| the plan of a paired node: TLS, sysctl, drop-in, authorizations, then the role | `keel.system.dbpairplan`, from `keel.system.database.plan_database` |
+| the one drop-in of a pair, the role's drop-in, the statements | `keel.system.dbmariadb` |
+| the role hook, `keel database follow`: the follow table, the seed, the rejoin by GTID, the divergence | `keel.system.dbfollow`, `keel.system.dbgtid` |
+| the database leaf of the mesh root | `keel.system.dbtls`; the root's side `keel.mesh.etcdstate.database_grant`, asked through `issue` with `kind: database` (`keel.mesh.etcdserve`) |
+| the shared credential | `keel.system.dbsecret`; the `secret` message on `POST /v1/vip` (`keel.mesh.vipserve`) |
+| the fallback and its recovery alerted, the certificate renewed, a role followed again | `keel.system.dbwatch`, `keel database watch`, `keel-database-watch.timer` (30 s) |
+| the operator's screen | `keel.system.dbstatus`, `keel database status` |
+| the units | `keel-database-follow.path` on `/var/lib/keel/vip`, `keel-database-follow.service` (also at boot), `keel-database-watch.timer` |
+| what inspect, diff and the role file say | `keel.inspect.database`, `keel.inspect.dbengines`, `keel.diff.compare`, `/var/lib/keel/role` |
+
+Three seams let the end to end test run several nodes in one container,
+each on a scratch root in a network namespace of its own, and are the
+clients' and keel's own conventions rather than switches of the code:
+`KEEL_LIVE_ROOT` names the tree that stands for the live system of a
+node (`keel.inspect.constants.ROOT_DEFAULT`; never set on a machine),
+`MYSQL_HOME` names an options file with that node's socket, which the
+MariaDB clients read after `/etc/mysql/my.cnf`, and
+`KEEL_MARIADB_SERVICE` names the node's unit
+(`keel.system.dbmariadb.service()`).
+
 ## Tests
 
-Pure: the drop-in, the statements, the GTID comparison, the follow
-table, the secret exchange's messages, the leaf's extensions, the diff
-and inspect lines, against fixtures (coverage gate 95 %).
+Pure, against fixtures and a server replaced at the subprocess boundary
+(the coverage gate of 0003): the GTID comparison, the pair, the shared
+credential over the in-process channel with its refusals, the leaf
+issued by the holder and the refusals of a request for another address
+or in another name, the plan of a paired node, every branch of the
+follow table, the watch's alerts once each way, inspect's and diff's
+lines (`tests/test_system_dbpair.py`, `tests/test_system_dbfollow.py`).
 
-End to end, `tests/test_mariadb_netns.py`, as root in a network
-namespace in the trixie container (the CI job `mariadb / trixie`,
-systemd booted): three namespaces A, B and C on links of 250 ms ±25 ms
-with 2 % loss, measured first as `tests/test_vip_netns.py` measures
-them; etcd on the three, keel's CA, the VIP's units; a `mariadbd` per
-node in its namespace as a systemd unit (`mariadb-keel-<node>`), its
-`--defaults-file` including the node's scratch root's
-`etc/mysql/mariadb.conf.d/`, the client reaching it by `MYSQL_UNIX_PORT`;
-A and B paired with the VIP; C a plain member that writes to the VIP:
+End to end, `tests/test_mariadb_netns.py` runs `tests/mariadb_netns.py`
+on `tests/vip_netns.py`'s three nodes: as root in a network namespace
+that routes for three others, on links of 250 ms ±25 ms with 2 % loss
+measured first, the real wg-quick, etcd 3.5, the members' channel, the
+VIP's units, and trixie's MariaDB 11.8 as a server per node in its
+namespace, reading the node's scratch root's drop-in directory. A and B
+are the pair, C the application at the VIP. **Case (a)** is this pull
+request's: A and B applied, B seeded over TLS (`Master_SSL_Allowed:
+Yes`, `Using_Gtid: Slave_Pos`), three rows written at the VIP each read
+on B with the lag measured from the write's acknowledgement,
+semi-synchronous replication on and a commit's cost, the replica read
+only with `'mysql'@'localhost'` alone holding `READ_ONLY ADMIN`, `keel
+diff` clean on both; then B applied again and written through, its SQL
+thread still applying; B's database leaf taken as `repl` on A and B's
+etcd member leaf refused; A restarted and read only from its first
+second, writable again once `follow` ran. In CI, `mariadb / trixie`,
+with systemd booted.
 
-- **(a)** A applies as primary, B as replica (seeded with TLS, `REQUIRE
-  X509`, `Master_SSL_Allowed: Yes`); a row inserted at the VIP is read
-  on B; the lag measured as the time from the insert to its appearance;
-- **(b)** a commit at the VIP takes about one round trip; B's leg cut
-  (100 % loss): the next commit returns after about 10 s, `semi_sync`
-  reads `off`, `keel diff` on A reports drift, the alert reaches the
-  test's webhook, and commits keep returning fast; healed, `on` again;
-- **(c)** `keel database promote` on B, planned: the longest gap in C's
-  writes at the VIP, every 50 ms, is the downtime; every row C wrote
-  before the move is on B, none lost;
-- **(d)** B (the primary) cut off with C idle: the VIP fails over to A
-  within keel#81's times, `keel database follow` promotes A, C's writes
-  resume, measured from the cut; healed, B drops the VIP, turns read
-  only and rejoins as a replica of A by itself, no errant GTID. Then
-  again with C writing through the cut: B comes back diverged, read only,
-  the errant GTIDs reported and alerted;
-- **(e)** on the replica, `INSERT` as root over the unix socket and as
-  the application account at its overlay address are refused with 1290.
+**Cases (b) to (e) are the follow-up pull request's**, with the rest of
+the harness (a writer at the VIP, the partitions and heals of
+`tests/vip_netns.py`, the webhook that takes the alerts): (b) the
+fallback after 10 s with the replica cut, reported as drift and alerted,
+writes going on, the recovery; (c) `keel database promote` while the
+application writes, the downtime, no acknowledged row lost; (d) the
+primary cut off idle, the failover and the database following, the old
+primary rejoining by itself; then cut off while written to, coming back
+diverged, read only and alerted, reseeded once confirmed; (e) the
+replica refusing an `INSERT` as root and as the application. A first
+full run on one host measured them (under "Measured", marked local);
+the CI harness for three servers on one runner is that pull request's
+work.
 
-## Questions for the maintainer
+## Measured
 
-1. **The mesh root CA in cloud simple.** `keel mesh create` makes the
-   root in every cloud mode, and every join issues the member and
-   database leaves; the database's TLS rests on it in both modes.
-   Recommended. (The alternative is a database CA per pair, made by the
-   first primary and handed over the members' channel: self-contained,
-   but a second CA on every cloud advanced node, with its own renewal,
-   and two things for 0051 to federate.) Yes or no?
-2. **`ip_nonlocal_bind`** so both nodes bind the VIP and no role change
-   restarts MariaDB; the alternative restarts the server on each
-   promotion and demotion with the VIP added to or taken from its
-   `bind-address`. Recommended: the sysctl. Yes or no?
-3. **The rejoin does not rewrite the spec.** The role in
-   `/etc/keel/instance.yaml` stays the one chosen at installation (0020);
-   `inspect` writes the observed role out and `diff` reports the
-   difference as information on a paired node. 0049's "writes `role:
-   replica` into its own spec" is taken as the emitted spec, and
-   keel#69 decides who writes the file. Yes or no?
-4. **Dumps on the standby as a follow-up PR**, after this one, so the
-   replication PR stays reviewable. Yes or no?
+Under the design case, 250 ms ±25 ms with 2 % loss on every leg
+(measured over the overlay in CI: 226.5 ms minimum, 251 ms median, 3.75 %
+loss). Case (a) is the CI job's (`mariadb / trixie`, 2026-10-08, keel#93);
+the rest was measured once on one host by the full harness of the
+follow-up, and is marked so.
+
+| What | Measured |
+| --- | --- |
+| (a) the replica's first connection to the primary (TLS over 250 ms) | 5.3 s after its apply |
+| (a) a commit at the VIP, the replica acknowledging (AFTER_SYNC) | 0.28 to 0.31 s: one round trip |
+| (a) a client's write at the VIP, connect, TLS and the commit | 1.3 to 1.9 s |
+| (a) a write visible on the replica, from its acknowledgement | 0.04 to 0.07 s (three of three) |
+| (a) `keel diff` on both nodes | the database section clean, `semi_sync: same (on)` on the primary |
+| (a) the replica applied again, then written through | its SQL thread applying, the row 0.04 s after the acknowledgement |
+| (a) the replication account with the other member's etcd leaf, with its database leaf | refused (1045); taken |
+| (a) the primary restarted | read only at its first second (a 0.8 s restart), writable once `follow` ran |
+| (b) the first commit after the replica is cut; the next | 10.04 s, then 0.04 s (local) |
+| (b) the fallback alerted; semi-synchronous again after the heal | at the next watch; 7.3 s (local) |
+| (c), (d) | the follow-up pull request's |
+| (e) `INSERT` as root by the socket, and as the application at the replica's address | refused, 1290 (local) |
+
+## Decided, 2026-10-11
+
+The four questions the design check asked, each approved by the
+maintainer as recommended: the mesh root CA in every cloud mode, with a
+`database` leaf per node and no database CA per pair; `ip_nonlocal_bind`
+on both nodes, so no role change restarts MariaDB; the rejoin leaves
+`/etc/keel/instance.yaml` alone, the role being runtime state (0020), a
+precision the handbook records under 0049; the dumps on the standby as
+the next pull request.

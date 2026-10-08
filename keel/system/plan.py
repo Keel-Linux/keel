@@ -21,6 +21,7 @@ def plan(
     doc: dict, state: SystemState, confirmed: bool = False,
     defer_certificate: bool = False, network_window: int = DEFAULT_WINDOW,
     skip_network: bool = False, skip_uplink: bool = False,
+    spec: str | None = None,
 ) -> Plan:
     """Steps: instance, users, locale, security, tls, database, monitor,
     the appliance's overlays and Monit file (decision 0041), its firewall
@@ -50,7 +51,7 @@ def plan(
     steps += plan_locale(doc.get("locale") or {}, state)
     steps += plan_security(doc.get("security") or {}, state)
     steps += plan_tls(doc.get("tls") or {}, state, defer_certificate)
-    steps += plan_database(doc, state.database, confirmed)
+    steps += plan_database(doc, state.database, confirmed, spec)
     steps += plan_monitor(doc.get("monitor"), doc, state.monitor,
                           state.live, state.available)
     steps += plan_appliance(doc, state.appliance, state.live,

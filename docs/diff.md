@@ -307,6 +307,26 @@ quietly, and a diff that resolved the declared name before comparing would
 report `same` for an authorization that matches nothing at all
 ([docs/spec.md](spec.md)).
 
+### On a pair, the role is information and the fallback is drift
+
+With `appliance.vip` declared and a claim known (decisions 0020, 0049),
+the role line is `not compared` with the reason: the VIP makes this node
+the primary or the replica, the server is what it is, and the declared
+role is the installation's. `database.server.read_only` is then compared
+against the VIP's role, not the server's. `database.server.semi_sync` is
+compared on the primary: `on` is the same, `off` is drift with the note
+that the primary commits without the replica's acknowledgement (the
+fallback after 10 s, decision 0031), and on the replica it is not
+compared. `database.server.diverged` is drift on an old primary that
+came back holding transactions the new primary lacks, naming them
+([docs/replication.md](replication.md)).
+
+```
+database.server.role: not compared (declared primary; the role is runtime state on a paired node ...: the VIP makes this node the replica, ...)
+database.server.read_only: same (true)
+database.server.semi_sync: drift (declared on, observed off (0 replica(s) acknowledging, 41 commits acknowledged, 3 not); the primary commits without the replica's acknowledgement ...)
+```
+
 ### read_only follows the role the server has
 
 `database.server.read_only` is no field of the description: a replica is read

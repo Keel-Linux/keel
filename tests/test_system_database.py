@@ -543,7 +543,9 @@ class TestNoApplicationWritesThroughIt(unittest.TestCase):
             bypass="'root'@'localhost'\n'admin'@'localhost'\n",
         )))
         lock = only(plan[READ_ONLY_STEP], LockReplica)[0]
-        self.assertEqual(lock.accounts, ("'admin'@'localhost'",))
+        # root among them (0049, second round, point 1)
+        self.assertEqual(lock.accounts,
+                         ("'root'@'localhost'", "'admin'@'localhost'"))
 
     def test_it_comes_after_the_seed_which_copies_the_primarys_grants(self):
         plan = plan_database(REPLICA_DOC, state(answered=answering(
@@ -560,7 +562,7 @@ class TestNoApplicationWritesThroughIt(unittest.TestCase):
 
     def test_a_replica_where_nobody_bypasses_it_is_unchanged(self):
         plan = steps(REPLICA_DOC, state(answered=answering(
-            "ON", replicating=True, bypass="'root'@'localhost'\n",
+            "ON", replicating=True, bypass="'mysql'@'localhost'\n",
         )))
         self.assertEqual(only(plan[READ_ONLY_STEP], LockReplica), [])
         self.assertIn("unchanged",
@@ -605,6 +607,8 @@ class TestAPrimaryHoldsAuthorizations(unittest.TestCase):
         text = sql(plan["database.server.replication.allowed_from"])
         self.assertIn(f"'repl'@'{PATTERN}'", text)
         self.assertIn("GRANT REPLICATION SLAVE", text)
+        # a node's authorizations are its own, never its replica's
+        self.assertTrue(text.startswith("SET SESSION sql_log_bin = 0;\n"))
 
     def test_the_grant_lets_a_new_replica_copy_what_is_already_here(self):
         # A replica is seeded with mariadb-dump over the network, as the

@@ -150,7 +150,32 @@ def inspect_root(
     return Inspection(
         tree.root, str(appliance or "unknown appliance"), spec,
         tuple(findings), channel, vip_lines(tree, spec),
+        vip_role(tree, spec), divergence(tree),
     )
+
+
+def vip_role(tree: Tree, spec: dict) -> str | None:
+    """The role the pair's VIP gives this node, from the newest claim it
+    took (decision 0049); None without a VIP or a claim"""
+    declared = (spec.get("appliance") or {}).get("vip")
+    if declared is None:
+        return None
+    overlay = ((spec.get("network") or {}).get("overlay") or {}).get(
+        "wireguard") or {}
+    own_key = wgkeys.public(tree.path(
+        wireguard.key_path(overlay).lstrip("/")))[0] if overlay else None
+    try:
+        held = vip.read(tree.root, str(declared))
+    except ValueError:
+        return None
+    if held is None or held.claim is None:
+        return None
+    return vip.role(spec, held, own_key)
+
+
+def divergence(tree: Tree) -> dict | None:
+    from keel.system import dbfollow
+    return dbfollow.diverged(tree.root)
 
 
 def vip_lines(tree: Tree, spec: dict) -> tuple[str, ...]:

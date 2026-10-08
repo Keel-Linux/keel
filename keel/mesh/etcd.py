@@ -63,6 +63,7 @@ from keel.mesh.signing import SigningError
 from keel.network.wireguard import same_key
 
 MODE = "cloud_advanced"
+CLOUD_MODES = ("cloud_simple", MODE)
 OVERLAY = "etcd"
 ENABLED = "enabled"
 QUORUM_AT = 3
@@ -254,6 +255,14 @@ def ready(doc: dict) -> bool:
         OVERLAY in (doc.get("overlays") or {})
 
 
+def pki_ready(doc: dict) -> bool:
+    """Whether this node is in a cloud mode, where the mesh has a root
+    CA: etcd's in cloud advanced, and the database's TLS in both (the
+    maintainer, 2026-10-11: the root is made in every cloud mode)"""
+    installation = doc.get("installation") or {}
+    return installation.get("mode") in CLOUD_MODES
+
+
 def own_address(node: Node) -> str:
     return str(ipaddress.IPv6Interface(str(node.overlay()["address"])).ip)
 
@@ -301,9 +310,11 @@ def token_state(etcd: Etcd) -> str:
 
 def created(etcd: Etcd) -> None:
     """After `keel mesh create`: the root CA and this node's
-    certificate, on a ready node"""
+    certificate, in every cloud mode (etcd's in cloud advanced, the
+    database's TLS in cloud simple too)"""
     try:
-        if not ready(etcd.node.document()):
+        doc = etcd.node.document()
+        if not pki_ready(doc):
             return
         mesh_id = identity.read(etcd.root)
         etcdstate.make_root(etcd.root, mesh_id.hex(),
@@ -312,8 +323,12 @@ def created(etcd: Etcd) -> None:
         etcd.err(f"etcd: the mesh's CA was not made ({e}); keel mesh etcd"
                  " form makes it")
         return
-    etcd.err("etcd: this node holds the mesh's root CA; etcd forms when"
-             " the third cloud advanced member joins")
+    if ready(doc):
+        etcd.err("etcd: this node holds the mesh's root CA; etcd forms when"
+                 " the third cloud advanced member joins")
+    else:
+        etcd.err("mesh: this node holds the mesh's root CA, which signs the"
+                 " database certificates of a cloud simple pair")
 
 
 def join_request(etcd: Etcd) -> Request | None:

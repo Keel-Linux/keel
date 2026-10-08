@@ -66,6 +66,11 @@ class Inspection:
     # the VIPs this node knows (decision 0049): machine state, never a
     # field of the spec
     vip: tuple[str, ...] = ()
+    # on a paired node, the role the VIP gives this node, primary or
+    # replica; None without a claim or a VIP (keel.mesh.vip.role)
+    role: str | None = None
+    # what the last rejoin recorded of a divergence (keel.system.dbfollow)
+    diverged: dict | None = None
 
     @property
     def missing_required(self) -> tuple[str, ...]:

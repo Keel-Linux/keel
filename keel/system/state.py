@@ -91,12 +91,15 @@ class SystemState:
     appliance: ApplianceState | None = None
 
 
-def observe(root: str, doc: dict, start: bool = False) -> SystemState:
+def observe(root: str, doc: dict, start: bool = False,
+            spec: str | None = None) -> SystemState:
     """Read everything the plan for `doc` depends on under `root`
 
     `start` lets the observation start the database server the plan
     converges, when it is stopped: a run that will change the machine
-    passes it, a dry run does not (keel.system.dbready).
+    passes it, a dry run does not (keel.system.dbready). `spec` is the
+    spec's path, for a paired database node that speaks on the members'
+    channel (keel.system.dbstate).
     """
     tree = Tree(root)
     live = tree.root == paths.ROOT_DEFAULT
@@ -121,7 +124,7 @@ def observe(root: str, doc: dict, start: bool = False) -> SystemState:
         available=frozenset(
             name for name in COMMANDS if shutil.which(name)
         ) if live else frozenset(),
-        database=observe_database(root, doc, start),
+        database=observe_database(root, doc, start, spec),
         aliases=tree.read(paths.ALIASES),
         cron_apt_config=tree.read(paths.CRON_APT_CONFIG),
         hostname=tree.read(paths.HOSTNAME),

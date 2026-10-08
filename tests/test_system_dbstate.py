@@ -169,7 +169,7 @@ class TestTheServerIsUpBeforeItIsAsked(unittest.TestCase):
             with mock.patch.object(state, "observe_database",
                                    return_value=None) as observed:
                 state.observe(root, {}, start=start)
-            observed.assert_called_once_with(root, {}, start)
+            observed.assert_called_once_with(root, {}, start, None)
 
     def test_an_offline_root_starts_nothing(self):
         root, doc = self.live()

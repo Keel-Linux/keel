@@ -1,0 +1,15 @@
+# keel database watch (decisions 0031, 0049): on a node of a pair, the
+# fallback of semi-synchronous replication to asynchronous, and its
+# recovery, alerted once each through the monitor's channels; the
+# database certificate renewed with a third of its life left. Run by
+# keel-database-watch.timer; a node with no database state has nothing
+# to watch.
+[Unit]
+Description=keel database: the semi-synchronous fallback, the certificate
+After=network-online.target mariadb.service
+Wants=network-online.target
+ConditionPathExists=/var/lib/keel/database
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/keel database watch

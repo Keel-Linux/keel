@@ -19,6 +19,8 @@ from keel.system.actions import (
     AdoptKey,
     Attempt,
     Change,
+    EnsureDatabaseTls,
+    FollowVip,
     GenerateKey,
     InstallRuleset,
     LockReplica,
@@ -81,9 +83,44 @@ class Effects:
                 return dbreadonly.unlock(self.tree.root)
             if isinstance(action, PromoteReplica):
                 return dbreadonly.promote(self.tree.root, action)
+            if isinstance(action, EnsureDatabaseTls):
+                return self.database_tls(action)
+            if isinstance(action, FollowVip):
+                from keel.system import dbfollow
+                return dbfollow.followed(self.tree.root, action.spec,
+                                         action.confirmed)
             return self.symlink(action)
         except OSError as e:
             return f"{e.strerror or e}"
+
+    def database_tls(self, action: EnsureDatabaseTls) -> str | None:
+        """keel.system.dbtls.ensure, with this node on the members'
+        channel; None when nothing was due"""
+        import sys
+        from datetime import datetime, timezone
+        from keel.mesh import etcd
+        from keel.mesh.etcdstate import StateError
+        from keel.mesh.node import Node, NodeError
+        from keel.mesh import vippair
+        from keel.system import dbtls
+        node = Node(self.tree.root, action.spec)
+        member = etcd.Etcd(node, lambda: datetime.now(timezone.utc),
+                           lambda line: print(line, file=sys.stderr))
+        try:
+            own = etcd.own_key(member)
+            if own is None:
+                return "this node's WireGuard key could not be read"
+            try:
+                pair = vippair.read(self.tree.root, action.vip)
+            except ValueError:
+                pair = None
+            said = dbtls.ensure(member, action.address, action.vip,
+                                action.peer, own, pair=pair)
+        except (StateError, NodeError, ValueError) as e:
+            return str(e)
+        if said:
+            print(f"database.server.tls: {said}", file=sys.stderr)
+        return None
 
     def run(self, argv: tuple[str, ...], stdin: str | None = None,
             timeout: float | None = None) -> str | None:

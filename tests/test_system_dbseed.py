@@ -212,7 +212,12 @@ class TestTheCopy(SeedTestCase):
         runner = Runner()
         self.seed(runner)
         load = runner.named("load")[0]
-        self.assertEqual(load["argv"], ["mariadb", "--batch"])
+        # as the server's mysql account (decision 0049), and outside the
+        # binary log: a pair has one on both nodes, and the copy's rows
+        # are the primary's transactions, not this node's
+        self.assertEqual(load["argv"], [
+            "runuser", "-u", "mysql", "--", "mariadb", "--batch",
+            "--init-command=SET SESSION sql_log_bin=0"])
         self.assertIn("Seed post 1", load["stdin"])
 
     def test_the_declared_port_is_the_one_dialled(self):

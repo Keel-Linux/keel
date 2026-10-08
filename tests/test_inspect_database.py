@@ -515,20 +515,25 @@ class TestReadOnly(unittest.TestCase):
                    "'admin'@'localhost'\n'admin'@'::1'\n",
         )
         reading = mariadb_reading(answered, SOCKETS)
+        # root is named too: on a replica it loses the privilege like
+        # every account (decision 0049, second round, point 1)
         self.assertEqual(
-            reading.bypass.value, ["'admin'@'localhost'", "'admin'@'::1'"]
+            reading.bypass.value,
+            ["'root'@'localhost'", "'admin'@'localhost'", "'admin'@'::1'"]
         )
 
     def test_root_from_anywhere_is_not_the_servers_own(self):
-        """Debian's root is a socket account at localhost; a root that
-        connects from the network is somebody's, and is named"""
+        """The server's own accounts are mysql, which only the system's
+        mysql user reaches by the socket, and mariadb.sys; root at this
+        machine or from the network is named"""
         answered = with_variables(
             "read_only\tON\n",
             bypass="'root'@'localhost'\n'root'@'%'\n'mysql'@'::1'\n"
                    "'mariadb.sys'@'127.0.0.1'\n",
         )
         reading = mariadb_reading(answered, SOCKETS)
-        self.assertEqual(reading.bypass.value, ["'root'@'%'"])
+        self.assertEqual(reading.bypass.value,
+                         ["'root'@'localhost'", "'root'@'%'"])
 
     def test_the_bypass_question_names_read_only_admin(self):
         engine = next(one for one in ENGINES if one.name == "mariadb")
@@ -559,7 +564,7 @@ class TestReadOnly(unittest.TestCase):
 
     def test_no_account_but_the_servers_own_is_not_mentioned(self):
         answered = with_variables(
-            "read_only\tOFF\n", bypass="'root'@'localhost'\n"
+            "read_only\tOFF\n", bypass="'mysql'@'localhost'\n"
         )
         _, findings = probe_server((self.one(answered),))
         self.assertNotIn(

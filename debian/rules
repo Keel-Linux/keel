@@ -11,3 +11,5 @@ override_dh_installsystemd:
 	dh_installsystemd --name=keel-mesh-members
 	dh_installsystemd --name=keel-mesh-sync
 	dh_installsystemd --name=keel-mesh-etcd
+	dh_installsystemd --name=keel-database-follow
+	dh_installsystemd --name=keel-database-watch
