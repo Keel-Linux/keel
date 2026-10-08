@@ -125,9 +125,12 @@ class JoinRequest:
     time: int
     # the new node's signing key, which its admission names
     sign_key: str
-    # the request for its etcd intermediate CA, sent only by a node that
-    # can run etcd (keel.mesh.etcdmsg, 0048 third round)
+    # the request for its etcd certificate, sent only by a node that can
+    # run etcd (keel.mesh.etcdmsg, 0048 third round), and the proof it is
+    # this node's: its signature over it with `sign_key`
+    # (keel.mesh.etcdproof)
     etcd_csr: str | None = None
+    etcd_proof: str | None = None
 
 
 @dataclass(frozen=True)
@@ -272,7 +275,7 @@ def number(data: dict, name: str) -> int:
 
 def join_request(body: bytes) -> JoinRequest:
     # etcdmsg reads ProtocolError and the shapes from here
-    from keel.mesh import etcdmsg
+    from keel.mesh import etcdmsg, etcdproof
     data = loaded(body)
     return JoinRequest(
         invite_id=matching(data, "invite_id", ID_RE),
@@ -281,7 +284,9 @@ def join_request(body: bytes) -> JoinRequest:
         address=overlay(data, "address", True),
         nonce=matching(data, "nonce", NONCE_RE),
         time=number(data, "time"), sign_key=key(data, "sign_key"),
-        etcd_csr=etcdmsg.csr(data.get("etcd_csr")))
+        etcd_csr=etcdmsg.csr(data.get("etcd_csr")),
+        etcd_proof=None if data.get("etcd_proof") is None
+        else etcdproof.proof(data.get("etcd_proof")))
 
 
 def join_answer(body: bytes) -> JoinAnswer:

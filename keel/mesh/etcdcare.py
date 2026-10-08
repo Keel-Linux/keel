@@ -1,11 +1,15 @@
 # Copyright (c) 2026 KeelLinux maintainers
 """etcd once it runs: tend, leave, revocation and status (0025, 0048)
 
-- `keel-mesh-etcd.timer` runs `keel mesh etcd tend` (`tend`): learners in
-  sync promoted, learners that never started within an hour removed,
-  the member's intermediate renewed by the root's holder with a third
-  of its year left, its leaves with a third of their 30 days left, and
-  on the holder, the CRL signed again every ten days;
+- `keel-mesh-etcd.timer` runs `keel mesh etcd tend` (`tend`): on the
+  root's holder, learners in sync promoted, learners that never started
+  within an hour removed (etcd lets only its root user change the
+  membership once auth is on), its admin certificate renewed, the CRL
+  signed again every ten days, and etcd's users and roles converged
+  once auth is on (keel.mesh.etcdauth); on every member, its
+  certificate renewed by the root with a third of its 30 days left (a
+  renewal waits, alerted, while the root's holder cannot be reached),
+  and its VIP pairs sent to the holder for their role;
 - `keel mesh remove` removes a member under the amendment's rule
   (`leave`), and has the root's holder revoke its certificates
   (`revoked`); every member takes the new CRL from the rosters
@@ -19,7 +23,8 @@ import os
 from datetime import datetime, timedelta
 
 from keel import exits
-from keel.mesh import etcdca, etcdmsg, etcdstate
+from keel.mesh import etcdca, etcdmsg, etcdproof, etcdstate, protocol
+from keel.mesh.etcdproof import Request
 from keel.mesh.etcd import (
     NO_TOLERANCE,
     QUORUM_AT,
@@ -58,26 +63,28 @@ def tend(etcd: Etcd) -> int:
         etcd.err(f"etcd: {e}")
         return exits.APPLY_FAILED
     now = etcd.clock()
-    learners = [one for one in listed if one.learner]
+    learners = [one for one in listed if one.learner] \
+        if etcdstate.holds_root(etcd.root) else []
     seen = etcdstate.learners(etcd.root, [one.id for one in learners
                                           if not one.started], now)
     for one in learners:
         try:
             if one.started:
-                client.promote(one.id)
+                etcd.admin().promote(one.id)
                 etcd.err(f"etcd: learner {one.name} promoted to a voter")
             elif now - seen[one.id] >= STALE_LEARNER:
-                client.remove(one.id)
+                etcd.admin().remove(one.id)
                 etcd.err(f"etcd: learner {one.id} at {one.address} never"
                          " started within an hour: removed")
         except EtcdError as e:
             etcd.err(f"etcd: learner {one.name or one.id}: {e}")
     try:
         renewed = renew(etcd, now)
-    except StateError as e:
+    except (StateError, SigningError) as e:
         failed(etcd, str(e))
         return exits.APPLY_FAILED
     etcdstate.write(etcd.root, etcdstate.RENEWAL, "{}\n")
+    code = max(code, roles(etcd))
     left = etcdstate.expires(etcd.root)
     if left is not None and left - now < WARN_BEFORE:
         alert(etcd, "etcd certificate expires soon",
@@ -90,28 +97,61 @@ def tend(etcd: Etcd) -> int:
     return code
 
 
+def roles(etcd: Etcd) -> int:
+    """etcd's users and roles: converged on the root's holder once auth
+    is on; this node's VIP pairs sent to the holder"""
+    from keel.mesh import etcdauth
+    from keel.mesh.etcdclient import EtcdError
+    code = exits.OK
+    if etcdstate.holds_root(etcd.root):
+        try:
+            if etcdauth.enabled(etcd):
+                for line in etcdauth.reconcile(etcd):
+                    etcd.err(f"etcd: {line}")
+        except (StateError, EtcdError) as e:
+            etcd.err(f"etcd: users and roles not converged: {e}")
+            code = exits.APPLY_FAILED
+        for address, key in etcdca.impostors(
+                etcd.root, lambda one: etcdproof.trusted_sign_key(
+                    etcd.root, one)):
+            etcd.err(f"etcd: the certificate of {address} was issued under"
+                     " a signing key the trust store does not hold for it:"
+                     " revoked")
+            revoked(etcd, address, key)
+    for line in etcdauth.announce(etcd):
+        etcd.err(line)
+    return code
+
+
 def waiting(etcd: Etcd) -> int:
     """The requests this inviter queued while the root's holder could
-    not be reached: asked again, and each node given its CA (and its
-    cluster) over the members' channel once the holder signs"""
+    not be reached: asked again, and each node given its certificate
+    (and its cluster) over the members' channel once the holder
+    signs"""
     from keel.mesh import etcdform
     code = exits.OK
     for one in etcdstate.pending(etcd.root):
         address, key = str(one.get("address")), str(one.get("public_key"))
         try:
-            found = issued(etcd, str(one.get("csr")), address, key)
-        except StateError as e:
+            evidence = one.get("admission")
+            found = issued(etcd, Request(str(one.get("csr")),
+                                         str(one.get("proof"))),
+                           address, key, None if evidence is None
+                           else protocol.admission(evidence))
+        except (StateError, ProtocolError) as e:
             etcd.err(f"etcd: {address} still waits: {e}")
             code = exits.APPLY_FAILED
             continue
         problem = etcdform.send_cluster(etcd, Member(key, address),
                                         found.cluster, found.grant)
         if problem:
-            etcd.err(f"etcd: {address} did not take its CA ({problem})")
+            etcd.err(f"etcd: {address} did not take its certificate"
+                     f" ({problem})")
             code = exits.APPLY_FAILED
             continue
         etcdstate.unqueue(etcd.root, address)
-        etcd.err(f"etcd: {address} has its CA from the root's holder")
+        etcd.err(f"etcd: {address} has its certificate from the root's"
+                 " holder")
     return code
 
 
@@ -157,27 +197,30 @@ def renewal_problem(root: str) -> str | None:
 
 
 def renew(etcd: Etcd, now: datetime) -> bool:
-    """This member's intermediate with a third of its life left, signed
-    again by the root's holder; its leaves, with a third left; on the
-    holder, the CRL once a third of its life went by. Whether anything
-    changed, which apply then writes for etcd. Raises StateError"""
+    """This member's certificate with a third of its life left signed
+    again by the root: here on its holder, else asked of the holder
+    (keel#83); on the holder, its admin certificate and the CRL once a
+    third of their life went by. Whether anything changed, which apply
+    then writes for etcd. Raises StateError: a renewal waits while the
+    root's holder cannot be reached"""
     address = own_address(etcd.node)
     changed = False
-    if etcdca.ca_due(etcd.root, now):
-        if etcdstate.holds_root(etcd.root):
-            etcdca.renew_own(etcd.root, address, own_key(etcd))
-        else:
-            etcdstate.take_grant(etcd.root, issued(
-                etcd, etcdstate.ca_request(etcd.root), address,
-                own_key(etcd)).grant)
-        etcd.err("etcd: this member's intermediate CA renewed")
+    if etcdstate.stale(etcd.root, address, now):
+        csr = etcdstate.member_request(etcd.root)
+        grant = etcdstate.grant_for(etcd.root, csr, address, own_key(etcd)) \
+            if etcdstate.holds_root(etcd.root) else issued(
+                etcd, Request(csr, etcdproof.sign(etcd.root, csr)), address,
+                own_key(etcd) or "").grant
+        etcdstate.keep_own_intermediate(etcd.root, address, own_key(etcd))
+        etcdstate.take_grant(etcd.root, grant, address)
+        etcd.err("etcd: this member's certificate renewed by the root")
         changed = True
-    if etcdstate.leaves(etcd.root, address, now) or changed:
-        etcd.err("etcd: this member's certificates renewed")
-        changed = True
-    if etcdca.refresh(etcd.root, now):
-        etcd.err("etcd: the CRL signed again with the root")
-        changed = True
+    if etcdstate.holds_root(etcd.root):
+        if etcdstate.admin(etcd.root, now):
+            etcd.err("etcd: the root's admin certificate renewed")
+        if etcdca.refresh(etcd.root, now):
+            etcd.err("etcd: the CRL signed again with the root")
+            changed = True
     return changed
 
 
@@ -196,35 +239,43 @@ def leave(etcd: Etcd, address: str, may: bool, key: str = "") -> None:
                  " local only; its admitter or a root removes it from etcd")
         return
     try:
-        client = etcd.local()
+        # the root's user on the holder; elsewhere this member, which
+        # etcd lets remove a member only while auth is off: then the
+        # holder removes it when it revokes the node's certificates
+        client = etcd.admin() if etcdstate.holds_root(etcd.root) \
+            else etcd.local()
         found = [one for one in client.members() if one.address == address]
         for one in found:
             client.remove(one.id)
         left = [one for one in client.members() if not one.learner]
     except EtcdError as e:
-        etcd.err(f"etcd: the member at {address} was not removed ({e})")
-        return
-    gone = {key for key, at in etcdstate.ready(etcd.root).items()
+        etcd.err(f"etcd: the member at {address} was not removed here"
+                 f" ({e}); the root's holder removes it")
+        found, left = [], None
+    gone = {one for one, at in etcdstate.ready(etcd.root).items()
             if at == address}
-    for key in gone:
-        etcdstate.drop_ready(etcd.root, key)
+    for one in gone:
+        etcdstate.drop_ready(etcd.root, one)
     if found:
         etcd.err(f"etcd: the member at {address} removed; {len(left)}"
                  " voter(s) left")
-    if len(left) == 2:
+    if left is not None and len(left) == 2:
         etcd.err(f"etcd: {NO_TOLERANCE}")
     revoked(etcd, address, key)
 
 
 def revoked(etcd: Etcd, address: str, key: str) -> None:
-    """The removed node's certificates revoked by the root's holder: the
-    intermediates it signed for that address and key, and so the node's
-    leaves; the new CRL kept and written for etcd; said when it cannot be"""
+    """The removed node's certificates revoked by the root's holder,
+    what it signed for that address and key, and its etcd member and
+    user removed there; the new CRL kept and written for etcd; said
+    when it cannot be"""
     from keel.mesh.memberlink import LinkError
     holder = etcdstate.holder(etcd.root)
     try:
         if etcdstate.holds_root(etcd.root):
             etcdca.revoke(etcd.root, address, key, etcd.clock())
+            from keel.mesh import etcdserve
+            etcdserve.removed_from_etcd(etcd, address)
         elif holder is None:
             raise StateError("this node does not know the root's holder")
         else:
@@ -235,8 +286,7 @@ def revoked(etcd: Etcd, address: str, key: str) -> None:
     except (StateError, LinkError, SigningError, ValueError,
             ProtocolError) as e:
         etcd.err(f"etcd: the certificates of {address} were not revoked"
-                 f" ({e}); its intermediate expires within a year, its"
-                 " leaves within 30 days")
+                 f" ({e}); they expire within 30 days")
         return
     etcd.err(f"etcd: the certificates of {address} revoked; the CRL goes"
              " to every member with the rosters")
@@ -292,7 +342,7 @@ def certificates(etcd: Etcd) -> list[str]:
     waits = etcdstate.pending(etcd.root)
     if waits:
         lines.append(f"etcd: {len(waits)} node(s) wait for the root CA's"
-                     " holder to sign their CA ("
+                     " holder to sign their certificate ("
                      + ", ".join(str(one.get("address")) for one in waits)
                      + "); keel-mesh-etcd.timer asks again")
     ends = etcdstate.expires(etcd.root)

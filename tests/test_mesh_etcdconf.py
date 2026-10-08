@@ -38,6 +38,9 @@ class TestEnvironment(unittest.TestCase):
         for one in ("ETCD_CLIENT_CERT_AUTH", "ETCD_PEER_CLIENT_CERT_AUTH"):
             self.assertEqual(found[one], "true")
         self.assertEqual(found["ETCD_TLS_MIN_VERSION"], "TLS1.3")
+        # keel asks over gRPC: the gateway, which would call etcd with the
+        # member's own certificate whoever asks it, is off (keel#83)
+        self.assertEqual(found["ETCD_ENABLE_GRPC_GATEWAY"], "false")
         self.assertEqual(found["ETCD_CERT_FILE"], "/etc/etcd/keel/member.crt")
         self.assertEqual(found["ETCD_PEER_KEY_FILE"],
                          "/etc/etcd/keel/member.key")

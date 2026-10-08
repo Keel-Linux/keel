@@ -226,7 +226,7 @@ def seconds(text: str) -> int:
 
 
 def etcd_actions(mesh_actions, options: Options) -> None:
-    """keel mesh etcd form and tend (0025, 0048)"""
+    """keel mesh etcd form, tend and reissue (0025, 0048, keel#83)"""
     etcd_parser = mesh_actions.add_parser(
         "etcd",
         help="etcd, the mesh's registry: form it on a mesh that never saw"
@@ -276,3 +276,23 @@ def etcd_actions(mesh_actions, options: Options) -> None:
     )
     options.root(gate_parser, "gate etcd in")
     gate_parser.set_defaults(handler=commands.mesh_etcd_gate)
+    reissue_parser = etcd_subs.add_parser(
+        "reissue",
+        help="on the root CA's holder: move every member to a certificate"
+        " the root signs, one at a time, revoke the members' intermediate"
+        " CAs and enable etcd's auth (keel#83); safe to run again (root)",
+    )
+    options.common(reissue_parser)
+    which = reissue_parser.add_mutually_exclusive_group()
+    which.add_argument(
+        "--dry-run", action="store_true",
+        help="ask the members and print what it would do; change nothing"
+        " on any member",
+    )
+    which.add_argument(
+        "--rollback", action="store_true",
+        help="disable etcd's auth again; the certificates stay the root's",
+    )
+    window(options, reissue_parser)
+    options.root(reissue_parser, "reissue etcd's certificates in")
+    reissue_parser.set_defaults(handler=commands.mesh_etcd_reissue)

@@ -34,24 +34,42 @@ class Case(unittest.TestCase):
                                                  relative)).st_mode)
 
 
+def legacy_layout(root: str) -> None:
+    """The files of a member before keel#83: an intermediate and the
+    client leaf it issued"""
+    for one in etcdstate.LEGACY:
+        etcdstate.write(root, one, "x\n")
+
+
 class TestTheFirstNode(Case):
-    def test_the_root_and_its_own_intermediate(self):
+    def test_the_root_its_own_certificate_and_its_admin(self):
         self.assertFalse(etcdstate.credentials(self.root))
         self.assertIsNone(etcdstate.root_fingerprint(self.root))
         self.assertTrue(etcdstate.make_root(self.root, MESH, "fd00::1"))
         self.assertTrue(etcdstate.credentials(self.root))
         self.assertTrue(etcdstate.holds_root(self.root))
+        self.assertFalse(etcdstate.legacy(self.root))
         # made once: a second call keeps what is there
         before = etcdstate.read(self.root, etcdstate.ROOT_CERT)
         self.assertFalse(etcdstate.make_root(self.root, MESH, "fd00::1"))
         self.assertEqual(etcdstate.read(self.root, etcdstate.ROOT_CERT),
                          before)
-        for one in (etcdstate.ROOT_KEY, etcdstate.CA_KEY,
-                    etcdstate.ROOT_CERT, etcdstate.CA_CERT):
+        for one in (etcdstate.ROOT_KEY, etcdstate.MEMBER_KEY,
+                    etcdstate.ADMIN_KEY, etcdstate.ROOT_CERT,
+                    etcdstate.MEMBER_CERT, etcdstate.ADMIN_CERT):
             self.assertEqual(self.mode(one), 0o600)
         self.assertEqual(self.mode(etcdstate.DIR), 0o700)
         self.assertEqual(etcdstate.root_fingerprint(self.root),
                          etcdpki.fingerprint(before))
+        own = etcdstate.read(self.root, etcdstate.MEMBER_CERT)
+        self.assertTrue(etcdpki.verified(own, [], before))
+        self.assertEqual(etcdpki.subject(own), "keel-fd00--1")
+        self.assertEqual(etcdpki.addresses(own), ("fd00::1", "::1"))
+        admin = etcdstate.read(self.root, etcdstate.ADMIN_CERT)
+        self.assertEqual(etcdpki.subject(admin), "root")
+        self.assertTrue(etcdpki.verified(admin, [], before))
+        self.assertFalse(os.path.exists(os.path.join(self.root,
+                                                     etcdstate.CA_KEY)))
 
     def test_a_root_file_that_holds_none(self):
         etcdstate.write(self.root, etcdstate.ROOT_CERT, "fd00::4")
@@ -61,9 +79,9 @@ class TestTheFirstNode(Case):
     def test_a_node_with_a_grant_makes_no_root(self):
         other = self.scratch()
         etcdstate.make_root(other, MESH, "fd00::1")
-        grant = etcdstate.grant_for(other, etcdstate.ca_request(self.root),
-                                    "fd00::2")
-        etcdstate.take_grant(self.root, grant)
+        grant = etcdstate.grant_for(other, etcdstate.member_request(
+            self.root), "fd00::2")
+        etcdstate.take_grant(self.root, grant, "fd00::2")
         self.assertFalse(etcdstate.make_root(self.root, MESH, "fd00::1"))
         self.assertFalse(etcdstate.holds_root(self.root))
 
@@ -74,71 +92,85 @@ class TestGrants(Case):
         self.first = self.scratch()
         etcdstate.make_root(self.first, MESH, "fd00::1")
 
-    def test_every_intermediate_is_the_root_s(self):
+    def test_every_certificate_is_the_root_s(self):
         second = self.root
-        grant = etcdstate.grant_for(self.first, etcdstate.ca_request(second),
-                                    "fd00::3", "k2")
+        legacy_layout(second)
+        self.assertTrue(etcdstate.legacy(second))
+        grant = etcdstate.grant_for(self.first, etcdstate.member_request(
+            second), "fd00::3", "k2")
         self.assertEqual(grant.chain, ())
         self.assertEqual(etcdstate.holder(second), None)
-        etcdstate.take_grant(second, grant)
+        etcdstate.take_grant(second, grant, "fd00::3")
         self.assertEqual(etcdstate.holder(second), "fd00::1")
+        self.assertFalse(etcdstate.legacy(second))
         self.assertEqual(etcdstate.root_fingerprint(second),
                          etcdstate.root_fingerprint(self.first))
-        self.assertTrue(etcdstate.leaves(second, "fd00::3", NOW))
         member = etcdstate.read(second, etcdstate.MEMBER_CERT)
-        chain = etcdpki.blocks(member)
-        self.assertEqual(len(chain), 2)  # the leaf, its CA
+        self.assertEqual(len(etcdpki.blocks(member)), 1)
         self.assertTrue(etcdpki.verified(
-            chain[0], chain[1:], etcdstate.read(second, etcdstate.ROOT_CERT)))
-        self.assertEqual(etcdpki.addresses(chain[0]), ("fd00::3", "::1"))
-        client = etcdpki.blocks(etcdstate.read(second, etcdstate.CLIENT_CERT))
-        self.assertTrue(etcdpki.verified(
-            client[0], client[1:], etcdstate.read(second,
-                                                  etcdstate.ROOT_CERT)))
+            member, [], etcdstate.read(second, etcdstate.ROOT_CERT)))
+        self.assertEqual(etcdpki.addresses(member), ("fd00::3", "::1"))
+        self.assertEqual(etcdpki.subject(member), "keel-fd00--3")
         issued = json.loads(etcdstate.read(self.first, etcdstate.ISSUED))
-        self.assertEqual(issued["fd00::3"][0][2], "k2")
+        self.assertEqual(issued["fd00::3"][0][2:], ["k2", "leaf", None, None])
+        self.assertEqual(etcdstate.issued(self.first)["fd00::3"][0][2],
+                         "k2")
         # a member that is not the holder signs nothing
         with self.assertRaisesRegex(StateError, "only the node"):
-            etcdstate.grant_for(second, etcdstate.ca_request(
+            etcdstate.grant_for(second, etcdstate.member_request(
                 self.scratch()), "fd00::4")
+        self.assertFalse(etcdstate.stale(second, "fd00::3", NOW))
 
     def test_a_grant_for_another_key_is_refused(self):
         stranger = self.scratch()
         grant = etcdstate.grant_for(self.first,
-                                    etcdstate.ca_request(stranger), "fd00::4")
-        etcdstate.ca_request(self.root)
+                                    etcdstate.member_request(stranger),
+                                    "fd00::4")
+        etcdstate.member_request(self.root)
         with self.assertRaisesRegex(StateError, "another key"):
-            etcdstate.take_grant(self.root, grant)
+            etcdstate.take_grant(self.root, grant, "fd00::4")
         self.assertFalse(etcdstate.credentials(self.root))
 
+    def test_a_grant_for_another_address_is_refused(self):
+        grant = etcdstate.grant_for(self.first, etcdstate.member_request(
+            self.root), "fd00::4")
+        with self.assertRaisesRegex(StateError, "does not name"):
+            etcdstate.take_grant(self.root, grant, "fd00::5")
+
     def test_a_grant_that_does_not_chain_is_refused(self):
-        grant = etcdstate.grant_for(self.first,
-                                    etcdstate.ca_request(self.root), "fd00::4")
+        grant = etcdstate.grant_for(self.first, etcdstate.member_request(
+            self.root), "fd00::4")
         other = self.scratch()
         etcdstate.make_root(other, MESH, "fd00::1")
         forged = Grant(grant.certificate, grant.chain,
                        etcdstate.read(other, etcdstate.ROOT_CERT))
-        with self.assertRaisesRegex(StateError, "does not chain"):
-            etcdstate.take_grant(self.root, forged)
+        with self.assertRaisesRegex(StateError, "not one the root"):
+            etcdstate.take_grant(self.root, forged, "fd00::4")
+        with_chain = Grant(grant.certificate, (grant.root,), grant.root)
+        with self.assertRaisesRegex(StateError, "not one the root"):
+            etcdstate.take_grant(self.root, with_chain, "fd00::4")
 
     def test_a_grant_under_another_root_than_the_one_held(self):
         etcdstate.take_grant(self.root, etcdstate.grant_for(
-            self.first, etcdstate.ca_request(self.root), "fd00::4"))
+            self.first, etcdstate.member_request(self.root), "fd00::4"),
+            "fd00::4")
         other = self.scratch()
         etcdstate.make_root(other, MESH, "fd00::1")
         with self.assertRaisesRegex(StateError, "another root"):
             etcdstate.take_grant(self.root, etcdstate.grant_for(
-                other, etcdstate.ca_request(self.root), "fd00::4"))
+                other, etcdstate.member_request(self.root), "fd00::4"),
+                "fd00::4")
 
-    def test_no_intermediate_no_grant(self):
+    def test_no_root_no_grant(self):
         with self.assertRaisesRegex(StateError, "only the node"):
-            etcdstate.grant_for(self.root, etcdstate.ca_request(
+            etcdstate.grant_for(self.root, etcdstate.member_request(
                 self.scratch()), "fd00::4")
 
     def test_a_request_once_made_is_kept(self):
-        first = etcdstate.ca_request(self.root)
+        first = etcdstate.member_request(self.root)
         self.assertEqual(etcdpki.request_key(first),
-                         etcdpki.request_key(etcdstate.ca_request(self.root)))
+                         etcdpki.request_key(etcdstate.member_request(
+                             self.root)))
 
 
 class TestTheRootsHolder(Case):
@@ -148,27 +180,43 @@ class TestTheRootsHolder(Case):
 
     def test_it_signs_with_the_root_and_records_what_it_signed(self):
         member = self.scratch()
-        grant = etcdstate.grant_for(self.root, etcdstate.ca_request(member),
-                                    "fd00::2")
+        grant = etcdstate.grant_for(self.root, etcdstate.member_request(
+            member), "fd00::2")
         self.assertEqual(grant.chain, ())
         self.assertEqual(grant.holder, "fd00::1")
         self.assertIn("X509 CRL", grant.crl)
         issued = json.loads(etcdstate.read(self.root, etcdstate.ISSUED))
         self.assertEqual(issued["fd00::2"][0][0],
                          etcdpki.serial(grant.certificate))
-        etcdstate.take_grant(member, grant)
+        etcdstate.take_grant(member, grant, "fd00::2")
         self.assertEqual(etcdstate.read(member, etcdstate.CRL), grant.crl)
         etcdstate.write(self.root, etcdstate.ISSUED, "[")
-        etcdstate.grant_for(self.root, etcdstate.ca_request(member),
+        self.assertEqual(etcdstate.issued(self.root), {})
+        etcdstate.grant_for(self.root, etcdstate.member_request(member),
                             "fd00::2")
         etcdstate.write(self.root, etcdstate.ISSUED, "[1]")
-        etcdstate.grant_for(self.root, etcdstate.ca_request(member),
+        self.assertEqual(etcdstate.issued(self.root), {})
+        etcdstate.grant_for(self.root, etcdstate.member_request(member),
                             "fd00::2")
+
+    def test_its_admin_certificate_renewed_with_a_third_left(self):
+        self.assertFalse(etcdstate.admin(self.root, NOW))
+        later = NOW + timedelta(days=etcdpki.LEAF_DAYS * 2 // 3 + 2)
+        self.assertTrue(etcdstate.admin(self.root, later))
+        os.remove(os.path.join(self.root, etcdstate.ADMIN_CERT))
+        self.assertTrue(etcdstate.admin(self.root, NOW))
+        with self.assertRaisesRegex(StateError, "root user"):
+            etcdstate.admin(self.scratch(), NOW)
+        with mock.patch("keel.mesh.etcdpki.issue",
+                        side_effect=PkiError("openssl exited 1")), \
+                self.assertRaisesRegex(StateError, "exited 1"):
+            etcdstate.admin(self.root, later)
 
     def test_a_crl_taken_when_the_root_signed_it_and_it_is_newer(self):
         member = self.scratch()
         etcdstate.take_grant(member, etcdstate.grant_for(
-            self.root, etcdstate.ca_request(member), "fd00::2"))
+            self.root, etcdstate.member_request(member), "fd00::2"),
+            "fd00::2")
         key = os.path.join(self.root, etcdstate.ROOT_KEY)
         root = etcdstate.read(self.root, etcdstate.ROOT_CERT)
         newer = etcdpki.crl(key, root, {}, 5)
@@ -189,33 +237,50 @@ class TestTheRootsHolder(Case):
                          "fd2a:9c41:7e03::/64")
 
 
-class TestLeaves(Case):
+class TestStale(Case):
     def setUp(self):
         super().setUp()
         etcdstate.make_root(self.root, MESH, "fd00::1")
 
-    def test_issued_then_kept_then_renewed(self):
-        self.assertTrue(etcdstate.leaves(self.root, "fd00::1", NOW))
-        self.assertFalse(etcdstate.leaves(self.root, "fd00::1", NOW))
-        self.assertEqual(self.mode(etcdstate.MEMBER_KEY), 0o600)
-        # a third of its life left: renewed with the same key
+    def test_kept_then_due_with_a_third_left(self):
+        self.assertFalse(etcdstate.stale(self.root, "fd00::1", NOW))
         later = NOW + timedelta(days=etcdpki.LEAF_DAYS * 2 // 3 + 2)
-        self.assertTrue(etcdstate.leaves(self.root, "fd00::1", later))
+        self.assertTrue(etcdstate.stale(self.root, "fd00::1", later))
 
-    def test_another_address_reissues(self):
-        etcdstate.leaves(self.root, "fd00::1", NOW)
-        self.assertTrue(etcdstate.leaves(self.root, "fd00::9", NOW))
-        cert = etcdpki.blocks(etcdstate.read(self.root,
-                                             etcdstate.MEMBER_CERT))[0]
-        self.assertEqual(etcdpki.addresses(cert)[0], "fd00::9")
+    def test_another_address_is_due(self):
+        self.assertTrue(etcdstate.stale(self.root, "fd00::9", NOW))
+
+    def test_one_an_intermediate_issued_is_due_by_its_date_alone(self):
+        """before keel#83: keel mesh etcd reissue moves it, not tend"""
+        ca_key = os.path.join(self.root, "x.key")
+        with open(ca_key, "w") as fob:
+            fob.write(etcdpki.new_key())
+        other = etcdpki.root(ca_key, MESH)
+        leaf = etcdpki.issue(etcdpki.MEMBER, ca_key, other, etcdpki.request(
+            os.path.join(self.root, etcdstate.MEMBER_KEY)), "keel-fd00--1",
+            ("fd00::1", "::1"))
+        etcdstate.write(self.root, etcdstate.MEMBER_CERT, leaf + other)
+        self.assertFalse(etcdstate.stale(self.root, "fd00::1", NOW))
+        self.assertTrue(etcdstate.stale(self.root, "fd00::1", NOW + timedelta(
+            days=etcdpki.LEAF_DAYS)))
 
     def test_without_credentials(self):
-        with self.assertRaises(StateError):
-            etcdstate.leaves(self.scratch(), "fd00::1", NOW)
+        self.assertTrue(etcdstate.stale(self.scratch(), "fd00::1", NOW))
 
-    def test_expiry_of_a_missing_leaf(self):
-        self.assertIsNone(etcdstate.expires(self.root))
-        etcdstate.leaves(self.root, "fd00::1", NOW)
+    def test_the_holder_s_own_intermediate_recorded_before_it_goes(self):
+        etcdstate.write(self.root, etcdstate.CA_CERT, etcdstate.read(
+            self.root, etcdstate.ROOT_CERT))
+        etcdstate.keep_own_intermediate(self.root, "fd00::1", "k1")
+        entry = etcdstate.issued(self.root)["fd00::1"][-1]
+        self.assertEqual(entry[2:], ["k1", etcdstate.INTERMEDIATE, None,
+                                     None])
+        other = self.scratch()
+        etcdstate.write(other, etcdstate.CA_CERT, "x")
+        etcdstate.keep_own_intermediate(other, "fd00::1", "k1")
+        self.assertEqual(etcdstate.issued(other), {})
+
+    def test_expiry_of_a_missing_certificate(self):
+        self.assertIsNone(etcdstate.expires(self.scratch()))
         self.assertIsNotNone(etcdstate.expires(self.root))
 
 
@@ -293,20 +358,16 @@ class TestOpensslFailing(Case):
         with failing, self.assertRaisesRegex(StateError, "exited 1"):
             etcdstate.make_root(self.root, MESH, "fd00::1")
         with failing, self.assertRaisesRegex(StateError, "exited 1"):
-            etcdstate.ca_request(self.root)
+            etcdstate.member_request(self.root)
         first = self.scratch()
         etcdstate.make_root(first, MESH, "fd00::1")
-        csr = etcdstate.ca_request(self.root)
+        csr = etcdstate.member_request(self.root)
         with failing, self.assertRaisesRegex(StateError, "cannot be signed"):
             etcdstate.grant_for(first, csr, "fd00::4")
         grant = etcdstate.grant_for(first, csr, "fd00::4")
         with failing, self.assertRaisesRegex(StateError, "exited 1"):
-            etcdstate.take_grant(self.root, grant)
-        etcdstate.take_grant(self.root, grant)
-        with mock.patch("keel.mesh.etcdpki.issue",
-                        side_effect=PkiError("openssl exited 1")), \
-                self.assertRaisesRegex(StateError, "exited 1"):
-            etcdstate.leaves(self.root, "fd00::1", NOW)
+            etcdstate.take_grant(self.root, grant, "fd00::4")
+        etcdstate.take_grant(self.root, grant, "fd00::4")
 
     def test_damaged_bookkeeping_is_started_again(self):
         etcdstate.ensure(self.root)

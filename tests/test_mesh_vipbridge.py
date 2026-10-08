@@ -136,7 +136,6 @@ class TestServeAndControl(Pair):
         self.nodes()
         here = self.all[0]
         etcdstate.make_root(here.root, MESH.hex(), address(0))
-        etcdstate.leaves(here.root, address(0), NOW)
         self.run_dir = tempfile.mkdtemp(prefix="vb-", dir="/var/tmp")
         self.addCleanup(lambda: os.path.exists(self.run_dir) and
                         __import__("shutil").rmtree(self.run_dir))
@@ -146,8 +145,9 @@ class TestServeAndControl(Pair):
             message, fds, _, _ = socket.recv_fds(sock, 65536, 3)
             got["endpoint"] = json.loads(message)["endpoint"]
             got["fds"] = len(fds)
-            got["context"] = vipbridge.context(
-                *(f"/proc/self/fd/{one}" for one in fds))
+            got["tls"] = vipbridge.held_files(fds)
+            with open(got["tls"].certificate) as fob:
+                got["certificate"] = fob.read()
             for one in fds:
                 os.close(one)
             got["facts"] = vipbridge.Remote(sock, threading.Event()).facts()
@@ -175,6 +175,10 @@ class TestServeAndControl(Pair):
         started, got = Started(), {}
         self.assertEqual(self.serve(here, started, got), exits.OK)
         self.assertEqual(got["fds"], 3)
+        self.assertEqual(got["certificate"], etcdstate.read(
+            here.root, etcdstate.MEMBER_CERT))
+        self.assertEqual(len(got["tls"].fds), 3)
+        self.assertTrue(got["tls"].key.startswith("/proc/self/fd/"))
         self.assertEqual(got["facts"].vip, VIP)
         self.assertIn("[::1]", got["endpoint"])
         self.assertTrue(got["where"].startswith("@keel-vip-"))
@@ -231,6 +235,66 @@ class TestServeAndControl(Pair):
                                          start=failing),
                          exits.APPLY_FAILED)
         self.assertIn("the controller stopped", self.text(0))
+
+    def test_renewed_credentials_written_into_the_controller_s_memfds(self):
+        """keel#83: a renewal or keel mesh etcd reissue changes the
+        member's certificate; the controller's next call reads the new
+        one from the same descriptors"""
+        here = self.all[0]
+        texts = vipbridge.credentials(here.root)
+        before = vipbridge.stamps(here.root)
+        with pem_fds(*texts) as fds:
+            tls = vipbridge.held_files(fds)
+            renewed = texts[1].replace("A", "B", 1)
+            etcdstate.write(here.root, etcdstate.MEMBER_CERT, renewed)
+            self.assertNotEqual(vipbridge.stamps(here.root), before)
+            self.assertTrue(vipbridge.refreshed(here.root, fds, here.err))
+            with open(tls.certificate) as fob:
+                self.assertEqual(fob.read(), renewed)
+            # shorter: cut to its length
+            etcdstate.write(here.root, etcdstate.MEMBER_CERT, "short\n")
+            vipbridge.refreshed(here.root, fds, here.err)
+            with open(tls.certificate) as fob:
+                self.assertEqual(fob.read(), "short\n")
+            os.remove(os.path.join(here.root, etcdstate.MEMBER_KEY))
+            self.assertFalse(vipbridge.refreshed(here.root, fds, here.err))
+            self.assertIsNone(vipbridge.stamps(here.root)[2])
+            with self.assertRaisesRegex(ValueError, "not 3"):
+                vipbridge.held_files(fds[:2])
+        empty = os.memfd_create("x")
+        self.addCleanup(os.close, empty)
+        with self.assertRaisesRegex(ValueError, "empty"):
+            vipbridge.held_files([empty, empty, empty])
+        self.assertIn("credentials renewed", self.text(0))
+
+    def test_serve_renews_the_credentials_between_messages(self):
+        here = self.all[0]
+        seen = []
+
+        def controller(got, where):
+            with connect(where) as sock:
+                message, fds, _, _ = socket.recv_fds(sock, 65536, 3)
+                tls = vipbridge.held_files(fds)
+                remote = vipbridge.Remote(sock, threading.Event())
+                remote.facts()
+                etcdstate.write(here.root, etcdstate.MEMBER_CERT,
+                                "renewed\n")
+                remote.facts()
+                with open(tls.certificate) as fob:
+                    seen.append(fob.read())
+                for one in fds:
+                    os.close(one)
+        threads = []
+
+        def start(where):
+            thread = threading.Thread(target=controller, args=({}, where))
+            thread.start()
+            threads.append(thread)
+            return Started()
+        vipbridge.serve(here, threading.Event(), start=start)
+        for thread in threads:
+            thread.join(10)
+        self.assertEqual(seen, ["renewed\n"])
 
     def test_control_refuses_capabilities_and_bad_parameters(self):
         status = os.path.join(self.run_dir, "status")

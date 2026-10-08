@@ -289,7 +289,7 @@ class TestUpgradeCheck(Gate):
 
 class TestTheClient(Gate):
     def test_this_member_first_then_the_others(self):
-        with mock.patch("keel.mesh.etcdclient.context"):
+        with mock.patch("keel.mesh.etcdclient.files"):
             client = etcdgate.client_of(self.root)
         self.assertEqual(client.endpoints[0],
                          etcdstate.client_url(etcdstate.LOOPBACK))

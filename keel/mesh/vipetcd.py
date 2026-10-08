@@ -16,11 +16,12 @@ still at the revision the node read. A stale claim, from a counter
 another write has since moved, fails that comparison and is never
 written.
 
-etcd's access control is not enabled (docs/vip.md says why), so any
-member can write or delete these keys, or revoke a lease by its ID.
-What a member outside the pair can do is therefore bounded by what each
-node checks, not by etcd, as defence in depth until etcd's users can be
-made to mean something:
+Once keel mesh etcd reissue has turned etcd's auth on (keel#83,
+keel.mesh.etcdauth), only the pair's two members may write or delete
+these keys, or revoke a lease attached to them. etcd checks no
+permission for a lease's keep-alive, and auth may be off (before the
+reissue, or after its rollback), so what a member outside the pair can
+do is also bounded by what each node checks, as defence in depth:
 
 - no node takes a claim it cannot verify (signed by a member of the
   pair record, newer than what it holds): an old or forged value is

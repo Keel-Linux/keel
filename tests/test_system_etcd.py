@@ -12,7 +12,6 @@ import tempfile
 import unittest
 
 from manifest_helpers import ManifestCase
-from pki_clock import NOW
 from test_system_appliance import PlanCase, units
 
 from keel.inspect.tree import Tree
@@ -42,7 +41,6 @@ class Root(unittest.TestCase):
     def formed(self):
         etcdstate.make_root(self.root, MESH, "fd00::1")
         etcdstate.write(self.root, etcdstate.STARTED, "started\n")
-        etcdstate.leaves(self.root, "fd00::1", NOW)
         etcdstate.save_cluster(self.root, THREE)
 
     def observed(self, doc=DOC):

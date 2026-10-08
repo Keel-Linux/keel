@@ -44,5 +44,12 @@ class TestControl(unittest.TestCase):
                 self.assertEqual(lower, broken)
 
 
+    def test_an_etcd_overlay_without_etcdctl_is_broken(self):
+        """keel asks etcd with etcdctl (keel#83), which keel-overlay-etcd
+        brings from 0.4.0: an older overlay is upgraded with keel"""
+        self.assertIn("keel-overlay-etcd (<< 0.4.0~)", field("Breaks"))
+        self.assertNotIn("etcd", field("Depends"))
+
+
 if __name__ == "__main__":
     unittest.main()

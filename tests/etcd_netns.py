@@ -9,9 +9,10 @@ veth on its own /64. Each child brings up wg0 from the file keel renders
 (keel.network.wireguard) with the real wg-quick, every other child its
 peer, and runs the real etcd 3.5 from the configuration keel renders
 (keel.mesh.etcdconf) and the credentials keel makes
-(keel.mesh.etcdstate): A makes the mesh's root CA, B's intermediate is
-signed by A's, C's by B's (any member invites), and each issues its own
-leaves. etcd's files point at the scratch roots instead of /etc/etcd.
+(keel.mesh.etcdstate): A makes the mesh's root CA, and the root signs
+every member's certificate itself (keel#83). etcd's files point at the
+scratch roots instead of /etc/etcd. keel asks etcd with etcdctl
+(keel.mesh.etcdclient), on PATH.
 
 The links are the design case of handbook decision 0050, as its bench
 did it: one egress qdisc on this namespace's end of each veth, half the
@@ -24,7 +25,7 @@ Then:
    reports the same leader and is healthy;
 2. **stays**: for STABLE seconds, every member is asked its leader and
    term each second by a watcher in its namespace (keel's etcd client,
-   keel's client certificate, on ::1), and writes a key every two
+   the member's certificate, on ::1), and writes a key every two
    seconds; the leaders and terms seen;
 3. **partition**: a follower is cut off (100% loss, both ways) for
    PARTITION seconds while the others write; then healed, and the time
@@ -34,8 +35,8 @@ Then:
    that the old leader follows the new one;
 4. a learner added with keel's client and removed again, on the real
    etcd: what `keel mesh join` and `keel mesh remove` ask of it;
-5. C's intermediate revoked by the CRL the root's holder signs: C's
-   client certificate reached A's etcd before, and is refused after.
+5. C's certificate revoked by the CRL the root's holder signs: it
+   reached A's etcd before, and is refused after.
 
 The cluster is formed by the root's holder, A, from the record it signs
 with the root (keel.mesh.etcdca), which every member checks.
@@ -151,15 +152,13 @@ KEYS: list[str] = []
 
 
 def credentials(roots: list[str]) -> None:
-    """A makes the root and signs B's and C's intermediates with it:
-    only the root's holder signs (keel.mesh.etcdca)"""
+    """A makes the root and signs B's and C's certificates with it: only
+    the root's holder signs (keel#83)"""
     etcdstate.make_root(roots[0], MESH, OVERLAY.format(n=1))
     for n, member in ((2, roots[1]), (3, roots[2])):
         etcdstate.take_grant(member, etcdstate.grant_for(
-            roots[0], etcdstate.ca_request(member), OVERLAY.format(n=n),
-            KEYS[n - 1]))
-    for index, root in enumerate(roots):
-        etcdstate.leaves(root, OVERLAY.format(n=index + 1), utcnow())
+            roots[0], etcdstate.member_request(member), OVERLAY.format(n=n),
+            KEYS[n - 1]), OVERLAY.format(n=n))
 
 
 def environment(root: str, address: str, cluster: Cluster) -> dict:
@@ -415,7 +414,7 @@ def driver() -> None:
     # 5. C revoked by the root's CRL: its client certificate no longer
     # reaches A's etcd (etcd checks the CRL against the chain it is shown)
     report["c_reaches_a_before"] = reaches(pids[2], roots[2])
-    serial = etcdpki.serial(etcdstate.read(roots[2], etcdstate.CA_CERT))
+    serial = etcdpki.serial(etcdstate.read(roots[2], etcdstate.MEMBER_CERT))
     found = etcdca.revoke(roots[0], OVERLAY.format(n=3), KEYS[2], utcnow())
     report["revoked"] = sorted(etcdpki.crl_serials(found))
     report["c_serial"] = serial
@@ -438,7 +437,7 @@ def connect(root: str, url: str) -> None:
     """From a member's namespace: the member list of `url`, with this
     member's client certificate"""
     try:
-        found = etcdclient.Client((url,), etcdclient.context(root),
+        found = etcdclient.Client((url,), etcdclient.files(root),
                                   timeout=10).members()
         print(f"ok: {len(found)} members", flush=True)
     except etcdclient.EtcdError as e:

@@ -14,13 +14,17 @@
   gives it the name, so no process can sit on it first; it takes the
   connection only from the unit's MainPID, not root, by SO_PEERCRED, and
   the controller takes it only from root. It sends it what it needs:
-  the facts, and etcd's root certificate, this member's client
-  certificate and its key as memfds, so the key is written nowhere the
-  controller could keep it;
+  the facts, and etcd's root certificate, this member's certificate and
+  its key as memfds, so the key is written nowhere the controller could
+  keep it; when the files change (a renewal, keel mesh etcd reissue)
+  it writes them again into the same memfds (`refreshed`), which the
+  controller's next call reads;
 - **the controller**, `keel vip control SOCKET`, which refuses to run
   with any capability, faces etcd and the overlay (keel.mesh.vipetcd's
   Controller), and asks the root side for every change of the machine,
-  one JSON message per line; the root side treats each as untrusted.
+  one JSON message per line; the root side treats each as untrusted. It
+  asks etcd with etcdctl (keel.mesh.etcdclient), handing each call the
+  memfds as /proc/self/fd paths it inherits.
 """
 
 import base64
@@ -30,7 +34,6 @@ import json
 import os
 import secrets
 import socket
-import ssl
 import sys
 import threading
 import time
@@ -40,7 +43,7 @@ from keel import exits
 from keel.mesh import bridge, etcdstate, memberd, vipetcd
 from keel.mesh.bridge import BridgeError, Unit, capabilities, line, send
 from keel.mesh.channel import pem_fds
-from keel.mesh.etcdclient import Client
+from keel.mesh.etcdclient import Client, Tls
 from keel.mesh.node import NodeError
 from keel.mesh.protocol import ProtocolError
 from keel.mesh.vip import Held
@@ -228,15 +231,48 @@ class Remote(Ops):
         return self.ask("bounded", vip=vip)
 
 
+CREDENTIAL_FILES = (etcdstate.ROOT_CERT, etcdstate.MEMBER_CERT,
+                    etcdstate.MEMBER_KEY)
+
+
 def credentials(root: str) -> tuple[str, str, str]:
-    """etcd's root certificate, this member's client certificate and its
-    key, as text; raises OSError without them"""
+    """etcd's root certificate, this member's certificate and its key,
+    as text; raises OSError without them"""
     found = []
-    for relative in (etcdstate.ROOT_CERT, etcdstate.CLIENT_CERT,
-                     etcdstate.CLIENT_KEY):
+    for relative in CREDENTIAL_FILES:
         with open(rooted(root, relative)) as fob:
             found.append(fob.read())
     return found[0], found[1], found[2]
+
+
+def stamps(root: str) -> tuple:
+    """When the credential files last changed, and their sizes"""
+    found = []
+    for relative in CREDENTIAL_FILES:
+        try:
+            info = os.stat(rooted(root, relative))
+            found.append((info.st_mtime_ns, info.st_size, info.st_ino))
+        except OSError:
+            found.append(None)
+    return tuple(found)
+
+
+def refreshed(root: str, fds: list[int], err: Callable[[str], None]) -> bool:
+    """The credentials written again into the memfds the controller
+    holds, when they can be read; whether they were. Each is written
+    whole before it is cut to its length, so a call that reads it at
+    that moment fails, and is no renewal, never a half key taken"""
+    try:
+        texts = credentials(root)
+    except OSError as e:
+        err(f"vip: the etcd credentials cannot be read again: {e}")
+        return False
+    for fd, text in zip(fds, texts):
+        data = text.encode()
+        os.pwrite(fd, data, 0)
+        os.ftruncate(fd, len(data))
+    err("vip: the controller's etcd credentials renewed")
+    return True
 
 
 def bound(path: str) -> socket.socket:
@@ -299,13 +335,17 @@ def serve(here: Here, stop: threading.Event,
             started = (start or (lambda where: start_unit(
                 where, here.node.run, here.node.output,
                 unit_name(here.root))))(path)
-            with accepted(server, started, here.err) as conn:
+            with accepted(server, started, here.err) as conn, \
+                    pem_fds(*texts) as fds:
                 found = endpoints(here)
-                with pem_fds(*texts) as fds:
-                    socket.send_fds(conn, [json.dumps({
-                        "endpoint": found[0], "endpoints": found}).encode()
-                        + b"\n"], fds)
+                socket.send_fds(conn, [json.dumps({
+                    "endpoint": found[0], "endpoints": found}).encode()
+                    + b"\n"], fds)
+                seen = stamps(here.root)
                 while (data := memberd.message(conn, stop)) is not None:
+                    now = stamps(here.root)
+                    if now != seen and refreshed(here.root, fds, here.err):
+                        seen = now
                     send(conn, answered(ops, data))
     except (BridgeError, OSError) as e:
         here.err(f"vip: the controller stopped: {e}")
@@ -384,20 +424,22 @@ def control(path: str, err: Callable[[str], None],
             sent = json.loads(message.decode())
             found = tuple(str(one) for one in sent.get("endpoints") or
                           (sent["endpoint"],))
-            tls = context(*(f"/proc/self/fd/{one}" for one in fds))
-        except (ValueError, KeyError, TypeError, OSError,
-                ssl.SSLError) as e:
+            tls = held_files(fds)
+        except (ValueError, KeyError, TypeError, OSError) as e:
+            for one in fds:
+                os.close(one)
             err(f"the root side sent nothing the controller can use"
                 f" ({e or 'nothing'}): refused")
             return exits.APPLY_FAILED
+        try:
+            client = Client(found, tls, vipetcd.CALL_TIMEOUT)
+            err("the VIP's controller runs, without capabilities")
+            stop = stop or threading.Event()
+            vipetcd.Controller(Remote(sock, stop), lambda: client, stop,
+                               err).run()
         finally:
             for one in fds:
                 os.close(one)
-        client = Client(found, tls, vipetcd.CALL_TIMEOUT)
-        err("the VIP's controller runs, without capabilities")
-        stop = stop or threading.Event()
-        vipetcd.Controller(Remote(sock, stop), lambda: client, stop,
-                           err).run()
     return exits.OK
 
 
@@ -425,10 +467,15 @@ def connected_to_helper(path: str,
     return None
 
 
-def context(ca: str, certificate: str, key: str) -> ssl.SSLContext:
-    """TLS trusting the mesh's root alone, with this member's client
-    certificate; raises ssl.SSLError, OSError"""
-    found = ssl.create_default_context(cafile=ca)
-    found.load_cert_chain(certificate, key)
-    found.minimum_version = ssl.TLSVersion.TLSv1_3
-    return found
+def held_files(fds: list[int]) -> Tls:
+    """The credentials the helper sent, as the paths an etcdctl child
+    reads them by: the root's certificate, this member's and its key,
+    each a memfd this process keeps and the child inherits; raises
+    ValueError for anything else"""
+    if len(fds) != CREDENTIALS:
+        raise ValueError(f"{len(fds)} descriptors, not {CREDENTIALS}")
+    for one in fds:
+        if os.fstat(one).st_size == 0:
+            raise ValueError("an empty credential")
+    ca, certificate, key = (f"/proc/self/fd/{one}" for one in fds)
+    return Tls(ca, certificate, key, tuple(fds))

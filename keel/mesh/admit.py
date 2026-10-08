@@ -36,7 +36,15 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
-from keel.mesh import etcd, identity, invites, protocol, signing, trust
+from keel.mesh import (
+    etcd,
+    etcdproof,
+    identity,
+    invites,
+    protocol,
+    signing,
+    trust,
+)
 from keel.mesh.node import Node, NodeError
 from keel.mesh.protocol import ProtocolError
 from keel.mesh.signing import SigningError
@@ -137,7 +145,8 @@ class Admitter:
                  log: Callable[[str], None] | None = None,
                  joined: Joined | None = None,
                  sleep: Callable[[float], None] = time.sleep,
-                 etcd_admit: Callable[[str | None, str, str],
+                 etcd_admit: Callable[[str | None, str | None, str, str,
+                                       protocol.Admission],
                                       etcd.Admission] | None = None):
         self.root = root
         self.invite = invite
@@ -152,8 +161,11 @@ class Admitter:
         self.forged = 0
         self.confirmed: bool | None = None
         self.cancelled = False
-        self.etcd_admit = etcd_admit or (lambda csr, key, address: etcd.admit(
-            etcd.Etcd(node, clock, self.log), csr, key, address))
+        self.etcd_admit = etcd_admit or (
+            lambda csr, proof, key, address, evidence: etcd.admit(
+                etcd.Etcd(node, clock, self.log),
+                None if csr is None or proof is None
+                else etcdproof.Request(csr, proof), key, address, evidence))
         # what the join decided for etcd (keel.mesh.etcd), acted on once
         # the join is confirmed (keel.mesh.inviting)
         self.etcd_admission = etcd.Admission()
@@ -268,7 +280,8 @@ class Admitter:
         # its etcd CA, and at the third member or after, its cluster:
         # 0048, "the inviter runs member add ... before it answers"
         decided = self.etcd_admission = self.etcd_admit(
-            request.etcd_csr, request.public_key, address)
+            request.etcd_csr, request.etcd_proof, request.public_key,
+            address, evidence)
         answer = protocol.JoinAnswer(
             invite_id=self.invite.invite_id, nonce=request.nonce,
             public_key=self.public_key, address=self.address,

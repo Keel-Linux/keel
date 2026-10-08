@@ -141,11 +141,13 @@ def run(joiner: Joiner, endpoint: str | None) -> int:
         return joiner.refused(str(e), exits.APPLY_FAILED)
     own = f"{endpoint_text(endpoint)}:{wireguard.port(overlay)}" \
         if endpoint else None
+    asked = etcd.join_request(member(joiner))
     request = protocol.JoinRequest(
         invite_id=token.invite_id, public_key=public, endpoint=own,
         address=token.assigned, nonce=protocol.new_nonce(),
         time=protocol.seconds(joiner.clock()), sign_key=signer,
-        etcd_csr=etcd.join_csr(member(joiner)))
+        etcd_csr=None if asked is None else asked.csr,
+        etcd_proof=None if asked is None else asked.proof)
     return requested(joiner, after, request, reach)
 
 

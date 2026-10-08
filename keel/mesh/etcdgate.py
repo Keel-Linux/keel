@@ -26,9 +26,9 @@ puts this gate around etcd.service (a drop-in):
 whether this node may be upgraded now, and whether it holds a VIP
 (docs/vip.md, "Upgrading a pair without downtime").
 
-The lock is advice between keel's own gates; any member can write any
-key (docs/vip.md says why), and the health of the others, asked of each,
-is checked whatever the lock says.
+The lock is advice between keel's own gates, under the mesh's own keys
+that every member may write (keel-member, keel.mesh.etcdauth), and the
+health of the others, asked of each, is checked whatever the lock says.
 """
 
 import json
@@ -62,7 +62,7 @@ def client_of(root: str) -> Client:
     cluster = etcdstate.cluster(root)
     for member in cluster.members if cluster else ():
         urls.append(etcdstate.client_url(member.address))
-    return Client(tuple(urls), etcdclient.context(root), CALL_TIMEOUT)
+    return Client(tuple(urls), etcdclient.files(root), CALL_TIMEOUT)
 
 
 def problems(client: Client, own: str, mesh_id: str) -> list[str]:

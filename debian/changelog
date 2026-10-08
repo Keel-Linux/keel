@@ -1,3 +1,36 @@
+keel (0.22.0) unstable; urgency=medium
+
+  * etcd's certificates are the root's (keel#83, amending decision 0048's
+    third round and 0051): the root CA, on its holder, signs every
+    member's certificate itself, the request relayed by the inviter or
+    sent by the member at a renewal; the CN is the member's mesh identity
+    (keel-<address>) and the SANs its /128 and ::1, both fixed by the
+    root. No member holds an intermediate CA any more, so no member can
+    make a certificate etcd takes. A renewal (every 30 days) and a new
+    membership wait while the root's holder cannot be reached.
+  * etcd's auth: users are the certificates' CNs; every member reads the
+    mesh's keys and writes its own (/keel/<mesh>/etcd/), and a VIP's keys
+    are read-write for its pair's two members alone. The root's holder
+    manages users and roles with an admin certificate (CN root) only it
+    holds; keel vip pair and keel mesh etcd tend send a pair's record to
+    it for the pair's role. Membership changes run on the holder.
+  * keel mesh etcd reissue, on the root's holder: a running cluster of the
+    layout before keel#83 moved to the root's certificates one member at
+    a time, every voter healthy before the next and nothing restarted,
+    the intermediates revoked by the root's CRL, then auth enabled.
+    --dry-run prints the plan; --rollback disables auth again.
+  * keel asks etcd over gRPC with etcdctl (etcd-client, which
+    keel-overlay-etcd depends on): an argument list, the certificates by
+    path, -w json, timeouts; a call that fails or prints anything but
+    etcd's JSON is never taken as done, and is no renewal of a VIP's
+    lease. etcd's JSON gateway is off. The VIP's controller hands its
+    memfds to etcdctl, and keel-vip.service's helper writes a renewed
+    certificate into them.
+  * Breaks keel-overlay-etcd before the version that depends on
+    etcd-client.
+
+ -- Marcos Mendez <mendez.foto@gmail.com>  Thu, 08 Oct 2026 14:00:00 +0000
+
 keel (0.21.0) unstable; urgency=medium
 
   * Upgrades keep the VIP (the maintainer's requirement of 2026-10-10).

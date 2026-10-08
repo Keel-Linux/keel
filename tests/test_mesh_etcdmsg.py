@@ -121,12 +121,19 @@ class TestSigned(unittest.TestCase):
 
     def test_answers(self):
         self.assertEqual(etcdmsg.probe_answer(etcdmsg.probe_dumps(
-            True, "f" * 64, False, "fd00::1")), etcdmsg.Probe(
-                True, "f" * 64, False, "fd00::1"))
+            True, "f" * 64, False, "fd00::1", legacy=True)), etcdmsg.Probe(
+                True, "f" * 64, False, "fd00::1", False, etcdmsg.PKI, True))
+        # a probe from a keel before keel#83 says no PKI: 1
+        self.assertEqual(etcdmsg.probe_answer(json.dumps({
+            "ready": True, "root": None, "formed": True,
+            "address": "fd00::1"}).encode()).pki, 1)
         self.assertEqual(etcdmsg.probe_answer(etcdmsg.probe_dumps(
             False, None, False, "fd00::1")).root, None)
-        self.assertEqual(etcdmsg.enroll_answer(json.dumps(
-            {"csr": CSR}).encode()), CSR)
+        found = etcdmsg.enroll_answer(json.dumps(
+            {"csr": CSR, "proof": "A" * 86 + "=="}).encode())
+        self.assertEqual((found.csr, found.proof), (CSR, "A" * 86 + "=="))
+        with self.assertRaises(ProtocolError):
+            etcdmsg.enroll_answer(json.dumps({"csr": CSR}).encode())
         for bad in (b"[]", json.dumps({"ready": 1}).encode(),
                     json.dumps({"ready": True, "root": "x", "formed": False,
                                 "address": "fd00::1"}).encode(),

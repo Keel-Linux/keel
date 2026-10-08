@@ -39,6 +39,7 @@ from keel.mesh import (
     etcdcare,
     etcdform,
     etcdgate,
+    etcdreissue,
     etcdstate,
     identity,
     invites,
@@ -534,6 +535,16 @@ def mesh_etcd_form(args) -> int:
     if code != exits.OK:
         return code
     return etcdform.form(member(args), args.dry_run, out)
+
+
+def mesh_etcd_reissue(args) -> int:
+    """Every member on a certificate the root signs, then etcd's auth"""
+    code = as_root(args, "keel mesh etcd reissue")
+    if code != exits.OK:
+        return code
+    if args.rollback:
+        return etcdreissue.rollback(member(args), out)
+    return etcdreissue.reissue(member(args), args.dry_run, out)
 
 
 def mesh_etcd_tend(args) -> int:

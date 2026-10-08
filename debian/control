@@ -26,6 +26,7 @@ Depends:
  ${misc:Depends},
 Breaks:
  inithooks (<< 2.3.6+keel9~),
+ keel-overlay-etcd (<< 0.4.0~),
 Suggests:
  monit,
  nftables,

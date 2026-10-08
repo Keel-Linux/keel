@@ -262,7 +262,7 @@ class TestTheEndpoints(WithEtcd):
                                return_value=ours), \
                 mock.patch.object(socket, "recv_fds", return_value=(
                     json.dumps(body).encode(), [], 0, None)), \
-                mock.patch.object(vipbridge, "context"), \
+                mock.patch.object(vipbridge, "held_files"), \
                 mock.patch.object(vipbridge, "Client", Client), \
                 mock.patch.object(vipetcd.Controller, "run", run), \
                 mock.patch.object(vipbridge, "capabilities", return_value=0):

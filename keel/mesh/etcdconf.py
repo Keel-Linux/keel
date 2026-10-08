@@ -8,9 +8,12 @@ overlay address: peers on the overlay address, clients on the overlay
 address and on ::1, never a wildcard address; TLS for both, the client
 certificate required of both, TLS 1.3 at least (0048, second round,
 point 3), and the root's CRL checked against every certificate a peer
-or a client presents (keel.mesh.etcdca); /health and /metrics on a
-plain listener on ::1 for Monit; and the timeouts of the design case
-(0050).
+or a client presents (keel.mesh.etcdca); the JSON gateway off, since
+keel asks etcd over gRPC with etcdctl, the only way etcd takes a client
+certificate's CN as its user (keel#83, keel.mesh.etcdclient), and a
+gateway would let any client act as the member's own certificate;
+/health and /metrics on a plain listener on ::1 for Monit; and the
+timeouts of the design case (0050).
 
 The timeouts, from etcd's tuning guide: the heartbeat interval "around
 the round-trip time between members", the election timeout "at least
@@ -86,6 +89,7 @@ def environment(address: str, cluster: Cluster, crl: bool = True) -> str:
         ("ETCD_PEER_TRUSTED_CA_FILE", f"/{TRUSTED}"),
         ("ETCD_PEER_CLIENT_CERT_AUTH", "true"),
         ("ETCD_TLS_MIN_VERSION", "TLS1.3"),
+        ("ETCD_ENABLE_GRPC_GATEWAY", "false"),
         ("ETCD_LISTEN_METRICS_URLS", METRICS),
     ) + ((("ETCD_CLIENT_CRL_FILE", f"/{CRL}"),
           ("ETCD_PEER_CRL_FILE", f"/{CRL}")) if crl else ())

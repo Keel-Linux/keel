@@ -23,15 +23,23 @@ two nodes at once can never start two clusters ({A,B,C} and {A,B,D}).
 - **Revocation.** The holder keeps the serials it revoked and signs the
   CRL with the root (`revoke`), which every member writes to etcd's
   `--peer-crl-file` and `--client-crl-file`: etcd checks each
-  certificate a peer or a client presents, its chain included, so
-  revoking a member's intermediate revokes its leaves. The holder signs
-  every intermediate and records it with its member's address and key
-  (keel.mesh.etcdstate.grant_for), so a removal revokes that member's
-  intermediates and no other's (`revoke`, which takes no serial from
-  the asker). The CRL travels in grants, in the members' rosters and
-  in the answer to a revocation, and is taken only when the root signed
-  it and it is newer (etcdstate.take_crl); the holder signs it again
-  every ten days (`refresh`), its life being 30.
+  certificate a peer or a client presents, its chain included. The
+  holder signs every member's certificate and records it with its
+  member's address and key (keel.mesh.etcdstate.grant_for), so a
+  removal revokes that member's certificates and no other's (`revoke`,
+  which takes no serial from the asker); the intermediates of the
+  layout before keel#83, recorded the same way, are revoked by
+  `revoke_legacy` once every member holds a certificate the root
+  signed (keel.mesh.etcdreissue), and with them every leaf they
+  issued. The CRL travels in grants, in the members' rosters and in the
+  answer to a revocation, and is taken only when the root signed it and
+  it is newer (etcdstate.take_crl); the holder signs it again every ten
+  days (`refresh`), its life being 30. Only the root signs a CRL, on
+  its holder; members sign nothing (keel#83). With 0051's several
+  roots, etcd still reads one CRL file and does not check its signer:
+  the merged CRL is then signed by a root's holder, and a member takes
+  it only when its entries are the union it computed from each root's
+  own CRL, which it verifies as today (the note keel#83 adds to 0051).
 """
 
 import json
@@ -112,11 +120,11 @@ def problem(root: str, cluster: Cluster, now: datetime) -> str | None:
     its record signed by the root this member holds, for that root, the
     cluster's token and state, naming exactly its members, not expired,
     and newer than the highest epoch this member has seen"""
-    trusted = read(root, etcdstate.ROOT_CERT)
-    if not trusted:
+    anchor = read(root, etcdstate.ROOT_CERT)
+    if not anchor:
         return "this node holds no root to check the cluster's record"
     if not cluster.record or not cluster.signature or \
-            not etcdpki.verified_by(trusted, cluster.record.encode(),
+            not etcdpki.verified_by(anchor, cluster.record.encode(),
                                     cluster.signature):
         return "the cluster carries no record signed by the mesh's root"
     try:
@@ -124,7 +132,7 @@ def problem(root: str, cluster: Cluster, now: datetime) -> str | None:
         named = {str(one[0]) for one in data["members"]}
         fine = (data["label"] == LABEL and data["token"] == cluster.token
                 and data["state"] == cluster.state
-                and data["root"] == etcdpki.fingerprint(trusted))
+                and data["root"] == etcdpki.fingerprint(anchor))
         expires, seen = int(data["expires"]), int(data["epoch"])
     except (ValueError, KeyError, TypeError, IndexError, PkiError):
         return "the cluster's record cannot be read"
@@ -192,7 +200,7 @@ def revoked(root: str) -> dict[str, list[str]]:
 
 def revoke(root: str, address: str, public_key: str,
            now: datetime) -> str:
-    """On the root's holder: the intermediates it signed for the member
+    """On the root's holder: the certificates it signed for the member
     at `address` whose key is `public_key`, revoked, and nothing else;
     the new CRL. Raises StateError when it signed none for them"""
     if not etcdstate.holds_root(root):
@@ -203,10 +211,10 @@ def revoke(root: str, address: str, public_key: str,
         except ValueError:
             issued = {}
         entries = [one for one in issued.get(address, [])
-                   if isinstance(one, list) and len(one) == 3
+                   if isinstance(one, list) and len(one) >= 3
                    and one[2] == public_key]
         if not entries:
-            raise StateError(f"no intermediate of {address} with that key"
+            raise StateError(f"no certificate of {address} with that key"
                              " was signed here")
         found = revoked(root)
         for one in entries:
@@ -246,18 +254,54 @@ def refresh(root: str, now: datetime) -> bool:
     return True
 
 
-def ca_due(root: str, now: datetime) -> bool:
-    """Whether this member's intermediate has a third of its life left"""
-    found = read(root, etcdstate.CA_CERT)
-    if not found:
-        return False
-    left = etcdpki.not_after(found) - now
-    return left < timedelta(days=etcdpki.CA_DAYS // 3)
+def impostors(root: str, sign_key_of) -> list[tuple[str, str]]:
+    """On the root's holder: the (address, WireGuard key) of certificates
+    it issued under a signing key the trust store now disowns for that
+    node (`sign_key_of(key)` gives the key it holds): an inviter that
+    vouched for a signing key of its own in place of the node's. They
+    are revoked (keel.mesh.etcdproof)"""
+    found = []
+    gone = revoked(root)
+    for address, entries in etcdstate.issued(root).items():
+        for one in entries:
+            if len(one) < 5 or not one[2] or not one[4] or \
+                    str(one[0]).upper() in gone:
+                continue
+            known = sign_key_of(one[2])
+            if known is not None and known != one[4] and \
+                    (address, one[2]) not in found:
+                found.append((address, one[2]))
+    return found
 
 
-def renew_own(root: str, address: str, public_key: str | None) -> None:
-    """On the root's holder: its own intermediate signed again"""
-    etcdstate.take_grant(root, etcdstate.grant_for(
-        root, etcdstate.ca_request(root), address, public_key))
+def legacy_serials(root: str) -> dict[str, str]:
+    """On the root's holder: the intermediates of the layout before
+    keel#83, serial to expiry: those it recorded (an entry without a
+    kind), and its own"""
+    found = {}
+    for entries in etcdstate.issued(root).values():
+        for one in entries:
+            if len(one) == 3 or one[3] == etcdstate.INTERMEDIATE:
+                found[str(one[0]).upper()] = str(one[1])
+    own = read(root, etcdstate.CA_CERT)
+    if own:
+        try:
+            found[etcdpki.serial(own)] = etcdpki.stamp(
+                etcdpki.not_after(own))
+        except PkiError:
+            pass
+    return found
 
 
+def revoke_legacy(root: str, serials: dict[str, str],
+                  now: datetime) -> str:
+    """On the root's holder: the intermediates `serials` names revoked,
+    and the leaves under them with them; the new CRL"""
+    if not etcdstate.holds_root(root):
+        raise StateError("only the root CA's holder revokes")
+    with etcdstate.locked(root):
+        found = revoked(root)
+        for serial, expiry in serials.items():
+            found.setdefault(serial.upper(), [expiry, etcdpki.stamp(now)])
+        write(root, REVOKED, json.dumps(found, sort_keys=True) + "\n")
+        return signed(root, found)
