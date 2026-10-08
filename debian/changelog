@@ -1,3 +1,13 @@
+keel (0.23.13) unstable; urgency=medium
+
+  * keel assemble refuses to pack a template whose rootfs records a
+    package only a machine boots with: the kernel, the initrd tools,
+    firmware, GRUB and the other bootloaders, the live boot and the
+    installer, the QEMU guest agent, acpid (keel.layers.container,
+    handbook decision 0052). They belong in the boot layer the ISO is
+    made from; a rootfs assembled without --template is not checked.
+
+ -- Marcos Mendez <mendez.foto@gmail.com>  Fri, 09 Oct 2026 22:30:00 +0000
 keel (0.23.12) unstable; urgency=medium
 
   * A member that keel mesh sync adds live is kept with no handshake

@@ -163,6 +163,17 @@ def zstd(data: bytes) -> bytes:
     ).stdout
 
 
+# what dpkg records of a container image: no kernel, a kernel removed and
+# purged, so a template may be packed from it (keel.layers.container)
+DPKG_STATUS = b"""Package: base-files
+Status: install ok installed
+Version: 13.8
+
+Package: linux-image-amd64
+Status: purge ok not-installed
+"""
+
+
 def core_tar() -> bytes:
     return tar_bytes([
         member("./", "dir"),
@@ -176,6 +187,10 @@ def core_tar() -> bytes:
         member("./usr/bin", "dir"),
         member("./usr/bin/tool", data=b"#!/bin/sh\n", mode=0o755,
                xattrs=dict([TOOL_XATTR])),
+        member("./var", "dir"),
+        member("./var/lib", "dir"),
+        member("./var/lib/dpkg", "dir"),
+        member("./var/lib/dpkg/status", data=DPKG_STATUS),
     ])
 
 

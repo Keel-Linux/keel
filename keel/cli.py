@@ -504,7 +504,8 @@ def add_assemble_options(parser: argparse.ArgumentParser) -> None:
         default=None,
         metavar="FILE",
         help="also pack the rootfs into this .tar.zst, with FILE.sha512"
-        " next to it",
+        " next to it; refused when the rootfs has a kernel, bootloader or"
+        " other package only a machine boots with (decision 0052)",
     )
     parser.add_argument(
         "--sha256",
