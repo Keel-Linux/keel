@@ -328,7 +328,7 @@ def absorb(syncer: Syncer, rosters: list[Roster], public: str,
     for key in dropped:
         after = without_peer(after, key)
     if not added and not dropped:
-        missing = missing_live(syncer, public)
+        missing = missing_live(syncer, public, resting)
         if not missing:
             syncer.err("no member this node does not know: it is a peer of"
                        " every admitted member its peers know")
@@ -354,10 +354,15 @@ def absorb(syncer: Syncer, rosters: list[Roster], public: str,
     return found if found != exits.OK else taken.code
 
 
-def missing_live(syncer: Syncer, public: str) -> tuple:
+def missing_live(syncer: Syncer, public: str,
+                 resting: dict[str, datetime]) -> tuple:
     """The spec's peers the interface does not hold: what an announcement
     the members' service could not apply leaves behind (keel#96). An
-    interface that cannot be read says so and names none."""
+    interface that cannot be read says so and names none. A peer whose
+    repair was not confirmed is in `resting`, the hour's backoff of a
+    member that never answered, and is left until it is over: a routine
+    sync must not bounce the interface twice every time it runs while
+    that peer is down."""
     reader = syncer.live_peers or (
         lambda iface: live_keys(iface, syncer.node.output))
     live = reader(syncer.iface())
@@ -366,8 +371,17 @@ def missing_live(syncer: Syncer, public: str) -> tuple:
                    " peer the spec names and the interface lacks is not"
                    " repaired now")
         return ()
-    return tuple(one for one in syncer.node.peers(public)
-                 if not any(same_key(one.public_key, key) for key in live))
+    found = []
+    for one in syncer.node.peers(public):
+        if any(same_key(one.public_key, key) for key in live):
+            continue
+        if one.public_key in resting:
+            syncer.err(f"{one.public_key} is tried again after"
+                       f" {resting[one.public_key]:%H:%M} UTC: it did"
+                       " not answer the last time")
+            continue
+        found.append(one)
+    return tuple(found)
 
 
 def live_keys(iface: str, output) -> set[str] | None:
