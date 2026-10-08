@@ -8,11 +8,20 @@ of either is drift. The states are read the way apply reads them
 with (keel.manifest.monit) and compared whole. An overlay that runs no
 unit has nothing in systemd to compare, and says so; nor has etcd while
 it waits for its cluster, which apply leaves stopped (keel.system.etcd).
+An overlay the chain gained since the spec was last applied is compared
+with the default apply converges it to, and said to be not declared.
 """
 
 from datetime import datetime, timezone
 
-from keel.diff.report import DRIFT, NOT_COMPARED, SAME, UNKNOWN, FieldDiff
+from keel.diff.report import (
+    DRIFT,
+    NOT_COMPARED,
+    NOT_DECLARED,
+    SAME,
+    UNKNOWN,
+    FieldDiff,
+)
 from keel.inspect.monitor import monit_cycle
 from keel.inspect.tree import Tree
 from keel.inspect.units import overlay_state, read_units
@@ -21,6 +30,7 @@ from keel.manifest import monit
 from keel.manifest.facts import gather
 from keel.manifest.resolve import overlay_units
 from keel.mesh import etcdstate
+from keel.spec.validate_appliance import with_defaults
 from keel.system.fwstate import bridges_of, table_digest
 from keel.system.monitor import NOTIFY
 
@@ -35,6 +45,7 @@ NO_MONITOR = ("no monitor section: the include is left as an earlier apply"
               " set it")
 RULESET = "the ruleset apply renders from the manifests"
 KEEL_RULESET = "keel's ruleset"
+DEFAULT_NOTE = "not declared: the manifest's default"
 NOT_LIVE = ("the table the kernel holds is asked of nft on the live system"
             " only")
 
@@ -50,6 +61,7 @@ def appliance_fields(declared: dict, root: str) -> list[FieldDiff]:
         return [FieldDiff("overlays", UNKNOWN, reason="; ".join(
             facts.problems))]
     tree = Tree(root)
+    declared, defaulted = with_defaults(declared, facts)
     states = declared.get("overlays") or {}
     names = [unit for state in resolved.overlays
              for unit in overlay_units(resolved, state.name)]
@@ -59,8 +71,10 @@ def appliance_fields(declared: dict, root: str) -> list[FieldDiff]:
         key = f"overlays.{name}"
         owned = overlay_units(resolved, name)
         if not owned:
+            given = (f"not declared (default: {wanted}); "
+                     if name in defaulted else "")
             fields.append(FieldDiff(key, NOT_COMPARED, wanted, None,
-                                    NO_UNIT))
+                                    given + NO_UNIT))
             continue
         if name == "etcd" and wanted == "enabled" and \
                 not tree.exists(etcdstate.CLUSTER):
@@ -68,11 +82,25 @@ def appliance_fields(declared: dict, root: str) -> list[FieldDiff]:
                                     NO_CLUSTER))
             continue
         value, why = overlay_state([units[unit] for unit in owned])
+        if name in defaulted:
+            fields.append(defaulted_field(key, wanted, value or why,
+                                          value == wanted))
+            continue
         status = SAME if value == wanted else DRIFT
         fields.append(FieldDiff(key, status, wanted, value or why))
     return (fields + monit_fields(declared, resolved, states, tree)
             + firewall_fields(declared, resolved, states, tree)
             + etcd_fields(states, tree))
+
+
+def defaulted_field(key: str, default: str, observed: object,
+                    same: bool) -> FieldDiff:
+    """An overlay the spec does not declare and that takes its default:
+    not declared while the machine has the default, else drift"""
+    if same:
+        return FieldDiff(key, NOT_DECLARED, None, observed,
+                         f"default: {default}")
+    return FieldDiff(key, DRIFT, default, observed, note=DEFAULT_NOTE)
 
 
 def etcd_fields(states: dict, tree: Tree,
