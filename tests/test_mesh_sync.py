@@ -109,9 +109,38 @@ class TestPull(Case):
 
     def test_nothing_new(self):
         self.net.rosters["fd00:6b65:1::1"] = inviter_roster()
+        self.syncer.live_peers = lambda iface: {INVITER}
         self.assertEqual(sync.pull(self.syncer), exits.OK)
         self.assertIn("no member this node does not know", self.err[-1])
         self.assertEqual(self.node.apply.documents, [])
+
+    def test_a_peer_the_spec_names_and_wg0_lacks_is_applied_again(self):
+        """keel#96: an announcement the members' service applied from its
+        worker thread died before wg0 changed, so the spec had the peer
+        and wg0 did not; a sync with nothing new repairs it, confirmed
+        by that peer's handshake"""
+        self.net.rosters["fd00:6b65:1::1"] = inviter_roster()
+        self.syncer.live_peers = lambda iface: set()
+        self.net.handshakes[INVITER] = int(NOW.timestamp()) + 5
+        self.assertEqual(sync.pull(self.syncer), exits.OK)
+        self.assertIn(f"wg0 lacks: {INVITER}", self.said())
+        self.assertIn("applied again", self.said())
+        self.assertEqual(len(self.node.apply.documents), 1)
+        self.assertEqual(len(self.peers()), 1)
+        self.assertEqual(self.peers()[0]["public_key"], INVITER)
+
+    def test_wg0_that_cannot_be_read_repairs_nothing_and_says_so(self):
+        self.net.rosters["fd00:6b65:1::1"] = inviter_roster()
+        self.assertEqual(sync.pull(self.syncer), exits.OK)
+        self.assertIn("could not be read", self.said())
+        self.assertIn("no member this node does not know", self.err[-1])
+        self.assertEqual(self.node.apply.documents, [])
+
+    def test_the_repair_is_not_confirmed_without_a_handshake(self):
+        self.net.rosters["fd00:6b65:1::1"] = inviter_roster()
+        self.syncer.live_peers = lambda iface: set()
+        self.assertEqual(sync.pull(self.syncer), exits.NETWORK_NOT_CONFIRMED)
+        self.assertEqual(len(self.peers()), 1)
 
     def test_no_member_answers(self):
         self.net.down.add("fd00:6b65:1::1")

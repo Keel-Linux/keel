@@ -1,3 +1,15 @@
+keel (0.23.1) unstable; urgency=medium
+
+  * The members' service applies an announcement from its worker thread,
+    and keel.network.switch set the SIGHUP handler there, which only the
+    main thread may: the handler died, the new member was in the spec and
+    not on wg0, and keel mesh sync found nothing to add (keel#96). The
+    handler is set in the main thread alone, and keel mesh sync applies
+    the overlay again when the spec names a peer the interface lacks,
+    confirmed by that peer's handshake.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Sun, 12 Oct 2026 10:00:00 +0000
+
 keel (0.23.0) unstable; urgency=medium
 
   * A MariaDB pair on the mesh (decisions 0013, 0020, 0031, 0049; the

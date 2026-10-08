@@ -38,6 +38,7 @@ systemd refuses a transient unit whose name has a unit file.
 import os
 import signal
 import sys
+import threading
 from collections.abc import Callable
 from dataclasses import replace
 
@@ -271,8 +272,13 @@ def change(root: str, pending: marker.Pending, text: str,
 
     A hangup is ignored while it runs: the operator's session dying as the
     interface moves is expected, and dying half way would leave a change
-    nobody can confirm.
+    nobody can confirm. Only the main thread may set a signal's handler:
+    from any other, the members' service applying an announcement in its
+    worker (keel.mesh.sync.announced, keel#96), the change runs as it is,
+    that thread having no session to lose.
     """
+    if threading.current_thread() is not threading.main_thread():
+        return changed(root, pending, text, run)
     previous = signal.signal(signal.SIGHUP, signal.SIG_IGN)
     try:
         return changed(root, pending, text, run)
