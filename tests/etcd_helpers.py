@@ -22,7 +22,15 @@ from unittest import mock
 from manifest_helpers import build_root
 from pki_clock import NOW
 
-from keel.mesh import etcdserve, identity, signing, trust
+from keel.mesh import (
+    admit,
+    etcd,
+    etcdserve,
+    identity,
+    protocol,
+    signing,
+    trust,
+)
 from keel.mesh.etcd import Etcd
 from keel.mesh.etcdclient import EtcdError
 from keel.mesh.etcdclient import Member as EtcdMember
@@ -98,6 +106,11 @@ class FakeEtcd:
         self.healthy: dict[str, tuple[bool, str]] = {}
         self.leaders: dict[str, str] = {}
         self.next_id = 100
+        # etcd's auth, as the root user changes it (keel.mesh.etcdauth)
+        self.users_: dict[str, set[str]] = {}
+        self.roles_: dict[str, set[tuple[str, str, str]]] = {}
+        self.auth = False
+        self.kvs: list = []
 
     def __call__(self):
         if "connect" in self.refuse:
@@ -138,6 +151,75 @@ class FakeEtcd:
         self.check("status", url)
         from keel.mesh.etcdclient import Status
         return Status("x", self.leaders.get(url, ""), 2, False)
+
+    def prefix(self, key):
+        self.check("prefix", key)
+        return [one for one in self.kvs if one.key.startswith(key)]
+
+    def auth_enabled(self):
+        self.check("auth_enabled")
+        return self.auth
+
+    def auth_enable(self):
+        self.check("auth_enable")
+        if "root" not in self.roles_.get("root", set()) and \
+                "root" not in self.users_.get("root", set()):
+            raise EtcdError("etcdserver: root user does not have root role")
+        self.auth = True
+
+    def auth_disable(self):
+        self.check("auth_disable")
+        self.auth = False
+
+    def users(self):
+        self.check("users")
+        return sorted(self.users_)
+
+    def user_roles(self, user):
+        self.check("user_roles", user)
+        return sorted(self.users_[user])
+
+    def user_add(self, user):
+        self.check("user_add", user)
+        self.users_[user] = set()
+
+    def user_delete(self, user):
+        self.check("user_delete", user)
+        del self.users_[user]
+
+    def grant_role(self, user, role):
+        self.check("grant_role", user, role)
+        self.users_[user].add(role)
+
+    def revoke_role(self, user, role):
+        self.check("revoke_role", user, role)
+        self.users_[user].discard(role)
+
+    def roles(self):
+        self.check("roles")
+        return sorted(self.roles_)
+
+    def role_add(self, role):
+        self.check("role_add", role)
+        self.roles_[role] = set()
+
+    def role_delete(self, role):
+        self.check("role_delete", role)
+        del self.roles_[role]
+
+    def permissions(self, role):
+        self.check("permissions", role)
+        return set(self.roles_[role])
+
+    def permit(self, role, kind, key):
+        from keel.mesh.etcdclient import range_end
+        self.check("permit", role, kind, key)
+        self.roles_[role].add((kind, key, range_end(key)))
+
+    def unpermit(self, role, key):
+        self.check("unpermit", role, key)
+        self.roles_[role] = {one for one in self.roles_[role]
+                             if one[1] != key}
 
 
 def voter(index: int, name: bool = True) -> EtcdMember:
@@ -189,6 +271,20 @@ class Mesh(unittest.TestCase):
             trust.save(one.root, store)
         self.all = made
         return made
+
+    def evidence(self, inviter: Etcd, index: int) -> protocol.Admission:
+        """The admission of member `index`, signed by `inviter`, as its
+        join leaves it in the inviter's trust store"""
+        joiner = self.all[index]
+        return admit.admitted(inviter.root, "0123456789abcdef", KEYS[index],
+                              signing.public(joiner.root), address(index),
+                              None, self.clock())
+
+    def admit(self, inviter: Etcd, joiner: Etcd, index: int) -> etcd.Admission:
+        """A join seen from etcd: the joiner's request and proof, and the
+        inviter's evidence of the admission (keel.mesh.etcdproof)"""
+        return etcd.admit(inviter, etcd.join_request(joiner), KEYS[index],
+                          address(index), self.evidence(inviter, index))
 
     def exchanger(self, index: int):
         def exchange(host: str, iface: str, body: bytes) -> bytes:

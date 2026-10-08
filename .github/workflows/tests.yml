@@ -40,7 +40,7 @@ jobs:
           tests/test_mesh_channel.py
   # etcd over the mesh (decisions 0025, 0048, 0050) in a Debian trixie
   # system container: three namespaces, the real wg-quick and trixie's
-  # etcd 3.5, keel's CA and rendered configuration, on links of 250 ms
+  # etcd 3.5 and etcdctl, keel's CA and rendered configuration, on links of 250 ms
   # ±25 ms with 2% loss; it forms, keeps its leader for 60 s, and a
   # follower cut off for 45 s rejoins (tests/test_etcd_netns.py; the
   # 5 and 2 minutes of the brief run by hand, ETCD_SOAK=full). The
@@ -53,7 +53,7 @@ jobs:
         apt-get update -qq
         apt-get install -y -qq --no-install-recommends python3-pytest \
           python3-yaml wireguard-tools iproute2 iputils-ping openssl \
-          etcd-server
+          etcd-server etcd-client
         KEEL_ETCD_NETNS=1 PYTHONPATH=. python3 -m pytest -q -s \
           tests/test_etcd_netns.py
   # The service VIP on the mesh (decision 0049) in a Debian trixie
@@ -74,7 +74,7 @@ jobs:
         apt-get update -qq
         apt-get install -y -qq --no-install-recommends python3-pytest \
           python3-yaml wireguard-tools iproute2 iputils-ping openssl \
-          etcd-server util-linux
+          etcd-server etcd-client util-linux
         KEEL_VIP_NETNS=1 PYTHONPATH=. python3 -m pytest -q -s \
           tests/test_vip_netns.py
   # Upgrades on a pair whose VIP is active (the maintainer's requirement
@@ -93,9 +93,33 @@ jobs:
         apt-get update -qq
         apt-get install -y -qq --no-install-recommends python3-pytest \
           python3-yaml wireguard-tools iproute2 iputils-ping openssl \
-          etcd-server util-linux
+          etcd-server etcd-client util-linux
         KEEL_VIP_UPGRADE_NETNS=1 PYTHONPATH=. python3 -m pytest -q -s \
           tests/test_vip_upgrade_netns.py
+  # keel#83 on the mesh: three members in the layout before keel#83 (an
+  # intermediate CA per member), the VIP held by a pair, moved by keel
+  # mesh etcd reissue while the VIP's holders are sampled every 200 ms
+  # and each member's quorum read every second, on links of 250 ms
+  # ±25 ms with 2% loss measured first; then etcd refuses the member
+  # outside the pair its writes, no member can mint a certificate, a
+  # renewal goes through the root and waits while it is cut off, and
+  # the rollback turns auth off (tests/test_etcd_auth_netns.py). The
+  # check is "etcd-auth / trixie". The VIP's units need systemd, as the
+  # vip job's do.
+  etcd-auth:
+    permissions:
+      contents: read
+    uses: keel-linux/.github/.github/workflows/lxc-trixie.yml@main
+    with:
+      systemd: true
+      timeout: 40
+      run: |
+        apt-get update -qq
+        apt-get install -y -qq --no-install-recommends python3-pytest \
+          python3-yaml wireguard-tools iproute2 iputils-ping openssl \
+          etcd-server etcd-client util-linux
+        KEEL_ETCD_AUTH_NETNS=1 PYTHONPATH=. python3 -m pytest -q -s \
+          tests/test_etcd_auth_netns.py
   # A change that ships must come with a changelog entry, or it cannot be
   # installed and never reaches an appliance. The rule and its tests are
   # bin/require-changelog of the .github repository. The check is

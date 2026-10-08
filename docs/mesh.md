@@ -38,7 +38,7 @@ a replicated pair, `keel vip` ([docs/vip.md](vip.md), decision 0049),
 whose section closes `keel mesh status`. Not yet: members
 learning of each other through etcd's registry (they still do through
 the members' channel), rotating
-an intermediate CA or the root, the rotation of a node's signing key, `keel mesh invites` and `invite
+the root, the rotation of a node's signing key, `keel mesh invites` and `invite
 --cancel`, and the boot unit that removes invites
 which expired while the machine was down. confconsole's "Invite a node"
 and "Join a mesh" screens call these commands, in confconsole.
@@ -230,7 +230,8 @@ the mesh has 3 nodes: this node has them all as peers, and the inviter announces
 etcd: this node forms with 2 other member(s)
 ```
 
-The last line is etcd's, when the inviter gave this node an etcd CA
+The last line is etcd's, when the inviter gave this node an etcd
+certificate
 ("etcd"): `forms with` at the third cloud advanced member, `joins as a
 learner with` from the fourth, or how many ready members are known
 before the third.
@@ -599,59 +600,177 @@ fault tolerance.
 etcd uses its own TLS, peer and client, not WireGuard alone, so a
 process on a member that holds no certificate signed in the mesh cannot
 read or write the registry (0048, second round, point 3). All P-256,
-made with openssl on the machine, never in an image (keel.mesh.etcdpki):
+made with openssl on the machine, never in an image (keel.mesh.etcdpki).
+**The root signs every certificate etcd is shown itself** (keel#83,
+which amends 0048's third round, point 1, and 0051's intermediate per
+member): no member holds a CA key, so no member can make a certificate
+etcd takes, and etcd's users mean what they say ("etcd's users and
+roles").
 
 - **the root CA** is made by the first node: `keel mesh create` on a
   cloud advanced node, or `keel mesh etcd form` on a mesh that has none.
   Its key stays on that node, **the root's holder**, whose overlay
-  address every member learns with its intermediate;
-- **an intermediate CA per member**, signed by the root alone: its key
-  is made on the member and its request travels in the join request; the
-  root's holder signs it, itself when it invites, or through the
-  inviter, which relays the request over the members' channel (`issue`).
-  This narrows 0048's third round, point 1 ("signed by its inviter") to
-  "signed by the root CA, relayed by the inviter": an intermediate that
-  signed intermediates could not be limited to its own member, nor
-  recorded where a removal finds it. When the holder cannot be reached
-  the join completes without etcd; the inviter queues the request,
-  `keel-mesh-etcd.timer` asks the holder again and sends the node its CA
-  once it signs, and `keel mesh status` says the node waits. The holder
-  records every intermediate it signs with its member's address and key,
-  and signs one for an address only with that address's own key. The
-  join's answer, under the invite's HMAC, carries the intermediate, the
-  root, the root's CRL and the holder's address. The member checks the
-  intermediate certifies its own key and chains to the root it holds;
-- **one intermediate deep, constrained to its member**: an intermediate
-  has a path length of 0 (it signs leaves, never another CA), and name
-  constraints that permit only its member's own address (a /128) and
-  ::1, so no member can certify another member's address or one outside
-  the mesh;
-- **leaves**, issued by each member with its own intermediate: its
-  member certificate (server and client, its overlay address and ::1)
-  and keel's client certificate (root's alone).
+  address every member learns with its certificate;
+- **a member's certificate**, signed by the root: its key is made on the
+  member and its request travels in the join request; the root's holder
+  signs it, itself when it invites, or through the inviter, which relays
+  the request over the members' channel (`issue`), as 0051's "signed by
+  a region root, relayed by the inviter" says. Its CN is the member's
+  mesh identity, `keel-` and its overlay address
+  (`keel-fd2a-9c41-7e03--3`), its SANs that address and ::1, whatever the
+  request asks: the root fixes both. It is the member's peer, server and
+  client certificate alike; keel asks etcd with it. **The root signs
+  only a request shown to be the member's own** (keel.mesh.etcdproof):
+  the request's own signature proves the requester holds its key, and
+  the member's signature over it with its mesh signing key, the proof,
+  binds that key to the member. For a member's own address, the member
+  itself asks (`issue`, signed by its key) and the proof verifies with
+  the signing key the holder's trust store holds for it; for a node
+  being admitted, its inviter relays the request with the evidence of
+  the admission it signed, which names the node, its address and its
+  signing key, and the proof verifies with that key. Evidence naming the
+  inviter's own signing key, or any other member's, for the node is
+  refused, and so is evidence naming a key the trust store does not hold
+  for a node it knows; a certificate issued under a signing key the
+  trust store later disowns for that node (an inviter vouching for one
+  it made up) is revoked at the next `tend`. So no member can have a
+  certificate signed for another's address or name, and no inviter can
+  hold the identity of the node it admits. When the holder
+  cannot be reached the join completes without etcd; the inviter queues
+  the request, `keel-mesh-etcd.timer` asks the holder again and sends
+  the node its certificate once it signs, and `keel mesh status` says
+  the node waits. The holder records every certificate it signs with its
+  member's address and key, and signs one for an address only with that
+  address's own key. The join's answer, under the invite's HMAC, carries
+  the certificate, the root, the root's CRL and the holder's address.
+  The member checks the certificate is for its own key, names its own
+  address, is no CA and chains to the root it holds;
+- **the holder's admin certificate**, CN `root`, etcd's root user, which
+  the root issues to its own holder alone (a member's name always starts
+  with `keel-`): what manages etcd's users, roles and membership once
+  auth is on.
 
-**Short lives.** A leaf lasts 30 days and is renewed by its member with
-ten left; an intermediate lasts a year and is renewed by the root's
-holder with four months left (`keel mesh etcd tend`, every five
-minutes); the root lasts twenty years. etcd reads its certificate files
-at each handshake, so nothing restarts. A renewal that fails is alerted
-through the monitor's channels (decision 0021, as Monit's alerts are),
-kept, and shown by `keel mesh status` and by `keel diff` as drift of
-`etcd.certificates`; so is a certificate within seven days of its
-expiry.
+**Short lives.** A certificate lasts 30 days and is renewed by the root
+with ten left (`keel mesh etcd tend`, every five minutes): the member
+sends a request for its own key to the holder (`issue`), which signs it
+and adds nothing else. While the holder cannot be reached a renewal
+waits, and so does a new membership; with several regions (0051) another
+region's root issues instead, which the request's path, through the
+holder named in the member's state, leaves room for. The root lasts
+twenty years. etcd reads its certificate files at each handshake, so
+nothing restarts, and keel-vip.service's helper writes a renewed
+certificate into its controller's memfds ([docs/vip.md](vip.md)). A
+renewal that fails is alerted through the monitor's channels (decision
+0021, as Monit's alerts are), kept, and shown by `keel mesh status` and
+by `keel diff` as drift of `etcd.certificates`; so is a certificate
+within seven days of its expiry.
 
 **Revocation.** The root's holder keeps a CRL signed by the root, which
 every member writes to etcd's `--peer-crl-file` and `--client-crl-file`;
 etcd checks it against every certificate a peer or a client presents,
 its chain included, at each handshake. When `keel mesh remove` removes a
 node under the amendment's rule, the remover asks the holder (`revoke`)
-to revoke the node's intermediates, which revokes its leaves. The holder
-revokes only for the node's admitter, a trust root or the node itself,
-and only the intermediates it recorded for that address and key: a
-revocation names no serial; the holder signs the CRL again, and every
-member takes it from the rosters (`keel mesh sync`, the announcement)
-when the root signed it and it is newer. The holder signs it again every
-ten days; its life is thirty.
+to revoke the node's certificates; the holder also removes its etcd
+member and user. The holder revokes only for the node's admitter, a
+trust root, the node itself, or the member that relayed the node's
+request to it (its inviter, giving back a join that was not confirmed,
+with the learner added for it), and only the certificates it recorded for
+that address and key: a revocation names no serial; the holder signs the
+CRL again, and every member takes it from the rosters (`keel mesh
+sync`, the announcement) when the root signed it and it is newer. The
+holder signs it again every ten days; its life is thirty. Only the root
+signs a CRL; members sign nothing. With 0051's several roots etcd still
+reads one CRL file and does not check its signer, so the merged CRL is
+signed by a root's holder and taken by a member only when its entries
+are the union it computed from each root's own CRL.
+
+### etcd's users and roles
+
+etcd takes a client certificate's CN as its user over gRPC alone: its
+JSON gateway calls etcd with the member's own certificate, and refuses
+any client certificate with a CN once auth is on. So keel asks etcd with
+`etcdctl` (etcd-client, which keel-overlay-etcd depends on), an argument
+list and never a shell, the certificates by their paths, `-w json`, and
+renders etcd's configuration with the gateway off
+(`ETCD_ENABLE_GRPC_GATEWAY=false`). A call that fails, does not finish
+in time or prints anything but etcd's JSON raises: it never counts as
+done, and a lease's keep-alive that raises is no renewal.
+
+| User | Roles |
+| --- | --- |
+| `root` | `root`: the holder's admin certificate alone |
+| each member, `keel-<address>` | `keel-member`, and `keel-vip-<vip>` for each VIP whose pair it is in |
+
+| Role | Permissions |
+| --- | --- |
+| `keel-member` | read every key under `/keel/<mesh>/`; read-write under `/keel/<mesh>/etcd/`, the mesh's own keys |
+| `keel-vip-<vip>` | read-write under `/keel/<mesh>/vip/<vip>/`: the VIP's two members alone |
+
+A member outside a VIP's pair can read its keys, and cannot write or
+delete them or revoke a lease on them (etcd lets a lease be revoked only
+by a user that may write every key on it). etcd 3.5 checks no permission
+for a lease's keep-alive, so such a member can keep a lease alive by its
+ID; the VIP's controllers decide by their own lease and the counter's
+transaction, never by a key's value, so that is a delay at most, never a
+second holder ([docs/vip.md](vip.md)).
+
+The root's holder manages them with its admin certificate
+(keel.mesh.etcdauth): it adds what is missing and takes away only what
+keel made (roles named `keel-`), never a user or a role an operator
+added; it does so when it adds a learner, at every `keel mesh etcd
+tend`, and when a pair's member sends it its pair record (`pair`, by
+`keel vip pair` and by `tend` on the pair's members). The record is
+checked as every node checks one; the first record kept for a VIP binds
+it. The pairs of the claims already under the VIPs' keys are taken too.
+Membership changes (add, promote, remove) take etcd's root role once
+auth is on, so they run on the holder, which adds every learner already;
+`tend` promotes and removes learners there. Whether auth is on is
+etcd's to say (`auth status`, kept for a few seconds), never a file's.
+
+### keel mesh etcd reissue
+
+```
+keel mesh etcd reissue [--dry-run | --rollback]
+```
+
+Root, on the root's holder, once, on a cluster made before keel#83 (an
+intermediate CA per member), after every member runs this keel. It is
+safe to run again, and goes on where a run that stopped left off:
+
+1. it checks, changing nothing, that this node holds the root and is in
+   a cluster, that no network change waits, that every other member of
+   the cluster answers a probe and runs a keel of keel#83, and that every
+   voter is healthy; with `--dry-run` it prints what it would do and
+   stops;
+2. it issues the holder's admin certificate;
+3. **one member at a time**, the others first and itself last, it asks
+   the member's request (`enroll`), signs a certificate for it with the
+   root and sends it (`reissue`); the member keeps it, drops its
+   intermediate and the leaves it issued, and writes it for etcd, which
+   reads it at its next handshake, so nothing restarts. It then waits
+   until that member serves the new certificate on its client port and
+   every voter is healthy, three minutes at most, before the next; past
+   that it stops and says why;
+4. it revokes every intermediate (those it recorded, and its own) in the
+   root's CRL and sends it to every member (`crl`); every leaf an
+   intermediate issued goes with it;
+5. it converges etcd's users and roles, with the pairs of the claims
+   under the VIPs' keys, enables etcd's auth as its root user, records
+   it, and reads the mesh's keys as this member to check.
+
+Quorum is kept because nothing restarts and no step starts before every
+voter is healthy; the VIP's holder is not touched, since its controller
+takes the renewed certificate before step 4 and its pair's role exists
+before step 5. tests/test_etcd_auth_netns.py moves three members of the
+live layout this way at 250 ms ±25 ms with 2% loss while the VIP is held.
+
+**Rollback.** `keel mesh etcd reissue --rollback`, on the holder,
+disables etcd's auth as its root user and records it; every member may
+then write every key again, as before keel#83, and the VIP goes on. The
+certificates stay the root's: the intermediates are revoked, and no
+member holds one, which is what keel#83 is for. A run that stopped part
+way needs no rollback: members on either certificate work together until
+step 4, and running it again finishes it.
 
 ### Only the root's holder forms the cluster, once
 
@@ -673,8 +792,8 @@ is refused; a join that reverts gives the reservation back.
 ### Birth at the third member
 
 The holder's token says `forms` when it and exactly one other member are
-ready (cloud advanced, an intermediate held). When it admits a third
-ready node, it signs the node's intermediate, signs and reserves the
+ready (cloud advanced, a certificate held). When it admits a third
+ready node, it signs the node's certificate, signs and reserves the
 formation of the three, `new`, the mesh's identity as its token, the
 members named after their overlay addresses
 (`keel-fd2a-9c41-7e03--3`); the answer carries the cluster and its
@@ -684,7 +803,7 @@ renders etcd's configuration from the state and starts it
 ([docs/apply.md](apply.md), "etcd's configuration"); the holder sends the
 cluster to the third member over the members' channel, which does the
 same. **Another inviter** of the third ready member admits it to the
-mesh, gives it its intermediate (signed by the root through the holder),
+mesh, gives it its certificate (signed by the root through the holder),
 and says to run `keel mesh etcd form` on the root's holder, which then
 forms.
 
@@ -706,7 +825,7 @@ does not count towards the quorum, so a join that never finishes cannot
 lower the cluster's fault tolerance; the answer says `existing` with the
 member list and the cluster's formation record. The new node starts as a
 learner; the inviter's helper promotes it once etcd accepts (a learner
-in sync), for two minutes, and `keel mesh etcd tend` on every member
+in sync), for two minutes, and `keel mesh etcd tend` on the holder
 goes on after. A learner that never started within an hour is a join
 that never came, and tend removes it.
 
@@ -742,12 +861,12 @@ root's key stays where it is made. It is made safe on such a mesh:
    ```
 
 3. it makes the root when no member holds one, and enrolls every ready
-   member that holds no intermediate (`enroll`, its request, signed with
+   member that holds no certificate (`enroll`, its request, signed with
    the root). Any enrollment that fails stops it before anything is
    started anywhere;
 4. at three ready members or more it signs and reserves the formation,
    sends each the cluster and its record (`cluster`), and starts its own;
-   with fewer, the members keep their intermediates and etcd forms
+   with fewer, the members keep their certificates and etcd forms
    later.
 
 On a formed cluster it brings in what the cluster lacks: a ready member
@@ -763,9 +882,12 @@ keel mesh etcd tend
 ```
 
 Root; what `keel-mesh-etcd.timer` runs every five minutes, on a member
-of a cluster: each learner etcd says is in sync is promoted, a learner
-that never started within an hour is removed, and this member's leaves
-are renewed with a third of their life left.
+of a cluster: on the root's holder, each learner etcd says is in sync is
+promoted, a learner that never started within an hour is removed, its
+admin certificate and the CRL are renewed, and once auth is on etcd's
+users and roles are converged; on every member, its certificate is
+renewed by the root with a third of its life left, and its VIP pairs are
+sent to the holder for their role.
 
 ### keel mesh etcd gate, and upgrades
 
@@ -801,26 +923,32 @@ leader's restart costs one leader change, not an election timeout.
 when every other member is healthy and none restarts, 24 with one line
 per reason otherwise, and says when this node holds a VIP (upgrade it
 last, or move the VIP first: docs/vip.md, "Upgrading a pair without
-downtime"). Any member can write the lock (docs/vip.md says why etcd has
-no access control here); it is advice between keel's own gates, and the
-others' health is asked of each, whatever it says.
+downtime"). Every member may write the lock, under the mesh's own keys
+(`keel-member`, "etcd's users and roles"); it is advice between keel's
+own gates, and the others' health is asked of each, whatever it says.
 
 ### The members' channel for etcd
 
 `POST /v1/etcd` carries one message: `kind` (`probe`, `enroll`,
-`cluster`, and to the root's holder `issue` and `revoke`), `mesh_id`, `sender` (its WireGuard key), `time` and `body`,
+`cluster`, `reissue`, `crl`, and to the root's holder `issue`, `revoke`
+and `pair`), `mesh_id`, `sender` (its WireGuard key), `time` and `body`,
 signed with the sender's Ed25519 key over `keel mesh etcd 1\n` and the
 message's canonical JSON. WireGuard says who speaks; a message that acts
 needs the member's own signature too (0048's amendment): the root side
 takes it only when it names the key of the peer it came from, is no more
 than five minutes from this node's clock, is for this node's mesh, and
 is signed by the signing key its trust store holds for that member. A
-`cluster` message never replaces an intermediate this node holds, brings
-an intermediate only from this node's inviter or a trust root, never
-another root, and starts nothing without the root's formation record. The
-holder signs (`issue`) for an address of the mesh's prefix, and revokes
-(`revoke`) only for the removed node's admitter, a trust root, or the
-node itself.
+`cluster` message never replaces a certificate this node holds, brings
+one only from this node's inviter or a trust root, never another root,
+and starts nothing without the root's formation record. A `reissue`
+replaces this node's certificate only with one the root signed for its
+own key, name and address that lasts longer, or in place of an
+intermediate's. The holder signs (`issue`) for an address of the mesh's
+prefix, and only a request shown to be the member's own ("The CA and the
+certificates"), revokes (`revoke`) only for the removed node's admitter,
+a trust root, the node itself or the member that relayed its request,
+and gives a pair its role (`pair`) only when one of its members sends
+the record.
 
 ### Timeouts, two members, a partition
 
@@ -907,12 +1035,12 @@ the body.
 
 | Request | Fields | Over |
 | --- | --- | --- |
-| `POST /v1/join` | `invite_id`, `public_key`, `sign_key` (the new node's Ed25519 key), `endpoint` (`[address]:port`, or null), `address` (the reserved one, with its length), `nonce` (16 random bytes, hex), `time` (seconds since the epoch), `etcd_csr` (the request for its etcd intermediate CA, PEM, sent only by a node that can run etcd, else null) | the uplink |
+| `POST /v1/join` | `invite_id`, `public_key`, `sign_key` (the new node's Ed25519 key), `endpoint` (`[address]:port`, or null), `address` (the reserved one, with its length), `nonce` (16 random bytes, hex), `time` (seconds since the epoch), `etcd_csr` (the request for its etcd certificate, PEM, sent only by a node that can run etcd, else null), `etcd_proof` (its signature over the request with `sign_key`, keel.mesh.etcdproof, or null) | the uplink |
 | `POST /v1/confirm` | `invite_id`, `public_key`, `nonce`, `time` | the overlay |
 
 | Answer (200) | Fields |
 | --- | --- |
-| to a join | `invite_id`, `nonce` (the request's), `public_key` and `address` (the inviter's), `sign_key` (the inviter's signing key), `admission` (the evidence of this admission, signed with it), `peers` (the other members the inviter knows: `public_key`, `endpoint` or null, `address`, and `admission`, the evidence it keeps, or null), `etcd` (`none`, `forms` or `running`), `window` (the seconds the inviter's change waits), `etcd_grant` (the new node's intermediate CA, its chain and the root, or null), `etcd_cluster` (the cluster it starts, `new` or `existing`, or null), `etcd_ready` (the members ready for etcd: key to address) |
+| to a join | `invite_id`, `nonce` (the request's), `public_key` and `address` (the inviter's), `sign_key` (the inviter's signing key), `admission` (the evidence of this admission, signed with it), `peers` (the other members the inviter knows: `public_key`, `endpoint` or null, `address`, and `admission`, the evidence it keeps, or null), `etcd` (`none`, `forms` or `running`), `window` (the seconds the inviter's change waits), `etcd_grant` (the new node's etcd certificate, signed by the root, an empty chain and the root, or null), `etcd_cluster` (the cluster it starts, `new` or `existing`, or null), `etcd_ready` (the members ready for etcd: key to address) |
 | to a confirmation | `invite_id`, `nonce`, `confirmed` (whether the inviter kept its change), `detail`, `sign_key` (the inviter's: what the fallback's node learns it by) |
 
 The evidence (`admission`) is `mesh_id` (hex), `invite_id` (empty for a
@@ -1148,12 +1276,13 @@ backup set.
 
 etcd's state is beside it, under `/var/lib/keel/etcd`, root's, 0700,
 files 0600: the root CA's key on the first node alone (`root.key`),
-with the intermediates it signed (`issued.json`), what it revoked
-(`revoked.json`) and the formation it reserved (`formation.json`); the
-root (`root.crt`), its CRL (`crl.pem`), the holder's address (`holder`),
-whether keel started etcd here (`started`), this member's intermediate (`ca.key`, `ca.crt`) and
-the chain above it (`chain.pem`), its leaves (`member.key`,
-`member.crt`, `client.key`, `client.crt`), the cluster
+with its admin certificate (`admin.key`, `admin.crt`), the certificates
+it signed (`issued.json`), what it revoked (`revoked.json`), the
+formation it reserved (`formation.json`), whether etcd's auth is on
+(`auth.json`) and the VIP pairs it gave a role (`pairs.json`); the root
+(`root.crt`), its CRL (`crl.pem`), the holder's address (`holder`),
+whether keel started etcd here (`started`), this member's certificate
+(`member.key`, `member.crt`), the cluster
 (`cluster.json`), the members ready for etcd (`ready.json`) and when
 each unstarted learner was first seen (`learners.json`). Never in the
 spec, never in a backup set.
@@ -1249,10 +1378,13 @@ At these seams, each written down before its tests:
   `tests/test_mesh_adopt.py`, `tests/test_mesh_remove.py`);
 - the CLI through `keel.cli.main` (`tests/test_mesh_cli.py`,
   `tests/test_mesh_cli_live.py`);
-- etcd: the CA, the intermediates and the leaves with the real openssl
+- etcd: the CA and the certificates the root signs with the real openssl
   (`tests/test_mesh_etcdpki.py`, `tests/test_mesh_etcdstate.py`), the
   rendered configuration (`tests/test_mesh_etcdconf.py`), the client
-  against a fake gateway over real TLS (`tests/test_mesh_etcdclient.py`),
+  against a recording etcdctl (`tests/test_mesh_etcdclient.py`), the
+  users and roles (`tests/test_mesh_etcd_auth.py`), `keel mesh etcd
+  reissue` on a cluster of the layout before keel#83
+  (`tests/test_mesh_etcd_reissue.py`),
   the messages (`tests/test_mesh_etcdmsg.py`), the flows of a join, tend,
   leave and status with members in one process and a recording etcd
   (`tests/test_mesh_etcd.py`, two concurrent invites among them),
@@ -1263,17 +1395,28 @@ At these seams, each written down before its tests:
   step (`tests/test_system_etcd.py`);
 - etcd end to end, `tests/test_etcd_netns.py` runs `tests/etcd_netns.py`
   as root in a network namespace that routes for three others: the real
-  wg-quick and etcd 3.5, keel's CA (one intermediate signed by a member
-  that is not the first), leaves and rendered configuration, on links of
+  wg-quick and etcd 3.5, keel's CA and the certificates its root signs,
+  and rendered configuration, on links of
   250 ms ±25 ms with 2% loss, the cluster formed from the record the
   root's holder signs. It forms, keeps its leader and term, a follower
   cut off keeps the others their quorum and writes and comes back
   without raising the term, the leader cut off for two minutes is
   replaced and comes back as a follower, a learner is added and removed
-  with keel's client, and a member whose intermediate the root's CRL
+  with keel's client, and a member whose certificate the root's CRL
   revokes no longer reaches etcd. In CI, `etcd / trixie` runs 60 s of
   stability and a 45 s follower partition; `ETCD_SOAK=full` runs 5
   minutes and 2. The leader is cut off for 2 minutes in both;
+- keel#83 end to end, `tests/test_etcd_auth_netns.py` runs
+  `tests/etcd_auth_netns.py` on the namespaces, links, members' channel
+  and VIP units of the VIP's test: three members in the layout before
+  keel#83, the VIP held by a pair, moved by `keel mesh etcd reissue`
+  while the VIP's holders are sampled every 200 ms, the VIP pinged every
+  50 ms and each member's quorum read every second; then etcd refuses
+  the member outside the pair its writes, deletes and revokes on the
+  VIP's keys, a certificate a member signs itself does not reach etcd,
+  a renewal goes through the root and waits while the root is cut off,
+  and the rollback turns auth off. The cost of etcdctl on the link is
+  measured there too. In CI, `etcd-auth / trixie`;
 - end to end, `tests/test_mesh_netns.py` runs `tests/mesh_netns.py` as
   root in a network namespace (tests/wgtools.py), with two more
   namespaces joined to it by veths: real `wg-quick`, real TLS, the real

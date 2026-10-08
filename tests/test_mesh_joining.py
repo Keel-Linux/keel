@@ -151,10 +151,10 @@ class TestJoin(Case):
         for one in (issuer, other):
             self.addCleanup(shutil.rmtree, one)
         etcdstate.make_root(issuer, "ab" * 16, "fd00::1")
-        grant = etcdstate.grant_for(issuer, etcdstate.ca_request(other),
+        grant = etcdstate.grant_for(issuer, etcdstate.member_request(other),
                                      "fd00::2")
         asked = []
-        self.admitter.etcd_admit = lambda csr, key, address: (
+        self.admitter.etcd_admit = lambda csr, proof, key, address, ev: (
             asked.append(csr) or etcd.Admission(grant))
         self.assertEqual(self.joining(), exits.OK, self.err)
         # this node is not cloud advanced: it asked for no CA

@@ -2,9 +2,9 @@
 """What members say to each other about etcd (decision 0048)
 
 In the join (keel.mesh.protocol), the request carries `etcd_csr`, the
-request for the new node's intermediate CA, only when the node can run
-etcd (third round, point 3), and the answer carries `etcd_grant` (the
-intermediate, its chain and the root, third round, point 1),
+request for the new node's certificate, only when the node can run etcd
+(third round, point 3), and the answer carries `etcd_grant` (the
+certificate the root signed, and the root; keel#83),
 `etcd_cluster` (the cluster to start, `new` at the third member or
 `existing` with the new node a learner) and `etcd_ready` (the members
 the inviter knows to be ready, the new node among them). The invite's
@@ -17,20 +17,34 @@ Ed25519 key and the receiver checks it against the key its trust store
 holds for that member (0048's amendment: "signed by a member's key,
 verified by the receiver").
 
-    probe     -> Probe: ready for etcd, its root, formed, its address;
+    probe     -> Probe: ready for etcd, its root, formed, its address,
+                 whether it holds the root's key, its PKI (2 since
+                 keel#83) and whether it still holds an intermediate;
                  changes nothing
-    enroll    -> {"csr": ...}: the request for its intermediate, its key
-                 made once
+    enroll    -> {"csr": ..., "proof": ...}: the request for its
+                 certificate, its key made once, and its signature over
+                 it with its signing key (keel.mesh.etcdproof)
     cluster   {"grant": ... or null, "cluster": ..., "ready": {...}}
-              -> {"taken": true}: its intermediate if it had none, the
+              -> {"taken": true}: its certificate if it had none, the
                  cluster to start, with its formation record signed by
                  the root (keel.mesh.etcdca)
-    issue     {"csr": ..., "address": ...} -> {"grant": ...}: to the
-              root's holder, an intermediate signed by the root, for a
-              node an inviter admits or a member's renewal
-    revoke    {"address": ..., "public_key": ..., "serials": {...}}
-              -> {"crl": ...}: to the root's holder, a removed node's
-              certificates revoked, the new CRL
+    issue     {"csr": ..., "proof": ..., "address": ..., "public_key":
+              ..., "admission": ... or null} -> {"grant": ...}: to the
+              root's holder, a certificate signed by the root, for a
+              member's own renewal (no admission) or a node an inviter
+              admits (its admission evidence); signed only when the
+              request is shown to be that member's (keel.mesh.etcdproof)
+    revoke    {"address": ..., "public_key": ...} -> {"crl": ...}: to
+              the root's holder, a removed node's certificates revoked,
+              its etcd member and user removed, the new CRL
+    reissue   {"grant": ...} -> {"taken": true}: from the root's holder,
+              this member's certificate signed by the root, in place of
+              its intermediate's (keel mesh etcd reissue)
+    crl       {"crl": ...} -> {"taken": bool}: the root's CRL, taken
+              when the root signed it and it is newer
+    pair      {"pair": ...} -> {"roles": [...]}: to the root's holder,
+              from a member of a VIP's pair: the record, so the pair's
+              two members get read-write on its keys (keel.mesh.etcdauth)
 """
 
 import base64
@@ -40,7 +54,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 
-from keel.mesh import signing
+from keel.mesh import etcdproof, signing
 from keel.mesh.etcdpki import blocks
 from keel.mesh.etcdstate import STATES, Cluster, Grant, Member
 from keel.mesh.protocol import MESH_ID_RE, SKEW, ProtocolError, loaded
@@ -49,12 +63,15 @@ from keel.network.wireguard import is_key
 PATH = "/v1/etcd"
 PROBE, ENROLL, CLUSTER = "probe", "enroll", "cluster"
 ISSUE, REVOKE = "issue", "revoke"
-KINDS = (PROBE, ENROLL, CLUSTER, ISSUE, REVOKE)
+REISSUE, CRL_KIND, PAIR = "reissue", "crl", "pair"
+KINDS = (PROBE, ENROLL, CLUSTER, ISSUE, REVOKE, REISSUE, CRL_KIND, PAIR)
+# the PKI a member runs: 1, an intermediate per member; 2, every
+# certificate signed by the root (keel#83). A probe without it is 1
+PKI = 2
 MAX_RECORD = 16384
 LABEL = b"keel mesh etcd 1\n"
 MAX_PEM = 4096
-# a grant carries no intermediate above the member's: the root signs
-# every intermediate, so a chain is one intermediate deep
+# a grant carries no chain: the root signs every certificate itself
 MAX_CHAIN = 0
 # etcd's own advice is at most seven voters; a cluster sent is no more
 MAX_MEMBERS = 9
@@ -215,19 +232,24 @@ class Probe:
     """What a member says of itself: ready for etcd (cloud advanced,
     the overlay in its appliance), the fingerprint of the root it holds,
     whether it is in a cluster, its overlay address, whether it holds
-    the root CA's key"""
+    the root CA's key, the PKI its keel runs, and whether it still holds
+    an intermediate (the layout before keel#83)"""
 
     ready: bool
     root: str | None
     formed: bool
     address: str
     holder: bool = False
+    pki: int = 1
+    legacy: bool = False
 
 
 def probe_dumps(is_ready: bool, root: str | None, formed: bool,
-                address: str, holder: bool = False) -> bytes:
+                address: str, holder: bool = False,
+                legacy: bool = False) -> bytes:
     return json.dumps({"ready": is_ready, "root": root, "formed": formed,
-                       "address": address, "holder": holder}).encode()
+                       "address": address, "holder": holder, "pki": PKI,
+                       "legacy": legacy}).encode()
 
 
 def probe_answer(data: bytes) -> Probe:
@@ -239,9 +261,14 @@ def probe_answer(data: bytes) -> Probe:
                                   and all(c in "0123456789abcdef"
                                           for c in root))):
         raise ProtocolError("not a probe's answer")
+    pki = found.get("pki")
     return Probe(found["ready"], root, found["formed"],
-                 address(found.get("address")), found.get("holder") is True)
+                 address(found.get("address")), found.get("holder") is True,
+                 pki if type(pki) is int else 1,
+                 found.get("legacy") is True)
 
 
-def enroll_answer(data: bytes) -> str:
-    return pem(loaded(data).get("csr"), "CERTIFICATE REQUEST")
+def enroll_answer(data: bytes) -> etcdproof.Request:
+    found = loaded(data)
+    return etcdproof.Request(pem(found.get("csr"), "CERTIFICATE REQUEST"),
+                             etcdproof.proof(found.get("proof")))

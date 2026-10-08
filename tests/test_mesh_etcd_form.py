@@ -236,7 +236,7 @@ class TestTheReceiver(Mesh):
     def test_a_probe(self):
         found = etcdserve.answer(self.b, self.message(), KEYS[0])
         self.assertEqual(etcdmsg.probe_answer(found.body), etcdmsg.Probe(
-            True, None, False, address(1)))
+            True, None, False, address(1), False, etcdmsg.PKI, False))
 
     def test_refusals(self):
         self.assertIn("malformed", self.refused(b"{}"))
@@ -274,7 +274,7 @@ class TestTheReceiver(Mesh):
             etcdmsg.CLUSTER, {"cluster": other.dumps()})))
         self.assertIn("malformed cluster", self.refused(self.message(
             etcdmsg.CLUSTER, {"cluster": {"state": "x"}})))
-        self.assertIn("holds no etcd CA", self.refused(self.message(
+        self.assertIn("holds no etcd certificate", self.refused(self.message(
             etcdmsg.CLUSTER, {"ready": {}})))
         mine = Cluster("new", (Member(KEYS[1], address(1)),), "cd" * 16)
         etcdstate.save_cluster(self.b.root, mine)
@@ -287,7 +287,8 @@ class TestTheReceiver(Mesh):
         chose: the record must be the root's"""
         etcdstate.make_root(self.a.root, MESH.hex(), address(0))
         etcdstate.take_grant(self.b.root, etcdstate.grant_for(
-            self.a.root, etcdstate.ca_request(self.b.root), address(1)))
+            self.a.root, etcdstate.member_request(self.b.root), address(1)),
+            address(1))
         bare = Cluster("new", (Member(KEYS[1], address(1)),
                                Member(KEYS[2], address(2))), MESH.hex())
         self.assertIn("no record signed by the mesh's root", self.refused(
@@ -327,7 +328,8 @@ class TestTheReceiver(Mesh):
         from keel.mesh import etcdca
         etcdstate.make_root(self.a.root, MESH.hex(), address(0))
         etcdstate.take_grant(self.b.root, etcdstate.grant_for(
-            self.a.root, etcdstate.ca_request(self.b.root), address(1)))
+            self.a.root, etcdstate.member_request(self.b.root), address(1)),
+            address(1))
         two = (Member(KEYS[0], address(0)), Member(KEYS[1], address(1)))
         first = etcdca.record(self.a.root, two, MESH.hex(), NOW,
                               "existing", "4242")
@@ -373,7 +375,7 @@ class TestTheReceiver(Mesh):
     def test_a_grant_only_from_a_root_and_not_while_waiting(self):
         from keel.mesh import trust
         etcdstate.make_root(self.a.root, MESH.hex(), address(0))
-        grant = etcdstate.grant_for(self.a.root, etcdstate.ca_request(
+        grant = etcdstate.grant_for(self.a.root, etcdstate.member_request(
             self.b.root), address(1))
         store = trust.load(self.b.root)
         store.members[store.find(KEYS[0])].root = False
@@ -397,7 +399,7 @@ class TestTheReceiver(Mesh):
 
     def test_openssl_failing_is_a_503(self):
         etcdstate.make_root(self.b.root, MESH.hex(), address(1))
-        with mock.patch("keel.mesh.etcdstate.ca_request",
+        with mock.patch("keel.mesh.etcdstate.member_request",
                         side_effect=OSError("disk full")):
             found = etcdserve.answer(self.b, self.message(etcdmsg.ENROLL),
                                      KEYS[0])
@@ -406,7 +408,7 @@ class TestTheReceiver(Mesh):
     def test_a_grant_under_another_root(self):
         etcdstate.make_root(self.b.root, MESH.hex(), address(1))
         etcdstate.make_root(self.a.root, MESH.hex(), address(0))
-        grant = etcdstate.grant_for(self.a.root, etcdstate.ca_request(
+        grant = etcdstate.grant_for(self.a.root, etcdstate.member_request(
             self.c.root), address(2))
         self.assertIn("another root", self.refused(self.message(
             etcdmsg.CLUSTER, {"grant": etcdmsg.grant_data(grant)})))
@@ -419,7 +421,7 @@ class TestTheReceiver(Mesh):
 
     def test_a_grant_alone_starts_nothing(self):
         etcdstate.make_root(self.a.root, MESH.hex(), address(0))
-        grant = etcdstate.grant_for(self.a.root, etcdstate.ca_request(
+        grant = etcdstate.grant_for(self.a.root, etcdstate.member_request(
             self.b.root), address(1))
         found = etcdserve.answer(self.b, self.message(
             etcdmsg.CLUSTER, {"grant": etcdmsg.grant_data(grant),

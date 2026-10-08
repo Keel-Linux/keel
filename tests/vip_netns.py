@@ -336,7 +336,8 @@ def driver(play=None) -> None:
     for index, pid in enumerate(pids):
         overlay_up(pid, roots[index], index, pairs, specs[index])
     mesh_state(roots, pairs)
-    # etcd: keel's CA, intermediates and leaves (tests/etcd_netns.py)
+    # etcd: keel's CA and the certificates its root signs
+    # (tests/etcd_netns.py)
     etcd_netns.KEYS.extend(pair[1] for pair in pairs)
     etcd_netns.OVERLAY = OVERLAY
     etcd_netns.credentials(roots)
@@ -542,9 +543,8 @@ def move_leader(root: str) -> None:
                 return
             leader = next(one for one in local.members()
                           if one.id == own.leader)
-            etcdclient.Client(leader.client_urls, local.tls, 10).ask(
-                "/v3/maintenance/transfer-leadership",
-                {"targetID": own.member_id})
+            etcdclient.Client(leader.client_urls, local.tls,
+                              10).move_leader(own.member_id)
         except (etcdclient.EtcdError, StopIteration) as e:
             said = str(e)
         time.sleep(2)
@@ -621,6 +621,9 @@ def scenario(report: dict, pids: list[int], pairs, roots: list[str],
     # a leader renews leases by itself until it steps down, and only
     # renewals the majority confirmed count
     report["c_lead"] = lead(b_pid, roots[1])
+    # each member's watcher samples about every 2 s (etcdctl's calls on
+    # the link): wait until B's says it leads
+    wait_until(lambda: was_leader(roots, 1), 20, 1)
     partition(report, "c", pids, roots, samples, 1, 0, log, key)
 
     # (d) healed: B takes A's newer claim and never carries it again
@@ -758,7 +761,8 @@ def command(here: vipnode.Here, words: list[str]) -> dict | None:
     if words[:1] == ["stale"]:
         return stale(here)
     if words[:1] == ["remember"]:
-        now = vipetcd.seen(vipetcd.local(here), here.mesh_id()).get(VIP)
+        now = again(lambda: vipetcd.seen(vipetcd.local(here),
+                                         here.mesh_id())).get(VIP)
         REMEMBERED.append(now.epoch.raw)
         return {"epoch": now.epoch.epoch}
     if words[:1] == ["epoch"]:
@@ -772,7 +776,7 @@ def command(here: vipnode.Here, words: list[str]) -> dict | None:
         return attack_keys(here)
     if words[:1] == ["attack-revoke"]:
         client = vipetcd.local(here)
-        now = vipetcd.seen(client, here.mesh_id()).get(VIP)
+        now = again(lambda: vipetcd.seen(client, here.mesh_id())).get(VIP)
         client.revoke(now.epoch.lease)
         return {"revoked": now.epoch.lease, "epoch": now.epoch.epoch,
                 "holder": now.epoch.address}
@@ -782,23 +786,28 @@ def command(here: vipnode.Here, words: list[str]) -> dict | None:
 REMEMBERED: list[bytes] = []
 
 
+def again(call, tries: int = 5):
+    """A read the driver needs, tried again: one linearizable read can
+    outlast its 2 s on a link that loses 2%"""
+    for _ in range(tries - 1):
+        try:
+            return call()
+        except EtcdError:
+            time.sleep(1)
+    return call()
+
+
 def attack_keys(here: vipnode.Here) -> dict:
     """What any member can do to etcd's keys without RBAC: the old claim
     and the current one, without its lease, under the holder key, then
     the key deleted"""
-    import base64
     client = vipetcd.local(here)
     mesh = here.mesh_id()
     holder = vipetcd.key_of(mesh, VIP, vipetcd.HOLDER)
-    now = vipetcd.seen(client, mesh).get(VIP)
-    client.ask("/v3/kv/put", {
-        "key": base64.b64encode(holder.encode()).decode(),
-        "value": base64.b64encode(REMEMBERED[0]).decode()})
-    client.ask("/v3/kv/put", {
-        "key": base64.b64encode(holder.encode()).decode(),
-        "value": base64.b64encode(now.epoch.raw).decode()})
-    client.ask("/v3/kv/deleterange", {
-        "key": base64.b64encode(holder.encode()).decode()})
+    now = again(lambda: vipetcd.seen(client, mesh)).get(VIP)
+    client.put(holder, REMEMBERED[0].decode())
+    client.put(holder, now.epoch.raw.decode())
+    client.delete(holder)
     return {"epoch": now.epoch.epoch}
 
 

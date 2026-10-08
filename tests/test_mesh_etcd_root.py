@@ -3,6 +3,7 @@
 holder's answers on the members' channel: issue and revoke"""
 
 import json
+from dataclasses import asdict
 import os
 import unittest
 from datetime import timedelta
@@ -10,14 +11,19 @@ from unittest import mock
 
 from etcd_helpers import KEYS, MESH, NOW, FakeEtcd, Mesh, address, voter
 
+from keel import exits
 from keel.mesh import (
+    admit,
     etcd,
     etcdca,
+    etcdcare,
     etcdform,
     etcdmsg,
     etcdpki,
+    etcdproof,
     etcdserve,
     etcdstate,
+    signing,
     trust,
 )
 from keel.mesh.etcdpki import PkiError
@@ -58,9 +64,9 @@ class TestTheHolder(Mesh):
         with self.assertRaisesRegex(StateError, "only the root"):
             etcdca.revoke(self.b.root, address(2), KEYS[2], NOW)
         self.assertFalse(etcdca.refresh(self.b.root, NOW))
-        grant = etcdstate.grant_for(self.a.root, etcdstate.ca_request(
+        grant = etcdstate.grant_for(self.a.root, etcdstate.member_request(
             self.c.root), address(2), KEYS[2])
-        with self.assertRaisesRegex(StateError, "no intermediate"):
+        with self.assertRaisesRegex(StateError, "no certificate"):
             etcdca.revoke(self.a.root, address(2), KEYS[1], NOW)
         etcdstate.write(self.a.root, etcdca.REVOKED, "{")
         found = etcdca.revoke(self.a.root, address(2), KEYS[2], NOW)
@@ -72,7 +78,7 @@ class TestTheHolder(Mesh):
                 self.assertRaises(StateError):
             etcdca.revoke(self.a.root, address(2), KEYS[2], NOW)
         etcdstate.write(self.a.root, etcdstate.ISSUED, "{")
-        with self.assertRaisesRegex(StateError, "no intermediate"):
+        with self.assertRaisesRegex(StateError, "no certificate"):
             etcdca.revoke(self.a.root, address(2), KEYS[2], NOW)
         just = os.path.getmtime(os.path.join(self.a.root, etcdstate.CRL))
         from datetime import datetime, timezone
@@ -83,8 +89,23 @@ class TestTheHolder(Mesh):
         os.remove(os.path.join(self.a.root, etcdstate.CRL))
         self.assertTrue(etcdca.refresh(self.a.root, NOW))
 
-    def test_no_intermediate_is_not_due(self):
-        self.assertFalse(etcdca.ca_due(self.b.root, NOW))
+    def test_the_intermediates_before_keel_83_revoked(self):
+        """Those the holder recorded without a kind, those recorded as
+        intermediates, and its own"""
+        etcdstate.write(self.a.root, etcdstate.ISSUED, json.dumps({
+            address(1): [["0A", "300101000000Z", KEYS[1]]],
+            address(2): [["0B", "300101000000Z", KEYS[2], "intermediate"],
+                         ["0C", "300101000000Z", KEYS[2], "leaf"]]}))
+        own = etcdstate.read(self.a.root, etcdstate.MEMBER_CERT)
+        etcdstate.write(self.a.root, etcdstate.CA_CERT, own)
+        serials = etcdca.legacy_serials(self.a.root)
+        self.assertEqual(set(serials), {"0A", "0B", etcdpki.serial(own)})
+        found = etcdca.revoke_legacy(self.a.root, serials, NOW)
+        self.assertEqual(etcdpki.crl_serials(found), set(serials))
+        with self.assertRaisesRegex(StateError, "only the root"):
+            etcdca.revoke_legacy(self.b.root, serials, NOW)
+        etcdstate.write(self.a.root, etcdstate.CA_CERT, "x")
+        self.assertNotIn("x", etcdca.legacy_serials(self.a.root))
 
 
 class TestTheHolderAnswers(Mesh):
@@ -104,9 +125,15 @@ class TestTheHolderAnswers(Mesh):
         self.assertGreaterEqual(found.status, 400)
         return json.loads(found.body)["error"]
 
+    def request(self, index: int, root=None) -> dict:
+        """Member `index`'s request and proof, as its own renewal
+        carries them"""
+        found = etcd.join_request(self.all[index])
+        return {"csr": found.csr, "proof": found.proof}
+
     def test_issue_refusals(self):
-        csr = etcdstate.ca_request(self.c.root)
-        body = {"csr": csr, "address": address(2), "public_key": KEYS[2]}
+        body = {**self.request(2), "address": address(2),
+                "public_key": KEYS[2]}
         self.assertIn("does not hold", self.error(self.b, etcdmsg.ISSUE,
                                                   body, sender=0))
         self.assertIn("not an overlay address", self.error(
@@ -119,31 +146,200 @@ class TestTheHolderAnswers(Mesh):
             self.a, etcdmsg.ISSUE, {**body, "csr": "x"}))
         self.assertIn("no request", self.error(
             self.a, etcdmsg.ISSUE, {**body, "csr": None}))
-        # b asks for c's address with its own key: c's, refused
+        self.assertIn("not a proof", self.error(
+            self.a, etcdmsg.ISSUE, {**body, "proof": "x"}))
+        self.assertIn("not a JSON object", self.error(
+            self.a, etcdmsg.ISSUE, {**body, "admission": 1}))
+
+    def test_a_member_gets_no_certificate_for_another_s_address(self):
+        """keel#83's review: B asks the root for C's address, with C's
+        key, with its own key, or for an address nobody holds: refused,
+        and nothing is signed. Only C renews C"""
+        body = {**self.request(2), "address": address(2),
+                "public_key": KEYS[2]}
+        before = etcdstate.issued(self.a.root)
+        # C's address and key, asked by B: B is not C, and admitted no C
+        self.assertIn("needs the evidence of its admission", self.error(
+            self.a, etcdmsg.ISSUE, body))
+        # C's address with B's own key: the address is C's
         self.assertIn("another member's", self.error(
-            self.a, etcdmsg.ISSUE, {**body, "public_key": KEYS[1]}))
-        self.assertIn("another member's", self.error(
-            self.a, etcdmsg.ISSUE, {**body, "address": address(0),
+            self.a, etcdmsg.ISSUE, {**self.request(1), **body,
                                     "public_key": KEYS[1]}))
-        found = self.ask(self.a, etcdmsg.ISSUE, body)
+        self.assertIn("another member's", self.error(
+            self.a, etcdmsg.ISSUE, {**self.request(1), "address": address(0),
+                                    "public_key": KEYS[1]}))
+        # an address nobody holds, with no evidence
+        self.assertIn("needs the evidence", self.error(
+            self.a, etcdmsg.ISSUE, {**body, "address": "fd00:6b65:1::9",
+                                    "public_key": KEYS[3]}))
+        self.assertEqual(etcdstate.issued(self.a.root), before)
+        # C itself: its own address and key, the proof its own
+        found = self.ask(self.a, etcdmsg.ISSUE, body, sender=2)
         self.assertEqual(found.status, 200)
-        # an address nobody holds yet: a node being admitted
-        fresh = {**body, "address": "fd00:6b65:1::9", "public_key": KEYS[3]}
-        self.assertEqual(self.ask(self.a, etcdmsg.ISSUE, fresh).status, 200)
-        self.assertEqual(etcdserve.claimed(self.a, "fd00:6b65:1::9"),
-                         KEYS[3])
+        entry = etcdstate.issued(self.a.root)[address(2)][-1]
+        self.assertEqual(entry[2:], [KEYS[2], "leaf", signing.public(
+            self.c.root), KEYS[2]])
+        # C, with a request B made (another key's proof)
+        self.assertIn("not signed by the member's own signing key",
+                      self.error(self.a, etcdmsg.ISSUE, {
+                          **self.request(1), "address": address(2),
+                          "public_key": KEYS[2]}, sender=2))
+        # a sender the holder does not trust never reaches the proof
+        # (the message itself is refused first); the rule says so anyway
+        request = etcdproof.Request(body["csr"], body["proof"])
+        self.assertIn("not trusted here", etcdproof.problem(
+            KEYS[2], None, KEYS[2], address(2), request, None, MESH.hex(),
+            None, None)[0])
+        # a member the trust store knows by another signing key
+        self.assertIn("not known by that signing key", etcdproof.problem(
+            KEYS[2], "x", KEYS[2], address(2), request, None, MESH.hex(),
+            KEYS[2], "y")[0])
+
+    def test_an_inviter_relays_a_node_s_request_with_its_evidence(self):
+        """A node being admitted, through B: the root signs with B's
+        evidence of the admission and the node's proof, and refuses what
+        B could forge: another key's request, or evidence naming a
+        signing key the trust store does not hold for that node"""
+        import tempfile
+
+        from keel.mesh import signing as signing_
+        fresh = tempfile.mkdtemp(dir=self.parent)
+        signer = signing_.ensure(fresh)
+        at, key = "fd00:6b65:1::9", KEYS[3]
+        csr = etcdstate.member_request(fresh)
+        request = {"csr": csr, "proof": etcdproof.sign(fresh, csr)}
+        evidence = admit.admitted(self.b.root, "0123456789abcdef", key,
+                                  signer, at, None, NOW)
+        body = {**request, "address": at, "public_key": key,
+                "admission": asdict(evidence)}
+        found = self.ask(self.a, etcdmsg.ISSUE, body)
+        self.assertEqual(found.status, 200, found.body)
+        entry = etcdstate.issued(self.a.root)[at][-1]
+        self.assertEqual(entry[2:], [key, "leaf", signer, KEYS[1]])
+        self.assertEqual(etcdserve.claimed(self.a, at), key)
+        # the same node again, now claimed by its key: still B's to relay
+        self.assertEqual(self.ask(self.a, etcdmsg.ISSUE, body).status, 200)
+        # B puts its own request in the node's place: the proof is not
+        # the node's
+        self.assertIn("not signed by the admitted node's signing key",
+                      self.error(self.a, etcdmsg.ISSUE, {
+                          **body, **self.request(1)}))
+        # B's evidence names a signing key of B's own for the node
+        forged = admit.admitted(self.b.root, "0123456789abcdef", key,
+                                signing_.public(self.b.root), at, None, NOW)
+        own = etcdstate.member_request(self.b.root)
+        self.assertIn("names a signing key that is another member's",
+                      self.error(self.a, etcdmsg.ISSUE, {
+                          "csr": own, "proof": etcdproof.sign(self.b.root,
+                                                               own),
+                          "address": at, "public_key": key,
+                          "admission": asdict(forged)}))
+        # or C's, which B has no key for either
+        c_named = admit.admitted(self.b.root, "0123456789abcdef", key,
+                                 signing_.public(self.c.root), at, None, NOW)
+        self.assertIn("names a signing key that is another member's",
+                      self.error(self.a, etcdmsg.ISSUE, {
+                          **body, "admission": asdict(c_named)}))
+        # evidence not B's, or for another node or address
+        for bad in (asdict(admit.admitted(self.c.root, "0123456789abcdef",
+                                          key, signer, at, None, NOW)),
+                    {**asdict(evidence), "address": "fd00:6b65:1::8"},
+                    {**asdict(evidence), "public_key": KEYS[4]},
+                    {**asdict(evidence), "invite_id": ""}):
+            with self.subTest(bad=bad):
+                self.assertIn("evidence is not the sender's", self.error(
+                    self.a, etcdmsg.ISSUE, {**body, "admission": bad}))
+        # C, whom the trust store knows by its own signing key, with
+        # evidence naming another: refused
+        other = admit.admitted(self.b.root, "0123456789abcdef", KEYS[2],
+                               signer, address(2), None, NOW)
+        self.assertIn("does not know the member by", self.error(
+            self.a, etcdmsg.ISSUE, {**request, "address": address(2),
+                                    "public_key": KEYS[2],
+                                    "admission": asdict(other)}))
         etcdstate.write(self.a.root, etcdstate.ISSUED,
                         '{"fd00:6b65:1::8": [[1]]}')
         self.assertIsNone(etcdserve.claimed(self.a, "fd00:6b65:1::8"))
         etcdstate.write(self.a.root, etcdstate.ISSUED, "{")
         self.assertIsNone(etcdserve.claimed(self.a, "fd00:6b65:1::8"))
 
+    def test_a_certificate_under_a_made_up_signing_key_is_revoked(self):
+        """B admits a node vouching for a signing key it made up; once the
+        trust store knows the node's real key (its confirmed join's
+        rosters), tend on the holder revokes what was issued under the
+        other one"""
+        import tempfile
+
+        from keel.mesh import signing as signing_
+        fresh, forger = (tempfile.mkdtemp(dir=self.parent) for _ in "ab")
+        at, key = "fd00:6b65:1::9", KEYS[3]
+        csr = etcdstate.member_request(forger)
+        made_up = signing_.ensure(forger)
+        evidence = admit.admitted(self.b.root, "0123456789abcdef", key,
+                                  made_up, at, None, NOW)
+        found = self.ask(self.a, etcdmsg.ISSUE, {
+            "csr": csr, "proof": etcdproof.sign(forger, csr), "address": at,
+            "public_key": key, "admission": asdict(evidence)})
+        self.assertEqual(found.status, 200)
+        sign_key_of = lambda one: etcdproof.trusted_sign_key(  # noqa: E731
+            self.a.root, one)
+        self.assertEqual(etcdca.impostors(self.a.root, sign_key_of), [])
+        # the node's real key reaches the holder's trust store
+        store = trust.load(self.a.root)
+        store.members[key] = trust.Member(signing_.ensure(fresh), False)
+        trust.save(self.a.root, store)
+        self.assertEqual(etcdca.impostors(self.a.root, sign_key_of),
+                         [(at, key)])
+        self.assertEqual(etcdcare.tend(self.a), exits.OK)
+        self.assertIn(f"certificate of {at} was issued under a signing key",
+                      self.text(0))
+        self.assertEqual(etcdca.impostors(self.a.root, sign_key_of), [])
+        serial = etcdstate.issued(self.a.root)[at][0][0]
+        self.assertIn(serial, etcdpki.crl_serials(etcdstate.read(
+            self.a.root, etcdstate.CRL)))
+        # entries without a signing key (the layout before) are left
+        etcdstate.write(self.a.root, etcdstate.ISSUED, json.dumps(
+            {at: [["0A", "x", key]]}))
+        self.assertEqual(etcdca.impostors(self.a.root, sign_key_of), [])
+
+    def test_a_damaged_trust_store_holds_no_signing_keys(self):
+        with open(f"{self.a.root}/{trust.TRUST}", "w") as fob:
+            fob.write("{")
+        self.assertIsNone(etcdproof.trusted_sign_key(self.a.root, KEYS[1]))
+        self.assertEqual(etcdproof.other_sign_keys(self.a.root, KEYS[1]),
+                         {signing.public(self.a.root)})
+
+    def test_the_relay_may_give_a_failed_join_back(self):
+        """The inviter that relayed a node's request revokes it when the
+        join is not confirmed, so etcd's learner slot is freed"""
+        import tempfile
+
+        from keel.mesh import signing as signing_
+        fresh = tempfile.mkdtemp(dir=self.parent)
+        at, key = "fd00:6b65:1::9", KEYS[3]
+        csr = etcdstate.member_request(fresh)
+        evidence = admit.admitted(self.b.root, "0123456789abcdef", key,
+                                  signing_.ensure(fresh), at, None, NOW)
+        self.ask(self.a, etcdmsg.ISSUE, {
+            "csr": csr, "proof": etcdproof.sign(fresh, csr), "address": at,
+            "public_key": key, "admission": asdict(evidence)})
+        self.assertTrue(etcdserve.may_revoke(self.a.root, KEYS[1], key))
+        # C, neither a root here nor the relay, may not
+        store = trust.load(self.a.root)
+        store.members[store.find(KEYS[2])].root = False
+        trust.save(self.a.root, store)
+        self.assertFalse(etcdserve.may_revoke(self.a.root, KEYS[2], key))
+        found = self.ask(self.a, etcdmsg.REVOKE, {"address": at,
+                                                  "public_key": key})
+        self.assertEqual(found.status, 200)
+        self.assertIn(("remove", "101"), self.fake.calls)
+
     def test_a_member_cannot_revoke_another_s_certificates(self):
         """b names itself as the removed node, at c's address: refused,
         and c's intermediate is not revoked"""
         found = self.error(self.a, etcdmsg.REVOKE, {
             "address": address(2), "public_key": KEYS[1]})
-        self.assertIn("no intermediate of", found)
+        self.assertIn("no certificate of", found)
         self.assertEqual(etcdpki.crl_serials(etcdstate.read(
             self.a.root, etcdstate.CRL)), set())
         # b leaving names its own address: its own intermediate goes
@@ -152,7 +348,7 @@ class TestTheHolderAnswers(Mesh):
         self.assertEqual(own.status, 200)
         self.assertEqual(etcdpki.crl_serials(json.loads(own.body)["crl"]),
                          {etcdpki.serial(etcdstate.read(
-                             self.b.root, etcdstate.CA_CERT))})
+                             self.b.root, etcdstate.MEMBER_CERT))})
 
     def test_revoke_refusals(self):
         self.assertIn("no WireGuard key", self.error(
@@ -196,9 +392,9 @@ class TestTheHolderAnswers(Mesh):
         fresh = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, fresh)
         bare = replace(etcdstate.grant_for(
-            self.a.root, etcdstate.ca_request(fresh), address(2)),
+            self.a.root, etcdstate.member_request(fresh), address(2)),
             crl=None, holder=None)
-        etcdstate.take_grant(fresh, bare)
+        etcdstate.take_grant(fresh, bare, address(2))
         self.assertIsNone(etcdstate.holder(fresh))
         self.assertIsNone(etcdstate.read(fresh, etcdstate.CRL))
 
@@ -260,7 +456,7 @@ class TestJoinEdges(Mesh):
         etcdstate.add_ready(a.root, {KEYS[1]: address(1)})
         with mock.patch("keel.mesh.etcdca.record",
                         side_effect=StateError("no openssl")):
-            found = etcd.admit(a, etcd.join_csr(c), KEYS[2], address(2))
+            found = self.admit(a, c, 2)
         self.assertIsNone(found.cluster)
         self.assertIn("no cluster formed (no openssl)", self.text(0))
 
@@ -269,12 +465,11 @@ class TestJoinEdges(Mesh):
         etcdform.form(a, False, lambda line: None)
         with mock.patch("keel.mesh.etcdmsg.grant", return_value=None), \
                 self.assertRaisesRegex(StateError, "holds no grant"):
-            etcd.issued(b, etcdstate.ca_request(c.root), address(2),
-                        KEYS[2])
+            etcd.issued(b, etcd.join_request(c), address(2), KEYS[2],
+                        self.evidence(b, 2))
         etcdstate.write(b.root, etcdstate.HOLDER, "")
-        with self.assertRaisesRegex(StateError, "does not know"):
-            etcd.issued(b, etcdstate.ca_request(c.root), address(2),
-                        KEYS[2])
+        with self.assertRaisesRegex(etcd.Unreachable, "does not know"):
+            etcd.issued(b, etcd.join_request(c), address(2), KEYS[2])
 
     def test_a_stray_member_directory_only_with_the_package_s_mark(self):
         a, = self.members(1)

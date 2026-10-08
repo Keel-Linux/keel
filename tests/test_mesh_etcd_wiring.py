@@ -93,7 +93,8 @@ class TestTheInviterOnceConfirmed(Mesh):
         a, b = self.members(2)
         etcd.created(a)
         etcdstate.take_grant(b.root, etcdstate.grant_for(
-            a.root, etcdstate.ca_request(b.root), address(1)))
+            a.root, etcdstate.member_request(b.root), address(1)),
+            address(1))
         said = []
         with mock.patch("keel.mesh.etcdform.form") as form:
             inviting.Inviter(b.node, self.clock, print,
@@ -196,7 +197,6 @@ class TestDiff(ManifestCase):
                          "no member certificate")
         etcdstate.make_root(self.root, MESH.hex(), "fd00::1")
         now = datetime.now(timezone.utc)
-        etcdstate.leaves(self.root, "fd00::1", now)
         self.assertEqual(etcd_fields(on, tree)[0].status, SAME)
         found = etcd_fields(on, tree, now + timedelta(days=25))[0]
         self.assertEqual(found.status, DRIFT)

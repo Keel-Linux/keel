@@ -129,6 +129,13 @@ def pair(here: Here, at: str, out: Callable[[str], None]) -> int:
         out(f"keel vip pair: {e}")
         return exits.MESH_REFUSED
     out(f"{vip} is the VIP of {own} and {peer}, signed by both")
+    if with_etcd(here):
+        # the pair's two members alone may write its keys in etcd: the
+        # root's holder grants the role (keel.mesh.etcdauth)
+        from keel.mesh import etcdauth
+        for line in etcdauth.announce(etcd.Etcd(here.node, here.clock,
+                                                here.err)):
+            out(line)
     return exits.OK
 
 

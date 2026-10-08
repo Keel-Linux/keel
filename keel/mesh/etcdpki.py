@@ -1,12 +1,18 @@
 # Copyright (c) 2026 KeelLinux maintainers
-"""The mesh's etcd CA: a root, an intermediate per member, leaves
+"""The mesh's etcd CA: a root, and the leaves it signs itself
 
 etcd uses its own TLS, peer and client (0048, second round, point 3),
-with a CA the first node makes; every member holds an intermediate CA
-of its own, signed by its inviter, and the root's key stays on the
-first node (0048, third round, point 1). Each member issues its own
-leaves with its intermediate: its member certificate and keel's client
-certificate.
+with a CA the first node makes, whose key stays on that node, the
+root's holder. The root signs every certificate etcd is shown itself
+(keel#83, amending 0048's third round, point 1, and 0051's intermediate
+per member): a member's certificate, which names the member by its mesh
+identity in its CN (keel.mesh.etcdstate.name, from its overlay address)
+and carries its /128 and ::1 as its IP SANs, and the holder's admin
+certificate, CN `root`, which only the holder holds. No member holds a
+CA key, so no member can make a certificate etcd takes, and etcd's
+users, which are the CNs of client certificates, mean what they say
+(keel.mesh.etcdauth). A member's certificate is its peer, server and
+client certificate alike: keel asks etcd with it.
 
 All P-256, made with `openssl` (a dependency of keel) on the machine
 itself, never in an image. A key is made on standard output and written
@@ -14,22 +20,18 @@ by the caller to its state, 0600, so no key is ever in a temporary
 file; a signing key is handed to openssl by its path. What a request
 asks for is ignored: the issuer takes only its public key, after
 checking the request's own signature, and sets the subject and every
-extension itself, so a request that asks for `CA:TRUE` or another
-address gets none of it.
+extension itself, so a request that asks for `CA:TRUE`, another name or
+another address gets none of it.
 
 Short lives, so that a key that leaks stops working by itself: a leaf
-lasts 30 days and is renewed by its member with a third left
-(`keel mesh etcd tend`), an intermediate a year and is renewed by the
-root's holder. Only the root signs intermediates, so every chain is
-one intermediate deep and each intermediate has a path length of 0: it
-signs leaves, never another CA. Each is name constrained to its own
-member's address (a /128) and ::1, the addresses its leaves name, so
-no member can certify another member's address or one outside the
-mesh.
+lasts 30 days and is renewed by the root, asked over the members'
+channel, with a third left (`keel mesh etcd tend`); while the root's
+holder cannot be reached a renewal waits, and is alerted.
 
 Revocation is a CRL the root signs (`crl`), which etcd checks against
-every certificate a peer or a client presents, chain included: revoking
-an intermediate revokes every certificate under it.
+every certificate a peer or a client presents, chain included; the
+intermediates of the layout before keel#83 are revoked by it once every
+member holds a certificate the root signed (keel.mesh.etcdreissue).
 """
 
 import base64
@@ -44,18 +46,15 @@ from datetime import datetime, timezone
 
 OPENSSL = "openssl"
 TIMEOUT = 30
-CA, MEMBER, CLIENT = "ca", "member", "client"
-# the root outlives every intermediate it signs, and an intermediate
-# the leaves; a leaf is renewed with a third of its life left
+MEMBER, CLIENT = "member", "client"
+# the root outlives every leaf it signs; a leaf is renewed with a third
+# of its life left
 ROOT_DAYS = 7300
-CA_DAYS = 365
 LEAF_DAYS = 30
 CRL_DAYS = 30
 PEM_RE = re.compile(r"-----BEGIN (?P<label>[A-Z0-9 ]+)-----\n[A-Za-z0-9+/=\n]+"
                     r"-----END (?P=label)-----\n")
 EXTENSIONS = {
-    CA: ("basicConstraints=critical,CA:TRUE,pathlen:0\n"
-         "keyUsage=critical,keyCertSign,cRLSign\n"),
     MEMBER: ("basicConstraints=critical,CA:FALSE\n"
              "keyUsage=critical,digitalSignature\n"
              "extendedKeyUsage=serverAuth,clientAuth\n"),
@@ -130,34 +129,20 @@ def root(path: str, mesh_id: str) -> str:
         "-addext", "subjectKeyIdentifier=hash")
 
 
-def constraints(prefix: str) -> str:
-    """The name constraints of an intermediate: `prefix` (its member's
-    own /128) and ::1, which its member certificate names, and nothing
-    else"""
-    net = ipaddress.IPv6Network(prefix, strict=False)
-    loop = ipaddress.IPv6Network("::1/128")
-    return ("nameConstraints=critical,"
-            f"permitted;IP:{net.network_address}/{net.netmask},"
-            f"permitted;IP:{loop.network_address}/{loop.netmask}\n")
-
-
 def issue(kind: str, issuer_key: str, issuer: str, csr: str, name: str,
-          addresses: tuple[str, ...] = (), days: int | None = None,
-          prefix: str | None = None) -> str:
-    """A certificate of `kind` for the key of `csr`, named `name`, signed
-    with the key at `issuer_key` whose certificate is `issuer`; a member
-    certificate carries `addresses` as its IP SANs, an intermediate the
-    name constraints of `prefix`. Raises PkiError"""
+          addresses: tuple[str, ...] = (), days: int | None = None) -> str:
+    """A leaf of `kind` for the key of `csr`, its CN `name`, signed with
+    the key at `issuer_key` whose certificate is `issuer` (the root); a
+    member certificate carries `addresses` as its IP SANs. Never a CA.
+    Raises PkiError"""
     request_key(csr)
+    if kind not in EXTENSIONS or not name or "/" in name or \
+            any(ord(one) < 0x20 for one in name):
+        raise PkiError(f"not a certificate keel issues: {kind} {name!r}")
     extensions = EXTENSIONS[kind] + IDS
-    if kind == CA:
-        if prefix is None:
-            raise PkiError("an intermediate needs the mesh's prefix")
-        extensions += constraints(prefix)
     if addresses:
         extensions += "subjectAltName=" + ",".join(
             f"IP:{ipaddress.ip_address(one)}" for one in addresses) + "\n"
-    lasts = days or (CA_DAYS if kind == CA else LEAF_DAYS)
     with tempfile.TemporaryDirectory(prefix="keel-etcd-") as scratch:
         files = {}
         for label, text in (("csr", csr), ("issuer", issuer),
@@ -168,8 +153,8 @@ def issue(kind: str, issuer_key: str, issuer: str, csr: str, name: str,
         return openssl(
             "x509", "-req", "-in", files["csr"], "-CA", files["issuer"],
             "-CAkey", issuer_key, "-set_serial",
-            f"0x{secrets.token_hex(16)}", "-days", str(lasts), "-subj",
-            f"/CN={name}", "-extfile", files["ext"])
+            f"0x{secrets.token_hex(16)}", "-days", str(days or LEAF_DAYS),
+            "-subj", f"/CN={name}", "-extfile", files["ext"])
 
 
 def text(certificate: str) -> str:
@@ -226,18 +211,18 @@ def fingerprint(certificate: str) -> str:
     return hashlib.sha256(done.stdout).hexdigest()
 
 
-def verified(certificate: str, chain: list[str], trusted: str) -> bool:
-    """Whether `certificate` chains to `trusted` through `chain`"""
+def verified(certificate: str, chain: list[str], anchor: str) -> bool:
+    """Whether `certificate` chains to `anchor` through `chain`"""
     with tempfile.TemporaryDirectory(prefix="keel-etcd-") as scratch:
         files = {}
         for label, body in (("leaf", certificate), ("chain", "".join(chain)),
-                            ("root", trusted)):
+                            ("root", anchor)):
             files[label] = os.path.join(scratch, label)
             with open(files[label], "w") as fob:
                 fob.write(body)
         argv = ["verify", "-CAfile", files["root"]]
         if chain:
-            argv += ["-untrusted", files["chain"]]
+            argv += ["-unanchor", files["chain"]]
         try:
             openssl(*argv, files["leaf"])
         except PkiError:
@@ -319,14 +304,14 @@ def crl_serials(found: str) -> set[str]:
         r"Serial Number: ([0-9A-Fa-f]+)", text)}
 
 
-def crl_verified(found: str, trusted: str) -> bool:
-    """Whether `found` is one CRL, signed by the root `trusted`"""
+def crl_verified(found: str, anchor: str) -> bool:
+    """Whether `found` is one CRL, signed by the root `anchor`"""
     if len(blocks(found)) != 1 or "X509 CRL" not in found:
         return False
     with tempfile.TemporaryDirectory(prefix="keel-etcd-") as scratch:
         root_file = os.path.join(scratch, "root")
         with open(root_file, "w") as fob:
-            fob.write(trusted)
+            fob.write(anchor)
         try:
             openssl("crl", "-noout", "-CAfile", root_file, data=found)
         except PkiError:

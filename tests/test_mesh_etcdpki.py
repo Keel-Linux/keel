@@ -26,60 +26,50 @@ class Case(unittest.TestCase):
 
 
 class TestRootAndChain(Case):
-    def test_a_root_an_intermediate_one_deep_and_a_leaf(self):
+    def test_the_root_signs_a_member_s_certificate_itself(self):
         root_key = self.key("root.key")
         root = etcdpki.root(root_key, "ab" * 16)
         self.assertTrue(etcdpki.is_ca(root))
-        b_key = self.key("b.key")
-        b = etcdpki.issue(etcdpki.CA, root_key, root,
-                          etcdpki.request(b_key), "keel-b",
-                          prefix="fd00::3/128")
         m_key = self.key("m.key")
-        leaf = etcdpki.issue(etcdpki.MEMBER, b_key, b,
+        leaf = etcdpki.issue(etcdpki.MEMBER, root_key, root,
                              etcdpki.request(m_key), "keel-m",
                              ("fd00::3", "::1"), days=365)
-        self.assertTrue(etcdpki.is_ca(b))
-        self.assertIn("pathlen:0", etcdpki.text(b))
         self.assertFalse(etcdpki.is_ca(leaf))
-        self.assertTrue(etcdpki.verified(leaf, [b], root))
-        self.assertFalse(etcdpki.verified(leaf, [], root))
+        self.assertTrue(etcdpki.verified(leaf, [], root))
         other = etcdpki.root(self.key("other.key"), "cd" * 16)
-        self.assertFalse(etcdpki.verified(leaf, [b], other))
+        self.assertFalse(etcdpki.verified(leaf, [], other))
         self.assertEqual(etcdpki.subject(leaf), "keel-m")
         self.assertEqual(etcdpki.addresses(leaf), ("fd00::3", "::1"))
+        self.assertIn("TLS Web Server Authentication", etcdpki.text(leaf))
         left = etcdpki.not_after(leaf) - datetime.now(timezone.utc)
         self.assertTrue(timedelta(days=364) < left <= timedelta(days=366))
+        default = etcdpki.issue(etcdpki.MEMBER, root_key, root,
+                                etcdpki.request(m_key), "keel-m")
+        left = etcdpki.not_after(default) - datetime.now(timezone.utc)
+        self.assertTrue(timedelta(days=29) < left <= timedelta(days=31))
 
-    def test_an_intermediate_signs_no_intermediate(self):
-        """pathlen:0: a member cannot make itself a CA for others"""
+    def test_a_member_s_key_mints_nothing_etcd_takes(self):
+        """keel#83: a member holds a leaf, CA:FALSE; what its key signs
+        does not chain to the root"""
         root_key = self.key("root.key")
         root = etcdpki.root(root_key, "ab" * 16)
-        b_key = self.key("b.key")
-        b = etcdpki.issue(etcdpki.CA, root_key, root,
-                          etcdpki.request(b_key), "b", prefix="fd00::3/128")
-        c_key = self.key("c.key")
-        c = etcdpki.issue(etcdpki.CA, b_key, b, etcdpki.request(c_key), "c",
-                          prefix="fd00::3/128")
-        leaf = etcdpki.issue(etcdpki.MEMBER, c_key, c,
-                             etcdpki.request(self.key("m.key")), "m",
-                             ("fd00::3",))
-        self.assertFalse(etcdpki.verified(leaf, [c, b], root))
+        m_key = self.key("m.key")
+        leaf = etcdpki.issue(etcdpki.MEMBER, root_key, root,
+                             etcdpki.request(m_key), "keel-m", ("fd00::3",))
+        minted = etcdpki.issue(etcdpki.CLIENT, m_key, leaf,
+                               etcdpki.request(self.key("x.key")), "root")
+        self.assertFalse(etcdpki.verified(minted, [leaf], root))
 
-    def test_an_intermediate_certifies_its_own_member_alone(self):
-        """A member cannot certify another member's address"""
+    def test_only_the_certificates_keel_issues(self):
         root_key = self.key("root.key")
         root = etcdpki.root(root_key, "ab" * 16)
-        b_key = self.key("b.key")
-        b = etcdpki.issue(etcdpki.CA, root_key, root,
-                          etcdpki.request(b_key), "b", prefix="fd00::3/128")
-        own = etcdpki.issue(etcdpki.MEMBER, b_key, b,
-                            etcdpki.request(self.key("m.key")), "m",
-                            ("fd00::3", "::1"))
-        other = etcdpki.issue(etcdpki.MEMBER, b_key, b,
-                              etcdpki.request(self.key("n.key")), "n",
-                              ("fd00::4",))
-        self.assertTrue(etcdpki.verified(own, [b], root))
-        self.assertFalse(etcdpki.verified(other, [b], root))
+        csr = etcdpki.request(self.key("m.key"))
+        for kind, name in (("ca", "keel-m"), (etcdpki.MEMBER, ""),
+                           (etcdpki.MEMBER, "a/CN=root"),
+                           (etcdpki.MEMBER, "a\nb")):
+            with self.subTest(kind=kind, name=name), \
+                    self.assertRaises(PkiError):
+                etcdpki.issue(kind, root_key, root, csr, name)
 
     def test_the_csr_gives_only_its_key(self):
         """The issuer sets the subject and every extension: a request
@@ -146,32 +136,14 @@ class TestRootAndChain(Case):
         self.assertEqual(etcdpki.blocks("none"), [])
 
 
-class TestConstraintsSignaturesCrl(Case):
+class TestSignaturesCrl(Case):
     def setUp(self):
         super().setUp()
         self.root_key = self.key("root.key")
         self.root = etcdpki.root(self.root_key, "ab" * 16)
-        self.ca_key = self.key("ca.key")
-        self.ca = etcdpki.issue(etcdpki.CA, self.root_key, self.root,
-                                etcdpki.request(self.ca_key), "keel-a",
-                                prefix="fd00:6b65:1::/64")
-
-    def leaf(self, *addresses):
-        return etcdpki.issue(etcdpki.MEMBER, self.ca_key, self.ca,
-                             etcdpki.request(self.key("m.key")), "m",
-                             addresses)
-
-    def test_an_intermediate_certifies_the_mesh_s_prefix_alone(self):
-        self.assertTrue(etcdpki.verified(
-            self.leaf("fd00:6b65:1::5", "::1"), [self.ca], self.root))
-        self.assertFalse(etcdpki.verified(
-            self.leaf("fd00:6b65:2::5"), [self.ca], self.root))
-        self.assertFalse(etcdpki.verified(
-            self.leaf("10.0.0.1"), [self.ca], self.root))
-        with self.assertRaisesRegex(PkiError, "prefix"):
-            etcdpki.issue(etcdpki.CA, self.root_key, self.root,
-                          etcdpki.request(self.ca_key), "x")
-        self.assertIn("FD00:6B65:1:0:0:0:0:0", etcdpki.text(self.ca))
+        self.ca = etcdpki.issue(etcdpki.MEMBER, self.root_key, self.root,
+                                etcdpki.request(self.key("ca.key")),
+                                "keel-a", ("fd00:6b65:1::1",))
 
     def test_a_signature_by_the_root(self):
         signature = etcdpki.sign(self.root_key, b"record")

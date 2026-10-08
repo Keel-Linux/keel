@@ -145,15 +145,21 @@ written. Every node takes from etcd only counter values it verifies as
 above. The VIP's address is under its region's /112 (0051), so the keys
 need no region of their own.
 
-**etcd has no access control here, and what follows is defence in
-depth until it can have one.** Each member issues its own client
-certificates with its own intermediate CA (0048, third round, point 1),
-and etcd takes a client certificate's CN as its user: any member could
-issue itself a certificate in any user's name, so etcd's RBAC would
-stop no member. Whether the root CA should issue every client
-certificate, which would make RBAC meaningful, is the maintainer's
-decision. Until then any member can write or delete these keys and
-revoke a lease by its ID, so no decision rests on a key's value alone:
+**Only the pair writes its keys, and what follows is defence in depth
+behind that.** Since keel#83 the root signs every certificate etcd is
+shown and names it after its member, so etcd's users are the members,
+and once `keel mesh etcd reissue` has turned etcd's auth on, the keys
+under `/keel/<mesh>/vip/<vip>/` are read-write for the pair's two
+members alone and read-only for everyone else ([docs/mesh.md](mesh.md),
+"etcd's users and roles"): a member outside the pair cannot write or
+delete them, nor revoke a lease attached to them. The root's holder
+gives a pair its role when one of its members sends it the pair record:
+`keel vip pair` does, and `keel mesh etcd tend` sends it again on each
+member of the pair, so a new pair claims once the holder has answered.
+etcd 3.5 checks no permission for a lease's keep-alive, so any member
+can still keep a lease alive by its ID, and with auth off (before the
+reissue, or after its rollback) any member can write these keys; so no
+decision rests on a key's value alone:
 
 - **the holder decides only by its own lease.** A value written to the
   holder key, or the key deleted, neither fences it nor keeps it. A
@@ -190,11 +196,18 @@ cluster, split as keel#75 splits an invite:
   hands to it, so no process can take the name first: each end checks
   the other by SO_PEERCRED, the helper against the controller's unit's
   MainPID, the controller for root. The helper hands
-  it etcd's root certificate and this member's client certificate and
-  key as memfds, and sets no-new-privileges on itself when its unit did
-  not;
+  it etcd's root certificate and this member's certificate and key as
+  memfds, writes them into the same memfds again when a renewal or
+  `keel mesh etcd reissue` changes them, and sets no-new-privileges on
+  itself when its unit did not;
 - **the controller**, `keel vip control`, which faces etcd and the
   overlay and asks the helper for every change:
+  - it asks etcd with etcdctl over gRPC (keel.mesh.etcdclient), each
+    call a process handed the memfds as /proc/self/fd paths, so the key
+    is in no file; about 35 ms of process before etcd answers, measured
+    on the design case's links by tests/test_etcd_auth_netns.py, within
+    the 2 s a call may take. A call that fails or prints anything but
+    etcd's JSON is no renewal;
   - **the holder renews its lease every 2 s, and carries the address
     only while the last renewal the majority confirmed is under 10 s
     old**, counted from the renewal's send on CLOCK_BOOTTIME (suspend
@@ -330,11 +343,13 @@ and the peers without the VIP.
   the counter, and revoking the holder's lease, twice in a row and with
   the holder cut off too, and promote through etcd, on a fake etcd with a clock
   (`tests/test_mesh_vipetcd.py`), the client's lease and transaction
-  calls against a fake gateway over real TLS
-  (`tests/test_mesh_etcdclient.py`);
+  calls against a recording etcdctl, a failed or unparseable call never
+  a renewal (`tests/test_mesh_etcdclient.py`), the pair's role
+  (`tests/test_mesh_etcd_auth.py`);
 - the helper and the controller over their socket, the fresh abstract
   name the helper binds (the old fixed name taken by another process
-  changes nothing) and the credentials checks, the credentials as memfds, a controller
+  changes nothing) and the credentials checks, the credentials as memfds,
+  written again into them when they change, a controller
   with capabilities refused, no-new-privileges, and the controller's
   unit (`tests/test_mesh_vipbridge.py`); a two-node mesh promoted with
   `--old-primary-gone` (`tests/test_mesh_vippair.py`);

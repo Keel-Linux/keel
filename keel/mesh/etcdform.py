@@ -37,7 +37,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 
 from keel import exits
-from keel.mesh import etcd, etcdca, etcdmsg, etcdstate, identity
+from keel.mesh import etcd, etcdca, etcdmsg, etcdproof, etcdstate, identity
 from keel.mesh.etcd import QUORUM_AT, Etcd
 from keel.mesh.etcdclient import EtcdError
 from keel.mesh.etcdmsg import Probe
@@ -89,12 +89,18 @@ def probed(etcd_: Etcd, peers: tuple[Peer, ...]) -> dict[str, Probe | str]:
 
 
 def enrolled(etcd_: Etcd, peer: Peer) -> Grant:
-    """`peer`'s intermediate, from its request; raises Refused"""
+    """`peer`'s certificate, from its request, once the proof over it is
+    the peer's (keel.mesh.etcdproof); raises Refused"""
     try:
-        csr = etcdmsg.enroll_answer(said(etcd_, etcdmsg.ENROLL,
-                                         peer.address, {}))
-        return etcdstate.grant_for(etcd_.root, csr, peer.address,
-                                   peer.public_key)
+        request = etcdmsg.enroll_answer(said(etcd_, etcdmsg.ENROLL,
+                                             peer.address, {}))
+        signer = etcdproof.trusted_sign_key(etcd_.root, peer.public_key)
+        if signer is None or not etcdproof.verified(signer, request.csr,
+                                                    request.proof):
+            raise StateError("its request is not signed by the signing key"
+                             " this node trusts for it")
+        return etcdstate.grant_for(etcd_.root, request.csr, peer.address,
+                                   peer.public_key, signer)
     except (LinkError, ProtocolError, SigningError, StateError,
             ValueError) as e:
         raise Refused(f"member {peer.address} was not enrolled: {e};"
