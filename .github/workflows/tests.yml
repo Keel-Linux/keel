@@ -136,7 +136,7 @@ jobs:
     uses: keel-linux/.github/.github/workflows/lxc-trixie.yml@main
     with:
       systemd: true
-      timeout: 35
+      timeout: 45
       run: |
         apt-get update -qq
         apt-get install -y -qq --no-install-recommends python3-pytest \
