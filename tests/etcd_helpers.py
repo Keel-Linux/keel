@@ -13,6 +13,7 @@ root side names it. etcd itself is `FakeEtcd`: the member list, and the
 calls made of it.
 """
 
+import base64
 import os
 import shutil
 import tempfile
@@ -32,7 +33,7 @@ from keel.mesh import (
     trust,
 )
 from keel.mesh.etcd import Etcd
-from keel.mesh.etcdclient import EtcdError
+from keel.mesh.etcdclient import EtcdError, Value
 from keel.mesh.etcdclient import Member as EtcdMember
 from keel.mesh.memberlink import LinkError
 from keel.mesh.node import Node
@@ -155,6 +156,30 @@ class FakeEtcd:
     def prefix(self, key):
         self.check("prefix", key)
         return [one for one in self.kvs if one.key.startswith(key)]
+
+    def swap(self, compare, puts, deletes=()):
+        """A transaction on `kvs`; every key is at revision 1"""
+        self.check("swap", compare, puts)
+        for one in compare:
+            key = base64.b64decode(one["key"]).decode()
+            there = any(found.key == key for found in self.kvs)
+            if one.get("target") == "MOD":
+                if int(one["mod_revision"]) != (1 if there else 0):
+                    return False
+            elif there:
+                return False
+        for key, value, lease in puts:
+            self.kvs = [found for found in self.kvs if found.key != key]
+            self.kvs.append(Value(key, value, 1, lease))
+        self.kvs = [found for found in self.kvs if found.key not in deletes]
+        return True
+
+    def grant(self, ttl):
+        self.check("grant", ttl)
+        return "77"
+
+    def revoke(self, lease):
+        self.check("revoke", lease)
 
     def auth_enabled(self):
         self.check("auth_enabled")

@@ -40,7 +40,13 @@ from keel.mesh import (
     ports,
     sync,
 )
-from keel.mesh.admit import Admitter, Joined, admitted, stopped
+from keel.mesh.admit import (
+    Admitter,
+    Joined,
+    admitted,
+    reservation_problem,
+    stopped,
+)
 from keel.mesh.bridge import Bridge, BridgeError, socket_path
 from keel.mesh.listener import Params
 from keel.mesh.node import Node, NodeError
@@ -239,6 +245,11 @@ def accept(inviter: Inviter, text: str) -> int:
     if inviter.node.waiting():
         inviter.err("a network change waits for its confirmation on this"
                     " node: confirm or revert it, then accept again")
+        return exits.MESH_REFUSED
+    problem = reservation_problem(
+        etcd.Etcd(inviter.node, inviter.clock, inviter.err), found)
+    if problem:
+        inviter.err(problem)
         return exits.MESH_REFUSED
     public, address = inviter.own()
     if public is None:

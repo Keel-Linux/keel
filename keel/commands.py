@@ -76,7 +76,7 @@ def read_spec(
 
     facts = manifest_facts(doc, root)
     errors = spec.validate(doc, check_secret_files=check_secret_files,
-                           facts=facts)
+                           facts=facts, paired_vips=paired_vips(root))
     if errors:
         for message in errors:
             error(f"{path}: {message}")
@@ -85,6 +85,13 @@ def read_spec(
     for message in default_warnings(doc, facts, defaulted):
         warn(f"{path}: {message}")
     return doc, exits.OK
+
+
+def paired_vips(root: str) -> tuple[str, ...]:
+    """The VIPs the machine under `root` keeps a signed pair record for
+    (keel.mesh.vippair): one paired before the VIP range stays valid"""
+    from keel.mesh.vippair import kept_vips
+    return kept_vips(root)
 
 
 def manifest_facts(doc: dict, root: str):

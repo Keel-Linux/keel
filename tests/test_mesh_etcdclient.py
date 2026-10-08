@@ -259,6 +259,15 @@ class TestKeys(Case):
         with self.assertRaisesRegex(EtcdError, "not a comparison"):
             self.client.swap([{"key": "eA==", "target": "VALUE"}], [])
 
+    def test_a_swap_that_deletes(self):
+        """keel vip unpair: a reservation deleted only at the revision
+        it was read at"""
+        self.ctl.answer("txn", {"succeeded": True})
+        self.assertTrue(self.client.swap(
+            [etcdclient.modified("/k/a", 9)], [], ("/k/a",)))
+        self.assertEqual(self.ctl.calls[-1][1].split("\n"), [
+            'mod("/k/a") = "9"', "", 'del -- "/k/a"', "", "", ""])
+
 
 class TestLeases(Case):
     """What the VIP's controller asks (keel.mesh.vipetcd)"""

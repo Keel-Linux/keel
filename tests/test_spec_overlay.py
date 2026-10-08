@@ -182,6 +182,26 @@ class TestInvalid(unittest.TestCase):
         one(self, document({"peers": [peer(allowed_ips=["fd00:1::2/64"])]}),
             "host bits set")
 
+    def test_nothing_of_a_node_lies_in_the_vip_range(self):
+        """keel#102: <prefix>::ffff:0/112 holds the VIPs alone; keel
+        routes a VIP to its holder at runtime, never in the spec"""
+        one(self, document({"address": "fd00:1::ffff:1/64"}),
+            "network.overlay.wireguard.address: fd00:1::ffff:1 is in the"
+            " VIP range fd00:1::ffff:0/112")
+        for prefix in ("fd00:1::ffff:5/128", "fd00:1::ffff:0/120",
+                       "fd00:1::ffff:0/112"):
+            with self.subTest(prefix=prefix):
+                one(self, document({"peers": [peer(allowed_ips=[
+                    "fd00:1::2/128", prefix])]}),
+                    f"peers[0].allowed_ips: {prefix} is in the VIP range")
+        # what only borders the range, or covers more than it, and an
+        # overlay too narrow for a range
+        self.assertEqual(errors(document({"peers": [peer(allowed_ips=[
+            "fd00:1::fffe:ffff/128", "fd00:1:0:0:1::/80"])]})), [])
+        self.assertEqual(errors(document({
+            "address": "fd00:1::ffff:1/100", "peers": [peer(allowed_ips=[
+                "fd00:1::ffff:2/128"])]})), [])
+
     def test_keepalive(self):
         for value in (0, 70000, True, "25"):
             with self.subTest(value=value):

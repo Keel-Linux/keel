@@ -1,7 +1,7 @@
 # Copyright (c) 2026 KeelLinux maintainers
 """Run the inspect collector and compare, in one call for library users"""
 
-from keel.diff.appliance import appliance_fields
+from keel.diff.appliance import appliance_fields, vip_fields
 from keel.diff.compare import compare
 from keel.diff.report import Comparison
 from keel.inspect import ROOT_DEFAULT, inspect_root
@@ -15,4 +15,4 @@ def diff_root(declared: dict, root: str = ROOT_DEFAULT) -> Comparison:
     """
     found = compare(declared, inspect_root(root))
     return Comparison(found.root, found.fields + tuple(
-        appliance_fields(declared, root)))
+        appliance_fields(declared, root) + vip_fields(declared, root)))

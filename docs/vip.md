@@ -3,8 +3,14 @@
 The service VIP of a replicated appliance pair on the WireGuard mesh
 (handbook decision 0049, its third round of 2026-10-04). A pair has one
 VIP, `appliance.vip` in the spec of each of its two nodes: a `/128` of
-the overlay prefix. **The primary is the node that holds it** (third
-round, point 2): there is no role field beside it. The primary carries
+the overlay's **VIP range**, `<prefix>::ffff:n`, the `/112` at the top
+index of the seventh group, which no region owns (0051, keel#97): the
+two members of a pair are normally in two regions, and either carries
+the VIP, so the VIP belongs to neither region. `keel mesh invite` never
+allocates from that range, and no node address or peer `allowed_ips` of
+a spec may lie in it ([docs/mesh.md](mesh.md), "The address"). **The
+primary is the node that holds it** (third round, point 2): there is no
+role field beside it. The primary carries
 the address on `wg0`; every other node of the mesh routes it to the
 primary by listing it in the `allowed_ips` of the primary's peer entry.
 Everything the pair serves to the mesh is reached at it; replication and
@@ -12,12 +18,87 @@ node-to-node traffic use the nodes' own addresses, never the VIP (0029).
 
 ```
 keel vip pair ADDRESS                # once, on one node of the pair
+keel vip unpair VIP                  # a VIP no longer used, with etcd
 keel vip promote [--old-primary-gone]
 keel vip status
 keel vip check                       # keel-vip-check.timer
 keel vip tend [--stopped]            # keel-vip.service, the root helper
 keel vip control SOCKET              # its unprivileged controller
 ```
+
+`keel vip pair ADDRESS`: `ADDRESS` is the **other node's overlay
+address** (`fd2a:9c41:7e03::2:1`, the one `keel mesh status` lists it
+at), not the VIP: the VIP is what both specs declare under
+`appliance.vip`, and the record binds the two members to it.
+
+### The reservation in etcd
+
+With etcd, `keel vip pair` first **reserves the VIP**: one key,
+`/keel/<mesh>/vips/<vip>/pair`, written by a compare-and-swap only when
+it does not exist. The value names the mesh, the VIP, the two members
+and the member that reserves (`by`). That member signs it with its node
+signing key (decision 0048), over `keel vip reserve 1\n` and the
+canonical JSON. A VIP another pair reserved is refused before anything
+is signed, so uniqueness rests on etcd's consensus, not on any inviter.
+The same two members that pair again find their own reservation. The
+member asked to sign checks the reservation too: it signs only a pair
+whose VIP etcd holds for that pair, so a node that skips the
+reservation gets no signature.
+
+Every reader checks the signature with the signing key its trust store
+holds for `by`, and checks that `by` is a member the value names. A
+value that is unsigned, or signed by a key the reader does not trust
+for `by`, is an **alert**: keel prints `ALERT: the reservation of <vip>
+in etcd ... is not signed by a member it names`, the VIP stays blocked,
+and keel never overwrites or deletes the key. Find who wrote it. Remove
+it as etcd's root user (`etcdctl del <key>`) only when no pair uses
+the VIP.
+
+The reservation is written on a **lease of 24 h**. When both members
+signed the pair record, `keel vip pair` takes the key off its lease, so
+it stays as long as the pair does. A pair whose other member never
+signed lets its VIP go when the lease ends. When that last step fails,
+`keel vip pair` says so and exits non-zero; run it again: it finds the
+pair's reservation and keeps it.
+
+`keel vip unpair VIP` **releases** a VIP no longer used: remove
+`appliance.vip` from the spec of both members and apply first, then run
+it on either member. It deletes the pair's reservation only at the
+revision it read (a compare-and-swap), and never another pair's or an
+unverified one. Each node keeps the pair record it holds: the record
+binds the VIP to its two members on every node that took it.
+
+Every member may write under `/keel/<mesh>/vips/` (the member role,
+[docs/mesh.md](mesh.md), "etcd's users and roles"): the pair's own role
+exists only once the pair does, so etcd cannot keep one member off
+another pair's reservation. The signature makes a forged value visible.
+A reservation is never a claim: a claim rests on the signed pair record,
+which every node checks. Before etcd, the two signatures on the record
+are what binds the VIP.
+
+### VIPs paired before the range
+
+Before 0.23.3 a VIP was an address of the `/112` of its members, for
+example `fd2a:9c41:7e03::100`. After the upgrade such a pair keeps
+working: a VIP outside the range stays valid when a signed pair record
+already names it.
+
+- **Validation and apply**: `appliance.vip` outside the range is valid
+  on a node that keeps a pair record for that VIP
+  (`/var/lib/keel/vip/<vip>.pair`).
+- **Claims**: a node takes a claim for it when it keeps the same pair's
+  record, or, when it keeps no record, when the VIP is inside the `/112`
+  of a member's address, where every record signed before the range had
+  its VIP.
+- **`keel diff`** prints one information line,
+  `appliance.vip.range: not compared (<vip> is outside the VIP range
+  ...)`, which never changes the exit code.
+- **A new pair** outside the range is refused: by `keel vip pair`, by
+  the other member, which does not sign it, and by spec validation on a
+  node that keeps no record. The same pair may sign its record again.
+
+To move a VIP into the range, declare a VIP of the range on both
+members, apply, and run `keel vip pair` again.
 
 `keel database promote` moves the VIP first, with the same
 `--old-primary-gone`, when the spec declares one. The units are shipped
@@ -40,7 +121,8 @@ both, and both keep it (`/var/lib/keel/vip/<vip>.pair`). A trust root of
 Every claim carries the record, and every node checks it: each signature
 by the key its trust store holds for that member, the claim's holder one
 of the two, the claim's VIP the record's, the VIP nobody's overlay
-address and inside the /112 of its members' region (0051). The first
+address and inside the overlay's VIP range (0051, keel#97; a pair made
+before the range keeps its VIP, "VIPs paired before the range"). The first
 record a node takes for a VIP is kept, and one naming other members is
 refused. A release is taken only from the other member of the record.
 
@@ -144,8 +226,8 @@ with it at the next epoch, both keys written only when the counter is
 still at the revision the node read. A stale claim, from a counter
 another write has moved since, fails that comparison and is never
 written. Every node takes from etcd only counter values it verifies as
-above. The VIP's address is under its region's /112 (0051), so the keys
-need no region of their own.
+above. The VIP's address is in the overlay's VIP range, no region's
+(0051, keel#97), so the keys need no region of their own.
 
 **Only the pair writes its keys, and what follows is defence in depth
 behind that.** Since keel#83 the root signs every certificate etcd is

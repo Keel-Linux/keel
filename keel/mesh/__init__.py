@@ -8,6 +8,8 @@ on a node already in it, prints one line, `keel mesh join -
 - keel.mesh.token, the `keel1:` token: what the new node needs from the
   inviter, in one URL safe line with a checksum;
 - keel.mesh.allocate, the address the invite reserves for the new node;
+- keel.mesh.addrreserve, that address reserved in etcd too, once etcd is
+  formed;
 - keel.mesh.invites, the pending invites under /var/lib/keel/mesh, which
   hold an HMAC key derived from the token's secret, never the secret;
 - keel.mesh.identity, the mesh's random identity;

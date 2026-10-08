@@ -13,6 +13,7 @@ import signal
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from unittest import mock
 
 from mesh_helpers import (
@@ -232,6 +233,20 @@ class TestAccept(Case):
                 self.assertIn(words, self.err[0])
                 self.assertFalse(invites.read(self.root, INVITE).consumed)
                 self.assertEqual(self.node.apply.documents, [])
+
+    def test_a_reservation_in_etcd_that_is_gone_refuses_it(self):
+        """keel#102: an invite that reserved its address in etcd is
+        accepted only while that reservation names it"""
+        invites.remove(self.root, INVITE)
+        invites.reserve(self.root, NOW, lambda others: replace(
+            self.invite, etcd_reserved=True))
+        with mock.patch("keel.mesh.inviting.reservation_problem",
+                        return_value="the reservation is gone") as asked:
+            self.assertEqual(self.accept(), exits.MESH_REFUSED)
+        self.assertEqual(asked.call_args.args[1].invite_id, INVITE)
+        self.assertEqual(self.err, ["the reservation is gone"])
+        self.assertFalse(invites.read(self.root, INVITE).consumed)
+        self.assertEqual(self.node.apply.documents, [])
 
     def test_the_inviter_s_own_key_is_refused(self):
         self.assertEqual(self.accept(self.line(public_key=INVITER)),

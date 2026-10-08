@@ -23,14 +23,15 @@ from keel.mesh import (
 from keel.mesh.etcdclient import EtcdError, Value
 from keel.mesh.etcdstate import StateError
 
-VIP = "fd00:6b65:1::100"
-OTHER_VIP = "fd00:6b65:1::101"
+VIP = "fd00:6b65:1::ffff:100"
+OTHER_VIP = "fd00:6b65:1::ffff:101"
 PREFIX = f"/keel/{MESH.hex()}/"
 
 
 def member_role():
     return {("read", PREFIX, PREFIX[:-1] + "0"),
-            ("readwrite", f"{PREFIX}etcd/", f"{PREFIX}etcd0")}
+            ("readwrite", f"{PREFIX}etcd/", f"{PREFIX}etcd0"),
+            ("readwrite", f"{PREFIX}vips/", f"{PREFIX}vips0")}
 
 
 class Formed(Mesh):
@@ -59,7 +60,8 @@ class TestWanted(Formed):
                                              address(2)),
                                 {VIP: (address(0), address(1))})
         self.assertEqual(found.roles[etcdauth.MEMBER_ROLE], {
-            ("read", PREFIX), ("readwrite", f"{PREFIX}etcd/")})
+            ("read", PREFIX), ("readwrite", f"{PREFIX}etcd/"),
+            ("readwrite", f"{PREFIX}vips/")})
         self.assertEqual(found.roles[f"keel-vip-{VIP}"], {
             ("readwrite", f"{PREFIX}vip/{VIP}/")})
         self.assertEqual(found.users["root"], {"root"})
@@ -285,7 +287,8 @@ class TestTheHolderAfterAuth(Formed):
 
     def test_keel_vip_pair_asks_the_holder_for_the_role(self):
         from keel.mesh import vippromote
-        here = vipnode.Here(self.b.node, self.clock, lambda line: None)
+        here = vipnode.Here(self.b.node, self.clock, lambda line: None,
+                            client=self.fake)
         said = []
         with mock.patch("keel.mesh.vippromote.with_etcd", return_value=True), \
                 mock.patch("keel.mesh.etcdauth.announce",
@@ -299,6 +302,9 @@ class TestTheHolderAfterAuth(Formed):
         self.assertEqual(code, exits.OK, said)
         self.assertEqual(said[-1], "etcd: granted")
         announce.assert_called_once()
+        # and reserved the VIP first (keel.mesh.vipreserve)
+        self.assertEqual([one.key for one in self.fake.kvs],
+                         [f"{PREFIX}vips/{VIP}/pair"])
 
 
 class TestErrorsReach(Formed):

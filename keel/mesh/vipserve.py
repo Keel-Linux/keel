@@ -124,6 +124,9 @@ def countersigned(here: Here, message: vipmsg.Message) -> Answer:
     if not sender or theirs is None or not signing.verified(
             sender, pair.message(), theirs):
         raise Refusal(403, "the pair record is not signed by its sender")
+    problem = vipnode.new_pair_problem(here, pair) or reserved(here, pair)
+    if problem:
+        raise Refusal(409, problem)
     try:
         both = vippair.sign(here.root, pair, own)
     except SigningError as e:
@@ -134,6 +137,20 @@ def countersigned(here: Here, message: vipmsg.Message) -> Answer:
     vippair.write(here.root, both)
     here.err(f"vip {pair.vip}: paired with {message.sender}")
     return Answer(200, json.dumps({"pair": both.dumps()}).encode())
+
+
+def reserved(here: Here, pair: vippair.Pair) -> str | None:
+    """With etcd, why the pair's VIP is not reserved for it there, or
+    None (keel.mesh.vipreserve); None before etcd"""
+    from keel.mesh import vipetcd, vippromote, vipreserve
+    from keel.mesh.etcdclient import EtcdError
+    if not vippromote.with_etcd(here):
+        return None
+    try:
+        client = vipetcd.local(here)
+    except EtcdError as e:
+        return f"etcd cannot be asked ({e})"
+    return vipreserve.held_for(client, pair, vipnode.signer_of(here))
 
 
 def of_the_pair(here: Here, message: vipmsg.Message, what: str) -> str:

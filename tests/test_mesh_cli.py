@@ -165,6 +165,8 @@ class TestInviteReal(Case):
         self.assertNotIn(token_of(out), stored + err)
 
     def test_the_next_invite_takes_the_next_address(self):
+        """a draw in the inviter's region (0051) that a pending invite
+        holds is drawn again; ::1 is the inviter's own, ::2 its peer's"""
         first = mesh_token.parse(token_of(self.invite()[1]),
                                  datetime.now(timezone.utc))
         second = mesh_token.parse(token_of(self.invite("--port", "8443")[1]),

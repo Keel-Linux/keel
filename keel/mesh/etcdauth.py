@@ -18,6 +18,7 @@ change them.
 | --- | --- |
 | `keel-member` | read every key under `/keel/<mesh>/`; read-write under `/keel/<mesh>/etcd/`, the mesh's own keys (the lock of etcd's rolling restart) |
 | `keel-vip-<vip>` | read-write under `/keel/<mesh>/vip/<vip>/`: the VIP's counter and holder keys, its pair's two members alone |
+| `keel-member`, besides | read-write under `/keel/<mesh>/vips/`: the VIP reservations `keel vip pair` makes before a pair's role exists, each signed by the member that made it and checked by every reader (keel.mesh.vipreserve); and under `/keel/<mesh>/etcd/addresses/`, the invites' address reservations (keel.mesh.addrreserve) |
 
 So a member outside a VIP's pair can read its keys and cannot write or
 delete them, or revoke a lease attached to them (etcd lets a lease be
@@ -75,6 +76,14 @@ def own_prefix(mesh_id: str) -> str:
     return f"/keel/{mesh_id}/etcd/"
 
 
+def vips_prefix(mesh_id: str) -> str:
+    """The VIP reservations (keel.mesh.vipreserve), which every member
+    may write: a pair reserves its VIP before its own role exists, so no
+    role narrower than the member's can be given yet; the reservation's
+    signature, which every reader checks, stands in for that"""
+    return f"/keel/{mesh_id}/vips/"
+
+
 def vip_prefix(mesh_id: str, vip: str) -> str:
     """keel.mesh.vipetcd's keys of `vip`, and nothing else's: the slash
     keeps fd00::1's role off fd00::10's keys"""
@@ -99,7 +108,8 @@ def wanted(mesh_id: str, members: tuple[str, ...],
     """For the members at `members` and the pairs, VIP to its members'
     addresses"""
     roles = {MEMBER_ROLE: frozenset({("read", mesh_prefix(mesh_id)),
-                                     ("readwrite", own_prefix(mesh_id))})}
+                                     ("readwrite", own_prefix(mesh_id)),
+                                     ("readwrite", vips_prefix(mesh_id))})}
     users: dict[str, set[str]] = {ROOT_USER: {ROOT_ROLE}}
     for one in members:
         users[name(one)] = {MEMBER_ROLE}

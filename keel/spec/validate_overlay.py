@@ -17,6 +17,10 @@ peer's endpoint address. An endpoint given by name, or an uplink on a
 private prefix left to DHCP or SLAAC, cannot be checked here: `keel
 network confirm` asks the machine's routes.
 
+The overlay's VIP range, `<prefix>::ffff:0/112` (keel.mesh.vip), holds
+the VIPs alone: no node's address and no peer's allowed_ips lie in it.
+keel routes a VIP to its holder at runtime, never in the spec.
+
 No peer may hold this node's own public key. That key is read from the
 private key file, as `keel network wireguard key` reads it, so only when
 secret files are checked.
@@ -97,8 +101,38 @@ def validate_wireguard(wg: Any, interfaces: Any,
         errors += private_key_errors(f"{key}.private_key", wg["private_key"],
                                      check_secret_files)
     errors += peers_errors(f"{key}.peers", wg.get("peers"), reserved)
+    errors += vip_range_errors(key, wg)
     if check_secret_files:
         errors += own_key_errors(f"{key}.peers", wg)
+    return errors
+
+
+def vip_range_errors(key: str, wg: dict) -> list[str]:
+    """This node's address or a peer's allowed_ips in the VIP range"""
+    from keel.mesh.vip import vip_range
+    try:
+        own = ipaddress.IPv6Interface(str(wg.get("address")))
+    except ValueError:
+        return []
+    vips = vip_range(own.network)
+    if vips is None:
+        return []
+    errors = []
+    if own.ip in vips:
+        errors.append(f"{key}.address: {own.ip} is in the VIP range {vips},"
+                      " which holds VIPs alone: give the node an address"
+                      " of its region")
+    peers = wg.get("peers")
+    for index, peer in enumerate(peers if isinstance(peers, list) else []):
+        found = peer.get("allowed_ips") if isinstance(peer, dict) else None
+        for one in found if isinstance(found, list) else []:
+            prefix = as_prefix(one)
+            if prefix is not None and prefix.version == 6 and \
+                    prefix.subnet_of(vips):
+                errors.append(
+                    f"{key}.peers[{index}].allowed_ips: {one} is in the VIP"
+                    f" range {vips}: keel routes a VIP to its holder at"
+                    " runtime, never in the spec")
     return errors
 
 

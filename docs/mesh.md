@@ -114,9 +114,10 @@ It:
    it has none, and makes one only for a node with no peer ("The mesh's
    identity");
 5. under the mesh's lock, removes the expired invites, reserves a free
-   address (below) and writes the pending invite; another invite pending
-   on the same TCP port is refused (each listener holds its port), and
-   `--port` gives this one another;
+   address of this node's region (below), with etcd in etcd too, and
+   writes the pending invite; another invite pending on the same TCP port is
+   refused (each listener holds its port), and `--port` gives this one
+   another;
 6. starts the invite's root helper as a transient unit,
    `keel-mesh-invite@<id>` (`systemd-run`), which starts the unprivileged
    listener (below), so the command returns; an invite whose helper
@@ -158,16 +159,56 @@ behind NAT does, and says why.
 
 ### The address
 
-A random address of the inviter's overlay prefix, drawn with Python's
-`secrets`, that is not its own, not inside any peer's `allowed_ips`, and
-not reserved by another pending invite. Random rather than the next
-free one: until etcd exists, a member does not know the invites another
-member has pending, and two members inviting at the same time would both
-hand out `::2`; two draws in a `/64` practically never meet. A draw that
+A random free address of the inviter's **region** (decision 0051, "How
+a region is declared"), drawn with Python's `secrets`: the `/112` of
+the overlay the inviter's own address is in. keel numbers a region's
+`/112` in the seventh group of the address, the fifth and sixth staying
+zero: region *k*'s host *n* is `<prefix>::k:n`, and the first region,
+index 0, is `<prefix>::/112`. Free: not the inviter's own, not inside
+any peer's `allowed_ips`, not reserved by another pending invite, and
+not in the VIP range. Two regions cut off from each other never give
+out the same address, since each allocates in its own range.
+
+Random, not the next free one: two members of one region that invite
+at the same time do not know each other's pending invites, so both
+would give out the same lowest address. Two random draws in a `/112`
+seldom meet, and etcd catches the draws that do (below). A draw that
 lands on a taken address is drawn again; after 16 taken draws in a row
-the prefix is nearly full and is searched from the last draw, so its
-last free address is still found and a full prefix is refused. The
-prefix's own address (`::`, the subnet router anycast) is never given.
+the region is nearly full and is searched from the last draw, so its
+last free address is still found and a full region is refused. Host 0
+of a region is never given (in the first region it is `::`, the subnet
+router anycast).
+
+**With etcd**, the invite also reserves the address there: one key,
+`/keel/<mesh>/etcd/addresses/<address>`, written by a compare-and-swap
+only when it does not exist, on a lease that ends a day after the
+invite and the window of its join. A draw another invite holds is
+drawn again (8 times at most, then the invite is refused), and etcd not
+answering refuses the invite. The join is admitted, through the
+listener or by `keel mesh accept`, only while that key still names its
+invite; a reservation that expired, or that another invite holds,
+refuses the join, and the invite stays pending until it expires. Once
+the join is confirmed the new node is a peer: `keel mesh sync` tells
+every member, and every inviter avoids it. The lease lets the key go a
+day later. Before etcd, the random draw alone keeps two inviters
+apart. The key is not signed: every member may write it, and a member
+that invites can give any address in its token anyway, so the key
+keeps honest inviters apart, not a hostile member.
+
+**Addresses already given stay as they are**: no node is renumbered
+(0051). Before regions, keel gave a random address of the `/64`. Such a
+node allocates in the `/112` its own address is in, so the nodes it
+invites join that `/112`. `--region <name>`, for a region the inviter is
+not in, comes with the trust bundle that names regions (0051, "How it
+is carried out", item 3).
+
+The overlay's top `/112`, `<prefix>::ffff:n`, is the **VIP range**
+([docs/vip.md](vip.md)): no region has that index, and no invite
+allocates from it. Spec validation refuses a node address or a peer's
+`allowed_ips` in it. A node whose address lies in it cannot invite:
+`keel mesh invite` refuses with `this node's address ... is in the VIP
+range ...: that range is for VIPs, and no node is invited from it. Run
+keel mesh invite on a node outside that range`.
 
 ## keel mesh join
 
@@ -703,7 +744,7 @@ done, and a lease's keep-alive that raises is no renewal.
 
 | Role | Permissions |
 | --- | --- |
-| `keel-member` | read every key under `/keel/<mesh>/`; read-write under `/keel/<mesh>/etcd/`, the mesh's own keys |
+| `keel-member` | read every key under `/keel/<mesh>/`; read-write under `/keel/<mesh>/etcd/`, the mesh's own keys (the invites' address reservations among them), and under `/keel/<mesh>/vips/`, the VIP reservations `keel vip pair` signs ([docs/vip.md](vip.md), "The reservation in etcd") |
 | `keel-vip-<vip>` | read-write under `/keel/<mesh>/vip/<vip>/`: the VIP's two members alone |
 
 A member outside a VIP's pair can read its keys, and cannot write or

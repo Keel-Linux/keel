@@ -82,6 +82,18 @@ class TestTheCommands(Pair):
             code, _, _ = self.run_cli("vip", "pair", address(1))
         self.assertEqual(code, exits.APPLY_NEEDS_ROOT)
 
+    def test_unpair_reaches_its_flow(self):
+        self.nodes()
+        with mock.patch.object(vipcli, "here_of",
+                               side_effect=lambda args: self.all[0]):
+            code, out, _ = self.run_cli("vip", "unpair", VIP, *self.args(0))
+        # the spec still declares it
+        self.assertEqual(code, exits.MESH_REFUSED, out)
+        self.assertIn(f"this node's appliance.vip is {VIP}", out)
+        with mock.patch("os.geteuid", return_value=1000):
+            code, _, _ = self.run_cli("vip", "unpair", VIP)
+        self.assertEqual(code, exits.APPLY_NEEDS_ROOT)
+
     def test_each_action_reaches_its_flow(self):
         self.nodes()
         with mock.patch.object(vipcli, "here_of",

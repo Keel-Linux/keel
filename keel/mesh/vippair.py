@@ -27,21 +27,23 @@ import base64
 import binascii
 import ipaddress
 import json
+import os
 from dataclasses import dataclass
 
 from keel.mesh import signing
 from keel.mesh.etcdmsg import canonical
 from keel.mesh.protocol import MESH_ID_RE, ProtocolError
-from keel.mesh.vip import DIR, address
+from keel.mesh.vip import DIR, address, before_range, misplaced
 from keel.network.marker import path, write_private
 from keel.network.wireguard import is_key, key_bytes, same_key
 
 LABEL = b"keel vip pair 1\n"
 SUFFIX = ".pair"
 MEMBERS = 2
-# a VIP is inside the /112 of its pair's region (0051: a region's range)
-REGION_BITS = 112
 MAX_SIGNATURES = 4
+# before the VIP range (0.23.3), a VIP was inside the /112 of its
+# members' addresses
+REGION_BITS = 112
 
 
 @dataclass(frozen=True)
@@ -141,23 +143,33 @@ def problem(pair: Pair, signer_of, root_keys: set[str]) -> str | None:
     return None
 
 
-def placed(pair: Pair, addresses: dict[str, str]) -> str | None:
-    """Why the VIP cannot be this pair's, or None: it is a member's
-    address, or outside the /112 of a member's (its region's range)"""
+def placed(pair: Pair, addresses: dict[str, str],
+           prefix: ipaddress.IPv6Network, legacy: bool = False) -> str | None:
+    """Why the VIP cannot be this pair's, or None: outside the overlay's
+    VIP range (keel.mesh.vip: `<prefix>::ffff:n`, no region's, so the
+    members may be in two regions and either carries it), or a member's
+    own address. `legacy`: the pair was made before the range (0.23.3),
+    and its VIP may stay outside it, in the overlay prefix"""
     vip = ipaddress.IPv6Address(pair.vip)
     for key, at in addresses.items():
-        if not pair.has(key):
-            continue
-        if vip == ipaddress.IPv6Address(at):
+        if pair.has(key) and vip == ipaddress.IPv6Address(at):
             return f"{pair.vip} is {key}'s own overlay address"
-        if vip not in ipaddress.IPv6Network(f"{at}/{REGION_BITS}",
-                                            strict=False):
-            return (f"{pair.vip} is outside the /{REGION_BITS} of {key}'s"
-                    f" address {at}: a VIP is in its pair's region")
     for at in addresses.values():
         if vip == ipaddress.IPv6Address(at):
             return f"{pair.vip} is a member's own overlay address"
-    return None
+    why = misplaced(pair.vip, prefix)
+    if why and legacy and before_range(pair.vip, prefix):
+        return None
+    return why
+
+
+def signed_before_range(pair: Pair, addresses: dict[str, str]) -> bool:
+    """Whether the VIP is inside the /112 of a member's address: where
+    every record signed before the VIP range (0.23.3) had its VIP"""
+    vip = ipaddress.IPv6Address(pair.vip)
+    return any(pair.has(key) and vip in ipaddress.IPv6Network(
+        f"{at}/{REGION_BITS}", strict=False)
+        for key, at in addresses.items())
 
 
 def file_of(vip: str) -> str:
@@ -175,6 +187,25 @@ def read(root: str, vip: str) -> Pair | None:
     except (ValueError, ProtocolError):
         raise ValueError(f"/{file_of(vip)} is damaged: run keel vip pair"
                          " again on the pair") from None
+
+
+def kept_vips(root: str) -> tuple[str, ...]:
+    """The VIPs this node keeps a readable pair record for, sorted"""
+    try:
+        names = os.listdir(path(root, DIR))
+    except FileNotFoundError:
+        return ()
+    found = []
+    for name in sorted(names):
+        if not name.endswith(SUFFIX):
+            continue
+        try:
+            kept = read(root, address(name[:-len(SUFFIX)]))
+        except ValueError:
+            continue
+        if kept is not None:
+            found.append(kept.vip)
+    return tuple(found)
 
 
 def write(root: str, pair: Pair) -> None:

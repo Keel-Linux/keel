@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 import yaml
 
 from keel import spec
-from keel.commands import apply_system, manifest_facts
+from keel.commands import apply_system, manifest_facts, paired_vips
 from keel.mesh.protocol import Peer
 from keel.network import confirm as netconfirm
 from keel.network import live, marker, session, wgkeys, wireguard
@@ -93,7 +93,8 @@ class Node:
 
     def problems(self, doc: dict) -> list[str]:
         return spec.validate(doc, check_secret_files=False,
-                             facts=manifest_facts(doc, self.root))
+                             facts=manifest_facts(doc, self.root),
+                             paired_vips=paired_vips(self.root))
 
     def write(self, doc: dict) -> None:
         """Validate the whole spec, then replace the file with it"""

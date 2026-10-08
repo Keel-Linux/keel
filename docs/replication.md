@@ -21,7 +21,7 @@ asynchronous, and a replica served reads.
 ```yaml
 appliance:
   name: mariadb
-  vip: fd2a:9c41:7e03::100
+  vip: fd2a:9c41:7e03::ffff:1   # in the overlay's VIP range, no region's
 installation:
   mode: cloud_simple          # or cloud_advanced
 database:
@@ -41,7 +41,15 @@ database:
   `apply` never converges the role. On a node without a VIP, 0013's
   rule stands: a promotion by hand is drift, and `apply` refuses to
   demote.
-- **Nothing is typed twice.** With a pair record (`keel vip pair`),
+- **The VIP is in the overlay's VIP range**, `<prefix>::ffff:n` (0051,
+  keel#97), the same on both members whatever their regions. With etcd,
+  `keel vip pair` reserves it there, signed, so no other pair takes it.
+  A pair made before 0.23.3, whose VIP is outside the range (such as
+  `fd2a:9c41:7e03::100`), keeps it: its signed pair record keeps the VIP
+  valid, and replication, the VIP's SAN and the failover work as before
+  ([docs/vip.md](vip.md), "VIPs paired before the range").
+- **Nothing is typed twice.** With a pair record (`keel vip pair
+  <the other node's overlay address>`, [docs/vip.md](vip.md)),
   keel derives `replication.allowed_from` (the other member's /128),
   `replication.primary` (the holder's own overlay address, never the
   VIP: 0029), and the replication credential (below). The three stay
