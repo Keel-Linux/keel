@@ -136,6 +136,32 @@ NEVER_CORRECTED = {
 
 
 READ_ONLY_FIELD = "database.server.read_only"
+SEMI_SYNC_FIELD = "database.server.semi_sync"
+DIVERGED_FIELD = "database.server.diverged"
+VIP_FIELD = "appliance.vip"
+# On a paired node the role is the VIP's and runtime state (0020, 0049):
+# the declared one is the installation's, so the difference is
+# information, never drift to repair
+PAIR_ROLE_REASON = (
+    "the role is runtime state on a paired node (appliance.vip, decisions"
+    " 0020 and 0049): the VIP makes this node the {vip_role}, the server is"
+    " a {observed}, and the declared {declared} is the installation's;"
+    " nothing converges it"
+)
+SEMI_SYNC_NOTE = (
+    "the primary commits without the replica's acknowledgement: it fell"
+    " back to asynchronous replication after waiting 10 s for it, and a"
+    " failover now loses the commits the replica has not received."
+    " It turns semi-synchronous again by itself once the replica is back"
+    " and caught up; keel database status says what the replica does"
+)
+DIVERGED_NOTE = (
+    "this old primary holds transactions the new primary lacks ({errant}),"
+    " so it stays read only and is not connected (decision 0049)."
+    " Reseed it with keel spec apply --system-only"
+    " --destroy-local-database, or reconcile by hand and run keel database"
+    " follow"
+)
 READ_ONLY_NOTES = {
     True: (
         "the server is a replica and takes writes of its own, which its"
@@ -160,13 +186,102 @@ def compare(declared: dict, inspection: Inspection) -> Comparison:
                 unknowns,
             )
             if section == "database":
+                fields = pair_listen(fields, declared)
+                fields = pair_role(fields, declared, inspection)
                 fields += read_only(declared, inspection)
+                fields += semi_sync(declared, inspection)
+                fields += diverged(declared, inspection)
         elif section in declared and section in NOT_COMPARED_REASONS:
             fields.append(
                 FieldDiff(section, NOT_COMPARED,
                           reason=NOT_COMPARED_REASONS[section])
             )
     return Comparison(inspection.root, tuple(fields))
+
+
+def paired(declared: dict) -> bool:
+    appliance = declared.get("appliance")
+    return isinstance(appliance, dict) and bool(appliance.get("vip"))
+
+
+LISTEN_FIELD = "database.server.listen"
+
+
+def pair_listen(fields: list[FieldDiff], declared: dict) -> list[FieldDiff]:
+    """On a paired node the server binds the VIP beside the declared
+    addresses (keel.system.dbpair.bind_addresses), so the VIP among the
+    observed listen addresses is never drift: it is compared without it,
+    as the peers are compared without the VIP's /128"""
+    if not paired(declared):
+        return fields
+    vip = canonical_origin(str(declared["appliance"]["vip"]))
+    found = []
+    for one in fields:
+        if one.field != LISTEN_FIELD or one.status != DRIFT or \
+                not isinstance(one.observed, list):
+            found.append(one)
+            continue
+        observed = [item for item in one.observed
+                    if canonical_origin(str(item)) != vip]
+        same = isinstance(one.declared, list) and sorted(
+            canonical_origin(str(item)) for item in one.declared) == sorted(
+            canonical_origin(str(item)) for item in observed)
+        found.append(FieldDiff(one.field, SAME if same else DRIFT,
+                               one.declared, observed, one.reason, one.note))
+    return found
+
+
+def pair_role(fields: list[FieldDiff], declared: dict,
+              inspection: Inspection) -> list[FieldDiff]:
+    """On a paired node with a claim, the role line is information"""
+    if not paired(declared) or inspection.role is None:
+        return fields
+    observed_server = (inspection.spec.get("database") or {}).get("server")
+    observed = str((observed_server or {}).get("role"))
+    server = (declared.get("database") or {}).get("server") or {}
+    return [
+        FieldDiff(one.field, NOT_COMPARED, one.declared, inspection.role,
+                  PAIR_ROLE_REASON.format(vip_role=inspection.role,
+                                          observed=observed,
+                                          declared=server.get("role")))
+        if one.field == ROLE_FIELD and one.status == DRIFT else one
+        for one in fields
+    ]
+
+
+def semi_sync(declared: dict, inspection: Inspection) -> list[FieldDiff]:
+    """On a paired primary, commits are to wait for the replica (0031):
+    the fallback to asynchronous replication is drift"""
+    if not paired(declared):
+        return []
+    finding = next((one for one in inspection.findings
+                    if one.field == SEMI_SYNC_FIELD), None)
+    if finding is None:
+        return []
+    if finding.status == NOT_INFERRED:
+        return [FieldDiff(SEMI_SYNC_FIELD, UNKNOWN, "on", None,
+                          finding.source)]
+    found = finding.value.split(" ", 1)[0]
+    if inspection.role != "primary":
+        return [FieldDiff(SEMI_SYNC_FIELD, NOT_COMPARED, None, finding.value,
+                          reason="compared on the primary, whose commits"
+                          " wait for the replica; this node is the"
+                          f" {inspection.role or 'node of a pair without a'
+                              ' claim yet'}")]
+    if found == "on":
+        return [FieldDiff(SEMI_SYNC_FIELD, SAME, "on", finding.value)]
+    return [FieldDiff(SEMI_SYNC_FIELD, DRIFT, "on", finding.value,
+                      note=SEMI_SYNC_NOTE)]
+
+
+def diverged(declared: dict, inspection: Inspection) -> list[FieldDiff]:
+    """An old primary that came back holding what the new one lacks"""
+    if not paired(declared) or not inspection.diverged:
+        return []
+    errant = ", ".join(str(one) for one in
+                       inspection.diverged.get("errant") or [])
+    return [FieldDiff(DIVERGED_FIELD, DRIFT, "none", errant or "unknown",
+                      note=DIVERGED_NOTE.format(errant=errant or "unknown"))]
 
 
 def read_only(declared: dict, inspection: Inspection) -> list[FieldDiff]:
@@ -177,7 +292,8 @@ def read_only(declared: dict, inspection: Inspection) -> list[FieldDiff]:
     From the observed role and not the declared one, as decision 0020
     has everything that depends on the role follow the role the machine
     holds: a replica promoted by hand is a writable primary, and the
-    role line already says the description disagrees.
+    role line already says the description disagrees. On a paired node
+    the role is the VIP's (0049).
     """
     server = (declared.get("database") or {}).get("server") or {}
     if server.get("role") is None:
@@ -189,6 +305,8 @@ def read_only(declared: dict, inspection: Inspection) -> list[FieldDiff]:
         return []
     observed_server = (inspection.spec.get("database") or {}).get("server")
     role = str((observed_server or {}).get("role"))
+    if paired(declared) and inspection.role is not None:
+        role = inspection.role
     wanted = role == "replica"
     if finding.status == NOT_INFERRED:
         return [FieldDiff(READ_ONLY_FIELD, UNKNOWN, wanted, None,

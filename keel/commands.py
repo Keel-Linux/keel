@@ -178,6 +178,7 @@ def spec_apply(args) -> int:
         getattr(args, "network_window", system.DEFAULT_WINDOW),
         getattr(args, "skip_network", False),
         getattr(args, "skip_uplink", False),
+        spec_path=args.spec,
     )
 
 
@@ -213,7 +214,7 @@ def apply_system(
     doc: dict, root: str, dry_run: bool, label: str = "apply --system",
     confirmed: bool = False, defer_certificate: bool = False,
     network_window: int = system.DEFAULT_WINDOW, skip_network: bool = False,
-    skip_uplink: bool = False,
+    skip_uplink: bool = False, spec_path: str | None = None,
 ) -> int:
     """Observe, plan, then carry out or only print; one line per action
 
@@ -235,9 +236,9 @@ def apply_system(
     facts = manifest_facts(doc, root)
     declared = doc
     doc, _ = with_defaults(doc, facts)
-    state = system.observe(root, doc, start=not dry_run)
+    state = system.observe(root, doc, start=not dry_run, spec=spec_path)
     plan = system.plan(doc, state, confirmed, defer_certificate,
-                       network_window, skip_network, skip_uplink)
+                       network_window, skip_network, skip_uplink, spec_path)
     if not plan.steps:
         print(f"{label}: nothing declared that this phase converges")
         return exits.OK
@@ -431,8 +432,9 @@ def database_promote(args) -> int:
     code = promote_vip(args, doc, root, dry_run)
     if code != exits.OK:
         return code
-    state = system.observe(root, doc, start=not dry_run)
-    plan = system.Plan(tuple(system.plan_promote(doc, state.database)))
+    state = system.observe(root, doc, start=not dry_run, spec=args.spec)
+    plan = system.Plan(tuple(system.plan_promote(doc, state.database,
+                                                 args.spec)))
     outcome = system.execute(
         plan, system.Effects(root), dry_run, "database promote"
     )
@@ -440,6 +442,36 @@ def database_promote(args) -> int:
         print(line)
     print(outcome.summary())
     return exits.APPLY_FAILED if outcome.failed else exits.OK
+
+
+def database_follow(args) -> int:
+    """The server made to follow the pair's VIP (keel.system.dbfollow)"""
+    from keel.system import dbfollow
+    root = getattr(args, "root", inspection.ROOT_DEFAULT)
+    refusal = system.needs_root(root, "database follow")
+    if refusal:
+        error(refusal)
+        return exits.APPLY_NEEDS_ROOT
+    found = dbfollow.Followed(lambda line: print(
+        f"database.server.role: {line}"))
+    dbfollow.follow(os.path.abspath(root), args.spec,
+                    getattr(args, "destroy_local_database", False), found)
+    return exits.APPLY_FAILED if found.problem else exits.OK
+
+
+def database_watch(args) -> int:
+    from keel.system import dbwatch
+    root = getattr(args, "root", inspection.ROOT_DEFAULT)
+    refusal = system.needs_root(root, "database watch")
+    if refusal:
+        error(refusal)
+        return exits.APPLY_NEEDS_ROOT
+    return dbwatch.main(args)
+
+
+def database_status(args) -> int:
+    from keel.system import dbstatus
+    return dbstatus.main(args)
 
 
 def promote_vip(args, doc: dict, root: str, dry_run: bool) -> int:

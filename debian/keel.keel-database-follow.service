@@ -1,0 +1,19 @@
+# keel database follow (decisions 0020, 0031, 0049): the holder of the
+# pair's VIP writable, the other node read only and replicating from the
+# holder over TLS, an old primary rejoined by GTID when it holds nothing
+# the holder lacks, else left read only and reported. Run by
+# keel-database-follow.path when the VIP's state changes, and at boot,
+# so a server restarted comes to its role; a node with no VIP state has
+# nothing to follow.
+[Unit]
+Description=keel database: the server follows the pair's VIP
+After=network-online.target mariadb.service keel-vip.service
+Wants=network-online.target
+ConditionPathExists=/var/lib/keel/vip
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/keel database follow
+
+[Install]
+WantedBy=multi-user.target

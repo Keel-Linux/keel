@@ -179,6 +179,16 @@ database.server.read_only: true (from mariadb ... SHOW GLOBAL VARIABLES ...; REA
 
 `keel diff` compares it with the role the server has ([docs/diff.md](diff.md)).
 
+On a MariaDB node three more lines of the report follow, none of them a
+field of the description (decisions 0031, 0049; [docs/replication.md](replication.md)):
+`database.server.semi_sync` (`on` or `off`, from
+`Rpl_semi_sync_master_status`, with the replicas acknowledging and the
+commits acknowledged and not), `database.server.replica_lag`
+(`Seconds_Behind_Master`, on a replica), and `database.server.gtid` (the
+four GTID positions). On a paired node (`appliance.vip`) the report also
+carries the role the VIP gives this node, which `keel diff` compares
+`read_only` against, and what the last rejoin recorded of a divergence.
+
 ### The client side is the application's own configuration
 
 A server can be asked what it is. An application cannot be asked where it will

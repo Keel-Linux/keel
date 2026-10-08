@@ -82,7 +82,9 @@ def validate(doc: dict, *, check_secret_files: bool = True,
     errors.extend(validate_users(doc.get("users")))
     errors.extend(validate_locale(doc.get("locale")))
     errors.extend(
-        validate_database(doc.get("database"), check_secret_files)
+        validate_database(doc.get("database"), check_secret_files,
+                          paired=bool(isinstance(doc.get("appliance"), dict)
+                                      and doc["appliance"].get("vip")))
     )
     errors.extend(validate_monitor(
         doc.get("monitor"), doc.get("security"), check_secret_files

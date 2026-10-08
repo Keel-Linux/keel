@@ -55,11 +55,13 @@ class Runner:
                         "accounts": (0, ACCOUNTS, "")}
         self.answers.update(answers or {})
         self.calls: list[tuple[str, str]] = []
+        self.argv: list[list[str]] = []
 
     def __call__(self, argv, **kwargs):
         stdin = kwargs.get("input") or ""
         key = self.key(argv, stdin)
         self.calls.append((key, stdin))
+        self.argv.append(list(argv))
         answer = self.answers.get(key, (0, "", ""))
         if isinstance(answer, list):
             answer = answer.pop(0) if len(answer) > 1 else answer[0]
@@ -150,12 +152,16 @@ class TestLock(ReadOnlyTestCase):
         sent = runner.sent("revoke")
         self.assertTrue(sent.startswith("SET SESSION sql_log_bin = 0;\n"))
 
-    def test_the_servers_own_socket_accounts_keep_it(self):
+    def test_the_servers_own_socket_account_keeps_it_and_root_loses_it(self):
+        """0049, second round, point 1: root loses READ_ONLY ADMIN on a
+        replica too; 'mysql'@'localhost', which only the system's mysql
+        user reaches, keeps it, and keel's statements go through it"""
         runner = Runner()
         dbreadonly.lock(self.root, runner)
         sent = runner.sent("revoke")
-        self.assertNotIn("'root'@'localhost'", sent)
+        self.assertIn("FROM 'root'@'localhost';", sent)
         self.assertNotIn("'mysql'@'localhost'", sent)
+        self.assertEqual(runner.argv[0][:4], ["runuser", "-u", "mysql", "--"])
 
     def test_root_from_anywhere_is_not_the_servers_own(self):
         runner = Runner()
@@ -168,7 +174,8 @@ class TestLock(ReadOnlyTestCase):
         self.assertIn("ERROR 1045", problem)
         self.assertEqual(
             self.record(),
-            "admin\tlocalhost\nadmin\t::1\nroot\t%\nadminer\tlocalhost\n",
+            "root\tlocalhost\nadmin\tlocalhost\nadmin\t::1\nroot\t%\n"
+            "adminer\tlocalhost\n",
         )
 
     def test_an_earlier_record_is_kept_and_added_to(self):
@@ -176,12 +183,12 @@ class TestLock(ReadOnlyTestCase):
         dbreadonly.lock(self.root, Runner())
         self.assertEqual(
             self.record(),
-            "wp\tlocalhost\nadmin\tlocalhost\nadmin\t::1\nroot\t%\n"
-            "adminer\tlocalhost\n",
+            "wp\tlocalhost\nadmin\tlocalhost\nroot\tlocalhost\nadmin\t::1\n"
+            "root\t%\nadminer\tlocalhost\n",
         )
 
     def test_nothing_to_take_sends_nothing_and_records_nothing(self):
-        runner = Runner({"bypass": (0, "'root'@'localhost'\n", "")})
+        runner = Runner({"bypass": (0, "'mysql'@'localhost'\n", "")})
         self.assertIsNone(dbreadonly.lock(self.root, runner))
         self.assertEqual(runner.keys(), ["bypass"])
         self.assertIsNone(self.record())
@@ -399,7 +406,7 @@ class TestPromote(ReadOnlyTestCase):
         problem = dbreadonly.promote(
             self.root, PromoteReplica(60), missing, Clock(), Clock().sleep
         )
-        self.assertIn("cannot run mariadb", problem)
+        self.assertIn("cannot run runuser", problem)
 
 
 class TestEffects(ReadOnlyTestCase):

@@ -120,6 +120,32 @@ jobs:
           etcd-server etcd-client util-linux
         KEEL_ETCD_AUTH_NETNS=1 PYTHONPATH=. python3 -m pytest -q -s \
           tests/test_etcd_auth_netns.py
+  # A MariaDB pair on the mesh (decisions 0020, 0031, 0049) in a Debian
+  # trixie system container: the vip job's three nodes and links (250 ms
+  # ±25 ms with 2% loss measured first), etcd, the VIP's units, and
+  # trixie's MariaDB 11.8 as a server per node in its namespace: case (a)
+  # of docs/replication.md, the replica seeded over TLS, a write at the
+  # VIP read on it with the lag measured, semi-synchronous replication
+  # on, the replica read only, keel diff clean (tests/test_mariadb_netns.py;
+  # the fallback, the promote, the failover and rejoin, the diverged old
+  # primary and the replica's refusals are the follow-up pull request's).
+  # The check is "mariadb / trixie".
+  mariadb:
+    permissions:
+      contents: read
+    uses: keel-linux/.github/.github/workflows/lxc-trixie.yml@main
+    with:
+      systemd: true
+      timeout: 35
+      run: |
+        apt-get update -qq
+        apt-get install -y -qq --no-install-recommends python3-pytest \
+          python3-yaml wireguard-tools iproute2 iputils-ping openssl \
+          etcd-server etcd-client util-linux mariadb-server mariadb-client \
+          zstd
+        systemctl stop mariadb
+        KEEL_MARIADB_NETNS=1 PYTHONPATH=. python3 -m pytest -q -s \
+          tests/test_mariadb_netns.py
   # A change that ships must come with a changelog entry, or it cannot be
   # installed and never reaches an appliance. The rule and its tests are
   # bin/require-changelog of the .github repository. The check is

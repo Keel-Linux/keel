@@ -11,9 +11,14 @@ it back to those and no others once the node is no longer a replica.
 Both run with `sql_log_bin` off: a privilege a replica takes or gives
 back is its own business and never goes into a binary log.
 
-root keeps it. MariaDB 11.8 has no setting that stops root, which holds
-every privilege and can grant itself any it lacks; so can Webmin's MySQL
-module, which connects as root. docs/apply.md says so.
+**root loses it too** (0049, second round, point 1): MariaDB 11.8 has
+no setting that stops an account holding the privilege, so the privilege
+is taken from every account but `'mysql'@'localhost'`, which only the
+system's mysql user reaches by the unix socket, and `mariadb.sys`. keel
+runs its own replica statements as that user (keel.system.dbmariadb's
+CLIENT), root through Webmin or at a shell gets error 1290 like the
+application, and root cannot grant itself the privilege back: GRANT
+gives only what the granter holds. docs/apply.md says so.
 
 `promote` drains before it forgets: STOP SLAVE followed by RESET SLAVE
 ALL discards the relay log, and with it every transaction the I/O thread
@@ -36,14 +41,13 @@ from keel.inspect.tree import File
 from keel.system import dbmariadb as mariadb
 from keel.system.actions import READ_ONLY_RECORD as RECORD
 
-QUIET = ("mariadb", "--batch", "--skip-column-names", "--execute")
+QUIET = mariadb.QUIET_CLIENT + ("--execute",)
 BYPASS_QUESTION = QUIET + (
     "SELECT DISTINCT GRANTEE FROM information_schema.USER_PRIVILEGES"
     " WHERE PRIVILEGE_TYPE = 'READ_ONLY ADMIN'",
 )
 ACCOUNTS_QUESTION = QUIET + ("SELECT User, Host FROM mysql.user",)
-STATUS_QUESTION = ("mariadb", "--batch", "--execute",
-                   "SHOW REPLICA STATUS\\G")
+STATUS_QUESTION = mariadb.CLIENT + ("--execute", "SHOW REPLICA STATUS\\G")
 NO_BINLOG = "SET SESSION sql_log_bin = 0;\n"
 POLL_SECONDS = 1.0
 

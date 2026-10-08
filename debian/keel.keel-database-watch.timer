@@ -1,0 +1,12 @@
+# keel database watch every 30 s (decision 0031): the semi-synchronous
+# fallback and its recovery alerted, the database certificate renewed
+[Unit]
+Description=keel database: watch a pair's replication regularly
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=30s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

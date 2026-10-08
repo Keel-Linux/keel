@@ -63,15 +63,36 @@ MARIADB_SQL = {
     "bypass": ("SELECT DISTINCT GRANTEE FROM"
                " information_schema.USER_PRIVILEGES"
                " WHERE PRIVILEGE_TYPE = 'READ_ONLY ADMIN'", False),
+    # Semi-synchronous replication (0031): whether the primary's commits
+    # wait for the replica, or fell back to asynchronous (OFF).
+    "semisync": ("SHOW GLOBAL STATUS WHERE Variable_name IN"
+                 " ('Rpl_semi_sync_master_status',"
+                 " 'Rpl_semi_sync_slave_status',"
+                 " 'Rpl_semi_sync_master_clients',"
+                 " 'Rpl_semi_sync_master_yes_tx',"
+                 " 'Rpl_semi_sync_master_no_tx')", False),
+    # The GTID positions the rejoin of 0049 compares.
+    "gtid": ("SELECT @@gtid_binlog_pos, @@gtid_slave_pos,"
+             " @@gtid_current_pos, @@gtid_binlog_state", False),
 }
+SEMI_SYNC_KEYS = {"Rpl_semi_sync_master_status": "master",
+                  "Rpl_semi_sync_slave_status": "slave",
+                  "Rpl_semi_sync_master_clients": "clients",
+                  "Rpl_semi_sync_master_yes_tx": "acknowledged",
+                  "Rpl_semi_sync_master_no_tx": "unacknowledged"}
+GTID_KEYS = ("binlog_pos", "slave_pos", "current_pos", "binlog_state")
+LAG_KEYS = ("Seconds_Behind_Master", "Seconds_Behind_Source")
 # The questions whose answers say what the server is. `bypass` is not one:
 # a server that cannot list who writes through read_only still has a role.
 MARIADB_ROLE_QUESTIONS = ("status", "replicas", "variables", "grants")
-# Accounts of the server itself, which hold every privilege by design:
-# root and mysql are Debian's socket accounts, mariadb.sys the definer of
-# the sys views, all at this machine only. The same name at another host,
-# 'root'@'%', is somebody's. The replication thread is not an account.
-MARIADB_OWN_ACCOUNTS = ("root", "mysql", "mariadb.sys")
+# Accounts of the server itself, which keep READ_ONLY ADMIN on a replica:
+# mysql is Debian's socket account only the system's mysql user reaches
+# (keel's own statements go through it, decision 0049), mariadb.sys the
+# definer of the sys views, both at this machine only. root loses the
+# privilege on a replica like everybody (0049, second round, point 1):
+# Webmin's MySQL module connects as root. The replication thread is not
+# an account.
+MARIADB_OWN_ACCOUNTS = ("mysql", "mariadb.sys")
 MARIADB_OWN_HOSTS = ("localhost", "127.0.0.1", "::1")
 
 
@@ -179,7 +200,50 @@ def read_mariadb(answers: dict[str, File], sockets: File) -> Reading:
         ),
         read_only=_mariadb_read_only(variables, answers["variables"]),
         bypass=_mariadb_bypass(answers["bypass"]),
+        semi_sync=_mariadb_semi_sync(answers.get("semisync")),
+        gtid=_mariadb_gtid(answers.get("gtid")),
+        lag=_mariadb_lag(field_lines(status), status, replicating),
     )
+
+
+def _mariadb_semi_sync(answer: File | None) -> Value:
+    """The semi-synchronous status variables, by short name"""
+    if answer is None or not answer.readable:
+        return unknown(f"{answer.path} {answer.problem}" if answer
+                       else "semi-synchronous status not asked")
+    found = {SEMI_SYNC_KEYS[row[0]]: row[1] for row in columns(answer)
+             if len(row) > 1 and row[0] in SEMI_SYNC_KEYS}
+    if "master" not in found:
+        return unknown(f"{answer.path} names no Rpl_semi_sync_master_status:"
+                       " semi-synchronous replication is not configured")
+    return Value(found, source=answer.path)
+
+
+def _mariadb_gtid(answer: File | None) -> Value:
+    """The four GTID positions, by name"""
+    if answer is None or not answer.readable:
+        return unknown(f"{answer.path} {answer.problem}" if answer
+                       else "GTID positions not asked")
+    rows = columns(answer)
+    if not rows or len(rows[0]) < len(GTID_KEYS):
+        return unknown(f"{answer.path} answered no GTID positions")
+    return Value(dict(zip(GTID_KEYS, rows[0][:len(GTID_KEYS)])),
+                 source=answer.path)
+
+
+def _mariadb_lag(values: dict[str, str], status: File,
+                 replicating: bool) -> Value:
+    """How far behind the replica is, in seconds, as the server says"""
+    if not replicating:
+        return Value(problem="the server replicates from nowhere")
+    for key in LAG_KEYS:
+        text = values.get(key)
+        if text is not None:
+            return found(int(text) if text.isdigit() else None,
+                         status.path) if text.isdigit() else unknown(
+                f"{status.path}: {key} is {text or 'NULL'}: the replica is"
+                " not connected to its primary")
+    return unknown(f"{status.path} names no {LAG_KEYS[0]}")
 
 
 def _mariadb_read_only(variables: dict[str, str], answer: File) -> Value:

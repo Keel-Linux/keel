@@ -24,6 +24,9 @@ from keel.spec.origins import mariadb_problem
 SERVER = "database.server"
 CLIENT = "database.client"
 READ_ONLY = f"{SERVER}.read_only"
+SEMI_SYNC = f"{SERVER}.semi_sync"
+LAG = f"{SERVER}.replica_lag"
+GTID = f"{SERVER}.gtid"
 BYPASS = "; READ_ONLY ADMIN lets {accounts} write through it"
 REPLICA = "replica"
 PRIMARY = "primary"
@@ -157,7 +160,34 @@ def probe_server(
     if replication:
         section["replication"] = replication
     findings += _read_only(reading)
+    findings += _pair_state(reading)
     return section, findings
+
+
+def _pair_state(reading: Reading) -> list[Finding]:
+    """The lines of a pair (0031, 0049), none of them a field: whether
+    commits wait for the replica, how far behind it is, the positions"""
+    found: list[Finding] = []
+    semi = reading.semi_sync
+    if semi.known:
+        values = semi.value
+        master = str(values.get("master", "")).lower()
+        shown = ("on" if master == "on" else "off") + (
+            f" ({values.get('clients', '?')} replica(s) acknowledging,"
+            f" {values.get('acknowledged', '?')} commits acknowledged,"
+            f" {values.get('unacknowledged', '?')} not)")
+        found.append(inferred(SEMI_SYNC, shown, semi.source))
+    elif semi.problem and "not asked" not in semi.problem:
+        found.append(missing(SEMI_SYNC, semi.problem))
+    lag = reading.lag
+    if lag.known:
+        found.append(inferred(LAG, f"{lag.value} s", lag.source))
+    elif lag.problem and "nowhere" not in lag.problem:
+        found.append(missing(LAG, lag.problem))
+    gtid = reading.gtid
+    if gtid.known:
+        found.append(inferred(GTID, _shown(gtid.value), gtid.source))
+    return found
 
 
 def _read_only(reading: Reading) -> list[Finding]:

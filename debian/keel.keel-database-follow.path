@@ -1,0 +1,14 @@
+# The database follows the pair's VIP (decisions 0020, 0049): when the
+# VIP's state changes (a claim taken, a release, a fence), keel database
+# follow makes the server match it. The VIP's helper holds CAP_NET_ADMIN
+# alone and cannot run the database's statements, so this path unit is
+# the seam between them.
+[Unit]
+Description=Run keel database follow when the pair's VIP moves
+
+[Path]
+PathChanged=/var/lib/keel/vip
+Unit=keel-database-follow.service
+
+[Install]
+WantedBy=multi-user.target

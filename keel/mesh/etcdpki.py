@@ -46,7 +46,7 @@ from datetime import datetime, timezone
 
 OPENSSL = "openssl"
 TIMEOUT = 30
-MEMBER, CLIENT = "member", "client"
+MEMBER, CLIENT, DATABASE = "member", "client", "database"
 # the root outlives every leaf it signs; a leaf is renewed with a third
 # of its life left
 ROOT_DAYS = 7300
@@ -61,6 +61,13 @@ EXTENSIONS = {
     CLIENT: ("basicConstraints=critical,CA:FALSE\n"
              "keyUsage=critical,digitalSignature\n"
              "extendedKeyUsage=clientAuth\n"),
+    # a database server's, and its client certificate to its peer: TLS
+    # on replication (0031, the maintainer's answer of 2026-10-03); its
+    # CN is no etcd user, so the key the mysql user reads opens nothing
+    # in etcd (keel.system.dbtls)
+    DATABASE: ("basicConstraints=critical,CA:FALSE\n"
+               "keyUsage=critical,digitalSignature,keyEncipherment\n"
+               "extendedKeyUsage=serverAuth,clientAuth\n"),
 }
 IDS = "subjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n"
 

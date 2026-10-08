@@ -17,7 +17,10 @@ message is (keel.mesh.etcdserve); then:
   from the other member its pair record names, fresh, for an epoch
   newer than any this node knows: it drops the address, then answers;
 - `pair` is the other member's pair record (keel.mesh.vippair), signed
-  here too when this node's spec declares that VIP, and kept.
+  here too when this node's spec declares that VIP, and kept;
+- `secret` is answered with a secret the pair shares, only to the other
+  member of the pair record, fresh (keel.system.dbsecret); 404 while
+  this node holds none, and the asker tries again later.
 
 Nothing here applies a change under 0018's window, and nothing waits:
 each answer is the time of an `ip` or a `wg set`.
@@ -69,6 +72,8 @@ def answer(here: Here, body: bytes, key: str) -> Answer:
             return claimed(here, body)
         if message.kind == vipmsg.PAIR:
             return countersigned(here, message)
+        if message.kind == vipmsg.SECRET:
+            return shared(here, message)
         return released(here, message)
     except ProtocolError as e:
         here.err(f"vip: refused a message from {key}: {e}")
@@ -131,9 +136,10 @@ def countersigned(here: Here, message: vipmsg.Message) -> Answer:
     return Answer(200, json.dumps({"pair": both.dumps()}).encode())
 
 
-def released(here: Here, message: vipmsg.Message) -> Answer:
+def of_the_pair(here: Here, message: vipmsg.Message, what: str) -> str:
+    """The VIP of a fresh message from the other member of this node's
+    pair; raises Refusal for anything else"""
     vip = message.vip()
-    epoch = message.epoch()
     if not message.fresh(here.clock()):
         raise Refusal(403, "the message is stale")
     try:
@@ -142,12 +148,32 @@ def released(here: Here, message: vipmsg.Message) -> Answer:
         own = None
     if own != vip:
         raise Refusal(403, f"{vip} is not this node's appliance.vip: only"
-                      " the nodes of the pair release it")
+                      f" the nodes of the pair {what}")
     pair = vipnode.kept(here, vip)
     if not pair.has(here.own_key()) or not pair.has(message.sender):
         raise Refusal(403, f"{message.sender} is not the other member of"
-                      f" the pair of {vip}: only the pair's nodes ask a"
-                      " release")
+                      f" the pair of {vip}: only the pair's nodes {what}")
+    return vip
+
+
+def shared(here: Here, message: vipmsg.Message) -> Answer:
+    """A secret the pair shares, to the other member alone"""
+    from keel.system import dbsecret
+    vip = of_the_pair(here, message, "ask a shared secret")
+    name = message.body.get("name")
+    if name not in vipmsg.SECRET_NAMES:
+        raise Refusal(400, f"no shared secret is named {name!r}")
+    value = dbsecret.read(here.root)
+    if value is None:
+        raise Refusal(404, f"this node holds no {name} secret yet: the"
+                      " pair's primary makes it at its first apply")
+    here.err(f"vip {vip}: the {name} secret given to {message.sender}")
+    return Answer(200, json.dumps({"value": value}).encode())
+
+
+def released(here: Here, message: vipmsg.Message) -> Answer:
+    vip = of_the_pair(here, message, "release it")
+    epoch = message.epoch()
     held = vipnode.current(here, vip)
     if epoch <= held.epoch:
         raise Refusal(409, f"stale release: epoch {epoch}, and this node"

@@ -643,6 +643,23 @@ Three roles and no more. `multi_primary` and the shard roles are not in the
 list, and adding them later renames nothing that is in it, which is the point
 of naming the field `role` and not `cloud` or `mode` (decision 0013).
 
+### database.server on a pair: `appliance.vip`
+
+With `appliance.vip` declared (decision 0049, [docs/vip.md](vip.md)),
+the server is one of a replicated pair and the primary is the VIP's
+holder. `role` is then the role chosen at installation, which decides
+who seeds from whom before the first claim; from the first claim on the
+role is runtime state, the VIP's (decision 0020): `keel inspect` reports
+it, `keel diff` reports the difference from the declared role as
+information and never as drift to repair, and `apply` never converges it
+(the maintainer, 2026-10-11, recorded under 0049). With the pair record
+of `keel vip pair`, `replication.primary`, `replication.allowed_from`
+and `replication.secret` are each optional: the primary is the holder's
+own overlay address, the other member is who may replicate, and the
+credential is the pair's, made on the primary and asked for by the other
+member over the members' channel ([docs/replication.md](replication.md)).
+Declared, each stands, and `secret` wins over the pair's.
+
 ### database.client: where the database this machine uses is
 
 | Field | State | Notes |

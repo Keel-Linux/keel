@@ -124,8 +124,10 @@ record:
 
 An old primary that comes back, before etcd, learns the newer claim at
 its next `keel vip check` (at boot, then every minute), drops the
-address at once and is fenced. That it then catches up and rejoins as a
-replica is the database's part of 0049, not yet built.
+address at once and is fenced. That it then turns read only, catches up
+and rejoins as a replica is the database's part of 0049:
+`keel-database-follow.path` runs `keel database follow` when the VIP's
+state changes ([docs/replication.md](replication.md)).
 
 ## With etcd: the lease is the fence
 

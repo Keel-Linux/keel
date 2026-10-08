@@ -256,6 +256,22 @@ class TestListen(unittest.TestCase):
 
 
 class TestReplication(unittest.TestCase):
+    def test_a_paired_replica_need_not_name_its_primary(self):
+        """On a node with appliance.vip the primary is the VIP's holder,
+        the other member of the pair record (decision 0049)"""
+        doc = {"version": 1, "appliance": {"name": "core",
+                                           "vip": "fd00:6b65:1::100"},
+               "network": {"overlay": {"wireguard": {
+                   "address": "fd00:6b65:1::1/64", "peers": [
+                       {"public_key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYX"
+                        "GBkaGxwdHh8=",
+                        "allowed_ips": ["fd00:6b65:1::2/128"]}]}}},
+               "database": {"server": {"engine": "mariadb",
+                                       "role": "replica"}}}
+        from keel import spec as whole
+        self.assertEqual([one for one in whole.validate(
+            doc, check_secret_files=False) if "replication" in one], [])
+
     def test_a_replica_must_name_the_primary_it_replicates_from(self):
         messages(
             "version: 1\ndatabase:\n  server:\n    engine: mariadb\n"

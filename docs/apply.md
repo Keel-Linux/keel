@@ -378,27 +378,36 @@ MariaDB 11.8 (Debian 13):
   image's `wordpress` account holds `ALL PRIVILEGES ON wordpress.*` and
   nothing global, so it has no way through.
 
-**No account but root writes through it.** The image's `admin` and, on
-the LAMP appliances, Adminer's `adminer` hold `ALL PRIVILEGES ON *.*`,
-so Adminer on port 12322 could write to a replica through them. On a
-replica, after the seed (which copies the primary's grants), apply runs
-`SET SESSION sql_log_bin = 0` and `REVOKE READ_ONLY ADMIN ON *.* FROM`
-every account that holds it, matched by user and host exactly, except
-`root`, `mysql` and `mariadb.sys` at `localhost`, `127.0.0.1` or `::1`
-(`'root'@'%'` is somebody's and loses it). Each account is recorded in
-`/var/lib/keel/database/read-only-admin` before the REVOKE, and
-`keel database promote`, or an apply that makes the node standalone or
-primary, grants it back to those accounts only, again with
+**No account writes through it, root included** (decision 0049, second
+round, point 1). The image's `admin` and, on the LAMP appliances,
+Adminer's `adminer` hold `ALL PRIVILEGES ON *.*`, so Adminer on port
+12322 could write to a replica through them; Webmin's MySQL module
+connects as root. On a replica, after the seed (which copies the
+primary's grants), apply runs `SET SESSION sql_log_bin = 0` and `REVOKE
+READ_ONLY ADMIN ON *.* FROM` every account that holds it, matched by
+user and host exactly, `'root'@'localhost'` among them, except `mysql`
+and `mariadb.sys` at `localhost`, `127.0.0.1` or `::1`. Each account is
+recorded in `/var/lib/keel/database/read-only-admin` before the REVOKE,
+and `keel database promote`, or an apply that makes the node standalone
+or primary, grants it back to those accounts only, again with
 `sql_log_bin` off, and removes the record. An account dropped since is
 not created again. A `GRANT ALL ON *.*` on the primary replicates and
 gives the privilege back; the next apply on the replica takes it again.
 
-**root still writes, and so does anything that connects as root**:
-Webmin's MySQL module among them. MariaDB 11.8 has no setting that
-stops an account holding every privilege (it has no `super_read_only`),
-and root can grant itself anything it lacks. A write by root on a
-replica diverges it the way tracker#26 did, so nobody administers a
-replica's data by hand: do it on the primary.
+**keel's own statements go through `'mysql'@'localhost'`**, the account
+MariaDB makes with every privilege and `unix_socket` authentication, so
+only the system's `mysql` user reaches it: `runuser -u mysql -- mariadb`
+is the client for the seed, the lock, `CHANGE MASTER`, the rejoin and the
+promotion that turns `read_only` off and gives the privilege back. Root
+through Webmin, or at a shell with `mariadb`, then gets error 1290 on a
+replica like the application does, and cannot grant itself the privilege
+back: `GRANT` gives only what the granter holds, and `read_only` refuses
+an edit of `mysql.global_priv` too. This is a guard against accidents,
+not against a root who means it: the system's root can still become
+`mysql` or restart the server with another configuration, which is the
+line decision 0019 draws for the network. (Before 0.23.0, keel let root
+keep the privilege and said MariaDB 11.8 had nothing that stops root;
+that was right about settings and wrong about privileges.)
 
 The order is safe for the seed: the file is written and the server
 restarted with `read_only = ON` before the copy is loaded, and the load,
@@ -680,6 +689,19 @@ The refusal is decided before the replica's configuration is written, so a
 declined replica keeps the file and the running server it had. Every
 refusal of the replica step works that way, a missing credential
 included.
+
+#### A pair: `appliance.vip`
+
+On a node that declares `appliance.vip` (decision 0049) the database is
+one of a pair, the primary is the VIP's holder, and apply's database
+phase is the pair's: the same drop-in on both nodes (the binary log,
+`gtid_strict_mode`, semi-synchronous replication both ways, TLS, the VIP
+bound beside the node's own addresses through
+`net.ipv6.ip_nonlocal_bind`), the database certificate from the mesh's
+root CA, the authorization of the other member with `REQUIRE X509`, and
+the role left to `keel database follow`, which apply runs as its last
+database step. [docs/replication.md](replication.md) has the whole of it,
+the role table, the rejoin and the measurements.
 
 #### apply never promotes and never demotes
 

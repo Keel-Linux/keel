@@ -185,13 +185,23 @@ NO_SERVER = (
 
 
 def plan_database(
-    doc: dict, state: DatabaseState | None, confirmed: bool = False
+    doc: dict, state: DatabaseState | None, confirmed: bool = False,
+    spec: str | None = None,
 ) -> list[Step]:
-    """The steps that put this node in the role the description declares"""
+    """The steps that put this node in the role the description declares
+
+    On a paired node (appliance.vip) the role is the VIP's, and the plan
+    is keel.system.dbpairplan's; `spec` is the spec's path its actions
+    speak on the members' channel with.
+    """
     if state is None:
         return []
     server = declared_server(doc)
     role = str(server.get("role") or "")
+    if state.pair is not None and state.engine == mariadb_name():
+        from keel.system.dbpairplan import plan_pair
+        return plan_pair(doc, state, confirmed,
+                         spec or "/etc/keel/instance.yaml", _cannot_act)
     refusal = _cannot_act(state, role)
     if refusal:
         return [Step(FIELD, (refusal,))]
@@ -251,6 +261,11 @@ AFTER = (
     " automatically. Change the description to primary and run"
     " `keel spec apply --system-only` to give it a binary log of its own"
 )
+AFTER_PAIR = (
+    "the old primary turns read only when it learns the newer claim, and"
+    " rejoins as a replica by itself when it holds nothing this node lacks;"
+    " keel database status on it says which (decision 0049)"
+)
 OLD_PRIMARY = (
     "nothing here stopped the old primary or told anybody else about"
     " this. There is no failover in Keel: two writable servers on one"
@@ -259,7 +274,8 @@ OLD_PRIMARY = (
 )
 
 
-def plan_promote(doc: dict, state: DatabaseState | None) -> list[Step]:
+def plan_promote(doc: dict, state: DatabaseState | None,
+                 spec: str | None = None) -> list[Step]:
     """Make this replica a primary, which apply is never allowed to do
 
     Its own operation because it is its own decision. Replication in Keel
@@ -267,9 +283,23 @@ def plan_promote(doc: dict, state: DatabaseState | None) -> list[Step]:
     stop being one is knowledge no machine here has and only the operator
     does. Afterwards the description still says replica and the machine
     says primary, which is drift by design (docs/diff.md).
+
+    On a paired node the VIP moved first (keel.commands.promote_vip), and
+    the database follows it (keel.system.dbfollow): a replica of the old
+    primary is drained and promoted, the lock undone.
     """
     if state is None:
         return [Step(PROMOTE_FIELD, (Refuse(NO_SERVER),))]
+    if state.pair is not None and state.engine == mariadb_name():
+        from keel.system.actions import FollowVip
+        refusal = _cannot_act(state, REPLICA)
+        if refusal:
+            return [Step(PROMOTE_FIELD, (refusal,))]
+        return [Step(PROMOTE_FIELD, (
+            Note(f"the VIP {state.pair.vip} decides the role; the database"
+                 " follows it"),
+            FollowVip(spec or "/etc/keel/instance.yaml"),
+            Note(AFTER_PAIR)))]
     refusal = _cannot_act(state, REPLICA)
     if refusal:
         return [Step(PROMOTE_FIELD, (refusal,))]
@@ -372,7 +402,7 @@ def _configuration(
     if names:
         notes.append(Note(NAME_ORIGIN.format(names=", ".join(names))))
     if state.enabled == "disabled":
-        notes.append(Run(("systemctl", "enable", mariadb.SERVICE), ENABLE))
+        notes.append(Run(("systemctl", "enable", mariadb.service()), ENABLE))
     if state.dropin.readable and state.dropin.text == text:
         return Step(FIELD, tuple(notes) + (
             Note(f"unchanged ({state.dropin.path}, server id {identity})"),
@@ -383,7 +413,7 @@ def _configuration(
             f"write {state.dropin.path}: {role}, server id {identity}",
         ),
         Run(
-            ("systemctl", "restart", mariadb.SERVICE),
+            ("systemctl", "restart", mariadb.service()),
             "restart the server, which is the only way these take effect",
         ),
     ))

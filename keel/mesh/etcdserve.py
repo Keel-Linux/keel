@@ -29,8 +29,10 @@ that acts needs the member's own signature too (0048's amendment).
 - `crl` keeps the root's CRL when the root signed it and it is newer;
 - on the root's holder: `issue`, which signs only a request shown to be
   the member's own, asked by that member or relayed by its inviter with
-  the evidence of its admission (keel.mesh.etcdproof); `revoke`; and
-  `pair` (keel.mesh.etcdauth).
+  the evidence of its admission (keel.mesh.etcdproof); `issue` with
+  `kind: database`, the member's database leaf (keel.system.dbtls),
+  signed for the address the holder's own spec gives the sender's key
+  and no other; `revoke`; and `pair` (keel.mesh.etcdauth).
 """
 
 import ipaddress
@@ -268,6 +270,71 @@ def paired(member: Etcd, message: etcdmsg.Message) -> Answer:
     return Answer(200, json.dumps({"roles": roles}).encode())
 
 
+def database_issued(member: Etcd, message: etcdmsg.Message, address: str,
+                    key: str) -> Answer:
+    """On the root's holder: a member's database leaf, for the address
+    the holder's spec gives the sender's own key alone (its own address
+    when the holder asks itself), with the VIP asked as a second SAN"""
+    try:
+        csr = etcdmsg.csr(message.body.get("csr"))
+        vip = message.body.get("vip")
+        if vip is not None:
+            vip = etcdmsg.address(vip)
+    except ProtocolError as e:
+        raise Refusal(400, str(e)) from None
+    if csr is None:
+        raise Refusal(400, "no request to sign")
+    if not same_key(key, message.sender):
+        raise Refusal(403, "a database certificate is asked by the member"
+                      " it is for, and no other")
+    known = claimed(member, address)
+    if known is None or not same_key(known, message.sender):
+        raise Refusal(403, f"{address} is not the address this node knows"
+                      f" {message.sender} by")
+    if vip is not None:
+        pair_bound(member, message, vip, key)
+    try:
+        found = etcdstate.database_grant(member.root, csr, address, vip, key)
+    except StateError as e:
+        raise Refusal(403, str(e)) from None
+    member.err(f"etcd: a database certificate for {address} signed with"
+               f" the root, asked by {message.sender}")
+    return Answer(200, json.dumps({
+        "grant": etcdmsg.grant_data(found)}).encode())
+
+
+def pair_bound(member: Etcd, message: etcdmsg.Message, vip: str,
+               key: str) -> None:
+    """A VIP goes into a database certificate's SANs only on the signed
+    pair record of that VIP, naming the asker, every signature by a key
+    this node trusts (keel.mesh.vippair); raises Refusal"""
+    from keel.mesh import signing, vippair
+    found = message.body.get("pair")
+    if found is None:
+        raise Refusal(403, f"a certificate for the VIP {vip} needs the"
+                      " pair's signed record")
+    try:
+        pair = vippair.loads(found)
+    except ProtocolError as e:
+        raise Refusal(400, f"malformed pair record: {e}") from None
+    if pair.vip != vip or not pair.has(key):
+        raise Refusal(403, f"the pair record is not {key}'s for {vip}")
+    own = etcd.own_key(member)
+
+    def signer_of(member_key: str) -> str | None:
+        if own and same_key(member_key, own):
+            return signing.public(member.root)
+        return sign_key(member.root, member_key)
+    try:
+        store = trust.load(member.root)
+        roots = {one for one, entry in store.members.items() if entry.root}
+    except ValueError:
+        roots = set()
+    problem = vippair.problem(pair, signer_of, roots)
+    if problem:
+        raise Refusal(403, problem)
+
+
 def holder(member: Etcd, message: etcdmsg.Message) -> Answer:
     """On the root's holder: a certificate signed by the root for a
     request shown to be the member's own (`issue`), or a removed node's
@@ -286,6 +353,8 @@ def holder(member: Etcd, message: etcdmsg.Message) -> Answer:
     removed = body.get("public_key")
     if not isinstance(removed, str) or not is_key(removed):
         raise Refusal(400, "no WireGuard key for the member")
+    if message.kind == etcdmsg.ISSUE and body.get("kind") == "database":
+        return database_issued(member, message, address, removed)
     if message.kind == etcdmsg.ISSUE:
         try:
             csr = etcdmsg.csr(body.get("csr"))
