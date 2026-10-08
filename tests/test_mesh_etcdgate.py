@@ -313,6 +313,11 @@ class TestTheCommands(Gate):
     def test_the_gate_s_own_failures(self):
         from keel import cli
         args = ["--root", self.root, "--spec", "/nonexistent.yaml"]
+        with mock.patch("keel.system.needs_root", return_value=None), \
+                mock.patch.object(etcdstate, "cluster", return_value=None):
+            # no cluster: nothing to gate, whatever the spec says
+            self.assertEqual(cli.main(["mesh", "etcd", "gate", "stop",
+                                       *args]), exits.OK)
         with mock.patch("keel.system.needs_root", return_value=None):
             self.assertEqual(cli.main(["mesh", "etcd", "gate", "stop",
                                        *args]), exits.APPLY_FAILED)

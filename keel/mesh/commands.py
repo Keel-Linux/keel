@@ -39,6 +39,7 @@ from keel.mesh import (
     etcdcare,
     etcdform,
     etcdgate,
+    etcdstate,
     identity,
     invites,
     inviting,
@@ -559,6 +560,10 @@ def mesh_etcd_gate(args) -> int:
         return code
     root = os.path.abspath(args.root)
     try:
+        # a node in no cluster has nothing to keep: etcd-server's own
+        # restart, or keel's before it formed one
+        if etcdstate.cluster(root) is None:
+            return exits.OK
         own = own_address(args)
         if args.step == "stop":
             return etcdgate.before_stop(
