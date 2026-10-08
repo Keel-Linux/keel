@@ -306,7 +306,9 @@ def wait_until(test, seconds: float, step: float = 0.2) -> float | None:
     return None
 
 
-def driver() -> None:
+def driver(play=None) -> None:
+    """The three nodes, etcd, the agents and the helpers, then `play`
+    (scenario by default) under the sampler; the RESULT line"""
     global LISTENER_HOME
     os.makedirs(RUN_BASE, mode=0o755, exist_ok=True)
     LISTENER_HOME = tempfile.mkdtemp(prefix="listener-", dir=RUN_BASE)
@@ -384,7 +386,7 @@ def driver() -> None:
     sampling = threading.Thread(target=sampler, args=(pids, samples, stop))
     sampling.start()
     try:
-        scenario(report, pids, pairs, roots, samples)
+        (play or scenario)(report, pids, pairs, roots, samples)
     except Exception as e:  # noqa: BLE001 - the report says how it ended
         report["error"] = repr(e)
     finally:
@@ -433,15 +435,20 @@ def tended(index: int, pid: int, root: str, spec: str) -> None:
     HELPERS.append(unit)
     scratch = os.path.join(root, "tmp")
     os.makedirs(scratch, mode=0o700, exist_ok=True)
+    command = (sys.executable, "-m", "keel", "vip", "tend", "--root", root,
+               "--spec", spec)
     sh("systemd-run", f"--unit={unit}", "--collect", "--quiet",
        f"--setenv=TMPDIR={scratch}",
+       # keel-vip.service's: what runs once the helper stopped, and its
+       # restart after a crash
+       f"--property=ExecStopPost={' '.join(command)} --stopped",
+       "--property=Restart=always", "--property=RestartSec=2",
        f"--property=NetworkNamespacePath=/proc/{pid}/ns/net",
        f"--property=ReadWritePaths={root}",
        *(f"--property={one}" for one in HELPER_PROPERTIES),
        f"--setenv=PYTHONPATH={LISTENER_HOME}",
        f"--setenv=PATH={TOOLS}:{os.environ.get('PATH', '')}",
-       sys.executable, "-m", "keel", "vip", "tend", "--root", root,
-       "--spec", spec)
+       *command)
 
 
 def status_of(pid: int) -> dict:
@@ -744,6 +751,13 @@ def command(here: vipnode.Here, words: list[str]) -> dict | None:
         now = vipetcd.seen(vipetcd.local(here), here.mesh_id()).get(VIP)
         REMEMBERED.append(now.epoch.raw)
         return {"epoch": now.epoch.epoch}
+    if words[:1] == ["epoch"]:
+        try:
+            now = vipetcd.seen(vipetcd.local(here), here.mesh_id()).get(VIP)
+        except EtcdError as e:
+            return {"error": str(e)[:200]}
+        return {"epoch": now.epoch.epoch if now and now.epoch else None,
+                "holder": now.epoch.address if now and now.epoch else None}
     if words[:1] == ["attack-keys"]:
         return attack_keys(here)
     if words[:1] == ["attack-revoke"]:
@@ -818,23 +832,28 @@ def stale(here: vipnode.Here) -> dict:
     return found
 
 
+def main(play=None) -> None:
+    """The driver, and whatever it started stopped and removed after"""
+    try:
+        driver(play)
+    finally:
+        for unit in HELPERS:
+            subprocess.run(["systemctl", "stop", unit],
+                           capture_output=True, check=False)
+        for one in list(AGENTS.values()) + OTHERS + etcd_netns.ETCDS + \
+                CHILDREN:
+            one.kill()
+        for one in list(AGENTS.values()) + etcd_netns.ETCDS:
+            one.wait(30)
+        for root in ROOTS + ([] if os.environ.get("VIP_KEEP")
+                             else [LISTENER_HOME, TOOLS]):
+            shutil.rmtree(root, ignore_errors=True)
+
+
 if __name__ == "__main__":
     if sys.argv[1:2] == ["agent"]:
         agent(sys.argv[2], sys.argv[3])
     elif sys.argv[1:2] == ["lead"]:
         move_leader(sys.argv[2])
     else:
-        try:
-            driver()
-        finally:
-            for unit in HELPERS:
-                subprocess.run(["systemctl", "stop", unit],
-                               capture_output=True, check=False)
-            for one in list(AGENTS.values()) + OTHERS + etcd_netns.ETCDS + \
-                    CHILDREN:
-                one.kill()
-            for one in list(AGENTS.values()) + etcd_netns.ETCDS:
-                one.wait(30)
-            for root in ROOTS + ([] if os.environ.get("VIP_KEEP")
-                                 else [LISTENER_HOME, TOOLS]):
-                shutil.rmtree(root, ignore_errors=True)
+        main()

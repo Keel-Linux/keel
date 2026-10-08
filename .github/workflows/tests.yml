@@ -77,6 +77,25 @@ jobs:
           etcd-server util-linux
         KEEL_VIP_NETNS=1 PYTHONPATH=. python3 -m pytest -q -s \
           tests/test_vip_netns.py
+  # Upgrades on a pair whose VIP is active (the maintainer's requirement
+  # of 2026-10-10), on the nodes and links of the vip job: keel-vip.service
+  # try-restarted on the holder and the replica as keel-overlay-vip's
+  # postinst does, its helper killed, etcd restarted on each member in
+  # turn through keel-overlay-etcd's gate, a second member's restart held
+  # back while the first is down, and the holder's controller frozen
+  # (tests/test_vip_upgrade_netns.py). The check is "vip-upgrade / trixie".
+  vip-upgrade:
+    uses: keel-linux/.github/.github/workflows/lxc-trixie.yml@main
+    with:
+      systemd: true
+      timeout: 30
+      run: |
+        apt-get update -qq
+        apt-get install -y -qq --no-install-recommends python3-pytest \
+          python3-yaml wireguard-tools iproute2 iputils-ping openssl \
+          etcd-server util-linux
+        KEEL_VIP_UPGRADE_NETNS=1 PYTHONPATH=. python3 -m pytest -q -s \
+          tests/test_vip_upgrade_netns.py
   # A change that ships must come with a changelog entry, or it cannot be
   # installed and never reaches an appliance. The rule and its tests are
   # bin/require-changelog of the .github repository. The check is
