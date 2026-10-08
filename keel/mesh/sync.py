@@ -91,6 +91,9 @@ class Syncer:
     tell: Callable[[str, str, Roster], None] = memberlink.tell
     touch: Callable[[str, str], None] = memberlink.touch
     sleep: Callable[[float], None] = time.sleep
+    # the peers the interface holds, by key; None when it cannot be read
+    # (the live `wg show` by default, keel#96)
+    live_peers: Callable[[str], set[str] | None] | None = None
 
     @property
     def root(self) -> str:
@@ -325,9 +328,23 @@ def absorb(syncer: Syncer, rosters: list[Roster], public: str,
     for key in dropped:
         after = without_peer(after, key)
     if not added and not dropped:
-        syncer.err("no member this node does not know: it is a peer of"
-                   " every admitted member its peers know")
-        return taken.code
+        missing = missing_live(syncer, public, resting)
+        if not missing:
+            syncer.err("no member this node does not know: it is a peer of"
+                       " every admitted member its peers know")
+            return taken.code
+        syncer.err(f"the spec names {len(missing)} peer(s) that"
+                   f" {syncer.iface()} lacks: "
+                   + ", ".join(one.public_key for one in missing)
+                   + "; the overlay is applied again (keel#96)")
+        if syncer.node.waiting():
+            syncer.err("a network change waits for its confirmation on this"
+                       " node: the overlay is applied again by the next keel"
+                       " mesh sync, once it is confirmed or reverted")
+            return exits.MESH_REFUSED
+        found = changed_and_confirmed(syncer, doc, doc, missing, (),
+                                      repaired=True)
+        return found if found != exits.OK else taken.code
     if syncer.node.waiting():
         syncer.err("a network change waits for its confirmation on this"
                    " node: the members are added, or removed, by the next"
@@ -335,6 +352,43 @@ def absorb(syncer: Syncer, rosters: list[Roster], public: str,
         return exits.MESH_REFUSED
     found = changed_and_confirmed(syncer, doc, after, added, dropped)
     return found if found != exits.OK else taken.code
+
+
+def missing_live(syncer: Syncer, public: str,
+                 resting: dict[str, datetime]) -> tuple:
+    """The spec's peers the interface does not hold: what an announcement
+    the members' service could not apply leaves behind (keel#96). An
+    interface that cannot be read says so and names none. A peer whose
+    repair was not confirmed is in `resting`, the hour's backoff of a
+    member that never answered, and is left until it is over: a routine
+    sync must not bounce the interface twice every time it runs while
+    that peer is down."""
+    reader = syncer.live_peers or (
+        lambda iface: live_keys(iface, syncer.node.output))
+    live = reader(syncer.iface())
+    if live is None:
+        syncer.err(f"the peers of {syncer.iface()} could not be read, so a"
+                   " peer the spec names and the interface lacks is not"
+                   " repaired now")
+        return ()
+    found = []
+    for one in syncer.node.peers(public):
+        if any(same_key(one.public_key, key) for key in live):
+            continue
+        if one.public_key in resting:
+            syncer.err(f"{one.public_key} is tried again after"
+                       f" {resting[one.public_key]:%H:%M} UTC: it did"
+                       " not answer the last time")
+            continue
+        found.append(one)
+    return tuple(found)
+
+
+def live_keys(iface: str, output) -> set[str] | None:
+    """The keys of the peers `wg show` lists, or None"""
+    from keel.mesh import vipnet
+    routes = vipnet.live_routes(iface, output)
+    return None if routes is None else set(routes)
 
 
 def announced(syncer: Syncer, waiting: list[tuple[str, Roster]]) -> int:
@@ -364,7 +418,8 @@ def put_back(syncer: Syncer, doc: dict) -> None:
 
 def changed_and_confirmed(syncer: Syncer, doc: dict, after: dict,
                           added: tuple[Peer, ...],
-                          dropped: tuple[str, ...]) -> int:
+                          dropped: tuple[str, ...],
+                          repaired: bool = False) -> int:
     """`after` written and applied under the window, and confirmed by a
     WireGuard handshake since the change: from a member it added, else,
     when it only removes, from any peer it keeps; with no peer left, by
@@ -383,9 +438,10 @@ def changed_and_confirmed(syncer: Syncer, doc: dict, after: dict,
                    f" {change.code}); the spec is put back as it was")
         return exits.APPLY_FAILED
     for member in added:
-        syncer.err(f"member {member.public_key} added at {member.address},"
-                   f" through {member.endpoint or 'no endpoint (it reaches'
-                   ' this node)'}")
+        syncer.err(f"member {member.public_key}"
+                   f" {'applied again' if repaired else 'added'} at"
+                   f" {member.address}, through"
+                   f" {member.endpoint or 'no endpoint (it reaches this node)'}")
     for key in dropped:
         syncer.err(f"member {key} removed: a tombstone signed by a key that"
                    " may remove it names it")
