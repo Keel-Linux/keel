@@ -18,15 +18,28 @@ Each agent also stands for keel-database-follow.path (keel database
 follow when the VIP's state changes) and keel-database-watch.timer
 (keel database watch every 10 s here, 30 on a machine).
 
-A and B are the pair (A primary, B replica, by their specs); C is the
-application, writing to the VIP. This module runs case (a) of
-docs/replication.md: A and B applied, B seeded over TLS
-(`Master_SSL_Allowed: Yes`, the replication account `REQUIRE X509`), a
-row written at the VIP read on B, the replication lag measured from the
-write's acknowledgement to the row's appearance on B, and `keel diff`
-clean on both. Cases (b) to (e), the fallback, the planned promote, the
-failover and rejoin, the diverged old primary and the replica's refusals,
-are the follow-up pull request's, with the rest of this harness.
+A and B are the pair (A primary, B replica, by their specs); C writes to
+the VIP as the application. The alerts go to a webhook this namespace
+serves. Then:
+
+- **(a)** A and B applied: B seeded over TLS (`Master_SSL_Allowed: Yes`,
+  the replication account `REQUIRE X509`); a row written at the VIP is
+  read on B, the lag measured from the write;
+- **(b)** a commit at the VIP costs about one round trip; B's leg cut
+  (100 % loss): the next commit returns after about 10 s, A's
+  semi-synchronous status reads off, `keel diff` reports drift, the
+  alert reaches the webhook, writes go on; healed, on again;
+- **(c)** `keel database promote` on B: the longest gap in C's writes
+  is the downtime, every row C wrote before is on B;
+- **(d)** B, the primary, cut off with C idle: the VIP fails over to A
+  (keel#81's times), the database follows, C's writes resume; healed, B
+  turns read only and rejoins A by itself, no errant GTID. Then A, the
+  primary, cut off with C writing through: healed, A comes back
+  diverged, read only, the errant GTIDs reported and alerted; confirmed,
+  it is reseeded and follows;
+- **(e)** the replica refuses an INSERT as root by the socket and as the
+  application at its own address, 1290.
+
 
 The result is one JSON line, `RESULT {...}`.
 """
@@ -461,6 +474,57 @@ def monitor_settings(root: str, name: str, gateway: str) -> None:
                                "/alert"}}, fob)
 
 
+class Writer:
+    """C, the application: one INSERT at the VIP after another, each
+    timed; the gaps between successes are what a client saw"""
+
+    def __init__(self, pid: int, vip: str):
+        self.pid, self.vip = pid, vip
+        self.stop = threading.Event()
+        self.pause = threading.Event()
+        self.results: list[dict] = []
+        self.thread = threading.Thread(target=self.run, daemon=True)
+
+    def start(self) -> None:
+        self.thread.start()
+
+    def run(self) -> None:
+        n = 0
+        while not self.stop.is_set():
+            if self.pause.is_set():
+                time.sleep(0.2)
+                continue
+            n += 1
+            at = time.time()
+            done = subprocess.run(
+                ["nsenter", "-t", str(self.pid), "-n", "mariadb", "--batch",
+                 "--connect-timeout=15", "-h", self.vip, "-u", APP_USER,
+                 f"--password={APP_PASSWORD}", "--skip-ssl-verify-server-cert",
+                 APP_DB, "--execute",
+                 f"INSERT INTO t (v, at) VALUES ('w{n}', {at:.3f})"],
+                capture_output=True, text=True, check=False, timeout=40)
+            self.results.append({"n": n, "t": at, "ok": done.returncode == 0,
+                                 "took_s": round(time.time() - at, 3),
+                                 "err": done.stderr.strip()[-120:]})
+
+    def successes(self, since: float = 0, until: float = 1e12) -> list[dict]:
+        return [one for one in self.results
+                if one["ok"] and since <= one["t"] + one["took_s"] <= until]
+
+    def gap(self, start: float, end: float) -> float | None:
+        """The longest stretch without a write acknowledged in
+        [start, end]"""
+        times = sorted(one["t"] + one["took_s"]
+                       for one in self.successes(start, end))
+        if not times:
+            return None
+        edges = [start] + times + [end]
+        return round(max(b - a for a, b in zip(edges, edges[1:])), 3)
+
+    def rows(self) -> int:
+        return len([one for one in self.results if one["ok"]])
+
+
 def count_rows(pid_root: str, agent, name: str) -> int | None:
     found = agent(name, f"sql SELECT COUNT(*) FROM {APP_DB}.t")
     try:
@@ -492,12 +556,16 @@ def scenario(report: dict, pids: list[int], pairs, roots: list[str],
 def play(report: dict, pids: list[int], pairs, roots: list[str],
          samples: list[dict]) -> None:
     import vip_netns
-    from vip_netns import OVERLAY, UPLINK, VIP, agent_send, wait_until
+    from vip_netns import (
+        OVERLAY, UPLINK, VIP, agent_send, heal, partition, pinger,
+        wait_until,
+    )
     a_pid, b_pid, c_pid = pids
     webhook_server()
     for index in (0, 1):
         monitor_settings(roots[index], vip_netns.NAMES[index],
                          f"{UPLINK.format(n=index + 1)}::1")
+    # the servers, one per node
     for index in range(len(vip_netns.NAMES) - 1):
         server(index, pids[index], roots[index])
     # the application's data on A, before it is a primary: what a first
@@ -513,9 +581,9 @@ def play(report: dict, pids: list[int], pairs, roots: list[str],
         if found.get("code"):
             report["setup_error"] = found
             return
-    # the pair: the VIP on A first (what the installer does), then apply
-    # on each, as its first boot would
+    # the pair, the VIP on A first (what the installer does); C pings it
     report["a_promote"] = agent_send("A", "promote")
+    pinger(c_pid, os.path.join(roots[2], "ping.log"))
     report["a_apply"] = agent_send("A", "apply", 600)
     report["b_apply"] = agent_send("B", "apply", 900)
     report["b_follow_log"] = agent_send("B", "followlog")
@@ -530,112 +598,174 @@ def play(report: dict, pids: list[int], pairs, roots: list[str],
     report["b_status_a"] = replica_status(agent_send, "B")
     report["a_rows_a"] = count_rows(None, agent_send, "A")
     report["b_rows_a"] = count_rows(None, agent_send, "B")
-    before = report["b_rows_a"] or 0
-    lags = []
-    trace = []
-    report["a_before_first_write"] = {
-        "b": {k: v for k, v in replica_status(agent_send, "B").items()
-              if k in ("Slave_IO_State", "Read_Master_Log_Pos",
-                       "Exec_Master_Log_Pos", "Seconds_Behind_Master",
-                       "Gtid_IO_Pos", "Slave_SQL_Running_State")},
-        "a_semisync": agent_send("A", "sql SHOW GLOBAL STATUS LIKE"
-                                 " 'Rpl_semi_sync_master%'").get("out")}
-    for n in range(3):
-        started = time.time()
-        one = subprocess.run(
-            ["nsenter", "-t", str(c_pid), "-n", "mariadb", "--batch",
-             "--connect-timeout=30", "-h", VIP, "-u", APP_USER,
-             f"--password={APP_PASSWORD}", "--skip-ssl-verify-server-cert",
-             APP_DB, "--execute",
-             f"INSERT INTO t (v, at) VALUES ('probe{n}', {started:.3f})"],
-            capture_output=True, text=True, check=False, timeout=60)
-        acked = time.time()
-        if n == 0:
-            # the first replicated event, traced: where B's threads are
-            # and what A's semi-synchronous counters say, every 0.5 s
-            seen = None
-            for _ in range(40):
-                if count_rows(None, agent_send, "B") == before + 1:
-                    seen = True
-                    break
-                b = replica_status(agent_send, "B")
-                trace.append({"t": round(time.time() - acked, 2),
-                              "io": b.get("Slave_IO_State"),
-                              "read": b.get("Read_Master_Log_Pos"),
-                              "exec": b.get("Exec_Master_Log_Pos"),
-                              "sql": b.get("Slave_SQL_Running_State"),
-                              "behind": b.get("Seconds_Behind_Master"),
-                              "a": agent_send("A", "sql SHOW GLOBAL STATUS"
-                                              " LIKE 'Rpl_semi_sync_master_"
-                                              "%tx'").get("out")})
-                time.sleep(0.3)
-        else:
-            seen = wait_until(lambda: count_rows(None, agent_send, "B") ==
-                              before + n + 1, 60, 0.05)
-        lags.append({"write_ok": one.returncode == 0,
-                     "write_s": round(acked - started, 3),
-                     "lag_s": None if seen is None else round(
-                         time.time() - acked, 3),
-                     "err": one.stderr.strip()[-200:]})
-    report["a_writes"] = lags
-    report["a_first_write_trace"] = trace
-    report["a_write"] = {"code": 0 if all(one["write_ok"] for one in lags)
-                         else 1}
-    report["a_lag_s"] = max((one["lag_s"] for one in lags
-                             if one["lag_s"] is not None), default=None)
+    before = report["b_rows_a"]
+    written = time.time()
+    writer = Writer(c_pid, VIP)
+    one = subprocess.run(
+        ["nsenter", "-t", str(c_pid), "-n", "mariadb", "--batch",
+         "-h", VIP, "-u", APP_USER, f"--password={APP_PASSWORD}",
+         "--skip-ssl-verify-server-cert", APP_DB, "--execute",
+         "INSERT INTO t (v, at) VALUES ('probe', 0)"],
+        capture_output=True, text=True, check=False, timeout=60)
+    report["a_write"] = {"code": one.returncode, "err": one.stderr[-200:],
+                         "took_s": round(time.time() - written, 3)}
+    seen = wait_until(lambda: count_rows(None, agent_send, "B") ==
+                      (before or 0) + 1, 60, 0.05)
+    report["a_lag_s"] = None if seen is None else round(
+        time.time() - written, 3)
     report["a_grants"] = agent_send(
         "A", "sql SELECT Host, ssl_type, x509_subject, x509_issuer FROM"
         " mysql.user WHERE User='repl'")
     report["a_semisync"] = status_value(agent_send, "A",
                                         "Rpl_semi_sync_master_status")
-    report["a_commit_costs_s"] = [
-        agent_send("A", f"sql INSERT INTO {APP_DB}.t (v, at) VALUES"
-                   f" ('cost', {time.time():.3f})").get("took_s")
-        for _ in range(3)]
     report["a_dbstatus"] = agent_send("A", "dbstatus")
     report["a_diff"] = agent_send("A", "diff")
     report["b_diff"] = agent_send("B", "diff")
     report["b_role_file"] = agent_send("B", "role-file")
-    report["b_read_only"] = agent_send("B", "sql SELECT @@read_only")
-    # the replica applied again (every boot does), then written to:
-    # its own grants went nowhere near its binary log, so the primary's
-    # next event is applied (gtid_strict_mode, ER 1950 otherwise)
-    report["b_apply_again"] = agent_send("B", "apply", 600)
-    before = count_rows(None, agent_send, "B") or 0
-    one = subprocess.run(
+
+    # (b) semi-synchronous: a commit's cost, then B cut
+    costs = []
+    for _ in range(3):
+        found = agent_send("C", f"sql-as-root-tcp SELECT 1")
+        costs.append(found.get("took_s"))
+    report["b_commit_costs_s"] = [
+        agent_send("A", f"sql INSERT INTO {APP_DB}.t (v, at) VALUES"
+                   f" ('cost', {time.time():.3f})").get("took_s")
+        for _ in range(3)]
+    agent_send("A", "watch")
+    vip_netns.leg("to2", "100%")
+    sh("tc", "qdisc", "replace", "dev", "uplink", "root", "netem", "loss",
+       "100%", pid=b_pid)
+    cut_at = time.time()
+    slow = agent_send("A", f"sql INSERT INTO {APP_DB}.t (v, at) VALUES"
+                      f" ('fallback', {time.time():.3f})", 120)
+    report["b_fallback_commit_s"] = slow.get("took_s")
+    report["b_semisync_after"] = status_value(agent_send, "A",
+                                              "Rpl_semi_sync_master_status")
+    report["b_fast_after"] = agent_send(
+        "A", f"sql INSERT INTO {APP_DB}.t (v, at) VALUES ('after',"
+        f" {time.time():.3f})").get("took_s")
+    report["b_diff_a"] = agent_send("A", "diff")
+    agent_send("A", "watch")
+    report["b_alert_s"] = wait_until(
+        lambda: any("asynchronous" in str(one.get("text")) for one in
+                    HOOKS["alerts"]), 30)
+    report["b_alerts"] = [one.get("text", "")[:120] for one in HOOKS["alerts"]]
+    heal(pids, 1)
+    healed_at = time.time()
+    report["b_back_s"] = wait_until(
+        lambda: status_value(agent_send, "A", "Rpl_semi_sync_master_status")
+        == "ON", 120, 1)
+    agent_send("A", "watch")
+    report["b_recovery_alert"] = any(
+        "is back" in str(one.get("text")) for one in HOOKS["alerts"])
+    report["b_cut_to_heal_s"] = round(healed_at - cut_at, 1)
+
+    # (c) planned promote on B, C writing
+    writer.start()
+    time.sleep(8)
+    moved_at = time.time()
+    report["c_promote"] = agent_send("B", "dbpromote", 600)
+    report["c_b_writable_s"] = wait_until(
+        lambda: agent_send("B", "sql SELECT @@read_only").get("out") == "0",
+        120, 0.5)
+    time.sleep(15)
+    report["c_downtime_s"] = writer.gap(moved_at - 1, time.time())
+    report["c_a_rejoined_s"] = wait_until(
+        lambda: replica_status(agent_send, "A").get("Master_Host") ==
+        OVERLAY.format(n=2) and replica_status(agent_send, "A").get(
+            "Slave_SQL_Running") == "Yes", 120, 1)
+    writer.pause.set()
+    time.sleep(6)
+    report["c_rows_c"] = writer.rows()
+    report["c_b_rows"] = count_rows(None, agent_send, "B")
+    report["c_a_rows"] = count_rows(None, agent_send, "A")
+    report["c_a_status"] = replica_status(agent_send, "A")
+    report["c_a_role_file"] = agent_send("A", "role-file")
+    report["c_a_followlog"] = agent_send("A", "followlog")
+
+    # (d) the primary B cut off, C idle: failover, then rejoin by itself
+    cut_at = partition(report, "d", pids, roots, samples, 1, 0,
+                       os.path.join(roots[2], "ping.log"), {
+                           n: pairs[i][1] for i, n in
+                           enumerate(vip_netns.NAMES)})
+    report["d_a_writable_s"] = wait_until(
+        lambda: agent_send("A", "sql SELECT @@read_only").get("out") == "0",
+        120, 0.5)
+    writer.pause.clear()
+    resumed = wait_until(lambda: writer.successes(cut_at), 120, 0.5)
+    report["d_writes_resume_s"] = None if resumed is None else round(
+        writer.successes(cut_at)[0]["t"] + writer.successes(cut_at)[0]
+        ["took_s"] - cut_at, 2)
+    writer.pause.set()
+    time.sleep(3)
+    healed_at = heal(pids, 1)
+    report["d_b_rejoined_s"] = wait_until(
+        lambda: replica_status(agent_send, "B").get("Master_Host") ==
+        OVERLAY.format(n=1) and replica_status(agent_send, "B").get(
+            "Slave_SQL_Running") == "Yes", 240, 1)
+    report["d_b_read_only"] = agent_send("B", "sql SELECT @@read_only")
+    report["d_b_dbstatus"] = agent_send("B", "dbstatus")
+    report["d_b_followlog"] = agent_send("B", "followlog")
+    report["d_rows"] = {"c": writer.rows(),
+                        "a": count_rows(None, agent_send, "A"),
+                        "b": count_rows(None, agent_send, "B")}
+
+    # (d), second run: A the primary, cut off with C writing through
+    writer.pause.clear()
+    time.sleep(6)
+    alerts_before = len(HOOKS["alerts"])
+    cut_at = partition(report, "d2", pids, roots, samples, 0, 1,
+                       os.path.join(roots[2], "ping.log"), {
+                           n: pairs[i][1] for i, n in
+                           enumerate(vip_netns.NAMES)})
+    report["d2_b_writable_s"] = wait_until(
+        lambda: agent_send("B", "sql SELECT @@read_only").get("out") == "0",
+        120, 0.5)
+    time.sleep(12)
+    writer.pause.set()
+    time.sleep(3)
+    heal(pids, 0)
+    report["d2_a_diverged_s"] = wait_until(
+        lambda: "diverged" in "\n".join(agent_send("A", "dbstatus").get(
+            "lines") or []), 240, 2)
+    report["d2_a_dbstatus"] = agent_send("A", "dbstatus")
+    report["d2_a_read_only"] = agent_send("A", "sql SELECT @@read_only")
+    report["d2_a_diff"] = agent_send("A", "diff")
+    report["d2_alert_s"] = wait_until(
+        lambda: any("diverged" in str(one.get("text")) for one in
+                    HOOKS["alerts"][alerts_before:]), 30)
+    report["d2_a_followlog"] = agent_send("A", "followlog")
+    report["d2_a_errant_write"] = agent_send(
+        "A", f"sql SELECT COUNT(*) FROM {APP_DB}.t")
+    report["d2_b_rows"] = count_rows(None, agent_send, "B")
+    # confirmed: reseeded from B, a replica again
+    report["d2_a_reseed"] = agent_send("A", "apply destroy", 600)
+    report["d2_a_rejoined_s"] = wait_until(
+        lambda: replica_status(agent_send, "A").get("Master_Host") ==
+        OVERLAY.format(n=2) and replica_status(agent_send, "A").get(
+            "Slave_SQL_Running") == "Yes", 120, 1)
+    report["d2_rows_after"] = {"a": count_rows(None, agent_send, "A"),
+                               "b": count_rows(None, agent_send, "B")}
+
+    # (e) the replica, A, refuses writes
+    report["e_root_socket"] = agent_send(
+        "A", f"sql INSERT INTO {APP_DB}.t (v, at) VALUES ('root', 0)")
+    found = subprocess.run(
         ["nsenter", "-t", str(c_pid), "-n", "mariadb", "--batch",
-         "--connect-timeout=30", "-h", VIP, "-u", APP_USER,
+         "-h", OVERLAY.format(n=1), "-u", APP_USER,
          f"--password={APP_PASSWORD}", "--skip-ssl-verify-server-cert",
-         APP_DB, "--execute",
-         f"INSERT INTO t (v, at) VALUES ('after-apply', {time.time():.3f})"],
+         APP_DB, "--execute", "INSERT INTO t (v, at) VALUES ('app', 0)"],
         capture_output=True, text=True, check=False, timeout=60)
-    streaming = wait_until(
-        lambda: replica_status(agent_send, "B").get("Slave_IO_State", "")
-        .startswith("Waiting for master to send event"), 60, 1)
-    report["b_after_apply"] = {
-        "write_ok": one.returncode == 0, "streaming_s": streaming,
-        "seen_s": wait_until(lambda: count_rows(None, agent_send, "B") ==
-                             before + 1, 30, 0.05),
-        "status": {k: v for k, v in replica_status(agent_send, "B").items()
-                   if k in ("Slave_IO_Running", "Slave_SQL_Running",
-                            "Last_SQL_Errno", "Last_SQL_Error")}}
-    # the replication account takes the other member's database leaf
-    # alone: B's etcd member certificate, of the same root, is refused
-    report["a_repl_database_leaf"] = agent_send(
-        "B", "repl-probe etc/mysql/keel-tls/server.pem"
-        " etc/mysql/keel-tls/server.key " + OVERLAY.format(n=1))
-    report["a_repl_etcd_leaf"] = agent_send(
-        "B", "repl-probe var/lib/keel/etcd/member.crt"
-        " var/lib/keel/etcd/member.key " + OVERLAY.format(n=1))
-    # the primary restarted boots read only, and follow lifts it: a
-    # crashed old primary takes no write before it learns the newer epoch
-    report["a_restart"] = agent_send("A", "restart", 180)
-    report["a_follow_after_restart"] = agent_send("A", "follow", 180)
-    report["a_read_only_after_follow"] = agent_send(
-        "A", "sql SELECT @@read_only")
-    report["b_bypass"] = agent_send(
-        "B", "sql SELECT GRANTEE FROM information_schema.USER_PRIVILEGES"
+    report["e_app_at_replica"] = {"code": found.returncode,
+                                  "err": found.stderr.strip()[-200:]}
+    report["e_a_bypass"] = agent_send(
+        "A", "sql SELECT GRANTEE FROM information_schema.USER_PRIVILEGES"
         " WHERE PRIVILEGE_TYPE = 'READ_ONLY ADMIN'")
+    writer.stop.set()
+    report["writes"] = {"total": len(writer.results), "ok": writer.rows(),
+                        "failed_tail": [one for one in writer.results
+                                        if not one["ok"]][-5:]}
     report["alerts"] = [one.get("text", "")[:160] for one in HOOKS["alerts"]]
     for process in vip_netns.AGENTS.values():
         try:
