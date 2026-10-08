@@ -1,3 +1,12 @@
+keel (0.23.2) unstable; urgency=medium
+
+  * keel --version printed 0.19.0 on 0.23.0: keel/__init__.py carried a
+    number of its own (keel#98). The version is the installed package's
+    metadata, else a fallback the tests keep in step with this changelog
+    and pyproject.toml.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Sun, 12 Oct 2026 10:30:00 +0000
+
 keel (0.23.1) unstable; urgency=medium
 
   * The members' service applies an announcement from its worker thread,
