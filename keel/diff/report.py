@@ -67,7 +67,9 @@ class FieldDiff:
                 f"declared {show(self.declared)}; not inferred: {self.reason}"
             )
         if self.status == NOT_DECLARED:
-            return f"observed {show(self.observed)}"
+            # an overlay that takes its manifest default says which
+            given = f"{self.reason}, " if self.reason else ""
+            return f"{given}observed {show(self.observed)}"
         return self.reason
 
     def to_dict(self) -> dict:

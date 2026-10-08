@@ -55,7 +55,7 @@ Every field of the declared spec that inspect can observe gets one line:
 | `same` | The declared and observed values are equal after normalisation | unchanged |
 | `drift` | The values differ, or the spec declares a value and the machine has none where inspect looked | 14 |
 | `unknown` | inspect could not infer the field; the line carries inspect's reason, for example `/etc/hostname file is empty` or `permission denied (root only)` | 13 |
-| `not declared` | The machine has a value the spec is silent about; listed so the operator sees it, never counted as drift | unchanged |
+| `not declared` | The machine has a value the spec is silent about; listed so the operator sees it, never counted as drift. An overlay the chain gained after the spec was last applied says the default it takes, `not declared (default: disabled, observed disabled)`, and is drift when the machine is off it ([docs/spec.md](spec.md), "An overlay an upgrade adds to the chain") | unchanged |
 
 A fifth line describes what is deliberately not compared: `not compared`,
 with the reason. It covers a whole section whose values leave no trace,

@@ -18,6 +18,8 @@ from keel.monitor import notify as notifier
 from keel.network import confirm as netconfirm
 from keel.manifest.facts import gather as gather_facts
 from keel.network import live, session, switch, wgkeys, wireguard
+from keel.spec import overlayrecord
+from keel.spec.validate_appliance import default_warnings, with_defaults
 from keel.spec.validate_appliance import is_name as is_manifest_name
 from keel.system.ovstate import overlay_of
 
@@ -52,6 +54,11 @@ def read_spec(
     current name, and the document every command works on is the
     canonical one (keel.spec.compat), so nothing downstream knows about
     the old names.
+
+    An overlay the chain gained since the spec was last applied is warned
+    about, with the default it takes; the document returned is the spec
+    as written, and apply and diff fill the defaults in themselves
+    (keel.spec.validate_appliance.with_defaults).
     """
     if not os.path.exists(path):
         print(f"{path}: not found, nothing to do", file=sys.stderr)
@@ -67,12 +74,16 @@ def read_spec(
         warn(f"{path}: {message}")
     doc = spec.canonical(doc)
 
+    facts = manifest_facts(doc, root)
     errors = spec.validate(doc, check_secret_files=check_secret_files,
-                           facts=manifest_facts(doc, root))
+                           facts=facts)
     if errors:
         for message in errors:
             error(f"{path}: {message}")
         return None, exits.SPEC_INVALID
+    _, defaulted = with_defaults(doc, facts)
+    for message in default_warnings(doc, facts, defaulted):
+        warn(f"{path}: {message}")
     return doc, exits.OK
 
 
@@ -216,7 +227,14 @@ def apply_system(
 
     A run that is not a dry run may start the database server it
     converges before asking it anything (keel.system.dbready).
+
+    An overlay the chain gained since the spec was last applied is
+    converged to its manifest default; a run that did not fail then
+    records the overlays the spec itself declared (keel.spec.overlayrecord).
     """
+    facts = manifest_facts(doc, root)
+    declared = doc
+    doc, _ = with_defaults(doc, facts)
     state = system.observe(root, doc, start=not dry_run)
     plan = system.plan(doc, state, confirmed, defer_certificate,
                        network_window, skip_network, skip_uplink)
@@ -227,7 +245,25 @@ def apply_system(
     for line in outcome.lines:
         print(line)
     print(outcome.summary())
-    return exits.APPLY_FAILED if outcome.failed else exits.OK
+    if outcome.failed:
+        return exits.APPLY_FAILED
+    if not dry_run:
+        record_overlays(declared, facts, root)
+    return exits.OK
+
+
+def record_overlays(doc: dict, facts, root: str) -> None:
+    """What the spec declared of the chain, for the next validation"""
+    if facts is None or facts.problems:
+        return
+    overlays = doc.get("overlays")
+    names = [name for name in (overlays if isinstance(overlays, dict)
+                               else {}) if name in facts.overlays]
+    try:
+        overlayrecord.write(root, facts.appliance, names)
+    except OSError as e:
+        warn(f"/{overlayrecord.RECORD} not written: {e.strerror or e}; an"
+             " overlay left out of the spec is not refused until it is")
 
 
 def network_confirm(args) -> int:

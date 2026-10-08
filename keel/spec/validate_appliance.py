@@ -41,6 +41,12 @@ class ManifestFacts:
     `problems` says why the manifests cannot be used, which is rule 25's
     first error. `resolved` is the keel.manifest Resolved the facts came
     from, for the planners that need more than the rules do.
+
+    `defaults` maps each overlay to its state per mode, as the manifests
+    give it; `recorded` is what the spec declared when it was last
+    applied (keel.spec.overlayrecord), None when nothing is recorded.
+    Together they tell an overlay the chain gained on an upgrade from one
+    the spec dropped (undeclared_defaults).
     """
 
     appliance: str
@@ -50,6 +56,8 @@ class ManifestFacts:
     options: tuple = ()
     problems: tuple[str, ...] = ()
     resolved: Any = None
+    defaults: dict = field(default_factory=dict)
+    recorded: frozenset[str] | None = None
 
 
 def is_name(value: Any) -> bool:
@@ -167,23 +175,31 @@ def against_manifests(doc: dict, facts: ManifestFacts | None) -> list[str]:
         return []
     if facts.problems:
         return [f"appliance.name: {problem}" for problem in facts.problems]
-    return (_overlays(doc.get("overlays"), facts)
+    return (_overlays(doc, facts)
             + _generate(doc.get("secrets"), facts)
             + _options(doc.get("app"), facts))
 
 
-def _overlays(declared: Any, facts: ManifestFacts) -> list[str]:
-    """Rule 25: exactly the overlays of the chain, requires enabled"""
+def _overlays(doc: dict, facts: ManifestFacts) -> list[str]:
+    """Rule 25: exactly the overlays of the chain, requires enabled
+
+    An overlay the chain gained since the spec was last applied is not
+    an error: it takes its default (undeclared_defaults), and the
+    requires are held against the states with the defaults in.
+    """
+    declared = doc.get("overlays")
     declared = declared if isinstance(declared, dict) else {}
+    states = {**declared, **undeclared_defaults(doc, facts)}
+    mode = _mode(doc)
     errors = []
     for name in facts.overlays:
-        if name not in declared:
+        if name not in states:
             errors.append(
                 f"overlays.{name}: not declared; every overlay of the chain"
                 f" of {facts.appliance} is written out, enabled or disabled"
-                " (decisions 0027, 0041)")
+                f" (decisions 0027, 0041){_no_default(name, facts, mode)}")
     chain = ", ".join(facts.chain)
-    for name, state in declared.items():
+    for name, state in states.items():
         if name not in facts.overlays:
             errors.append(f"overlays.{name}: not an overlay of the chain of"
                           f" {facts.appliance} ({chain})")
@@ -191,11 +207,83 @@ def _overlays(declared: Any, facts: ManifestFacts) -> list[str]:
         if state != "enabled":
             continue
         for required in facts.overlays[name]:
-            if declared.get(required) != "enabled":
+            if states.get(required) != "enabled":
                 errors.append(
                     f"overlays.{name}: enabled, but {name} requires"
-                    f" {required}, which is {declared.get(required)}")
+                    f" {required}, which is {states.get(required)}")
     return errors
+
+
+def _no_default(name: str, facts: ManifestFacts, mode: str | None) -> str:
+    """Why an overlay the chain gained still has to be written out: its
+    default is ask; nothing more to say when the spec dropped it"""
+    recorded = facts.recorded is not None and name in facts.recorded
+    default = facts.defaults.get(name, {})
+    if recorded or mode is None or mode not in default:
+        return ""
+    return (f"; its default in {mode} is {default.get(mode)}, which a spec"
+            " cannot take: write the answer, enabled or disabled")
+
+
+def _mode(doc: dict) -> str | None:
+    installation = doc.get("installation")
+    mode = installation.get("mode") if isinstance(installation,
+                                                  dict) else None
+    return mode if mode in INSTALLATION_MODES else None
+
+
+def undeclared_defaults(doc: dict, facts: ManifestFacts | None) -> dict:
+    """The overlays the spec leaves out that take their manifest default
+
+    An overlay of the chain the spec does not declare, and did not
+    declare when it was last applied (or nothing was recorded), takes
+    the state its manifest gives for the spec's installation mode: it
+    came with an upgrade, and an upgrade never breaks a working machine.
+    Not without a mode, which picks the column, nor for `ask`, which is
+    a question only the installer puts. Name to state, in chain order.
+    """
+    if (facts is None or facts.problems
+            or not isinstance(doc.get("appliance"), dict)):
+        return {}
+    mode = _mode(doc)
+    declared = doc.get("overlays")
+    declared = declared if isinstance(declared, dict) else {}
+    if mode is None:
+        return {}
+    found = {}
+    for name in facts.overlays:
+        state = facts.defaults.get(name, {}).get(mode)
+        if (name in declared or state not in OVERLAY_STATES
+                or (facts.recorded is not None and name in facts.recorded)):
+            continue
+        found[name] = state
+    return found
+
+
+def with_defaults(doc: dict, facts: ManifestFacts | None) -> tuple[
+        dict, dict]:
+    """A copy of DOC with the undeclared defaults in, and those defaults
+
+    DOC itself when there are none; the spec on disk is never rewritten.
+    """
+    defaulted = undeclared_defaults(doc, facts)
+    if not defaulted:
+        return doc, {}
+    overlays = doc.get("overlays")
+    overlays = overlays if isinstance(overlays, dict) else {}
+    return {**doc, "overlays": {**overlays, **defaulted}}, defaulted
+
+
+def default_warnings(doc: dict, facts: ManifestFacts | None,
+                     defaulted: dict) -> list[str]:
+    """One line per overlay that took its default, for validate and the
+    other commands that read the spec"""
+    mode = _mode(doc)
+    return [f"overlays.{name}: not declared (default: {state}): the chain"
+            f" of {facts.appliance} gained it after this spec was last"
+            f" applied, so it takes the manifest's default for {mode};"
+            " write it out (decisions 0027, 0041)"
+            for name, state in defaulted.items()]
 
 
 def allowed_secret(name: str, facts: ManifestFacts | None) -> bool:
