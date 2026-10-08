@@ -260,7 +260,7 @@ class TestReplication(unittest.TestCase):
         """On a node with appliance.vip the primary is the VIP's holder,
         the other member of the pair record (decision 0049)"""
         doc = {"version": 1, "appliance": {"name": "core",
-                                           "vip": "fd00:6b65:1::100"},
+                                           "vip": "fd00:6b65:1::ffff:100"},
                "network": {"overlay": {"wireguard": {
                    "address": "fd00:6b65:1::1/64", "peers": [
                        {"public_key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYX"

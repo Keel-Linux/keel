@@ -12,6 +12,7 @@ An overlay the chain gained since the spec was last applied is compared
 with the default apply converges it to, and said to be not declared.
 """
 
+import ipaddress
 from datetime import datetime, timezone
 
 from keel.diff.report import (
@@ -46,6 +47,12 @@ NO_MONITOR = ("no monitor section: the include is left as an earlier apply"
 RULESET = "the ruleset apply renders from the manifests"
 KEEL_RULESET = "keel's ruleset"
 DEFAULT_NOTE = "not declared: the manifest's default"
+LEGACY_VIP = (
+    "{vip} is outside the VIP range{range}. It was paired before the"
+    " range (0.23.3), and the signed pair record on this node keeps it"
+    " valid. A new VIP is in the range. To move this one, declare a VIP"
+    " of the range on both members and run keel vip pair again"
+)
 NOT_LIVE = ("the table the kernel holds is asked of nft on the live system"
             " only")
 
@@ -91,6 +98,30 @@ def appliance_fields(declared: dict, root: str) -> list[FieldDiff]:
     return (fields + monit_fields(declared, resolved, states, tree)
             + firewall_fields(declared, resolved, states, tree)
             + etcd_fields(states, tree))
+
+
+def vip_fields(declared: dict, root: str) -> list[FieldDiff]:
+    """appliance.vip.range: information when the VIP was paired before
+    the VIP range and lies outside it (keel.mesh.vip.before_range);
+    nothing for a VIP in the range"""
+    from keel.mesh import vip as vipstate
+    from keel.mesh.vippair import kept_vips
+    from keel.system.ovstate import overlay_of
+    appliance = declared.get("appliance")
+    overlay = overlay_of(declared) or {}
+    try:
+        vip = vipstate.declared(declared) if isinstance(
+            appliance, dict) else None
+        prefix = ipaddress.IPv6Interface(str(overlay.get("address"))).network
+    except ValueError:
+        return []
+    vips = vipstate.vip_range(prefix)
+    if vip is None or not vipstate.before_range(vip, prefix) or \
+            vip not in kept_vips(root):
+        return []
+    return [FieldDiff("appliance.vip.range", NOT_COMPARED, vip, None,
+                      LEGACY_VIP.format(
+                          vip=vip, range=f" {vips}" if vips else ""))]
 
 
 def defaulted_field(key: str, default: str, observed: object,

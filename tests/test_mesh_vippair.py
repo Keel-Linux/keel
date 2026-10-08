@@ -49,11 +49,11 @@ class TestTheRecord(Pair):
         self.assertEqual(vippair.read(self.all[2].root, VIP), mine)
 
     def test_pair_refusals(self):
-        self.nodes(vips=(VIP, "fd00:6b65:1::200"), paired=False)
+        self.nodes(vips=(VIP, "fd00:6b65:1::ffff:200"), paired=False)
         said: list[str] = []
         self.assertEqual(vippromote.pair(self.all[0], address(1),
                                          said.append), exits.MESH_REFUSED)
-        self.assertIn("appliance.vip is fd00:6b65:1::200", said[-1])
+        self.assertIn("appliance.vip is fd00:6b65:1::ffff:200", said[-1])
         self.assertEqual(vippromote.pair(self.all[0], "fd00:6b65:1::77",
                                          said.append), exits.MESH_REFUSED)
         self.assertIn("no peer", said[-1])
@@ -61,9 +61,12 @@ class TestTheRecord(Pair):
                                          said.append), exits.MESH_REFUSED)
         self.assertIn("declares no appliance.vip", said[-1])
 
-    def test_a_vip_that_is_a_member_s_address_or_off_the_region(self):
+    def test_a_vip_that_is_a_member_s_address_or_off_the_range(self):
+        """a VIP is an address of the overlay's top /112, no region's
+        (0051, keel#97): the members may be in two regions"""
         for vip, why in ((address(1), "own overlay address"),
-                         ("fd00:6b65:1:0:1::5", "outside the /112")):
+                         ("fd00:6b65:1::200", "outside the VIP range"),
+                         ("fd00:6b65:1::ffff:0", "host 0")):
             with self.subTest(vip=vip):
                 self.setUp()
                 self.nodes(vips=(vip, vip), paired=False)
@@ -271,8 +274,8 @@ class TestTheAllocator(Pair):
         self.assertEqual(commands.reserved_vips(self.all[2].root, doc),
                          (VIP,))
         self.assertEqual(commands.reserved_vips(
-            self.all[0].root, {"appliance": {"vip": "fd00:6b65:1::300"}}),
-            (VIP, "fd00:6b65:1::300"))
+            self.all[0].root, {"appliance": {"vip": "fd00:6b65:1::ffff:300"}}),
+            (VIP, "fd00:6b65:1::ffff:300"))
         self.assertEqual(commands.reserved_vips(
             self.parent, {"appliance": {"vip": 3}}), ())
 
@@ -286,7 +289,7 @@ class TestRecordEdges(Pair):
                                           set()))
         self.assertIn("own overlay address", vippair.placed(
             vippair.made(MESH_HEX, address(2), (KEYS[0], KEYS[1])),
-            {KEYS[2]: address(2)}))
+            {KEYS[2]: address(2)}, vipnode.prefix(here)))
         other = vippair.made("ab" * 16, VIP, (KEYS[0], KEYS[1]))
         self.assertIn("another mesh", vipnode.record_problem(here, other))
         unsigned = vippair.made(MESH_HEX, VIP, (KEYS[0], KEYS[1]))

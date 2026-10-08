@@ -1,10 +1,10 @@
 # Copyright (c) 2026 KeelLinux maintainers
-"""keel vip: promote, check, tend, status (decision 0049, docs/mesh.md)
+"""keel vip: promote, pair, unpair, check, tend, status (decision 0049)
 
 The service VIP of a replicated appliance pair, on the WireGuard mesh.
-`promote` is the operator's; `check` is what keel-vip-check.timer runs,
-`tend` what keel-vip.service runs (keel-overlay-vip), and `status` reads
-only. Like every command, nothing here prompts.
+`promote`, `pair` and `unpair` are the operator's (docs/vip.md); `check`
+is what keel-vip-check.timer runs, `tend` what keel-vip.service runs
+(keel-overlay-vip), and `status` reads only. Like every command, nothing here prompts.
 """
 
 import os
@@ -56,6 +56,16 @@ def add(subparsers, options) -> None:
                              help="the other node's overlay address")
     options.root(pair_parser, "pair the VIP of")
     pair_parser.set_defaults(handler=vip_pair)
+    unpair_parser = actions.add_parser(
+        "unpair",
+        help="release this pair's reservation of VIP in etcd, once no"
+        " member declares it, so another pair may reserve it (root)",
+    )
+    options.common(unpair_parser)
+    unpair_parser.add_argument("vip", metavar="VIP",
+                               help="the VIP the pair no longer uses")
+    options.root(unpair_parser, "release the VIP of")
+    unpair_parser.set_defaults(handler=vip_unpair)
     check_parser = actions.add_parser(
         "check",
         help="ask every peer its epoch, take a newer claim, drop the VIP"
@@ -136,6 +146,13 @@ def vip_pair(args) -> int:
     if code != exits.OK:
         return code
     return vippromote.pair(here_of(args), args.address, out)
+
+
+def vip_unpair(args) -> int:
+    code = as_root(args, "keel vip unpair")
+    if code != exits.OK:
+        return code
+    return vippromote.unpair(here_of(args), args.vip, out)
 
 
 def vip_check(args) -> int:

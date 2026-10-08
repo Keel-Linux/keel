@@ -65,8 +65,10 @@ def is_name(value: Any) -> bool:
             and bool(NAME_RE.fullmatch(value)))
 
 
-def validate_appliance(doc: dict) -> list[str]:
-    """The structure of appliance, installation and overlays"""
+def validate_appliance(doc: dict,
+                       paired_vips: tuple[str, ...] = ()) -> list[str]:
+    """The structure of appliance, installation and overlays;
+    `paired_vips` as validate_vip takes them"""
     errors = []
     for key, fields in SECTION_KEYS.items():
         errors += _section(key, doc.get(key), fields)
@@ -80,7 +82,7 @@ def validate_appliance(doc: dict) -> list[str]:
     for name, state in (overlays or {}).items():
         errors += _state(name, state)
     errors += _etcd_mode(doc, overlays or {})
-    return errors + validate_vip(doc)
+    return errors + validate_vip(doc, paired_vips)
 
 
 def _etcd_mode(doc: dict, overlays: dict) -> list[str]:
@@ -130,9 +132,14 @@ def _vip(value: Any) -> list[str]:
     return []
 
 
-def validate_vip(doc: dict) -> list[str]:
-    """appliance.vip inside the overlay prefix, nobody's address, and
-    only beside an overlay (decision 0049)"""
+def validate_vip(doc: dict, paired_vips: tuple[str, ...] = ()) -> list[str]:
+    """appliance.vip inside the overlay's VIP range, nobody's address,
+    and only beside an overlay (decisions 0049, 0051)
+
+    `paired_vips` are the VIPs the machine keeps a signed pair record
+    for (keel.mesh.vippair.kept_vips), which a caller that knows the root
+    gathers: such a VIP, paired before the range (0.23.3), may stay
+    outside it."""
     appliance = doc.get("appliance")
     value = appliance.get("vip") if isinstance(appliance, dict) else None
     if value is None or _vip(value):
@@ -144,7 +151,8 @@ def validate_vip(doc: dict) -> list[str]:
                 " an address of the mesh"]
     from keel.mesh.vip import problem
     try:
-        found = problem(str(ipaddress.IPv6Address(value)), overlay)
+        found = problem(str(ipaddress.IPv6Address(value)), overlay,
+                        paired_vips)
     except ValueError:
         return []
     return [found] if found else []

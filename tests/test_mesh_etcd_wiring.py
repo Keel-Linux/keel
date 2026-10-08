@@ -170,7 +170,10 @@ class TestTheCli(Mesh):
         with mock.patch("keel.mesh.commands.public_key",
                         return_value=(KEYS[0], 0)), \
                 mock.patch("keel.mesh.commands.listening",
-                           return_value=("", 0)):
+                           return_value=("", 0)), \
+                mock.patch("keel.mesh.etcd.Etcd.local"), \
+                mock.patch("keel.mesh.commands.addrreserve.reserve",
+                           return_value=True) as reserved:
             code, out, err = run_cli(
                 "mesh", "invite", "--root", a.root, "--spec", a.node.path,
                 "--endpoint", "2001:db8::1")
@@ -180,6 +183,10 @@ class TestTheCli(Mesh):
         from keel.mesh.token import parse
         found = parse(out.split()[-1], datetime.now(timezone.utc))
         self.assertEqual((found.etcd, found.etcd_port), ("running", 2379))
+        # a formed member reserves the new node's address in etcd too
+        # (keel#102)
+        self.assertEqual(reserved.call_args.args[1:4], (
+            MESH.hex(), found.assigned, found.invite_id))
 
 
 class TestDiff(ManifestCase):

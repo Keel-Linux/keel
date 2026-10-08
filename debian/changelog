@@ -1,3 +1,36 @@
+keel (0.23.3) unstable; urgency=medium
+
+  * keel mesh invite draws a random free address of the inviter's
+    region, the /112 of the overlay its own address is in (decision
+    0051, keel#97), instead of one of the /64. With etcd, the invite
+    also reserves the address there by a compare-and-swap, on a lease
+    that ends a day after the invite, and the join is admitted only
+    while that reservation names it, so two members of one region that
+    invite at once never give out one address (keel#102). Addresses already given are untouched: a node
+    placed in the /64 before regions allocates in its own /112.
+  * VIPs live in the overlay's VIP range, <prefix>::ffff:n, outside
+    every region: a pair's members are normally in two regions and
+    either carries the VIP. appliance.vip, the pair record and every
+    claim are checked against the range; no invite allocates from it,
+    and no node address or peer allowed_ips of a spec may lie in it. A
+    node whose address lies in it cannot invite.
+  * Upgrade: a VIP paired before 0.23.3, outside the range, stays valid
+    when a signed pair record names it; it validates, applies and is
+    claimed as before, and keel diff prints one information line. A new
+    pair outside the range is refused.
+  * With etcd, keel vip pair reserves the VIP by a compare-and-swap
+    before the other member signs, and the other member signs only a
+    pair whose VIP is reserved for it, so two pairs never take one VIP.
+    The reservation is signed by the member that reserves, and every
+    reader checks it: an unsigned or forged one is an alert, never
+    overwritten. It lives on a lease of 24 h until both members signed
+    the record. keel vip unpair VIP releases it. The member role may
+    write /keel/<mesh>/vips/.
+  * docs/vip.md: keel vip pair ADDRESS takes the other node's overlay
+    address, not the VIP; the replication and spec examples agree.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Mon, 13 Oct 2026 09:00:00 +0000
+
 keel (0.23.2) unstable; urgency=medium
 
   * keel --version printed 0.19.0 on 0.23.0: keel/__init__.py carried a

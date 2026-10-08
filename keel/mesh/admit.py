@@ -12,7 +12,9 @@ so (`final`), and the listener stops.
 
 A join is then checked against the address the invite reserved, a key
 this node already knows (its own, or a peer's: a join never replaces an
-entry), and a network change waiting in its window. The invite is
+entry), a network change waiting in its window, and, for an invite that
+reserved its address in etcd, that reservation, which must still name
+the invite (keel.mesh.addrreserve). The invite is
 consumed under the mesh's lock, so a second request finds it used, the
 new node is written into the spec as a peer and applied under decision
 0018's window, and the answer goes back signed. The confirmation
@@ -37,6 +39,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
 from keel.mesh import (
+    addrreserve,
     etcd,
     etcdproof,
     identity,
@@ -45,6 +48,7 @@ from keel.mesh import (
     signing,
     trust,
 )
+from keel.mesh.etcdclient import EtcdError
 from keel.mesh.node import Node, NodeError
 from keel.mesh.protocol import ProtocolError
 from keel.mesh.signing import SigningError
@@ -147,7 +151,9 @@ class Admitter:
                  sleep: Callable[[float], None] = time.sleep,
                  etcd_admit: Callable[[str | None, str | None, str, str,
                                        protocol.Admission],
-                                      etcd.Admission] | None = None):
+                                      etcd.Admission] | None = None,
+                 reservation: Callable[[invites.Pending], str | None]
+                 | None = None):
         self.root = root
         self.invite = invite
         self.public_key = public_key
@@ -166,6 +172,10 @@ class Admitter:
                 etcd.Etcd(node, clock, self.log),
                 None if csr is None or proof is None
                 else etcdproof.Request(csr, proof), key, address, evidence))
+        # why the invite's reservation in etcd does not admit its join
+        self.reservation = reservation or (
+            lambda invite: reservation_problem(
+                etcd.Etcd(node, clock, self.log), invite))
         # what the join decided for etcd (keel.mesh.etcd), acted on once
         # the join is confirmed (keel.mesh.inviting)
         self.etcd_admission = etcd.Admission()
@@ -234,6 +244,9 @@ class Admitter:
             return refusal(409, "another network change waits for its"
                            " confirmation on the inviter; try again once"
                            " it is confirmed or reverted")
+        problem = self.reservation(self.invite)
+        if problem:
+            raise Refusal(409, problem)
         try:
             invites.consume(self.root, self.invite.invite_id, self.clock())
         except invites.InviteError as e:
@@ -370,6 +383,23 @@ def admitted(root: str, invite_id: str, key: str, sign_key: str,
     trust.recorded(store, found)
     trust.save(root, store)
     return found
+
+
+def reservation_problem(member: etcd.Etcd,
+                        invite: invites.Pending) -> str | None:
+    """Why the address reservation the invite made in etcd does not
+    admit its join, or None; None for an invite that made none
+    (keel.mesh.addrreserve)"""
+    if not invite.etcd_reserved:
+        return None
+    try:
+        client = member.local()
+        mesh_id = addrreserve.mesh_of(member.root)
+    except (EtcdError, ValueError) as e:
+        return (f"etcd cannot be asked ({e}): with etcd, a join is"
+                " admitted only while its address is reserved there")
+    return addrreserve.problem(client, mesh_id, invite.address,
+                               invite.invite_id)
 
 
 def evidenced(root: str, peers: tuple[protocol.Peer, ...]) -> tuple[

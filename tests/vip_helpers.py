@@ -27,7 +27,7 @@ from keel.mesh.etcdclient import EtcdError, Value
 from keel.mesh.memberlink import LinkError
 from keel.mesh.vipnode import Here
 
-VIP = "fd00:6b65:1::100"
+VIP = "fd00:6b65:1::ffff:100"
 
 
 def spec(index: int, count: int, vip: str | None,
@@ -194,7 +194,7 @@ class FakeKv:
         return [Value(k, v[0], v[1], v[2])
                 for k, v in sorted(self.kvs.items()) if k.startswith(key)]
 
-    def swap(self, compare, puts) -> bool:
+    def swap(self, compare, puts, deletes=()) -> bool:
         self.check("swap")
         for one in compare:
             key = base64.b64decode(one["key"]).decode()
@@ -207,6 +207,8 @@ class FakeKv:
         self.revision += 1
         for key, value, lease in puts:
             self.kvs[key] = (value, self.revision, lease)
+        for key in deletes:
+            self.kvs.pop(key, None)
         return True
 
 

@@ -40,8 +40,8 @@ from collections.abc import Callable
 from datetime import datetime
 
 from keel import exits
-from keel.mesh import etcd, etcdstate, vipetcd, vipmsg, vipnet, vipnode
-from keel.mesh import vippair
+from keel.mesh import etcd, etcdstate, signing, vipetcd, vipmsg, vipnet
+from keel.mesh import vipnode, vippair, vipreserve
 from keel.mesh import vip as vipstate
 from keel.mesh.etcdclient import EtcdError
 from keel.mesh.memberlink import LinkError
@@ -83,7 +83,8 @@ def promote(here: Here, gone: bool, out: Callable[[str], None]) -> int:
             out("this node declares no appliance.vip: it replicates nothing,"
                 " and has no VIP to take")
             return exits.MESH_REFUSED
-        problem = vipstate.problem(vip, here.overlay())
+        problem = vipstate.problem(vip, here.overlay(),
+                                   vippair.kept_vips(here.root))
         if problem:
             out(problem)
             return exits.MESH_REFUSED
@@ -111,10 +112,20 @@ def pair(here: Here, at: str, out: Callable[[str], None]) -> int:
             return exits.MESH_REFUSED
         own = here.own_key()
         draft = vippair.made(here.mesh_id(), vip, (own, peer))
-        problem = vippair.placed(draft, vipnode.addresses(here))
+        problem = vipnode.new_pair_problem(here, draft)
         if problem:
             out(problem)
             return exits.MESH_REFUSED
+        etcd_mode = with_etcd(here)
+        if etcd_mode:
+            # the VIP is one pair's across the mesh: reserved by a
+            # compare-and-swap before the other member is asked to sign
+            problem = vipreserve.reserve(
+                vipetcd.local(here), draft, own, signer(here),
+                vipnode.signer_of(here))
+            if problem:
+                out(problem)
+                return exits.MESH_REFUSED
         mine = vippair.sign(here.root, draft, own)
         answer = here.say(vipmsg.PAIR, at, {"pair": mine.dumps()})
         both = vippair.loads(json.loads(answer.decode()).get("pair"))
@@ -129,13 +140,66 @@ def pair(here: Here, at: str, out: Callable[[str], None]) -> int:
         out(f"keel vip pair: {e}")
         return exits.MESH_REFUSED
     out(f"{vip} is the VIP of {own} and {peer}, signed by both")
-    if with_etcd(here):
-        # the pair's two members alone may write its keys in etcd: the
-        # root's holder grants the role (keel.mesh.etcdauth)
-        from keel.mesh import etcdauth
-        for line in etcdauth.announce(etcd.Etcd(here.node, here.clock,
-                                                here.err)):
-            out(line)
+    if not etcd_mode:
+        return exits.OK
+    return paired_in_etcd(here, both, own, out)
+
+
+def signer(here: Here) -> Callable[[bytes], str]:
+    return lambda message: signing.sign(here.root, message)
+
+
+def paired_in_etcd(here: Here, both: vippair.Pair, own: str,
+                   out: Callable[[str], None]) -> int:
+    """With etcd, once both members signed: the reservation kept for
+    good, and the pair's role asked of the root's holder"""
+    try:
+        problem = vipreserve.kept(vipetcd.local(here), both, own,
+                                  signer(here), vipnode.signer_of(here))
+    except (EtcdError, SigningError) as e:
+        problem = str(e)
+    if problem:
+        out(f"the reservation of {both.vip} in etcd is not kept for good"
+            f" ({problem}): it ends {vipreserve.TTL // 3600} h after it"
+            " was made. Run keel vip pair again: it finds this pair's"
+            " reservation and keeps it")
+        return exits.APPLY_FAILED
+    # the pair's two members alone may write its keys in etcd: the
+    # root's holder grants the role (keel.mesh.etcdauth)
+    from keel.mesh import etcdauth
+    for line in etcdauth.announce(etcd.Etcd(here.node, here.clock,
+                                            here.err)):
+        out(line)
+    return exits.OK
+
+
+def unpair(here: Here, text: str, out: Callable[[str], None]) -> int:
+    """`keel vip unpair VIP`: this pair's reservation of a VIP no longer
+    used released in etcd, so another pair may reserve it"""
+    try:
+        vip = vipstate.address(text)
+        if vipstate.declared(here.node.document()) == vip:
+            out(f"this node's appliance.vip is {vip}: remove it from the"
+                " spec of both members and apply, then release it")
+            return exits.MESH_REFUSED
+        if not with_etcd(here):
+            out("this node is in no formed etcd cluster: nothing is"
+                " reserved, so nothing is released")
+            return exits.OK
+        problem = vipreserve.release(vipetcd.local(here), here.mesh_id(),
+                                     vip, here.own_key(),
+                                     vipnode.signer_of(here))
+    except EtcdError as e:
+        out(f"etcd did not answer: {e}")
+        return exits.APPLY_FAILED
+    except (VipError, NodeError, ValueError, SigningError) as e:
+        out(f"keel vip unpair: {e}")
+        return exits.MESH_REFUSED
+    if problem:
+        out(problem)
+        return exits.MESH_REFUSED
+    out(f"{vip}: its reservation in etcd is released. Each node keeps"
+        " the pair record it holds")
     return exits.OK
 
 

@@ -193,14 +193,26 @@ def addresses(here: Here) -> dict[str, str]:
     return found
 
 
+def prefix(here: Here) -> ipaddress.IPv6Network:
+    """The overlay prefix this node is in; VipError in no mesh"""
+    overlay = here.overlay()
+    if not overlay.get("address"):
+        raise VipError("this node is in no mesh")
+    return ipaddress.IPv6Interface(str(overlay["address"])).network
+
+
 def record_problem(here: Here, pair: vippair.Pair) -> str | None:
-    """Why the pair record is not taken here, or None"""
+    """Why the pair record is not taken here, or None
+
+    A VIP outside the VIP range is taken for a pair made before the
+    range (0.23.3): one whose record this node keeps, or, on a node that
+    keeps none, one whose VIP is where every record signed before the
+    range had it, inside the /112 of a member's address. A new pair's
+    VIP is in the range: `keel vip pair` and the other member's
+    signature check that (`new_pair_problem`)."""
     if pair.mesh_id != here.mesh_id():
         return "the pair record is for another mesh"
     problem = vippair.problem(pair, signer_of(here), trust_roots(here))
-    if problem:
-        return problem
-    problem = vippair.placed(pair, addresses(here))
     if problem:
         return problem
     try:
@@ -210,7 +222,21 @@ def record_problem(here: Here, pair: vippair.Pair) -> str | None:
     if kept is not None and not kept.same_members(pair):
         return (f"this node keeps another pair for {pair.vip}:"
                 f" {', '.join(kept.members)}")
-    return None
+    found = addresses(here)
+    return vippair.placed(pair, found, prefix(here), legacy=(
+        kept is not None or vippair.signed_before_range(pair, found)))
+
+
+def new_pair_problem(here: Here, pair: vippair.Pair) -> str | None:
+    """Why this node does not sign `pair`, or None: its VIP is in the VIP
+    range, unless this node keeps the same pair's record from before the
+    range (0.23.3), so an upgraded pair may sign again"""
+    try:
+        kept = vippair.read(here.root, pair.vip)
+    except ValueError as e:
+        return str(e)
+    return vippair.placed(pair, addresses(here), prefix(here), legacy=(
+        kept is not None and kept.same_members(pair)))
 
 
 def paired(here: Here, claim: Claim) -> str | None:

@@ -44,7 +44,8 @@ from keel.spec.validate_secret import validate_secret
 
 
 def validate(doc: dict, *, check_secret_files: bool = True,
-             facts: ManifestFacts | None = None) -> list[str]:
+             facts: ManifestFacts | None = None,
+             paired_vips: tuple[str, ...] = ()) -> list[str]:
     """Return a list of error messages, empty when the document is valid
 
     With `check_secret_files` false, a `file:` secret reference is still
@@ -55,6 +56,11 @@ def validate(doc: dict, *, check_secret_files: bool = True,
     with them the spec is also held against the manifests, rules 25 to
     27 of the format, and a secret a manifest declares is a known name.
     Without them only the structure of the three sections is checked.
+
+    `paired_vips` are the VIPs the machine keeps a signed pair record
+    for, which the same caller gathers (keel.commands.paired_vips): an
+    appliance.vip among them, paired before the VIP range, may lie
+    outside it (keel.mesh.vip.problem).
 
     The document is canonicalised first (keel.spec.compat), so a spec
     that still uses a deprecated field name is validated under the name
@@ -89,7 +95,7 @@ def validate(doc: dict, *, check_secret_files: bool = True,
     errors.extend(validate_monitor(
         doc.get("monitor"), doc.get("security"), check_secret_files
     ))
-    errors.extend(validate_appliance(doc))
+    errors.extend(validate_appliance(doc, paired_vips))
     errors.extend(against_manifests(doc, facts))
     errors.extend(validate_firewall(doc))
     return errors

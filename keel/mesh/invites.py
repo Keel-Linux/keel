@@ -3,7 +3,8 @@
 
 One file per invite, `<id>.json`, mode 0600 in directories of mode 0700:
 the reserved address, the expiry, the HTTPS port, the invite's TLS key
-and certificate, and the HMAC key the join request is checked with. That
+and certificate, the HMAC key the join request is checked with, and
+whether the address is reserved in etcd too (keel.mesh.addrreserve). That
 key is derived from the token's secret (keel.mesh.token.hmac_key); the
 secret itself is never stored, so the file cannot be turned back into
 the token. State, not configuration: never in the spec, never emitted,
@@ -56,6 +57,9 @@ class Pending:
     hmac_key: bytes = field(repr=False)
     tls_key: str = field(repr=False)
     consumed: bool = False
+    # its address is reserved in etcd too (keel.mesh.addrreserve), so
+    # its join is admitted only while that reservation names it
+    etcd_reserved: bool = False
 
     def expired(self, now: datetime) -> bool:
         return now >= self.expires
@@ -193,14 +197,16 @@ def read(root: str, invite_id: str) -> Pending | None:
             hmac_key=bytes.fromhex(data["hmac_key"]),
             tls_key=str(data["tls_key"]),
             consumed=consumed(data.get("consumed", False)),
+            etcd_reserved=consumed(data.get("etcd_reserved", False)),
         )
     except (OSError, ValueError, KeyError, TypeError):
         return None
 
 
 def consumed(value: object) -> bool:
+    """A flag of the file: true or false, nothing else"""
     if not isinstance(value, bool):
-        raise ValueError("consumed is true or false")
+        raise ValueError("a flag is true or false")
     return value
 
 
@@ -214,6 +220,7 @@ def dumps(pending: Pending) -> str:
         "hmac_key": pending.hmac_key.hex(),
         "tls_key": pending.tls_key,
         "consumed": pending.consumed,
+        "etcd_reserved": pending.etcd_reserved,
     }, indent=2) + "\n"
 
 

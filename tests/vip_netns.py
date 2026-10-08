@@ -97,7 +97,7 @@ from keel.network import wireguard
 MESH = "6b65656c207669702074657374210001"
 UPLINK = "2001:db8:f1b:{n}"
 OVERLAY = "fd00:6b65:f1b::{n}"
-VIP = "fd00:6b65:f1b::100"
+VIP = "fd00:6b65:f1b::ffff:100"
 SAMPLE = 0.2
 PING = "0.05"
 HEALED = int(os.environ.get("VIP_HEALED") or 30)

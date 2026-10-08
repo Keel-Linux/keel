@@ -292,14 +292,17 @@ class Client:
             raise EtcdError("an answer that is not etcd's") from None
 
     def swap(self, compare: list[dict], puts: list[tuple[str, bytes,
-                                                         str | None]]) -> bool:
-        """A transaction: every put, with its lease, only when every
-        comparison holds; whether it did"""
+                                                         str | None]],
+             deletes: tuple[str, ...] = ()) -> bool:
+        """A transaction: every put, with its lease (none: the key leaves
+        the lease it had), and every delete, only when every comparison
+        holds; whether it did"""
         lines = [condition(one) for one in compare] + [""]
         for key, value, lease in puts:
             lines.append("put " + (f"--lease={hex_id(lease)} " if lease
                                    else "")
                          + f"-- {quoted(key.encode())} {quoted(value)}")
+        lines += [f"del -- {quoted(key.encode())}" for key in deletes]
         found = self.ask("txn", "--interactive=false",
                          stdin="\n".join(lines + ["", "", ""]))
         return found.get("succeeded") is True

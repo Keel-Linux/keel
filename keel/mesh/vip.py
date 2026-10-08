@@ -48,6 +48,14 @@ SUFFIX = ".json"
 DIR_MODE = 0o700
 FILE_MODE = 0o600
 HOST = 128
+# VIPs live in one range of the overlay, outside every region (0051,
+# keel#97): the /112 at the top index of the seventh group,
+# `<prefix>::ffff:n`. A pair's members may be in two regions and either
+# carries the VIP, so the VIP belongs to neither; `keel mesh invite`
+# never allocates from this range, and `keel vip pair` reserves a VIP in
+# etcd (keel.mesh.vipreserve) so two pairs never take the same one.
+VIP_RANGE_INDEX = 0xffff
+VIP_RANGE_BITS = 112
 PRIMARY, REPLICA = "primary", "replica"
 # the etcd lease of a holder's claim, and how long after the last
 # renewal the majority confirmed the holder still carries the VIP
@@ -299,9 +307,52 @@ def unrouted(section: dict, vips: tuple[str, ...]) -> dict:
     return {**section, "peers": peers}
 
 
-def problem(vip: str, overlay: dict) -> str | None:
-    """Why `vip` cannot be this overlay's VIP: outside the prefix, this
-    node's own address, or inside a peer's allowed_ips"""
+def vip_range(prefix: ipaddress.IPv6Network) -> ipaddress.IPv6Network | None:
+    """The VIP range of an overlay prefix, `<prefix>::ffff:0/112`; None
+    for an overlay too narrow to hold one (narrower than a /96)"""
+    if prefix.prefixlen > VIP_RANGE_BITS - 16:
+        return None
+    return ipaddress.IPv6Network(
+        (int(prefix.network_address) + (VIP_RANGE_INDEX << 16),
+         VIP_RANGE_BITS))
+
+
+def misplaced(vip: str, prefix: ipaddress.IPv6Network) -> str | None:
+    """Why `vip` is not where a VIP lives in `prefix`, or None"""
+    found = ipaddress.IPv6Address(vip)
+    if found not in prefix:
+        return f"{vip} is outside the overlay prefix {prefix}"
+    vips = vip_range(prefix)
+    if vips is None:
+        return (f"the overlay {prefix} is too narrow for a VIP range:"
+                " a VIP is an address of the overlay's /112 at index"
+                f" {VIP_RANGE_INDEX:x}")
+    if found not in vips:
+        return (f"{vip} is outside the VIP range {vips}: a VIP is an"
+                " address of the overlay's top /112, outside every"
+                " region (decision 0051)")
+    if found == vips.network_address:
+        return f"{vip} is host 0 of the VIP range {vips}, never given"
+    return None
+
+
+def before_range(vip: str, prefix: ipaddress.IPv6Network) -> bool:
+    """Whether `vip` is in the overlay prefix and outside its VIP range:
+    where a VIP paired before the range (0.23.3) can lie"""
+    found = ipaddress.IPv6Address(vip)
+    vips = vip_range(prefix)
+    return found in prefix and (vips is None or found not in vips)
+
+
+def problem(vip: str, overlay: dict,
+            paired: tuple[str, ...] = ()) -> str | None:
+    """Why `vip` cannot be this overlay's VIP: outside the prefix or the
+    VIP range, this node's own address, or inside a peer's allowed_ips
+
+    `paired` are the VIPs this node keeps a signed pair record for
+    (keel.mesh.vippair.kept_vips): a VIP paired before the range, outside
+    it, stays valid, so an upgraded pair keeps working; a new VIP is in
+    the range."""
     if not overlay.get("address"):
         return "appliance.vip needs network.overlay.wireguard.address"
     own = ipaddress.IPv6Interface(str(overlay["address"]))
@@ -317,4 +368,7 @@ def problem(vip: str, overlay: dict) -> str | None:
                 return (f"appliance.vip: {vip} is inside {net}, which"
                         f" {peer.get('public_key')} is given: the VIP is"
                         " routed at runtime, never in the spec")
-    return None
+    why = misplaced(vip, own.network)
+    if why and vip in paired and before_range(vip, own.network):
+        return None
+    return f"appliance.vip: {why}" if why else None

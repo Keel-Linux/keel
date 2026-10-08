@@ -26,9 +26,10 @@ from datetime import datetime, timezone
 import yaml
 
 from keel import exits, spec, system
-from keel.commands import error, manifest_facts, read_spec
+from keel.commands import error, manifest_facts, paired_vips, read_spec
 from keel.inspect import ROOT_DEFAULT
 from keel.mesh import (
+    addrreserve,
     adopt,
     allocate,
     bridge,
@@ -106,7 +107,8 @@ def mesh_invite(args) -> int:
         return exits.APPLY_FAILED
     now = datetime.now(timezone.utc).replace(microsecond=0)
     secret = secrets.token_bytes(SECRET_BYTES)
-    state = etcd.token_state(etcd.Etcd(Node(root, args.spec), utcnow, err))
+    member = etcd.Etcd(Node(root, args.spec), utcnow, err)
+    state = etcd.token_state(member)
     draft = Token(
         public_key=public, endpoints=hosts, port=wireguard.port(overlay),
         https_port=args.port, fingerprint=certificate.fingerprint(cert),
@@ -116,7 +118,8 @@ def mesh_invite(args) -> int:
         etcd_port=CLIENT_PORT if state == "running" else None)
     try:
         made, line = invite(root, now, draft, overlay, (tls_key, cert),
-                            reserved_vips(root, doc))
+                            reserved_vips(root, doc),
+                            address_claim(member, draft, now))
     except (allocate.AllocationError, TokenError, invites.InviteError) as e:
         error(str(e))
         return exits.MESH_REFUSED
@@ -162,12 +165,15 @@ def listening(made: invites.Pending, path: str, root: str,
 
 
 def invite(root: str, now: datetime, draft: Token, overlay: dict,
-           tls: tuple[str, str],
-           reserved: tuple[str, ...] = ()) -> tuple[invites.Pending, str]:
+           tls: tuple[str, str], reserved: tuple[str, ...] = (),
+           claim: Callable[[str], bool] | None = None) -> tuple[
+               invites.Pending, str]:
     """The pending invite, reserved, and its token
 
-    The token is written before the invite is, so one that cannot be
-    written reserves nothing.
+    `claim(address)` reserves the drawn address in etcd, False when
+    another invite holds it there (keel.mesh.addrreserve); None before
+    etcd. The token is written before the invite is, so one that cannot
+    be written reserves nothing.
     """
     lines: list[str] = []
 
@@ -178,20 +184,57 @@ def invite(root: str, now: datetime, draft: Token, overlay: dict,
                     f"invite {one.invite_id} is pending on TCP port"
                     f" {one.https_port} until {shown(one.expires)}: give"
                     " this one another with --port, or wait")
-        assigned = allocate.free_address(
-            draft.address,
-            allocate.taken(overlay) + list(reserved) + [
-                str(ipaddress.IPv6Interface(one.address).ip)
-                for one in others])
+        assigned = drawn(draft.address, allocate.taken(overlay) + list(
+            reserved) + [str(ipaddress.IPv6Interface(one.address).ip)
+                         for one in others], claim)
         lines.append(encode(replace(draft, assigned=assigned)))
         return invites.Pending(
             invite_id=draft.invite_id, address=assigned,
             expires=draft.expires, https_port=draft.https_port,
             certificate=tls[1], hmac_key=hmac_key(draft.secret),
-            tls_key=tls[0])
+            tls_key=tls[0], etcd_reserved=claim is not None)
 
     made = invites.reserve(root, now, make)
     return made, lines[0]
+
+
+def drawn(own: str, used: list[str],
+          claim: Callable[[str], bool] | None) -> str:
+    """A free address of the inviter's region, reserved in etcd when
+    `claim` is given; a draw another invite holds there is drawn again.
+    Raises AllocationError"""
+    for _ in range(addrreserve.TRIES):
+        assigned = allocate.free_address(own, used)
+        try:
+            if claim is None or claim(assigned):
+                return assigned
+        except EtcdError as e:
+            raise allocate.AllocationError(
+                f"etcd did not answer ({e}): with etcd, an invite reserves"
+                " its address there first; nothing is reserved") from None
+        used = used + [str(ipaddress.IPv6Interface(assigned).ip)]
+    raise allocate.AllocationError(
+        f"{addrreserve.TRIES} addresses drawn in a row are reserved in etcd"
+        " by other invites: the region is nearly full, or other members"
+        " invite now; try again")
+
+
+def address_claim(member: etcd.Etcd, draft: Token,
+                  now: datetime) -> Callable[[str], bool] | None:
+    """How the invite reserves its address in etcd, None when this node
+    is in no formed etcd cluster (keel.mesh.addrreserve)"""
+    def ready() -> bool:
+        try:
+            return etcd.ready(member.node.document())
+        except NodeError:
+            return False
+    if not addrreserve.formed(member.root, ready):
+        return None
+    ttl = int((draft.expires - now).total_seconds()) + inviting.LINGER + \
+        addrreserve.AFTER_JOIN
+    return lambda address: addrreserve.reserve(
+        member.local(), draft.mesh_id.hex(), address, draft.invite_id,
+        draft.public_key, ttl)
 
 
 def reserved_vips(root: str, doc: dict) -> tuple[str, ...]:
@@ -356,7 +399,8 @@ def join_dry_run(args) -> int:
         return exits.MESH_REFUSED
     after = join.merged(doc, made)
     problems = spec.validate(after, check_secret_files=False,
-                             facts=manifest_facts(after, args.root))
+                             facts=manifest_facts(after, args.root),
+                             paired_vips=paired_vips(args.root))
     if problems:
         for problem in problems:
             error(f"{args.spec}, once joined: {problem}")
