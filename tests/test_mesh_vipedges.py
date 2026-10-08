@@ -195,7 +195,7 @@ class TestPromoteEdges(Pair):
         self.nodes()
         first(self)
         self.nets[0].addresses.clear()
-        self.assertEqual(vipetcd.stopped(self.all[0]), [])
+        self.assertEqual(vipetcd.stopped(self.all[0]), ([], []))
 
 class TestCliEdges(Pair):
     def test_the_controller_stops_on_sigterm(self):

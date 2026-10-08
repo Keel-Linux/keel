@@ -767,6 +767,42 @@ of a cluster: each learner etcd says is in sync is promoted, a learner
 that never started within an hour is removed, and this member's leaves
 are renewed with a third of their life left.
 
+### keel mesh etcd gate, and upgrades
+
+```
+keel mesh etcd gate stop|started [--wait SECONDS]
+keel mesh upgrade-check
+```
+
+etcd-server's postinst restarts etcd on every upgrade, and knows nothing
+of the other members: apt run on two members of three at once would
+lose the majority while both restart, and with it every VIP's renewal
+(docs/vip.md). keel-overlay-etcd puts a gate around etcd.service, a
+drop-in whose ExecStop runs `keel mesh etcd gate stop` and whose
+ExecStartPost runs `keel mesh etcd gate started` (root):
+
+- **stop**, before etcd is sent SIGTERM, waits until every other voter
+  says it is healthy and no other member holds the **restart lock**,
+  `/keel/<mesh id>/etcd/restarting`, then takes it by compare-and-swap
+  on a lease of 120 s: two members never pass at once. A stop cannot be
+  refused for good, so after `--wait` (300 s) it says so and lets the
+  stop go on (exit 16); at shutdown it does not wait. A second member's
+  upgrade so waits in its postinst until the first is back;
+- **started**, once etcd started, waits until this member answers a
+  linearizable read, back in the majority, up to `--wait` (120 s), and
+  deletes its own lock. A member that never comes back leaves the lock
+  to its lease, and the others' health to the next gate.
+
+etcd hands its leadership to another member when it stops, so the
+leader's restart costs one leader change, not an election timeout.
+`keel mesh upgrade-check` asks the same and changes nothing: it exits 0
+when every other member is healthy and none restarts, 24 with one line
+per reason otherwise, and says when this node holds a VIP (upgrade it
+last, or move the VIP first: docs/vip.md, "Upgrading a pair without
+downtime"). Any member can write the lock (docs/vip.md says why etcd has
+no access control here); it is advice between keel's own gates, and the
+others' health is asked of each, whatever it says.
+
 ### The members' channel for etcd
 
 `POST /v1/etcd` carries one message: `kind` (`probe`, `enroll`,
@@ -1161,11 +1197,11 @@ listener's lines go to its own unit's journal, under the same rule.
 | --- | --- |
 | 0 | the line, the change or the status was printed; the join or the accept confirmed |
 | 2, 3 | the spec cannot be read or is invalid |
-| 15 | `create`, `invite`, `join`, `accept`, `serve`, `sync`, `members`, `remove`, `etcd form`, `etcd tend` on the live system, not as root |
-| 16 | `wg` cannot read or make the key, `openssl` cannot make the certificate, the mesh identity is damaged, the invite's listener cannot start or bind, or this node's change did not come up; for `etcd form` and `etcd tend`, etcd's state cannot be read or etcd does not answer |
+| 15 | `create`, `invite`, `join`, `accept`, `serve`, `sync`, `members`, `remove`, `etcd form`, `etcd tend`, `etcd gate` on the live system, not as root |
+| 16 | `wg` cannot read or make the key, `openssl` cannot make the certificate, the mesh identity is damaged, the invite's listener cannot start or bind, or this node's change did not come up; for `etcd form` and `etcd tend`, etcd's state cannot be read or etcd does not answer; for `etcd gate`, it waited its `--wait` in vain (the stop or the start goes on) |
 | 21 | the change was applied and not confirmed (the other side did not answer within the window, or refused, or the route check did; for `sync`, no new member completed a handshake): it reverts by itself |
 | 23 | the token, or `accept`'s line, is mistyped, truncated, of a later format, inconsistent, or expired |
-| 24 | refused: no overlay to invite into, no key yet, no endpoint, no free address, another invite on the port; a node in another mesh or at another address of it, or a change the spec would refuse; a network change waiting; an invite whose peers hold another mesh identity, or none while this node has none; members of another identity, an address that is not a peer's, or an identity repair while an invite is pending; no route to the inviter, or neither node can reach the other; the inviter refused the join (used, expired, bad HMAC), its certificate is not the pinned one, or its answer is not the answer to the request; `etcd form` on a node that cannot run etcd or holds no identity, while a network change waits, with members holding two roots, a cluster this node is not in, the CA on another member, an enrollment that failed (nothing started), or a member that did not take the cluster (run it again) |
+| 24 | refused: no overlay to invite into, no key yet, no endpoint, no free address, another invite on the port; a node in another mesh or at another address of it, or a change the spec would refuse; a network change waiting; an invite whose peers hold another mesh identity, or none while this node has none; members of another identity, an address that is not a peer's, or an identity repair while an invite is pending; no route to the inviter, or neither node can reach the other; the inviter refused the join (used, expired, bad HMAC), its certificate is not the pinned one, or its answer is not the answer to the request; `etcd form` on a node that cannot run etcd or holds no identity, while a network change waits, with members holding two roots, a cluster this node is not in, the CA on another member, an enrollment that failed (nothing started), or a member that did not take the cluster (run it again); `upgrade-check`: another etcd member is not healthy or restarts, or etcd cannot be asked |
 
 ## Tests
 

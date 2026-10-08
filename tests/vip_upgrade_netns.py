@@ -110,6 +110,11 @@ def restarted(how: str, index: int, pids: list[int], samples_: list[dict],
             if index == 0 else None}
 
 
+def where(root: str) -> tuple[str, ...]:
+    """A node's root and its spec, where tests/vip_netns.py writes it"""
+    return ("--root", root, "--spec", os.path.join(root, "instance.yaml"))
+
+
 def keel_in(pid: int, *argv: str, timeout: float = 600) -> dict:
     """`keel ARGV` in a node's namespace: its code, what it said, how long
     it took"""
@@ -132,7 +137,7 @@ class Etcds:
         self.procs = dict(enumerate(etcd_netns.ETCDS[:len(NAMES)]))
 
     def gate(self, index: int, step: str, wait: int | None = None) -> dict:
-        argv = ["mesh", "etcd", "gate", step, "--root", self.roots[index]]
+        argv = ["mesh", "etcd", "gate", step, *where(self.roots[index])]
         if wait is not None:
             argv += ["--wait", str(wait)]
         return keel_in(self.pids[index], *argv)
@@ -210,14 +215,14 @@ def scenario(report: dict, pids: list[int], pairs, roots: list[str],
     etcds.stop(2)
     down_at = time.time()
     report["upgrade_check_c_down"] = keel_in(a_pid, "mesh", "upgrade-check",
-                                             "--root", roots[0])
+                                             *where(roots[0]))
     report["b_gate_refused"] = etcds.gate(1, "stop", wait=20)
     report["b_etcd_running"] = etcds.procs[1].poll() is None
     etcds.start(2)
     report["c_gate_started"] = etcds.gate(2, "started")
     report["c_down_s"] = round(time.time() - down_at, 2)
     report["upgrade_check_healthy"] = keel_in(a_pid, "mesh", "upgrade-check",
-                                              "--root", roots[0])
+                                              *where(roots[0]))
     report["b_gate_after"] = etcds.gate(1, "stop", wait=60)
     report["b_gate_after_started"] = etcds.gate(1, "started")
     report["c_holders_seen"] = window(samples_, down_at)
