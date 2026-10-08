@@ -26,6 +26,26 @@ keel (0.21.0) unstable; urgency=medium
 
  -- KeelLinux maintainers <admin@keellinux.org>  Thu, 08 Oct 2026 12:00:00 +0000
 
+keel (0.20.1) unstable; urgency=medium
+
+  * An overlay an upgrade adds to the appliance's chain no longer makes
+    every existing spec invalid. keel-core 0.1.3 added vip to Core, and
+    every keel command on two upgraded Keel Web nodes refused
+    /etc/keel/instance.yaml ("overlays.vip: not declared"). An overlay the
+    spec leaves out and did not declare when it was last applied takes its
+    manifest default for installation.mode: every command that reads the
+    spec warns "overlays.vip: not declared (default: disabled)", apply
+    --system converges the default, diff lists it as not declared with
+    its default (drift when the machine is off it), and the spec on disk
+    is never rewritten. inspect already writes it out.
+  * apply --system records the overlays the spec declared in
+    /var/lib/keel/spec/overlays.yaml after a run that did not fail; one of
+    them that the spec leaves out stays the error it was (decisions 0027,
+    0041). No default is taken without installation.mode, or for an
+    overlay whose default is ask.
+
+ -- Marcos Mendez <mendez.foto@gmail.com>  Thu, 08 Oct 2026 12:00:00 +0000
+
 keel (0.20.0) unstable; urgency=medium
 
   * The service VIP of a replicated appliance pair on the WireGuard mesh

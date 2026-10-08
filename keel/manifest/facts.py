@@ -6,11 +6,14 @@ appliance the spec names is looked up under the root, validated and
 resolved along its chain, and what rules 25 to 27 hold the spec against
 is handed to keel.spec as plain data. A chain that cannot be used is
 one problem, rule 25's, rather than a spec checked against half of it.
+What the spec declared when it was last applied comes with them, so an
+overlay the chain gained since can take its default.
 """
 
 from keel.manifest.catalog import Catalog
 from keel.manifest.constants import APPLIANCE
 from keel.manifest.resolve import resolve
+from keel.spec import overlayrecord
 from keel.spec.validate_appliance import ManifestFacts
 
 
@@ -37,4 +40,7 @@ def gather(root: str, name: str) -> ManifestFacts:
         options=tuple((owned.item, owned.origin)
                       for owned in resolved.options),
         resolved=resolved,
+        defaults={state.name: dict(state.states)
+                  for state in resolved.overlays},
+        recorded=overlayrecord.read(root, name),
     )

@@ -881,7 +881,7 @@ overlays:                   # every overlay of the chain, written out (0027)
 | `appliance.name` | system | The appliance manifest this machine runs, `[a-z][a-z0-9-]*`, at most 32 characters. It must be installed under `/usr/share/keel/appliances/` of the root the command works on, valid, and resolve along its `base` chain |
 | `appliance.vip` | read | The service VIP of this node's replicated pair (decision 0049): one IPv6 address, the same on both nodes of the pair, a `/128` of the overlay prefix that is neither this node's address nor inside a peer's `allowed_ips`. Optional; a node that replicates nothing has none. Who holds it is state, never the spec: the holder is the primary ([docs/vip.md](vip.md)). Chosen once, at installation, by the primary's installer, and handed to the replica; nothing converges it |
 | `installation.mode` | read | `simple`, `cloud_simple` or `cloud_advanced`. Chosen once, at installation: it picks the column of defaults the installer starts from, and nothing converges it. Moving a machine between modes is out of scope |
-| `overlays.<name>` | system | `enabled` or `disabled`, for every overlay of the resolved chain, none left out and none added. `apply --system` enables and starts, or stops and disables, the overlay's units, and derives Monit's checks from what is enabled ([docs/apply.md](apply.md)). `etcd: enabled` is refused unless `installation.mode` is `cloud_advanced` (decisions 0041 and 0048); it says only that etcd runs: its members and certificates are state ([docs/mesh.md](mesh.md), "etcd") |
+| `overlays.<name>` | system | `enabled` or `disabled`, for every overlay of the resolved chain, none left out (but one an upgrade added, below) and none added. `apply --system` enables and starts, or stops and disables, the overlay's units, and derives Monit's checks from what is enabled ([docs/apply.md](apply.md)). `etcd: enabled` is refused unless `installation.mode` is `cloud_advanced` (decisions 0041 and 0048); it says only that etcd runs: its members and certificates are state ([docs/mesh.md](mesh.md), "etcd") |
 
 The words are `enabled` and `disabled`: YAML reads an unquoted `on`,
 `off`, `yes` or `no` as a boolean, and such a value is refused with that
@@ -893,12 +893,34 @@ that names an appliance is checked against the manifests installed under
 the root of the command: `/` for `spec validate`, `spec render` and
 `network wireguard key`, `--root` for `spec validate --root`, `apply`,
 `diff` and `database promote`. The appliance must be installed and
-resolve; `overlays` names exactly the overlays of the chain; an `enabled`
+resolve; `overlays` names exactly the overlays of the chain, but for one
+the chain gained after the spec was last applied (below); an `enabled`
 overlay has every overlay it `requires` enabled; a secret is one of the
 three above or a name a manifest declares, and `generate: true` is
 refused where the manifest says `never`; `app.options` are declared
 options of their type, a required one present. A spec that names no
 appliance is checked as before, and needs no manifest at all.
+
+**An overlay an upgrade adds to the chain.** A package upgrade can add an
+overlay to the chain, as keel-core 0.1.3 added `vip` to Core, and a spec
+written before it does not name it. An upgrade never breaks a working
+machine, so such an overlay takes the default its manifest gives for
+`installation.mode`: every command that reads the spec warns
+`overlays.vip: not declared (default: disabled)`, `apply --system`
+converges it to that default, and `diff` lists it as `not declared
+(default: disabled, observed disabled)`, or as drift when the machine is
+off the default. The spec on disk is never rewritten; writing the
+overlay out (as `inspect` does) silences the warning.
+
+What tells a gained overlay from one the spec dropped is
+`/var/lib/keel/spec/overlays.yaml`, which `apply --system` writes after a
+run that did not fail: the overlays the spec itself declared, never the
+defaults it filled in. An overlay in that record that the spec leaves
+out is the error it always was. Without a record (a machine where no
+`apply --system` ran since keel 0.20.1), nothing the spec leaves out is
+refused, and each takes its default with the warning. There is no
+default to take without `installation.mode`, nor for an overlay whose
+default in the mode is `ask`: those stay errors.
 
 `keel inspect` writes `appliance.name` from the one installed appliance
 manifest no other is built on, the overlays that own units from systemd,
