@@ -279,15 +279,23 @@ still blips once on the holder: the old helper, in memory, drops it as
 it stops, and the new controller carries it again at its first renewal.
 
 Measured in CI (`vip-upgrade / trixie`, links of 250 ms ±25 ms with 2%
-loss), the longest gap in a third node's answers to the VIP, pinged
-every 50 ms:
+loss, three runs), the longest gap in a third node's answers to the VIP,
+pinged every 50 ms. Gaps this short are the links' own loss: the address
+never left wg0. Before keel 0.21.0, the same restart of the holder's
+keel-vip.service cost 2.8 to 3.2 s, and its helper killed 4.4 s:
 
 | Restart, as the package does it | Gap | Failover |
 | --- | --- | --- |
-| keel-vip.service on the holder (try-restart) | MEASURED_A | none |
-| keel-vip.service on the replica | MEASURED_R | none |
-| the holder's helper killed (Restart=always, 2 s) | MEASURED_K | none |
-| etcd on the third member, the holder, the replica | MEASURED_E | none |
+| keel-vip.service on the holder (try-restart) | 0.12 to 0.30 s | none |
+| keel-vip.service on the replica | 0.13 to 0.28 s | none |
+| the holder's helper killed (Restart=always, 2 s) | 0.14 to 0.17 s | none |
+| etcd on the third member, the holder, the replica (10 to 15 s each, through the gate) | 0.13 to 0.39 s | none |
+
+The holder's controller frozen (SIGSTOP) is no upgrade, but the kernel's
+part shows there: the address was gone 6.2 to 6.9 s after the freeze, and
+the replica carried the VIP once the lease expired, 21 s after it, never
+both at once. Before, the frozen holder kept it until the replica's claim
+reached it: both carried it for 0.8 s.
 
 ## What status, inspect and diff show
 
