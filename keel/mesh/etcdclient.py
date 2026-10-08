@@ -162,6 +162,10 @@ class Client:
             "value": base64.b64encode(value.encode()).decode()})
         return int(found["header"]["revision"])
 
+    def delete(self, key: str) -> None:
+        """`key` deleted, when it is there"""
+        self.ask("/v3/kv/deleterange", {"key": encoded(key)})
+
     def grant(self, ttl: int) -> str:
         """A lease of `ttl` seconds; its ID"""
         found = self.ask("/v3/lease/grant", {"TTL": ttl})

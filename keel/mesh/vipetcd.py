@@ -29,8 +29,11 @@ made to mean something:
   RENEW seconds, and carries the address only while the last renewal
   the majority confirmed is less than RELEASE_AFTER seconds old,
   counted from the renewal's send on CLOCK_BOOTTIME (suspend counts),
-  in this process's memory: a controller that starts, after a restart
-  or a reboot, carries nothing until it renewed the lease itself. A
+  in this process's memory, and the address itself carries the rest of
+  that time as its lifetime (keel.mesh.vipnet.lifetime), so the kernel
+  removes it by then whatever becomes of this process: a controller that
+  starts, after a restart, extends nothing until it renewed the lease
+  itself, and one after a reboot finds nothing to extend. A
   renewal counts once a linearizable read, which needs the majority,
   answers after it (etcd's leader renews leases by itself, so a leader
   cut off answers renewals until it steps down); any error of etcd is no
@@ -290,6 +293,9 @@ class Ops:
     def carried(self, vip: str) -> bool | None:
         return vipnet.carried(self.here.iface(), vip, self.here.node.output)
 
+    def bounded(self, vip: str) -> bool | None:
+        return vipnet.bounded(self.here.iface(), vip, self.here.node.output)
+
 
 class Controller:
     """Renew, carry, follow and fail over; `ops` is the root half,
@@ -314,6 +320,8 @@ class Controller:
         self.gone: dict[str, float] = {}
         # this node's VIPs whose lease was revoked while it renewed it
         self.reclaim: set[str] = set()
+        # the renewal each VIP's address last took its lifetime from
+        self.lifted: dict[str, float] = {}
 
     def own(self, facts: Facts) -> list[Held]:
         """The VIPs this node holds by its own claim on a lease"""
@@ -333,16 +341,31 @@ class Controller:
                 if not self.renew(facts, held, now):
                     continue
             base = self.renewed.get(vip)
-            age = None if base is None else self.clock() - base
-            if age is None or not 0 <= age < RELEASE_AFTER:
+            if base is None:
+                self.started_with(vip)
+                continue
+            age = self.clock() - base
+            if not 0 <= age < RELEASE_AFTER:
                 if self.ops.carried(vip):
                     self.ops.drop(vip, False, (
-                        "not renewed since this controller started" if base
-                        is None else f"no renewal the majority confirmed for"
+                        f"no renewal the majority confirmed for"
                         f" {RELEASE_AFTER:g} s: this node may be cut off"))
                 continue
-            if self.ops.carried(vip) is False:
-                self.ops.carry(vip, age)
+            # each confirmed renewal gives the address a new lifetime,
+            # what is left of the release time after it
+            if self.lifted.get(vip) != base or \
+                    self.ops.carried(vip) is False:
+                if self.ops.carry(vip, age):
+                    self.lifted[vip] = base
+
+    def started_with(self, vip: str) -> None:
+        """Before this controller's first renewal: an address a previous
+        one left with a lifetime is the kernel's to end, by the release
+        deadline of that one's last confirmed renewal, and is not
+        extended; one with none (an older keel's) is dropped"""
+        if self.ops.carried(vip) and self.ops.bounded(vip) is False:
+            self.ops.drop(vip, False, "not renewed since this controller"
+                          " started")
 
     def renew(self, facts: Facts, held: Held, sent: float) -> bool:
         """One renewal; False when the lease is gone and the VIP was
@@ -497,18 +520,29 @@ class Controller:
         holder.join()
 
 
-def stopped(here: Here) -> list[str]:
+def stopped(here: Here, restarting: bool = False
+            ) -> tuple[list[str], list[str]]:
     """What the unit's ExecStopPost runs: every VIP this node carries
-    dropped, so a controller that died never leaves one behind it,
-    unrenewed; the VIPs dropped. Not fenced: a controller started again
-    carries it once it renewed its lease."""
-    found = []
+    dropped, so a helper that stopped never leaves one behind it,
+    unrenewed; but while the unit is `restarting` (an upgrade's
+    try-restart, or Restart= after a crash), an address with a lifetime
+    is kept: the kernel ends it by the release deadline of the last
+    confirmed renewal, and the next controller extends it only once it
+    renewed the same lease itself. An address with no lifetime is always
+    dropped. The VIPs dropped and kept. Never fenced: a controller
+    started again carries it once it renewed its lease."""
+    dropped, kept = [], []
     for held in vipstate.held_all(here.root):
         if vipnet.carried(here.iface(), held.vip,
-                          here.node.output) is not False:
-            problem = vipnet.drop(here.iface(), held.vip, here.node.run,
-                                  here.node.output)
-            if problem:
-                here.err(f"vip {held.vip}: {problem}")
-            found.append(held.vip)
-    return found
+                          here.node.output) is False:
+            continue
+        if restarting and vipnet.bounded(here.iface(), held.vip,
+                                         here.node.output):
+            kept.append(held.vip)
+            continue
+        problem = vipnet.drop(here.iface(), held.vip, here.node.run,
+                              here.node.output)
+        if problem:
+            here.err(f"vip {held.vip}: {problem}")
+        dropped.append(held.vip)
+    return dropped, kept

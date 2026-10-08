@@ -2,7 +2,12 @@
 """The VIP on this node's wg0: carried, dropped, routed (decision 0049)
 
 - **The holder carries it** as a second address of wg0, beside its own:
-  `ip -6 addr replace <vip>/128 dev wg0 preferred_lft 0 nodad`. A
+  `ip -6 addr replace <vip>/128 dev wg0 valid_lft N preferred_lft 0
+  nodad`. With etcd, N is what is left of the release time after the
+  last renewal the majority confirmed (`lifetime`), so the kernel itself
+  removes the address by that deadline when no controller renews it: a
+  controller restarting, crashed or frozen never leaves it carried past
+  it. Without etcd, it is carried for good (no N). A
   deprecated address (`preferred_lft 0`) answers every connection made
   to it and is never chosen as the source of one this node makes, so
   node-to-node traffic keeps the node's own overlay address (0029:
@@ -26,6 +31,7 @@ not; standard output, or None.
 """
 
 import os
+import re
 from collections.abc import Callable
 
 from keel.mesh import vip as vipstate
@@ -37,8 +43,26 @@ Run = Callable[[tuple[str, ...]], str | None]
 Output = Callable[[tuple[str, ...]], str | None]
 
 
+# how late the kernel may remove an address whose valid_lft ran out:
+# addrconf's check runs at the expiry, rounded up by a quarter of a second
+# at most (net/ipv6/addrconf.c, ADDRCONF_TIMER_FUZZ), and every change of
+# the address runs it again; a second covers that and a busy workqueue
+EXPIRY_SLACK = 1
+
+
 def host(vip: str) -> str:
     return f"{vip}/{vipstate.HOST}"
+
+
+def lifetime(age: float) -> int | None:
+    """The valid_lft of an address whose last renewal the majority
+    confirmed is `age` seconds old: whole seconds, so that the kernel
+    removes it, EXPIRY_SLACK late at most, by RELEASE_AFTER after that
+    renewal; None when too little is left to carry it at all"""
+    if not 0 <= age < vipstate.RELEASE_AFTER:
+        return None
+    found = int(vipstate.RELEASE_AFTER - age) - EXPIRY_SLACK
+    return found if found >= 1 else None
 
 
 def carried(iface: str, vip: str, output: Output) -> bool | None:
@@ -49,9 +73,24 @@ def carried(iface: str, vip: str, output: Output) -> bool | None:
     return any(f" {host(vip)} " in f" {line} " for line in text.splitlines())
 
 
-def carry(iface: str, vip: str, run: Run) -> str | None:
+def carry(iface: str, vip: str, run: Run,
+          valid: int | None = None) -> str | None:
+    """`vip` on wg0, for `valid` seconds (the kernel removes it then), or
+    for good"""
+    bound = () if valid is None else ("valid_lft", str(valid))
     return run(("ip", "-6", "addr", "replace", host(vip), "dev", iface,
-                "preferred_lft", "0", "nodad"))
+                *bound, "preferred_lft", "0", "nodad"))
+
+
+def bounded(iface: str, vip: str, output: Output) -> bool | None:
+    """Whether wg0 carries `vip` with a lifetime the kernel ends; None
+    when it does not carry it, or `ip` does not answer"""
+    text = output(("ip", "-6", "-o", "addr", "show", "dev", iface))
+    for line in (text or "").splitlines():
+        if f" {host(vip)} " in f" {line} ":
+            found = re.search(r"valid_lft (\S+)", line)
+            return bool(found) and found.group(1) != "forever"
+    return None
 
 
 def drop(iface: str, vip: str, run: Run, output: Output) -> str | None:

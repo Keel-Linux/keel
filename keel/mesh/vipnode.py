@@ -356,15 +356,20 @@ def carry_held(here: Here, vip: str, age: float | None = None) -> bool:
     """Carry the VIP this node holds by its own claim, neither fenced nor
     released; whether it is carried now. A claim on an etcd lease is
     carried only with `age`, the time since the last renewal the
-    majority confirmed, below RELEASE_AFTER"""
+    majority confirmed, and for what is left of RELEASE_AFTER after it
+    (keel.mesh.vipnet.lifetime): the kernel ends it by then"""
     with vipstate.locked(here.root):
         held = current(here, vip)
         if not held.holds(here.own_key()):
             return False
-        if held.lease and (age is None or not
-                           0 <= age < vipstate.RELEASE_AFTER):
-            return False
-        problem = vipnet.carry(here.iface(), vip, here.node.run)
+        valid = None
+        if held.lease:
+            # the kernel removes it by the release deadline, whatever
+            # becomes of the controller
+            valid = None if age is None else vipnet.lifetime(age)
+            if valid is None:
+                return False
+        problem = vipnet.carry(here.iface(), vip, here.node.run, valid)
     if problem:
         here.err(f"vip {vip}: cannot carry it: {problem}")
         return False

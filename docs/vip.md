@@ -47,10 +47,14 @@ refused. A release is taken only from the other member of the record.
 ## The move, and why it is not under the window
 
 - **The holder carries it**: `ip -6 addr replace <vip>/128 dev wg0
-  preferred_lft 0 nodad`. A deprecated address answers every connection
-  made to it and is never the source of one the node makes, so the
-  members' channel and every other node-to-node exchange keep the node's
-  own overlay address.
+  valid_lft N preferred_lft 0 nodad`. A deprecated address answers every
+  connection made to it and is never the source of one the node makes,
+  so the members' channel and every other node-to-node exchange keep the
+  node's own overlay address. With etcd, N is what is left of the
+  release time after the last renewal the majority confirmed, less the
+  1 s the kernel may be late, so the kernel itself removes the address by that
+  deadline unless a renewal gives it a new lifetime; before etcd it is
+  carried for good.
 - **Every other node routes it to the holder**: `wg set wg0 peer <holder>
   allowed-ips <holder>/128,<vip>/128`, which also takes it from the peer
   that had it, then the same list in `/etc/wireguard/wg0.conf`, so a
@@ -194,11 +198,18 @@ cluster, split as keel#75 splits an invite:
   - **the holder renews its lease every 2 s, and carries the address
     only while the last renewal the majority confirmed is under 10 s
     old**, counted from the renewal's send on CLOCK_BOOTTIME (suspend
-    counts), kept in the controller's memory alone: a controller that
-    starts, after a restart or a reboot, carries nothing until it renewed
-    the lease itself. A renewal counts once a linearizable read, which
-    needs the majority, answers after it; any error of etcd is no
-    renewal;
+    counts), kept in the controller's memory, and **enforced by the
+    kernel**: each confirmed renewal gives the address the rest of the
+    10 s as its lifetime, so it is gone by then whatever becomes of the
+    controller, stopped, restarting, crashed or frozen. A controller
+    that starts after a restart leaves an address a previous one gave a
+    lifetime to the kernel and extends it only once it renewed the same
+    lease itself; one with no lifetime (an older keel's) it drops. After
+    a reboot there is nothing to extend. A renewal counts once a
+    linearizable read, which needs the majority, answers after it,
+    whichever member relays it: the controller asks this member's etcd
+    first, then the others of the cluster record, so the holder renews
+    while its own etcd restarts. Any error of etcd is no renewal;
   - every node follows the counter and takes a newer claim as from the
     channel;
   - the other node of the pair claims as above: 0020's automatic
@@ -206,9 +217,14 @@ cluster, split as keel#75 splits an invite:
     claim on the channel for the nodes that are not cloud advanced
     (third round, point 4).
 
-`--stopped`, the unit's `ExecStopPost`, drops every VIP the node carries,
-so a helper that died never leaves an unrenewed one behind it, and the
-unit has no start limit, so it is never left stopped for good.
+`--stopped`, the unit's `ExecStopPost`, drops every VIP the node
+carries, **except while the unit restarts**: a restart job of the unit
+(an upgrade's `try-restart`), or a helper that died, which Restart=always
+starts again 2 s later (`$SERVICE_RESULT` other than `success`). Then an
+address with a lifetime stays, and the kernel removes it at the release
+time unless the next controller renews the lease. A `systemctl stop`, the
+overlay disabled by `keel spec apply`, or a shutdown drops it at once.
+The unit has no start limit, so it is never left stopped for good.
 
 **The TTL is 20 s, the release 10 s.** etcd cannot expire a lease before
 TTL seconds after the last renewal it answered, so a holder cut off from
@@ -223,9 +239,63 @@ it cannot answer the linearizable read. The cut off holder so drops the
 VIP at most 14 s after the last renewal the majority confirmed (one
 renewal period and a call's timeout late), and the lease expires no
 sooner than 20 s after it (25 s when the majority elects a new leader,
-which gives the lease an election timeout more). A frozen process (a
-stopped container) is the one case this does not cover: 0020's
-watchdog is not built, and a container has none.
+which gives the lease an election timeout more). The address's lifetime
+makes the kernel drop it sooner still, by 10 s after that renewal, also
+for a frozen process (a stopped container), which no controller can
+cover: `tests/test_vip_upgrade_netns.py` (d).
+
+## Upgrading a pair without downtime
+
+The maintainer's requirement of 2026-10-10: an `apt full-upgrade` on any
+node of the pair, or on any etcd member, neither drops the VIP nor moves
+it, beyond a short blip, measured below.
+
+What each package does on upgrade:
+
+| Package | On upgrade | The VIP |
+| --- | --- | --- |
+| `keel-overlay-vip` | `try-restart keel-vip.service`, never a stop first; nothing started that was stopped | kept: the address and its lease survive the restart (above) |
+| `keel` | restarts its own units (the members' channel, sync, etcd's tend); a trigger in `keel-overlay-vip` try-restarts `keel-vip.service`, so the new code runs | kept, as above |
+| `etcd-server` | `restart etcd.service`, through keel-overlay-etcd's gate: one member at a time ([docs/mesh.md](mesh.md), "keel mesh etcd gate, and upgrades") | kept: the holder renews through the other members while its own etcd restarts |
+
+The procedure, one node at a time:
+
+1. on the node, `keel mesh upgrade-check`: 0 when every other etcd
+   member is healthy and none restarts; it also says whether this node
+   holds the VIP;
+2. `apt full-upgrade` on it; a second node's etcd restart waits in its
+   gate until this one is back, so a fleet tool that runs apt on several
+   at once loses no majority, only time;
+3. once `keel mesh upgrade-check` passes again, the next node. **The
+   holder last**, or, to take no risk with it at all, `keel vip promote`
+   on the replica first: a planned move, about 3 to 4 s with no answer
+   (the vip job's (b)), and the upgraded replica serves meanwhile;
+4. a reboot (a new kernel) is a planned move too: promote the replica
+   first, as above. Rebooted, a node carries nothing until its own claim
+   is renewed, and a former holder never claims again by itself.
+
+The first upgrade *into* the keel that keeps the address over a restart
+still blips once on the holder: the old helper, in memory, drops it as
+it stops, and the new controller carries it again at its first renewal.
+
+Measured in CI (`vip-upgrade / trixie`, links of 250 ms ±25 ms with 2%
+loss, three runs), the longest gap in a third node's answers to the VIP,
+pinged every 50 ms. Gaps this short are the links' own loss: the address
+never left wg0. Before keel 0.21.0, the same restart of the holder's
+keel-vip.service cost 2.8 to 3.2 s, and its helper killed 4.4 s:
+
+| Restart, as the package does it | Gap | Failover |
+| --- | --- | --- |
+| keel-vip.service on the holder (try-restart) | 0.12 to 0.30 s | none |
+| keel-vip.service on the replica | 0.13 to 0.28 s | none |
+| the holder's helper killed (Restart=always, 2 s) | 0.14 to 0.17 s | none |
+| etcd on the third member, the holder, the replica (10 to 15 s each, through the gate) | 0.13 to 0.39 s | none |
+
+The holder's controller frozen (SIGSTOP) is no upgrade, but the kernel's
+part shows there: the address was gone 6.2 to 6.9 s after the freeze, and
+the replica carried the VIP once the lease expired, 21 s after it, never
+both at once. Before, the frozen holder kept it until the replica's claim
+reached it: both carried it for 0.8 s.
 
 ## What status, inspect and diff show
 
@@ -294,3 +364,17 @@ and the peers without the VIP.
   VIP at its next renewal and a node carries it again within the TTL.
   At no sample do
   two nodes carry it. In CI, `vip / trixie`, with systemd booted.
+- upgrades: the address's lifetime and its arithmetic, a renewal giving
+  it a new one, a restarted controller keeping a bounded address and
+  dropping one with none, `--stopped` on a restart, a crash and a stop,
+  the controller's endpoints (`tests/test_mesh_vipupgrade.py`); etcd's
+  gate and `keel mesh upgrade-check` on a fake etcd
+  (`tests/test_mesh_etcdgate.py`); end to end,
+  `tests/test_vip_upgrade_netns.py` on the nodes and links above:
+  keel-vip.service try-restarted on the holder three times and on the
+  replica, the holder's helper killed, etcd restarted through its gate on
+  C, the holder A and B in turn, C held down while B's gate waits and
+  `upgrade-check` names C, and the holder's controller frozen (SIGSTOP),
+  the kernel dropping the address. No failover, never two holders, and
+  under 1 s without an answer for each upgrade-style restart. In CI,
+  `vip-upgrade / trixie`.

@@ -424,12 +424,12 @@ class TestTheController(WithEtcd):
 
     def test_stopped_drops_what_it_carries(self):
         self.promote(0)
-        self.assertEqual(vipetcd.stopped(self.all[0]), [VIP])
+        self.assertEqual(vipetcd.stopped(self.all[0]), ([VIP], []))
         self.assertFalse(self.carried(0))
         self.assertFalse(vipnode.current(self.all[0], VIP).fenced)
         self.nets[0].addresses.append(f"{VIP}/128")
         self.nets[0].fail[("ip", "-6", "addr", "del")] = "ip: busy"
-        self.assertEqual(vipetcd.stopped(self.all[0]), [VIP])
+        self.assertEqual(vipetcd.stopped(self.all[0]), ([VIP], []))
         self.assertIn("ip: busy", self.text(0))
 
     def test_the_check_leaves_carrying_to_the_controller(self):

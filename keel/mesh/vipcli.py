@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from keel import exits, system
 from keel.commands import error
 from keel.inspect import ROOT_DEFAULT
-from keel.mesh import vipbridge, vipetcd, vippromote
+from keel.mesh import vipbridge, vipetcd, vippromote, vipunit
 from keel.mesh.node import Node
 from keel.mesh.vipnode import Here
 
@@ -76,8 +76,9 @@ def add(subparsers, options) -> None:
     options.common(tend_parser)
     tend_parser.add_argument(
         "--stopped", action="store_true",
-        help="drop every VIP this node carries; what the unit runs once"
-        " the controller stopped, however it stopped",
+        help="drop every VIP this node carries, but keep one bounded by"
+        " its lifetime while the unit restarts (an upgrade, a crash); what"
+        " the unit runs once the controller stopped",
     )
     options.root(tend_parser, "tend the VIPs of")
     tend_parser.set_defaults(handler=vip_tend)
@@ -151,8 +152,14 @@ def vip_tend(args) -> int:
     here = here_of(args)
     vipbridge.no_new_privileges(err)
     if args.stopped:
-        for vip in vipetcd.stopped(here):
+        dropped, kept = vipetcd.stopped(here, vipunit.restarting(
+            os.environ, here.node.output))
+        for vip in dropped:
             out(f"vip {vip}: dropped, the controller stopped")
+        for vip in kept:
+            out(f"vip {vip}: kept while the unit restarts; the kernel"
+                " removes it at the release time unless the next"
+                " controller renews its lease")
         return exits.OK
     stop = threading.Event()
 

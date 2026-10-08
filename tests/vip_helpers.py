@@ -62,6 +62,9 @@ class FakeNet:
 
     def __init__(self, peers: dict[str, list[str]]):
         self.addresses: list[str] = []
+        # each address's valid_lft as `ip addr replace` set it, None for
+        # forever
+        self.lifetimes: dict[str, int | None] = {}
         self.routes = {key: list(nets) for key, nets in peers.items()}
         self.down = False
         self.fail: dict[tuple[str, ...], str] = {}
@@ -81,6 +84,8 @@ class FakeNet:
         if argv[:3] == ("ip", "-6", "addr") and argv[3] == "replace":
             if argv[4] not in self.addresses:
                 self.addresses.append(argv[4])
+            self.lifetimes[argv[4]] = int(argv[argv.index("valid_lft") + 1]) \
+                if "valid_lft" in argv else None
             return None
         if argv[:3] == ("ip", "-6", "addr") and argv[3] == "del":
             if argv[4] not in self.addresses:
@@ -96,12 +101,17 @@ class FakeNet:
             return None
         return f"{argv[0]}: not faked"
 
+    def lifetime(self, address: str) -> str:
+        found = self.lifetimes.get(address)
+        return "forever" if found is None else f"{found}sec"
+
     def output(self, argv: tuple[str, ...]) -> str | None:
         if self.down or self.failing(argv):
             return None
         if argv[:4] == ("ip", "-6", "-o", "addr"):
             return "".join(f"5: wg0    inet6 {one} scope global deprecated"
-                           " \\       valid_lft forever\n"
+                           f" \\       valid_lft {self.lifetime(one)}"
+                           " preferred_lft 0sec\n"
                            for one in self.addresses)
         if argv[:2] == ("wg", "show") and argv[3] == "allowed-ips":
             return "".join(f"{key}\t{' '.join(nets) or '(none)'}\n"

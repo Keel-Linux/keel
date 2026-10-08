@@ -176,6 +176,12 @@ class TestLeasesAndTransactions(Case):
             "/v3/lease/grant", "/v3/lease/keepalive", "/v3/lease/revoke",
             "/v3/lease/keepalive"])
 
+    def test_a_key_deleted(self):
+        """etcd's restart lock released (keel.mesh.etcdgate)"""
+        Gateway.answers["/v3/kv/deleterange"] = (200, {"deleted": "1"})
+        self.client.delete("/keel/x/etcd/restarting")
+        self.assertEqual(Gateway.seen[-1][0], "/v3/kv/deleterange")
+
     def test_answers_that_are_not_etcd_s(self):
         Gateway.answers["/v3/lease/grant"] = (200, {"TTL": "20"})
         with self.assertRaisesRegex(EtcdError, "not etcd's"):

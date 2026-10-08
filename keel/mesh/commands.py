@@ -38,6 +38,8 @@ from keel.mesh import (
     etcd,
     etcdcare,
     etcdform,
+    etcdgate,
+    etcdstate,
     identity,
     invites,
     inviting,
@@ -51,7 +53,8 @@ from keel.mesh import (
     vipnode,
     vippromote,
 )
-from keel.mesh.etcdstate import CLIENT_PORT
+from keel.mesh.etcdclient import EtcdError
+from keel.mesh.etcdstate import CLIENT_PORT, StateError
 from keel.mesh.node import Node, NodeError, static_addresses
 from keel.mesh.token import (
     LIFETIME,
@@ -539,3 +542,46 @@ def mesh_etcd_tend(args) -> int:
     if code != exits.OK:
         return code
     return etcdcare.tend(member(args))
+
+
+def own_address(args) -> str:
+    """This node's overlay address, from its spec; raises NodeError"""
+    found = str(live_node(args).overlay().get("address") or "")
+    if not found:
+        raise NodeError(f"{args.spec} declares no overlay address")
+    return found.partition("/")[0]
+
+
+def mesh_etcd_gate(args) -> int:
+    """What keel-overlay-etcd's drop-in of etcd.service runs around a
+    stop and a start: one member at a time"""
+    code = as_root(args, "keel mesh etcd gate")
+    if code != exits.OK:
+        return code
+    root = os.path.abspath(args.root)
+    try:
+        # a node in no cluster has nothing to keep: etcd-server's own
+        # restart, or keel's before it formed one
+        if etcdstate.cluster(root) is None:
+            return exits.OK
+        own = own_address(args)
+        if args.step == "stop":
+            return etcdgate.before_stop(
+                root, own, err, wait=etcdgate.WAIT if args.wait is None
+                else args.wait, output=live.output)
+        return etcdgate.after_start(
+            root, own, err, wait=etcdgate.STARTED_WAIT if args.wait is None
+            else args.wait)
+    except (NodeError, StateError, EtcdError, OSError, ValueError) as e:
+        err(f"etcd: the gate could not ask etcd: {e}")
+        return exits.APPLY_FAILED
+
+
+def mesh_upgrade_check(args) -> int:
+    """Whether this node may be upgraded now; changes nothing"""
+    try:
+        own = own_address(args)
+    except (NodeError, OSError, ValueError) as e:
+        error(str(e))
+        return exits.SPEC_UNREADABLE
+    return etcdgate.upgrade_check(os.path.abspath(args.root), own, out)

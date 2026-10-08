@@ -200,7 +200,29 @@ def actions(mesh_actions, options: Options) -> None:
     listen_parser.add_argument("socket", metavar="SOCKET",
                                help="the root helper's unix socket")
     listen_parser.set_defaults(handler=commands.mesh_listen)
+    check_parser = mesh_actions.add_parser(
+        "upgrade-check",
+        help="whether this node may be upgraded now: every other etcd"
+        " member healthy and none restarting, and whether it holds a VIP;"
+        " changes nothing (docs/vip.md, \"Upgrading a pair without"
+        " downtime\")",
+    )
+    options.common(check_parser)
+    options.root(check_parser, "check the upgrade of")
+    check_parser.set_defaults(handler=commands.mesh_upgrade_check)
     etcd_actions(mesh_actions, options)
+
+
+def seconds(text: str) -> int:
+    """A whole number of seconds, zero or more"""
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"not a number of seconds: {text}") from None
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"not a number of seconds: {text}")
+    return value
 
 
 def etcd_actions(mesh_actions, options: Options) -> None:
@@ -237,3 +259,20 @@ def etcd_actions(mesh_actions, options: Options) -> None:
     window(options, tend_parser)
     options.root(tend_parser, "tend etcd in")
     tend_parser.set_defaults(handler=commands.mesh_etcd_tend)
+    gate_parser = etcd_subs.add_parser(
+        "gate",
+        help="restart etcd one member at a time: `stop` waits until every"
+        " other member is healthy and none restarts, and takes the restart"
+        " lock; `started` waits until this member is back and releases it;"
+        " what keel-overlay-etcd's drop-in of etcd.service runs (root)",
+    )
+    options.common(gate_parser)
+    gate_parser.add_argument("step", choices=("stop", "started"),
+                             help="before etcd stops, or once it started")
+    gate_parser.add_argument(
+        "--wait", type=seconds, default=None, metavar="SECONDS",
+        help="how long to wait (stop: 300, then it stops anyway; started:"
+        " 120)",
+    )
+    options.root(gate_parser, "gate etcd in")
+    gate_parser.set_defaults(handler=commands.mesh_etcd_gate)

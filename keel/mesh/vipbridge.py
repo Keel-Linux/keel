@@ -50,7 +50,8 @@ from keel.network.marker import path as rooted
 
 UNIT = "keel-vip-control"
 CREDENTIALS = 3
-OPS = ("facts", "held", "take", "sign", "hold", "carry", "drop", "carried")
+OPS = ("facts", "held", "take", "sign", "hold", "carry", "drop", "carried",
+       "bounded")
 
 
 def unit_name(root: str) -> str:
@@ -153,6 +154,8 @@ def answered(ops: Ops, data: bytes) -> dict:
                      str(found["why"])[:200],
                      None if lease is None else str(lease))
             return {"ok": None}
+        if op == "bounded":
+            return {"ok": ops.bounded(str(found["vip"]))}
         return {"ok": ops.carried(str(found["vip"]))}
     except (ValueError, KeyError, TypeError, AttributeError,
             binascii.Error, ProtocolError, VipError, NodeError,
@@ -220,6 +223,9 @@ class Remote(Ops):
 
     def carried(self, vip: str) -> bool | None:
         return self.ask("carried", vip=vip)
+
+    def bounded(self, vip: str) -> bool | None:
+        return self.ask("bounded", vip=vip)
 
 
 def credentials(root: str) -> tuple[str, str, str]:
@@ -294,10 +300,11 @@ def serve(here: Here, stop: threading.Event,
                 where, here.node.run, here.node.output,
                 unit_name(here.root))))(path)
             with accepted(server, started, here.err) as conn:
+                found = endpoints(here)
                 with pem_fds(*texts) as fds:
                     socket.send_fds(conn, [json.dumps({
-                        "endpoint": etcdstate.client_url(
-                            etcdstate.LOOPBACK)}).encode() + b"\n"], fds)
+                        "endpoint": found[0], "endpoints": found}).encode()
+                        + b"\n"], fds)
                 while (data := memberd.message(conn, stop)) is not None:
                     send(conn, answered(ops, data))
     except (BridgeError, OSError) as e:
@@ -307,8 +314,30 @@ def serve(here: Here, stop: threading.Event,
         if started is not None:
             started.stop()
         stop.set()
-        vipetcd.stopped(here)
+        # an address with a lifetime is left to the unit's ExecStopPost,
+        # which keeps it while the unit restarts (keel.mesh.vipunit); one
+        # with none is dropped here, whatever comes next
+        vipetcd.stopped(here, restarting=True)
     return code
+
+
+def endpoints(here: Here) -> list[str]:
+    """Where the controller asks etcd: this member first, then every
+    other member of the cluster record, so the holder still renews while
+    its own etcd restarts. A renewal counts only once a linearizable read
+    answers after it, whichever member relays it: the majority confirms
+    it, and a holder cut off reaches no member at all."""
+    found = [etcdstate.client_url(etcdstate.LOOPBACK)]
+    try:
+        cluster = etcdstate.cluster(here.root)
+        own = here.overlay().get("address", "").partition("/")[0]
+    except (etcdstate.StateError, NodeError, ValueError):
+        return found
+    for member in cluster.members if cluster else ():
+        url = etcdstate.client_url(member.address)
+        if member.address != own and url not in found:
+            found.append(url)
+    return found
 
 
 PR_SET_NO_NEW_PRIVS = 38
@@ -352,7 +381,9 @@ def control(path: str, err: Callable[[str], None],
         message, fds, _, _ = socket.recv_fds(sock, bridge.MAX_MESSAGE,
                                              CREDENTIALS)
         try:
-            endpoint = str(json.loads(message.decode())["endpoint"])
+            sent = json.loads(message.decode())
+            found = tuple(str(one) for one in sent.get("endpoints") or
+                          (sent["endpoint"],))
             tls = context(*(f"/proc/self/fd/{one}" for one in fds))
         except (ValueError, KeyError, TypeError, OSError,
                 ssl.SSLError) as e:
@@ -362,7 +393,7 @@ def control(path: str, err: Callable[[str], None],
         finally:
             for one in fds:
                 os.close(one)
-        client = Client((endpoint,), tls, vipetcd.CALL_TIMEOUT)
+        client = Client(found, tls, vipetcd.CALL_TIMEOUT)
         err("the VIP's controller runs, without capabilities")
         stop = stop or threading.Event()
         vipetcd.Controller(Remote(sock, stop), lambda: client, stop,

@@ -1,3 +1,31 @@
+keel (0.21.0) unstable; urgency=medium
+
+  * Upgrades keep the VIP (the maintainer's requirement of 2026-10-10).
+    The holder carries the VIP with a lifetime, valid_lft, of what is
+    left of the 10 s release time after its last renewal the majority
+    confirmed: the kernel removes it by then whatever becomes of the
+    controller, stopped, restarting, crashed or frozen (the frozen
+    process was the one case docs/vip.md said it did not cover).
+  * keel-vip.service restarted keeps the VIP: the helper no longer drops
+    an address with a lifetime as it stops; keel vip tend --stopped
+    (ExecStopPost) keeps it while the unit restarts (a restart job, or a
+    helper that died) and drops it on a plain stop; a new controller
+    leaves it to the kernel and extends it only once it renewed the same
+    lease. An address with no lifetime, an older keel's, is dropped.
+  * The controller renews through every member of the cluster record
+    after its own, so the holder renews while its own etcd restarts; a
+    renewal still counts only once a linearizable read answers after it.
+  * keel mesh etcd gate stop|started, the ExecStop and ExecStartPost of
+    keel-overlay-etcd's drop-in for etcd.service: etcd restarts one
+    member at a time, behind a restart lock on a lease, once every other
+    voter is healthy. keel mesh upgrade-check says whether this node may
+    be upgraded now, and whether it holds a VIP.
+  * docs/vip.md, "Upgrading a pair without downtime"; docs/mesh.md, "keel
+    mesh etcd gate, and upgrades". tests/test_vip_upgrade_netns.py, the
+    CI job vip-upgrade / trixie, measures each upgrade-style restart.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Thu, 08 Oct 2026 12:00:00 +0000
+
 keel (0.20.1) unstable; urgency=medium
 
   * An overlay an upgrade adds to the appliance's chain no longer makes
