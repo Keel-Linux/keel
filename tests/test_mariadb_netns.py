@@ -182,7 +182,12 @@ class TestAMariadbPairOnAPoorNetwork(unittest.TestCase):
         self.assertEqual(found["k104_boot_read_only"], "1", found)
         follow = found["k104_follow_at_boot"]
         self.assertIsNone(follow["problem"], follow)
-        self.assertIn("not proven", " ".join(follow["lines"]), follow)
+        # the follow at boot finds the claim not proven, or, when A's
+        # controller learned B's newer epoch first, rejoins at once
+        # (keel#94): either way it never makes A writable
+        said = " ".join(follow["lines"])
+        self.assertTrue("not proven" in said or "rejoined" in said, follow)
+        self.assertNotIn("read_only OFF", said, follow)
         self.assertEqual(found["k104_after_follow"], "1", found)
         self.assertIsNotNone(found["k104_replica_s"],
                              found["k104_a_follow_log"])
