@@ -62,7 +62,10 @@ class WithEtcd(Pair):
         return code, "\n".join(said)
 
     def carry_soon(self, here, vip):
-        index = self.all.index(here)
+        # a promote with --old-primary-gone acts as a copy of the node
+        # whose asks of the old primary are bounded (keel#108)
+        index = next(i for i, one in enumerate(self.all)
+                     if one.root == here.root)
         self.sleep(vipetcd.RENEW)
         self.turn(index)
         return self.carried(index)
@@ -212,6 +215,59 @@ class TestPromoteWithEtcd(WithEtcd):
         code, said = self.promote(1, gone=True)
         self.assertEqual(code, exits.OK, said)
         self.assertTrue(self.carried(1))
+
+    def slow_old_primary(self, seconds: float, answers: bool):
+        """Node 0 answers node 1 only after `seconds`, or not at all"""
+        import time
+        from keel.mesh.memberlink import LinkError
+        real = self.all[1].exchange
+        asked: list[str] = []
+
+        def exchange(at: str, iface: str, body: bytes) -> bytes:
+            if at == address(0):
+                asked.append(at)
+                time.sleep(seconds)
+                if not answers:
+                    raise LinkError(f"[{at}]:51821 through {iface}: timed out")
+            return real(at, iface, body)
+        self.all[1].exchange = exchange
+        return asked
+
+    def test_with_etcd_the_gone_old_primary_costs_the_bound(self):
+        """keel#108: with etcd formed, the lease fences the old primary,
+        so each ask of it waits at most the bound"""
+        import time
+        self.promote(0)
+        self.turn()
+        asked = self.slow_old_primary(1.0, answers=False)
+        self.kv.leases[self.lease()] = self.monotonic() + 5
+        started = time.monotonic()
+        with mock.patch.object(vipnode, "GONE_BOUND", 0.2):
+            code, said = self.promote(1, gone=True)
+        self.assertEqual(code, exits.OK, said)
+        self.assertIn("no answer within 0.2 s", said)
+        self.assertTrue(self.carried(1))
+        self.assertGreaterEqual(len(asked), 1, asked)
+        # the late asks were joined before the promote returned
+        self.assertLess(time.monotonic() - started, 6.0)
+
+    def test_an_old_primary_that_answers_after_the_bound_still_drops_it(
+            self):
+        """The ask goes on after the bound, and the promote waits for it
+        before it returns: a live old primary that is slow still gets
+        the release and drops the VIP"""
+        self.promote(0)
+        self.turn()
+        self.assertTrue(self.carried(0))
+        self.slow_old_primary(0.6, answers=True)
+        self.kv.leases[self.lease()] = self.monotonic() + 5
+        with mock.patch.object(vipnode, "GONE_BOUND", 0.2):
+            code, said = self.promote(1, gone=True)
+        self.assertEqual(code, exits.OK, said)
+        self.assertIn("no answer within 0.2 s", said)
+        self.assertFalse(self.carried(0))
+        self.assertTrue(vipnode.current(self.all[0], VIP).released or
+                        not vipnode.current(self.all[0], VIP).holds(KEYS[0]))
 
     def test_etcd_that_does_not_answer(self):
         self.kv.refuse = "connect"

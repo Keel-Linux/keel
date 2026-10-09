@@ -13,6 +13,7 @@ from vip_helpers import KEYS, NOW, VIP, FakeNet, Pair, address
 from keel import exits
 from keel.mesh import signing, trust, vipmsg, vipnet, vipnode, vippromote
 from keel.mesh import vip as vipstate
+from keel.mesh.memberlink import LinkError
 from keel.mesh.vipnode import VipError
 from keel.network import wireguard
 
@@ -90,6 +91,30 @@ class TestPromote(Pair):
         self.assertIn("took epoch 2", "\n".join(said))
         self.assertEqual(vipstate.role(self.all[0].node.document(), held,
                                        KEYS[0]), "replica")
+
+    def test_without_etcd_a_slow_old_primary_still_releases_first(self):
+        """keel#108's safety review: without etcd nothing fences a live
+        old primary, so its release is waited for with the channel's
+        full timeout, never the 1.5 s bound (a slow but live old primary
+        must not stay writable beside the new one)"""
+        import time
+        from unittest import mock
+        self.nodes()
+        self.promote(0)
+        real = self.all[1].exchange
+
+        def slow(at: str, iface: str, body: bytes) -> bytes:
+            if at == address(0):
+                time.sleep(0.6)
+            return real(at, iface, body)
+        self.all[1].exchange = slow
+        with mock.patch.object(vipnode, "GONE_BOUND", 0.3):
+            code, said = self.promote(1, gone=True)
+        self.assertEqual(code, exits.OK, said)
+        self.assertIn(f"released by {address(0)}", said)
+        self.assertNotIn("no answer within", said)
+        self.assertFalse(self.carried(0))
+        self.assertTrue(self.carried(1))
 
     def test_a_node_that_declares_no_vip_promotes_nothing(self):
         self.nodes()

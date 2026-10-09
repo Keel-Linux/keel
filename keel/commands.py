@@ -484,10 +484,13 @@ def database_status(args) -> int:
 def promote_vip(args, doc: dict, root: str, dry_run: bool) -> int:
     """The pair's VIP first, when the spec declares one (decision 0049,
     third round): the old primary releases it before this node's
-    database takes writes, so writes never reach two primaries; a
-    database left read only by a promote that failed after it is
-    reachable at the VIP and refuses them until the promote is run
-    again"""
+    database takes writes. With --old-primary-gone the release is not
+    waited for: with etcd the old primary's lease fences it; without
+    etcd an old primary that is alive but cannot be reached stays
+    writable until it learns the newer claim, which is why only the
+    operator may say it is gone. A database left read only by a promote
+    that failed after it is reachable at the VIP and refuses writes
+    until the promote is run again"""
     from keel.mesh import vipcli, vippromote
     appliance = doc.get("appliance")
     if not isinstance(appliance, dict) or not appliance.get("vip"):

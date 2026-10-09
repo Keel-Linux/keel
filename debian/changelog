@@ -1,3 +1,20 @@
+keel (0.23.8) unstable; urgency=medium
+
+  * keel vip promote --old-primary-gone took 30.5 s on a real pair with
+    the old primary dead: it waited three times for the members'
+    channel's 10 s timeout, for the epoch, the release and the
+    announcement (keel#108). With --old-primary-gone and etcd formed,
+    each ask of the old primary now waits at most 1.5 s, and the other
+    peers are not held up; the promote still waits for the old
+    primary's lease to go and never revokes it (decision 0049). The ask
+    goes on after the bound and the promote waits for it before it
+    returns, so a slow live old primary still gets the release. Without
+    etcd nothing fences a live old primary, so its asks keep the full
+    timeout; the help and docs/vip.md say that such an old primary stays
+    writable until it learns the newer claim.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 09 Oct 2026 18:00:00 +0000
+
 keel (0.23.7) unstable; urgency=medium
 
   * A node that joins a mesh built by hand gets all the members as peers

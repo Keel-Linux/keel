@@ -161,7 +161,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="with appliance.vip: the old primary does not answer and you"
         " know it is gone; the VIP moves without its release (keel vip"
-        " promote --old-primary-gone)",
+        " promote --old-primary-gone). Without etcd, an old primary that"
+        " is alive but cannot be reached stays writable until it learns"
+        " the newer claim",
     )
     add_root_option(promote_parser, "promote")
     promote_parser.set_defaults(handler=commands.database_promote)

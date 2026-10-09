@@ -41,7 +41,9 @@ def add(subparsers, options) -> None:
         "--old-primary-gone", action="store_true",
         help="the old primary does not answer and you know it is gone:"
         " take the VIP without its release (with etcd, once its lease"
-        " expired; never revoked)",
+        " expired; never revoked). Without etcd, an old primary that is"
+        " alive but cannot be reached stays writable until it learns the"
+        " newer claim",
     )
     options.root(promote_parser, "promote the VIP of")
     promote_parser.set_defaults(handler=vip_promote)
