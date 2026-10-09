@@ -766,8 +766,11 @@ def command(here: vipnode.Here, words: list[str]) -> dict | None:
         REMEMBERED.append(now.epoch.raw)
         return {"epoch": now.epoch.epoch}
     if words[:1] == ["epoch"]:
+        # the driver's own read, not the controller's: tried again, as a
+        # single read of 2 s can be lost on the link (keel#94)
         try:
-            now = vipetcd.seen(vipetcd.local(here), here.mesh_id()).get(VIP)
+            now = again(lambda: vipetcd.seen(vipetcd.local(here),
+                                             here.mesh_id())).get(VIP)
         except EtcdError as e:
             return {"error": str(e)[:200]}
         return {"epoch": now.epoch.epoch if now and now.epoch else None,

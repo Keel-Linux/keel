@@ -102,6 +102,7 @@ def restarted(how: str, index: int, pids: list[int], samples_: list[dict],
             "gap_s": gap(answers(log), at - 1, time.time()),
             "epoch_before": before.get("epoch"),
             "epoch_after": after.get("epoch"),
+            "epoch_error": before.get("error") or after.get("error"),
             "holder_after": after.get("holder"),
             "holders_seen": window(samples_, at),
             "holders_after": held_by(pids),
@@ -206,7 +207,9 @@ def scenario(report: dict, pids: list[int], pairs, roots: list[str],
         found["gap_s"] = gap(answers(log), found["at"] - 1, time.time())
         found["quorum"] = quorum(roots, index, found["at"], time.time())
         found["epoch_before"] = before.get("epoch")
-        found["epoch_after"] = epoch().get("epoch")
+        after = epoch()
+        found["epoch_after"] = after.get("epoch")
+        found["epoch_error"] = before.get("error") or after.get("error")
         found["holders_seen"] = window(samples_, found["at"])
         report["etcd_restarts"].append(found)
 
