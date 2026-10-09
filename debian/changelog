@@ -1,3 +1,20 @@
+keel (0.23.6) unstable; urgency=medium
+
+  * A change of the overlay's peers alone is done live with wg set on an
+    interface that is up, and so is its revert (keel#99). The other
+    peers keep their sessions. Before, wg-quick down and up removed the
+    interface, and a repair of keel mesh sync cut an etcd voter from its
+    leader for about 25 s two times each hour.
+  * keel compares the new file with what wg show <interface> dump says
+    the interface holds, so drift of the interface is corrected, as the
+    bounce corrected it. An address that keel set live (a VIP) and an
+    endpoint that WireGuard learned stay.
+  * A change of [Interface], a listen port that is not the file's, a
+    peer address outside the interface's prefixes, an interface that is
+    not up, or a wg set that fails still uses wg-quick down and up.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 09 Oct 2026 14:00:00 +0000
+
 keel (0.23.5) unstable; urgency=medium
 
   * A cloud simple pair could not get its database certificate when the

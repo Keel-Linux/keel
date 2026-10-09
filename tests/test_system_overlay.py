@@ -75,6 +75,8 @@ class TestPlan(unittest.TestCase):
                           ("fd00:1::1",)))
         self.assertEqual(switch.content, RENDERED)
         self.assertIn("wg-quick down, then up", switch.describe())
+        self.assertIn("a change of its peers alone with wg set, live",
+                      switch.describe())
         self.assertIn("over the overlay or the uplink", switch.describe())
 
     def test_missing_tools_are_refused_first(self):

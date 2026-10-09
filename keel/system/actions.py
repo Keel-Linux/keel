@@ -350,7 +350,8 @@ class SwitchNetwork:
         if self.kind == "overlay":
             return (
                 f"bring the overlay {self.iface} up on a new /{self.path}"
-                f" (wg-quick down, then up); it reverts in {self.window} s"
+                " (wg-quick down, then up; a change of its peers alone with"
+                f" wg set, live); it reverts in {self.window} s"
                 " unless `keel network confirm` is run from a new session,"
                 " over the overlay or the uplink"
                 + ("; it is down now, and a revert leaves it down"

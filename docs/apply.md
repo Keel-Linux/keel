@@ -1413,7 +1413,22 @@ goes through the same window, marker, lock, timers and boot unit, with
   outgoing file (a failure is not fatal: an interface that is not up has
   nothing to take down), the new file put in place, `wg-quick up` on it. A
   change that created the file reverts by removing it, which leaves the
-  interface down, as it was. A change is dated on the clock a session's
+  interface down, as it was. **A change of the peers alone** on an
+  interface that is up is made live instead: keel compares the new file
+  with what `wg show <interface> dump` says the interface holds, gives
+  one `wg set` to each peer that differs (a peer no file names is
+  removed, a peer the interface lacks is set), then puts the file in
+  place; its revert goes the same way back. So drift of the interface
+  is corrected, as the bounce corrected it. An address that a peer
+  holds and no file names (a VIP, set live) stays, and so does an
+  endpoint WireGuard learned for a peer the file gives none. The other
+  peers keep their sessions; the bounce
+  ends every session, and on an etcd member it cut the member from its
+  leader for about 25 s (keel#99). The bounce stays for a change of
+  `[Interface]`, a line keel does not write, a peer address outside the
+  interface's own prefixes (wg-quick routes it, `wg set` does not), a
+  listen port that is not the file's, an interface that is not up, and
+  a `wg set` that fails. A change is dated on the clock a session's
   start time is read on (the start of a thread, in seconds since the
   host's boot), not `/proc/uptime`, which lxcfs counts from a container's
   start.
