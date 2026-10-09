@@ -1,3 +1,22 @@
+keel (0.23.10) unstable; urgency=medium
+
+  * After keel vip promote --old-primary-gone the new primary refused
+    writes for 11.7 s while it carried the VIP (keel#118). keel database
+    follow promoted the database 7.5 s after the VIP landed: STOP SLAVE
+    IO_THREAD waits until the I/O thread ends, which with a dead primary
+    takes up to 10 s (a try to connect) or 5 s (the semi-synchronous
+    kill of the dump thread). The thread receives nothing once the stop
+    marks it killed. The promotion now runs the stop in a client of its
+    own; once the stop is in the server's killing phase, the SQL thread
+    drains, the received position and the killing phase are checked
+    again, and read_only goes off; the I/O thread is
+    waited for and the primary forgotten after. When anything
+    arrived after the drain, the old order applies. A planned promote
+    takes the same path. Spec apply's replication actions take follow's
+    lock. Follow looks for the VIP every 0.2 s, not 0.5 s.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 09 Oct 2026 19:00:00 +0000
+
 keel (0.23.9) unstable; urgency=medium
 
   * With etcd, two nodes could carry the VIP for less than a second

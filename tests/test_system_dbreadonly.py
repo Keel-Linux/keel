@@ -30,10 +30,12 @@ ACCOUNTS = (
 def status(sql: str = "Yes", read: int = 900, executed: int = 900,
            read_file: str = "mariadb-bin.000002",
            executed_file: str = "mariadb-bin.000002",
-           error: str = "") -> str:
+           error: str = "", io: str | None = None) -> str:
     """SHOW REPLICA STATUS\\G as the server prints it, the fields read"""
     return (
         "*************************** 1. row ***************************\n"
+        + (f"             Slave_IO_Running: {io}\n" if io else "")
+        +
         f"              Master_Log_File: {read_file}\n"
         f"          Read_Master_Log_Pos: {read}\n"
         f"        Relay_Master_Log_File: {executed_file}\n"
@@ -71,6 +73,10 @@ class Runner:
     @staticmethod
     def key(argv, stdin: str) -> str:
         asked = argv[-1] if "--execute" in argv else ""
+        if "PROCESSLIST" in asked:
+            return "stopping"
+        if asked == "STOP SLAVE IO_THREAD":
+            return "stop-io"
         if "READ_ONLY ADMIN" in asked:
             return "bypass"
         if "mysql.user" in asked:
@@ -83,6 +89,10 @@ class Runner:
             return "grant"
         if "RESET SLAVE ALL" in stdin:
             return "promote"
+        if "STOP SLAVE SQL_THREAD" in stdin:
+            return "sql-stop"
+        if "read_only = OFF" in stdin:
+            return "writable"
         if "START SLAVE IO_THREAD" in stdin:
             return "resume"
         if "STOP SLAVE IO_THREAD" in stdin:
@@ -271,12 +281,167 @@ class TestPromote(ReadOnlyTestCase):
             self.root, PromoteReplica(60), runner, clock, clock.sleep
         )
 
+    def spawned(self, events: list[str], code: int = 0):
+        """STOP SLAVE IO_THREAD in a client of its own that is still
+        running (a primary that is gone) until it is waited for"""
+        test = self
+
+        class Stopping:
+            returncode = None
+            stderr = __import__("io").StringIO("ERROR 1198 stuck")
+
+            def __init__(self, argv, **kwargs):
+                test.assertEqual(argv[-1], "STOP SLAVE IO_THREAD")
+                events.append("stop-io started")
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                if self.returncode is None:
+                    events.append("stop-io ended")
+                    self.returncode = code
+                return self.returncode
+        return Stopping
+
+    def recorded(self, runner: Runner, events: list[str]) -> Runner:
+        real = runner.__call__
+
+        def call(argv, **kwargs):
+            done = real(argv, **kwargs)
+            events.append(runner.calls[-1][0])
+            return done
+        runner.__call__ = call
+        return runner
+
+    def promote_spawned(self, answers: dict, code: int = 0):
+        events: list[str] = []
+        runner = Runner(answers)
+        recording = self.recorded(runner, events)
+        clock = Clock()
+        problem = dbreadonly.promote(
+            self.root, PromoteReplica(60), recording.__call__, clock,
+            clock.sleep, self.spawned(events, code))
+        return problem, events, runner
+
+    def test_writes_do_not_wait_for_the_io_thread_to_end(self):
+        """keel#118: the stop waits seconds for a dead primary (10 s
+        connecting, 5 s for the semi-synchronous kill, measured on
+        11.8), while the thread receives nothing from the moment the
+        server shows the stop. So the server takes writes before the
+        stop ends, and forgets the primary after"""
+        problem, events, _ = self.promote_spawned({
+            "status": (0, status(io="Connecting"), ""),
+            "stopping": (0, "Killing slave\n", "")})
+        self.assertIsNone(problem, events)
+        self.assertEqual(events[:3], ["status", "stop-io started",
+                                      "stopping"])
+        self.assertNotIn("sql-stop", events)
+        self.assertLess(events.index("writable"),
+                        events.index("stop-io ended"))
+        self.assertLess(events.index("writable"), events.index("promote"))
+
+    def test_anything_received_after_the_drain_takes_the_old_order(self):
+        """The safety review of keel#118: a thread that connects again
+        (MASTER_CONNECT_RETRY 2) could receive; when the position moved
+        after the drain, the stop is waited for, the SQL thread drains
+        again, and only then does the server take writes"""
+        problem, events, runner = self.promote_spawned({
+            "status": [(0, status(io="Yes", read=900, executed=900), ""),
+                       (0, status(io="Yes", read=900, executed=900), ""),
+                       (0, status(io="Yes", read=950, executed=900), ""),
+                       (0, status(io="No", read=950, executed=950), "")],
+            "stopping": (0, "Killing slave\n", "")})
+        self.assertIsNone(problem, events)
+        self.assertNotIn("writable", events)
+        self.assertLess(events.index("stop-io ended"),
+                        events.index("promote"))
+        self.assertEqual(runner.sent("promote"),
+                         "STOP SLAVE;\nRESET SLAVE ALL;\n"
+                         "SET GLOBAL read_only = OFF;\n")
+
+    def test_a_stop_the_server_does_not_show_is_waited_for_first(self):
+        problem, events, _ = self.promote_spawned({
+            "status": (0, status(io="Connecting"), ""),
+            "stopping": (0, "starting\n", "")})
+        self.assertIsNone(problem, events)
+        self.assertLess(events.index("stop-io ended"),
+                        events.index("writable"))
+
+    def test_a_stop_not_yet_killing_after_the_drain_takes_the_old_order(
+            self):
+        """The re-review of keel#118: INFO is set when the statement is
+        dispatched, before the stop takes its lock; only the killing
+        phase, before and after the drain, lets writes come first"""
+        problem, events, runner = self.promote_spawned({
+            "status": (0, status(io="Connecting"), ""),
+            "stopping": [(0, "Killing slave\n", ""),
+                         (0, "Waiting for the stop lock\n", "")]})
+        self.assertIsNone(problem, events)
+        self.assertNotIn("writable", events)
+        self.assertLess(events.index("stop-io ended"),
+                        events.index("promote"))
+        self.assertEqual(runner.sent("promote"),
+                         "STOP SLAVE;\nRESET SLAVE ALL;\n"
+                         "SET GLOBAL read_only = OFF;\n")
+
+    def test_a_stop_that_fails_promotes_nothing_and_resumes(self):
+        problem, events, _ = self.promote_spawned({
+            "status": (0, status(io="Connecting"), ""),
+            "stopping": (0, "starting\n", "")}, code=1)
+        self.assertIn("ERROR 1198 stuck", problem)
+        self.assertIn("Nothing was promoted", problem)
+        # the server may have taken the stop before its client died
+        self.assertIn("The I/O thread was started again", problem)
+        self.assertIn("resume", events)
+        self.assertNotIn("writable", events)
+
+    def test_failures_after_the_stop_are_said(self):
+        for key, said in (("writable", "set read_only OFF"),):
+            with self.subTest(key=key):
+                problem, events, runner = self.promote_spawned({
+                    "status": (0, status(io="Connecting"), ""),
+                    "stopping": (0, "Killing slave\n", ""),
+                    key: (1, "", "ERROR 1290")})
+                self.assertIn("ERROR 1290", problem)
+                self.assertIn(said, problem)
+                self.assertIn("stop-io ended", events)
+                self.assertNotIn("promote", events)
+        problem, events, _ = self.promote_spawned({
+            "status": (0, status(io="Connecting"), ""),
+            "stopping": (0, "Killing slave\n", ""),
+            "promote": (1, "", "ERROR 2013")})
+        self.assertIn("takes writes", problem)
+        self.assertIn("ERROR 2013", problem)
+
+    def test_a_status_lost_after_the_sql_thread_stopped_takes_the_old_order(
+            self):
+        problem, events, runner = self.promote_spawned({
+            "status": [(0, status(io="Connecting"), ""),
+                       (0, status(io="Connecting"), ""),
+                       (1, "", "ERROR 2013"),
+                       (0, status(io="No"), "")],
+            "stopping": (0, "Killing slave\n", "")})
+        self.assertIsNone(problem, events)
+        self.assertNotIn("writable", events)
+        self.assertIn("promote", events)
+
+    def test_a_client_that_cannot_start_the_stop(self):
+        def broken(argv, **kwargs):
+            raise FileNotFoundError(2, "No such file or directory")
+        clock = Clock()
+        problem = dbreadonly.promote(
+            self.root, PromoteReplica(60), Runner({"status": (
+                0, status(), "")}), clock, clock.sleep, broken)
+        self.assertIn("cannot run runuser", problem)
+
     def test_the_io_thread_stops_before_anything_else(self):
         runner = Runner({"status": (0, status(), "")})
         self.assertIsNone(self.promote(runner))
         keys = runner.keys()
-        self.assertLess(keys.index("stop-io"), keys.index("promote"))
-        self.assertEqual(runner.sent("stop-io"), "STOP SLAVE IO_THREAD;\n")
+        self.assertEqual(keys[1], "stop-io")
+        self.assertLess(keys.index("stop-io"), keys.index("writable"))
+        self.assertLess(keys.index("writable"), keys.index("promote"))
 
     def test_it_waits_for_the_sql_thread_to_apply_the_backlog(self):
         runner = Runner({"status": [
@@ -289,8 +454,9 @@ class TestPromote(ReadOnlyTestCase):
         self.assertIsNone(self.promote(runner, clock))
         self.assertEqual(clock.slept, 2)
         keys = runner.keys()
-        self.assertEqual(keys.count("status"), 4)
-        self.assertGreater(keys.index("promote"),
+        # the drain's four, and one more after the SQL thread stopped
+        self.assertEqual(keys.count("status"), 5)
+        self.assertGreater(keys.index("writable"),
                            len(keys) - 1 - keys[::-1].index("status"))
 
     def test_a_backlog_in_an_older_binary_log_file_is_not_drained(self):
@@ -306,9 +472,11 @@ class TestPromote(ReadOnlyTestCase):
     def test_then_it_forgets_the_primary_and_takes_writes(self):
         runner = Runner({"status": (0, status(), "")})
         self.promote(runner)
+        self.assertEqual(runner.sent("writable"),
+                         "SET GLOBAL read_only = OFF;\n")
         self.assertEqual(
             runner.sent("promote"),
-            "STOP SLAVE;\nRESET SLAVE ALL;\nSET GLOBAL read_only = OFF;\n",
+            "STOP SLAVE;\nRESET SLAVE ALL;\n",
         )
 
     def test_giving_the_privilege_back_is_not_its_business(self):

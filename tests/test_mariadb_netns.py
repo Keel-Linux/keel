@@ -210,6 +210,12 @@ class TestAMariadbPairOnAPoorNetwork(unittest.TestCase):
         said = " ".join(self.found["k104_promote"]["out"])
         self.assertIn("no answer within 1.5 s", said)
         self.assertNotIn("timed out", said)
+        # follow does not lag the VIP (keel#118: 7.5 s on real nodes)
+        self.assertLess(found["writable_after_carried_s"], 3.0, found)
+        # with etcd the old primary's lease must expire before the claim
+        # (0049); after the VIP lands, the writes resume within 3 s
+        self.assertLess(found["first_ok_after_s"] - found["carried_s"], 3.0,
+                        found)
 
     def test_no_two_nodes_ever_carry_the_vip(self):
         self.assertEqual(self.found["max_holders"], 1,

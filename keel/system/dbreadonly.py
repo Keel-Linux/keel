@@ -31,9 +31,13 @@ apply would be lost.
 keel.system.effects is the only caller.
 """
 
+import contextlib
+import fcntl
+import io
 import os
 import subprocess
 import time
+from collections.abc import Iterator
 
 from keel.inspect.dbengines import grantee, own_account
 from keel.inspect.dbreading import field_lines
@@ -50,6 +54,25 @@ ACCOUNTS_QUESTION = QUIET + ("SELECT User, Host FROM mysql.user",)
 STATUS_QUESTION = mariadb.CLIENT + ("--execute", "SHOW REPLICA STATUS\\G")
 NO_BINLOG = "SET SESSION sql_log_bin = 0;\n"
 POLL_SECONDS = 1.0
+# the lock follow and spec apply take around the replication's statements
+REPLICATION_LOCK = "var/lib/keel/database/follow.lock"
+IO_STOP = "STOP SLAVE IO_THREAD"
+# subprocess.run as the module found it: a runner that is anything else
+# (a test's) runs the stop to its end itself
+REAL_RUN = subprocess.run
+# the stop running in the server: its own statement, exactly
+STOPPING_QUESTION = QUIET + (
+    "SELECT STATE FROM information_schema.PROCESSLIST"
+    " WHERE INFO = 'STOP SLAVE IO_THREAD'",
+)
+# the stop's STATE while it kills the thread (sql/slave.cc stop_slave)
+KILLING = "Killing slave"
+# how long the stop may take to show in the server, and how often it is
+# looked for; how long it may take to end (slave_net_timeout and the
+# 5 s of the semi-synchronous kill, with room)
+SHOWN_WAIT = 5.0
+SHOWN_POLL = 0.1
+STOP_WAIT = 60
 
 NOT_REPLICATING = (
     "this server replicates from nowhere, so there is nothing to promote."
@@ -132,9 +155,37 @@ def unlock(root: str, runner=subprocess.run) -> str | None:
 
 def promote(
     root: str, action, runner=subprocess.run, clock=time.monotonic,
-    sleep=time.sleep,
+    sleep=time.sleep, spawn=None,
 ) -> str | None:
-    """Drain the SQL thread, then promote; None on success, else why not"""
+    """Stop receiving, drain, then take writes; None on success, else
+    why not
+
+    STOP SLAVE IO_THREAD can take seconds when the primary is dead
+    (keel#118). Measured on 11.8: a thread that tries to connect ends
+    only when the try times out (slave_net_timeout, 10 s); a connected
+    thread with semi-synchronous replication tries to connect to the
+    primary to end its dump thread (5 s). So the stop runs in a client
+    of its own, and read_only goes off before it ends only when all of
+    this holds:
+
+    - the stop is in the server's killing phase (its process list STATE
+      is "Killing slave"), or it ended without an error, both before
+      the drain and again after it: the server marks the I/O thread
+      killed in that phase, and a killed thread receives no more events
+      (it leaves its read loop, and one that connects ends before it
+      asks for the binary log);
+    - the SQL thread applied everything received (the drain);
+    - the received position read after the drain is the drained one.
+
+    Otherwise the old order applies: the stop waited for, the drain
+    again, then the promotion. The guarantee is the old order's: read_only
+    goes off only once the I/O thread receives nothing and the SQL thread
+    applied all it received. The SQL thread is not stopped first: it has
+    nothing more to apply, and STOP SLAVE SQL_THREAD waits behind the I/O
+    thread's stop (4.7 s measured). The I/O thread is waited for and the
+    primary forgotten after. A planned promote takes the same path; its
+    stop ends at once, since the primary answers.
+    """
     values, problem = _status(runner)
     if problem:
         return f"cannot read the replica status: {problem}. Nothing was" \
@@ -143,11 +194,139 @@ def promote(
         return NOT_REPLICATING
     if values.get("Slave_SQL_Running", "").lower() != "yes":
         return STOPPED.format(error=_error(values))
-    problem = _send(runner, "STOP SLAVE IO_THREAD;\n")
+    stopping, problem = _stop_io(runner, spawn)
     if problem:
         return f"stopping the I/O thread failed ({problem}). Nothing was" \
             " changed"
-    problem = _drain(runner, action.timeout, clock, sleep)
+    if not _stop_shown(runner, stopping, clock, sleep):
+        problem = _waited(stopping)
+        if problem:
+            # the server may have taken the statement before the client
+            # died: the I/O thread is started again either way
+            return f"stopping the I/O thread failed ({problem}). Nothing" \
+                " was promoted" + _resume(runner)
+    problem, drained = _drain(runner, action.timeout, clock, sleep)
+    if problem:
+        _waited(stopping)
+        return problem + _resume(runner)
+    # the SQL thread is left running: it has nothing more to apply, and
+    # STOP SLAVE SQL_THREAD would wait behind the I/O thread's stop
+    after, problem = _status(runner)
+    if problem or _received(drained, after) or \
+            not _killing(runner, stopping):
+        return _promote_in_order(runner, stopping, action.timeout, clock,
+                                 sleep)
+    writable = mariadb.set_read_only(False)
+    problem = _send(runner, writable.text)
+    if problem:
+        _waited(stopping)
+        return f"{writable.summary} failed: {problem}"
+    forget = mariadb.stop_replicating()
+    problem = _send(runner, forget.text)
+    _waited(stopping)
+    if problem:
+        return (f"the server takes writes, but {forget.summary} failed:"
+                f" {problem}. Run STOP SLAVE; RESET SLAVE ALL before its"
+                " next restart")
+    return None
+
+
+@contextlib.contextmanager
+def replication_locked(root: str) -> Iterator[None]:
+    """One writer of the replication's statements at a time: keel
+    database follow, keel database watch's follow and spec apply's
+    replication actions (keel#118)"""
+    path = os.path.join(root, REPLICATION_LOCK)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+class _Ran:
+    """A client that already ran to its end, as a process looks"""
+
+    def __init__(self, done):
+        self.returncode = done.returncode
+        self.stderr = io.StringIO(done.stderr or "")
+
+    def poll(self) -> int:
+        return self.returncode
+
+    def wait(self, timeout=None) -> int:
+        return self.returncode
+
+
+def _stop_io(runner, spawn):
+    """STOP SLAVE IO_THREAD in a client of its own, `spawn` (Popen when
+    the runner is subprocess.run); with another runner, run to its end
+    by it. (the process, why it could not start)"""
+    argv = list(QUIET) + [IO_STOP]
+    try:
+        if spawn is None and runner is not REAL_RUN:
+            return _Ran(runner(argv, capture_output=True, text=True,
+                               check=False)), ""
+        return (spawn or subprocess.Popen)(
+            argv, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            text=True), ""
+    except OSError as e:
+        return None, f"cannot run {mariadb.CLIENT[0]}: {e.strerror}"
+
+
+def _stop_shown(runner, stopping, clock, sleep) -> bool:
+    """Whether the stop reached the server's killing phase, waited for
+    up to SHOWN_WAIT"""
+    deadline = clock() + SHOWN_WAIT
+    while True:
+        if _killing(runner, stopping):
+            return True
+        if stopping.poll() is not None or clock() >= deadline:
+            return False
+        sleep(SHOWN_POLL)
+
+
+def _killing(runner, stopping) -> bool:
+    """Whether the stop ended without an error, or is in the server's
+    killing phase: its process list STATE is KILLING (the statement's
+    INFO is set when it is dispatched, before the stop takes its lock,
+    so INFO alone says nothing)"""
+    done = stopping.poll()
+    if done is not None:
+        return done == 0
+    out, problem = _ask(runner, STOPPING_QUESTION)
+    return not problem and KILLING in out.splitlines()
+
+
+def _waited(stopping) -> str:
+    """The stop waited for; an empty string, or why it failed"""
+    try:
+        stopping.wait(STOP_WAIT)
+    except subprocess.TimeoutExpired:
+        return f"it did not end within {STOP_WAIT} s"
+    if stopping.returncode != 0:
+        said = stopping.stderr.read() if stopping.stderr else ""
+        return (said or "").strip() or f"exited {stopping.returncode}"
+    return ""
+
+
+def _received(drained: dict[str, str], after: dict[str, str]) -> bool:
+    """Whether the I/O thread received anything after the drain"""
+    return any(drained.get(one) != after.get(one)
+               for one in ("Master_Log_File", "Read_Master_Log_Pos"))
+
+
+def _promote_in_order(runner, stopping, timeout: int, clock,
+                      sleep) -> str | None:
+    """The old order: the stop waited for, the SQL thread started and
+    drained again, then STOP SLAVE, RESET SLAVE ALL, read_only off"""
+    problem = _waited(stopping)
+    if problem:
+        return f"stopping the I/O thread failed ({problem}). Nothing was" \
+            " promoted" + _resume(runner)
+    problem, _ = _drain(runner, timeout, clock, sleep)
     if problem:
         return problem + _resume(runner)
     statements = mariadb.promote()
@@ -166,20 +345,22 @@ def _resume(runner) -> str:
     return RESUMED
 
 
-def _drain(runner, timeout: int, clock, sleep) -> str:
-    """Wait until the SQL thread applied everything received; or why not"""
+def _drain(runner, timeout: int, clock,
+           sleep) -> tuple[str, dict[str, str]]:
+    """Wait until the SQL thread applied everything received; ("", the
+    status then), or (why not, {})"""
     deadline = clock() + timeout
     while True:
         values, problem = _status(runner)
         if problem:
             return f"the replica status could not be read while draining" \
-                f" ({problem}); nothing was promoted"
+                f" ({problem}); nothing was promoted", {}
         if values.get("Slave_SQL_Running", "").lower() != "yes":
-            return STOPPED_DRAINING.format(error=_error(values))
+            return STOPPED_DRAINING.format(error=_error(values)), {}
         if _drained(values):
-            return ""
+            return "", values
         if clock() >= deadline:
-            return SLOW.format(timeout=timeout)
+            return SLOW.format(timeout=timeout), {}
         sleep(POLL_SECONDS)
 
 

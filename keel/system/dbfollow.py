@@ -44,7 +44,6 @@ keel's statements go through the server's `mysql` account
 (keel.system.dbmariadb.CLIENT): root has no READ_ONLY ADMIN on a replica.
 """
 
-import fcntl
 import json
 import os
 import subprocess
@@ -73,7 +72,7 @@ from keel.system.dbstate import (
 )
 
 DIVERGED = "var/lib/keel/database/diverged"
-FOLLOW_LOCK = "var/lib/keel/database/follow.lock"
+FOLLOW_LOCK = dbreadonly.REPLICATION_LOCK
 BACKUPS = "var/backups/keel/mariadb"
 DROPIN_MODE = 0o644
 GTID_QUESTION = mariadb.QUIET_CLIENT + (
@@ -84,7 +83,8 @@ CHECK = "database-rejoin"
 # on wg0, before it leaves the server read only: keel vip promote's own
 # wait for the controller to carry it (keel.mesh.vippromote.CARRY_WAIT)
 PROOF_WAIT = 15.0
-PROOF_POLL = 0.5
+# how often follow looks for the VIP on wg0 while it waits (keel#118)
+PROOF_POLL = 0.2
 NO_PAIR = ("this node declares no appliance.vip: there is no VIP for the"
            " database to follow (keel spec apply converges a declared role)")
 DIVERGED_TITLE = "the old primary diverged and stays read only"
@@ -130,14 +130,8 @@ def follow(root: str, spec: str, confirmed: bool, found: Followed,
            wait: float = PROOF_WAIT, sleep=time.sleep) -> None:
     """One run at a time: keel-database-follow.service and keel database
     watch never interleave between the proof and SET read_only OFF"""
-    lock = os.path.join(root, FOLLOW_LOCK)
-    os.makedirs(os.path.dirname(lock), exist_ok=True)
-    fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+    with dbreadonly.replication_locked(root):
         _follow(root, spec, confirmed, found, runner, output, wait, sleep)
-    finally:
-        os.close(fd)
 
 
 def _follow(root: str, spec: str, confirmed: bool, found: Followed,
