@@ -65,6 +65,7 @@ import time
 from datetime import datetime, timezone
 
 import etcd_netns
+import wgtools
 from etcd_netns import (
     NAMES,
     agreed,
@@ -120,9 +121,7 @@ LISTENER_HOME = os.environ.get("KEEL_VIP_LISTENER_HOME") or ""
 
 def child(index: int) -> int:
     """A namespace joined to this one by a veth on its own /64"""
-    found = subprocess.Popen(["unshare", "-n", "sleep", "3600"],
-                             stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL)
+    found = wgtools.namespace_child(3600)
     CHILDREN.append(found)
     n = index + 1
     net = UPLINK.format(n=n)

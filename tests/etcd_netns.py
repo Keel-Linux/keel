@@ -56,6 +56,8 @@ import tempfile
 import time
 from datetime import datetime, timezone
 
+import wgtools
+
 from keel.mesh import etcdca, etcdclient, etcdconf, etcdpki, etcdstate
 from keel.mesh.etcdstate import Cluster, Member
 from keel.network import wireguard
@@ -95,9 +97,7 @@ def leg(device: str, loss: str | None = None) -> None:
 
 
 def child(index: int) -> int:
-    found = subprocess.Popen(["unshare", "-n", "sleep", "3600"],
-                             stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL)
+    found = wgtools.namespace_child(3600)
     CHILDREN.append(found)
     n = index + 1
     net = UPLINK.format(n=n)

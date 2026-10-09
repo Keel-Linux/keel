@@ -62,6 +62,8 @@ import threading
 import time
 from datetime import datetime, timezone
 
+import wgtools
+
 from keel import cli
 from keel.mesh import inviting, joining, memberd, sync
 from keel.mesh.node import Node
@@ -137,15 +139,29 @@ def node(root: str, path: str) -> Node:
     return Node(root, path, apply=netns_apply, run=Recorder())
 
 
-def ping(address: str, rounds: int = 3) -> bool:
-    """One answer of five is enough: the link may lose packets. Up to
-    three rounds: a tunnel the last change brought down and up needs a
-    new handshake, and on a poor link a lost initiation is sent again
-    only after WireGuard's 5 s rekey timeout"""
-    return any(subprocess.run(["ping", "-6", "-c", "5", "-i", "0.3", "-W",
-                               "3", address], capture_output=True,
-                              check=False).returncode == 0
-               for _ in range(rounds))
+# WireGuard sends a lost handshake initiation again after its rekey
+# timeout (5 s) and stops trying after its rekey attempt time (90 s): a
+# tunnel the last change brought down and up answers within that
+HANDSHAKE_WINDOW = 90
+
+
+def reached(address: str, within: float = HANDSHAKE_WINDOW) -> float | None:
+    """The seconds until `address` first answered a ping, asked again
+    until it does; None when it never did within `within`. The link may
+    lose packets, and a tunnel the last change brought down and up needs
+    a new handshake first"""
+    started = time.monotonic()
+    while time.monotonic() - started < within:
+        if subprocess.run(["ping", "-6", "-c", "1", "-W", "2", address],
+                          capture_output=True, check=False).returncode == 0:
+            return round(time.monotonic() - started, 2)
+    return None
+
+
+def outcome(root: str) -> str | None:
+    """How the node's last change ended; None while none ended"""
+    last = marker.last(root)
+    return last.outcome if last else None
 
 
 def joiner(token_text: str, endpoint: str, after: str) -> None:
@@ -166,13 +182,16 @@ def joiner(token_text: str, endpoint: str, after: str) -> None:
     found = joining.Joiner(here, parse(token_text, utcnow()),
                            utcnow, said, err.append)
     code = joining.run(found, endpoint)
-    last = marker.last(root)
-    report = {"code": code, "out": out, "err": err, "ping": ping(OVERLAY_A),
-              "outcome": last.outcome if last else None,
+    ping_s = reached(OVERLAY_A)
+    report = {"code": code, "out": out, "err": err,
+              "ping": ping_s is not None, "ping_s": ping_s,
+              "outcome": outcome(root),
               "address": here.overlay().get("address"),
               "key": here.public_key()[0]}
     if after not in ("serve", "-"):
-        report["ping_other"] = ping(after)
+        other_s = reached(after)
+        report["ping_other"] = other_s is not None
+        report["ping_other_s"] = other_s
         report["peers"] = [one.get("public_key")
                            for one in here.overlay().get("peers") or []]
     print("RESULT " + json.dumps(report), flush=True)
@@ -195,13 +214,14 @@ def member(here: Node, root: str) -> None:
             keys = [one.get("public_key")
                     for one in here.overlay().get("peers") or []]
             if words[2] in keys and not marker.exists(root) and \
-                    marker.last(root).outcome == marker.CONFIRMED:
+                    outcome(root) == marker.CONFIRMED:
                 break
             time.sleep(1)
-        last = marker.last(root)
+        ping_s = reached(words[1])
         print("CHECK " + json.dumps({
-            "peers": keys, "outcome": last.outcome if last else None,
-            "ping": ping(words[1]), "log": log}), flush=True)
+            "peers": keys, "outcome": outcome(root),
+            "ping": ping_s is not None, "ping_s": ping_s, "log": log}),
+            flush=True)
     stop.set()
     service.join(30)
 
@@ -285,9 +305,7 @@ def listening(host: str, port: int) -> None:
 
 def link(name: str) -> int:
     """A child namespace, and a veth from here to it on its own /64"""
-    child = subprocess.Popen(["unshare", "-n", "sleep", "600"],
-                             stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL)
+    child = wgtools.namespace_child(600)
     CHILDREN.append(child)
     net = LINKS[name]
     sh("ip", "link", "add", f"to{name}", "type", "veth", "peer", "name",
@@ -348,7 +366,7 @@ def accept_line(process: subprocess.Popen) -> str:
     return ""
 
 
-def inviter() -> None:
+def inviter(report: dict) -> None:
     sh("ip", "link", "set", "lo", "up")
     # A routes between B and C: their endpoints reach each other
     with open("/proc/sys/net/ipv6/conf/all/forwarding", "w") as fob:
@@ -364,7 +382,7 @@ def inviter() -> None:
     netns_apply(a.document(), root, 120)
     marker.clear(root)
     journal = []
-    report = {}
+    report["journal"] = journal
 
     # A's members' channel, as keel-mesh-members runs it
     service, stop = members_service(a, journal.append)
@@ -377,14 +395,16 @@ def inviter() -> None:
                               start=Spawned)
     codes = []
     thread = threading.Thread(target=lambda: codes.append(
-        inviting.serve_invite(a_side, parse(first, utcnow()).invite_id)))
+        inviting.serve_invite(a_side, parse(first, utcnow()).invite_id)),
+        daemon=True)
     thread.start()
     listening(f"{LINKS['B']}::1", 51900)
     b_process = run_joiner(pids["B"], first, "B", "serve")
     report["b"] = result(b_process)
     thread.join(120)
     report["serve"] = codes
-    report["a_after_b"] = marker.last(root).outcome
+    report["serving_still"] = thread.is_alive()
+    report["a_after_b"] = outcome(root)
     b_address = report["b"]["address"].split("/")[0]
 
     # 3. nothing listens on the second invite's port: the fallback. A
@@ -398,7 +418,7 @@ def inviter() -> None:
     report["accept"] = inviting.accept(accepting, accept_line(process))
     report["c"] = result(process)
     process.wait(60)
-    report["a_after_c"] = marker.last(root).outcome
+    report["a_after_c"] = outcome(root)
     # B learned of C through A's announcement, and confirmed it
     b_process.stdin.write(f"check {report['c']['address'].split('/')[0]}"
                           f" {report['c']['key']}\n")
@@ -423,19 +443,22 @@ def inviter() -> None:
                        for peer in a.overlay()["peers"]]
     report["invites_left"] = os.listdir(os.path.join(
         root, "var/lib/keel/mesh/invites"))
-    report["journal"] = journal
     report["tokens"] = [first, second]
     report["capabilities"] = CAPABILITIES
     report["netem"] = NETEM
-    print("RESULT " + json.dumps(report), flush=True)
 
 
 if __name__ == "__main__":
     if sys.argv[1:2] == ["join"]:
         joiner(sys.argv[2], sys.argv[3], sys.argv[4])
     else:
+        found: dict = {}
         try:
-            inviter()
+            inviter(found)
+        except Exception:  # noqa: BLE001 - the test reports it
+            import traceback
+            found["error"] = traceback.format_exc()[-3000:]
         finally:
             for one in CHILDREN:
                 one.kill()
+        print("RESULT " + json.dumps(found), flush=True)

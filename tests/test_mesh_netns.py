@@ -61,6 +61,7 @@ class TestThreeNamespaces(unittest.TestCase):
         if self.netem not in self.reports:
             self.reports[self.netem] = self.run_driver(tools)
         self.found = self.reports[self.netem]
+        self.assertNotIn("error", self.found, self.found.get("error"))
 
     def run_driver(self, tools: str) -> dict:
         prefix = wgtools.namespace_prefix()

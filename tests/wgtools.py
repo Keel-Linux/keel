@@ -17,6 +17,7 @@ where unprivileged user namespaces are allowed, else `sudo -n unshare -n`.
 import os
 import shutil
 import subprocess
+import time
 import unittest
 
 TOOLS = ("wg", "wg-quick")
@@ -45,6 +46,28 @@ def require(case: unittest.TestCase) -> str:
                       " .github/workflows/tests.yml")
         case.skipTest("wg and wg-quick not found (set KEEL_WG_DIR)")
     return found
+
+
+def namespace_child(seconds: int, within: float = 10.0) -> subprocess.Popen:
+    """`sleep` in a network namespace of its own, returned once it is in
+    that namespace. Popen returns before `unshare -n` made it, and a veth
+    moved to the child's PID before then stays in this namespace"""
+    own = os.readlink("/proc/self/ns/net")
+    child = subprocess.Popen(["unshare", "-n", "sleep", str(seconds)],
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+    deadline = time.monotonic() + within
+    while True:
+        try:
+            if os.readlink(f"/proc/{child.pid}/ns/net") != own:
+                return child
+        except OSError:
+            pass
+        if time.monotonic() >= deadline:
+            child.kill()
+            raise RuntimeError(f"unshare -n made no namespace within"
+                               f" {within:g} s")
+        time.sleep(0.01)
 
 
 def env(tools: str) -> dict[str, str]:
