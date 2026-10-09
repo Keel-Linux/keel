@@ -204,6 +204,20 @@ record:
 4. each peer routes the VIP with one `wg set`; one that did not answer
    takes it at its next check.
 
+With `--old-primary-gone`, the operator declared the other member of
+the pair gone. **With etcd**, its lease fences it: each ask of it in
+steps 2 and 4 waits at most 1.5 s (`keel.mesh.vipnode.GONE_BOUND`) and
+does not hold up the other peers, the wait for its lease does not
+change, and the ask goes on after the bound: the promote waits for it
+before it returns, so a live old primary that is slow still gets the
+release and the claim. A dead node cost the members' channel's 10 s
+timeout each time, 30.5 s on a real pair (keel#108). **Without etcd**
+nothing fences a live old primary, so every ask of it waits the
+channel's full timeout, as before. Without etcd, an old primary that is
+alive but cannot be reached keeps the VIP on its `wg0` and stays
+writable until it learns the newer claim (its next `keel vip check`, at
+boot and every minute): only the operator knows that it is gone.
+
 An old primary that comes back, before etcd, learns the newer claim at
 its next `keel vip check` (at boot, then every minute), drops the
 address at once and is fenced. That it then turns read only, catches up

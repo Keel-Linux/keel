@@ -56,6 +56,65 @@ def over_the_overlay(host: str, iface: str, body: bytes) -> bytes:
     return memberlink.vip_exchange(host, iface, body)
 
 
+# with --old-primary-gone and etcd formed, how long one ask of the old
+# primary may take before the promote goes on (keel#108): an answer over
+# 250 ms takes about 1 s, while a dead node costs the members' channel's
+# 10 s timeout, three times in a promote. Never without etcd: there no
+# lease fences a live old primary, so its release is waited for in full
+GONE_BOUND = 1.5
+
+
+def bounded(here: "Here", hosts: set[str], seconds: float | None = None
+            ) -> "Here":
+    """`here`, its exchanges with `hosts` bounded to `seconds`: the ask
+    runs in a thread of its own, and when no answer came by then, the
+    caller goes on as if the node did not answer. The thread goes on
+    until the channel's own timeout, so a late release or claim still
+    lands; `finished` waits for every such thread. Other hosts are
+    unchanged"""
+    import threading
+    bound = GONE_BOUND if seconds is None else seconds
+    inner = here.exchange
+    pending: list[threading.Thread] = []
+
+    def exchange(host: str, iface: str, body: bytes) -> bytes:
+        if host not in hosts:
+            return inner(host, iface, body)
+        found: list = []
+
+        def ask() -> None:
+            try:
+                found.append(inner(host, iface, body))
+            except Exception as e:  # noqa: BLE001 - given to the caller
+                found.append(e)
+        # not a daemon: the process does not end before the ask does
+        worker = threading.Thread(target=ask)
+        pending.append(worker)
+        worker.start()
+        worker.join(bound)
+        if not found:
+            from keel.mesh.memberlink import LinkError
+            raise LinkError(f"[{host}]: no answer within {bound:g} s"
+                            " (--old-primary-gone)")
+        if isinstance(found[0], Exception):
+            raise found[0]
+        return found[0]
+    exchange.pending = pending
+    return replace(here, exchange=exchange)
+
+
+def finished(here: "Here") -> int:
+    """Wait for the asks `bounded` let go on, each up to the members'
+    channel's own timeouts; how many are still running after"""
+    from keel.mesh import memberlink
+    limit = memberlink.CONNECT_TIMEOUT + memberlink.ANSWER_TIMEOUT
+    left = 0
+    for worker in getattr(here.exchange, "pending", ()):
+        worker.join(limit)
+        left += worker.is_alive()
+    return left
+
+
 # how far above the epoch a node knows a claim may be: a node that missed
 # a few moves takes the newest; a claim far above is refused, so none
 # can push the epoch out of every honest node's reach

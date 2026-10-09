@@ -662,6 +662,109 @@ def read_only_of(root: str) -> str:
     return done.stdout.strip() if done.returncode == 0 else "down"
 
 
+class Writer:
+    """C writes one row at the VIP every 0.1 s, a new connection each
+    time with a 2 s connect timeout, as the real-node test's writer"""
+
+    def __init__(self, pid: int):
+        self.pid = pid
+        self.done: list[dict] = []
+        self.halt = threading.Event()
+        self.thread = threading.Thread(target=self.run, daemon=True)
+
+    def start(self) -> None:
+        self.thread.start()
+
+    def stop(self) -> None:
+        self.halt.set()
+        self.thread.join()
+
+    def run(self) -> None:
+        import vip_netns
+        n = 0
+        while not self.halt.is_set():
+            n += 1
+            started = time.time()
+            one = subprocess.run(
+                ["nsenter", "-t", str(self.pid), "-n", "mariadb", "--batch",
+                 "--connect-timeout=2", "-h", vip_netns.VIP, "-u", APP_USER,
+                 f"--password={APP_PASSWORD}",
+                 "--skip-ssl-verify-server-cert", APP_DB, "--execute",
+                 f"INSERT INTO t (v, at) VALUES ('crash-{n}', {started:.3f})"],
+                capture_output=True, text=True, check=False, timeout=30)
+            self.done.append({"n": n, "t": round(started, 3),
+                              "end": round(time.time(), 3),
+                              "ok": one.returncode == 0,
+                              "err": one.stderr.strip()[:12]})
+            self.halt.wait(0.1)
+
+
+class NewPrimary:
+    """When the node that is promoted carries the VIP, and when its
+    server turns writable, sampled every 0.2 s from the driver"""
+
+    def __init__(self, pid: int, root: str):
+        self.pid, self.root = pid, root
+        self.carried_at = self.writable_at = None
+        self.halt = threading.Event()
+        self.thread = threading.Thread(target=self.run, daemon=True)
+
+    def start(self) -> None:
+        self.thread.start()
+
+    def stop(self) -> None:
+        self.halt.set()
+        self.thread.join()
+
+    def run(self) -> None:
+        import vip_netns
+        while not self.halt.is_set():
+            now = time.time()
+            if self.carried_at is None and vip_netns.holds(self.pid):
+                self.carried_at = now
+            if self.writable_at is None and read_only_of(self.root) == "0":
+                self.writable_at = now
+            self.halt.wait(0.2)
+
+
+def downtime(writer: Writer, watched: NewPrimary, killed_at: float,
+             promote_at: float, promoted_at: float) -> dict:
+    """The unplanned write downtime and where it went"""
+    ok = [one for one in writer.done if one["ok"]]
+    before = [one["end"] for one in ok if one["end"] <= killed_at]
+    after = [one["end"] for one in ok if one["t"] > killed_at]
+    errors: dict[str, int] = {}
+    for one in writer.done:
+        if not one["ok"] and one["t"] > killed_at:
+            errors[one["err"]] = errors.get(one["err"], 0) + 1
+
+    def since(at):
+        return None if at is None else round(at - killed_at, 2)
+    first_after = min(after) if after else None
+    return {"last_ok_before_s": since(max(before)) if before else None,
+            "first_ok_after_s": since(first_after),
+            "downtime_s": None if not before or first_after is None
+            else round(first_after - max(before), 2),
+            "promote_started_s": since(promote_at),
+            "promote_took_s": round(promoted_at - promote_at, 2),
+            "carried_s": since(watched.carried_at),
+            "writable_s": since(watched.writable_at),
+            "writable_after_carried_s": None if watched.carried_at is None
+            or watched.writable_at is None
+            else round(watched.writable_at - watched.carried_at, 2),
+            "errors_after_kill": errors, "writes": len(writer.done),
+            "acked": len(ok)}
+
+
+def acked_missing(writer: Writer, agent_send) -> list[str]:
+    """The rows C had acknowledged that the new primary B lacks"""
+    acked = {f"crash-{one['n']}" for one in writer.done if one["ok"]}
+    found = agent_send("B", f"sql SELECT v FROM {APP_DB}.t WHERE v LIKE"
+                       " 'crash-%'")
+    held = set((found.get("out") or "").split())
+    return sorted(acked - held)[:20]
+
+
 def crashed(report: dict, pids: list[int], roots: list[str]) -> None:
     """keel#104: the primary A crashes (its server killed, its VIP
     helper gone, cut off), B is promoted at a newer epoch with A gone,
@@ -672,6 +775,23 @@ def crashed(report: dict, pids: list[int], roots: list[str]) -> None:
     from vip_netns import OVERLAY, agent_send, wait_until
     a_pid = pids[0]
     a_root = roots[0]
+    # the application writes at the VIP from C all along (keel#108,
+    # keel#118): the unplanned write downtime and the rows acknowledged
+    # B connected and acknowledging first: A's restart of case (a)
+    # disconnected it, and a commit with no semi-synchronous replica
+    # connected is acknowledged without it (wait_no_slave OFF), which
+    # is the documented fallback, not this case
+    report["k108_semisync_s"] = wait_until(
+        lambda: status_value(agent_send, "A", "Rpl_semi_sync_master_clients")
+        == "1" and status_value(agent_send, "A",
+                                "Rpl_semi_sync_master_status") == "ON",
+        120, 1)
+    writer = Writer(pids[2])
+    watched = NewPrimary(pids[1], roots[1])
+    writer.start()
+    watched.start()
+    time.sleep(5)
+    killed_at = time.time()
     sh("systemctl", "kill", "--signal=SIGKILL", service_of(a_root),
        check=False)
     sh("systemctl", "stop", f"keel-vip-test-{vip_netns.NAMES[0]}",
@@ -679,7 +799,16 @@ def crashed(report: dict, pids: list[int], roots: list[str]) -> None:
     vip_netns.leg("to1", "100%")
     sh("tc", "qdisc", "replace", "dev", "uplink", "root", "netem", "loss",
        "100%", pid=a_pid)
+    promote_at = time.time()
     report["k104_promote"] = agent_send("B", "dbpromote gone", 300)
+    promoted_at = time.time()
+    wait_until(lambda: watched.writable_at is not None, 60, 0.2)
+    time.sleep(5)
+    writer.stop()
+    watched.stop()
+    report["k108_downtime"] = downtime(writer, watched, killed_at,
+                                       promote_at, promoted_at)
+    report["k108_acked_missing"] = acked_missing(writer, agent_send)
     report["k104_b_read_only"] = agent_send("B", "sql SELECT @@read_only")
     # A boots: the link back, its server started from its drop-in, and
     # what keel-database-follow.service does at boot, before anything

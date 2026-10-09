@@ -88,12 +88,40 @@ def promote(here: Here, gone: bool, out: Callable[[str], None]) -> int:
         if problem:
             out(problem)
             return exits.MESH_REFUSED
-        if with_etcd(here):
+        if not with_etcd(here):
+            return promoted(here, vip, gone, out)
+        if not gone:
             return promoted_etcd(here, vip, gone, out)
-        return promoted(here, vip, gone, out)
+        here = without_waiting(here, vip)
+        try:
+            return promoted_etcd(here, vip, gone, out)
+        finally:
+            if vipnode.finished(here):
+                out("an ask of the old primary is still running after the"
+                    " members' channel's timeouts")
     except (VipError, NodeError, ValueError, SigningError) as e:
         out(f"keel vip promote: {e}")
         return exits.APPLY_FAILED
+
+
+def without_waiting(here: Here, vip: str) -> Here:
+    """With --old-primary-gone and etcd formed, the operator declared the
+    other member of the pair gone: every ask of it (the release, the
+    announcement) waits at most vipnode.GONE_BOUND, so a dead node no
+    longer costs 10 s each time (keel#108). The promote still waits for
+    its lease to go, and never revokes it (0049): the lease fences it.
+    The ask goes on after the bound and the promote waits for it before
+    it returns, so a live old primary that is slow still gets the
+    release and the claim. Without etcd nothing fences a live old
+    primary, so nothing is bounded there"""
+    try:
+        pair_record = vipnode.kept(here, vip)
+        own = here.own_key()
+    except VipError:
+        return here
+    other = {vipnode.peer_at(here, key) for key in pair_record.members
+             if not same_key(key, own)} - {None}
+    return vipnode.bounded(here, other) if other else here
 
 
 def pair(here: Here, at: str, out: Callable[[str], None]) -> int:

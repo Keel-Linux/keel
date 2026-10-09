@@ -195,6 +195,22 @@ class TestAMariadbPairOnAPoorNetwork(unittest.TestCase):
         self.assertEqual(status.get("Master_SSL_Allowed"), "Yes", status)
         self.assertEqual(status.get("Using_Gtid"), "Slave_Pos", status)
 
+    def test_the_unplanned_write_downtime_and_no_acked_row_lost(self):
+        """keel#108, keel#118: the promote with the old primary gone and
+        the database following the VIP at once, measured at 250 ms; with
+        etcd the old primary's lease must expire first (0049), so the
+        downtime is that wait plus keel's own part"""
+        found = self.found["k108_downtime"]
+        print(f"k108 downtime: {found}", file=sys.stderr)
+        self.assertEqual(self.found["k108_acked_missing"], [], found)
+        self.assertIsNotNone(found["downtime_s"], found)
+        self.assertIsNotNone(found["writable_after_carried_s"], found)
+        self.assertIsNotNone(self.found["k108_semisync_s"], found)
+        # each ask of the dead old primary waited 1.5 s, not 10 s
+        said = " ".join(self.found["k104_promote"]["out"])
+        self.assertIn("no answer within 1.5 s", said)
+        self.assertNotIn("timed out", said)
+
     def test_no_two_nodes_ever_carry_the_vip(self):
         self.assertEqual(self.found["max_holders"], 1,
                          self.found["double_holder_samples"])
