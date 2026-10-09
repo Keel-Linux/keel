@@ -6,8 +6,9 @@ tests/vip_netns.py, as root in a network namespace of its own
 (on PATH, or its directory named by KEEL_ETCD_DIR) and keel's members'
 channel and VIP controller, on links of 250 ms ±25 ms with 2% loss,
 measured before the scenario. A and B are a pair, C routes their VIP:
-(a) C reaches the VIP at A; (b) a planned promote moves it to B, and
-the downtime C sees is measured; (c) B cut off from the majority drops
+(a) C reaches the VIP at A; (b) planned promotes move it between A
+and B, and the downtime C sees is measured three times and judged by
+the median; (c) B cut off from the majority drops
 it within its lease's release time and A claims it, and at no sample,
 every 200 ms, do two nodes carry it; (d) healed, B never carries it
 again; (e) a stale claim is refused on the members' channel and by
@@ -101,10 +102,15 @@ class TestTheVipOnAPoorNetwork(unittest.TestCase):
                             for line in found["b"]["said"]), found["b"])
         self.assertIsNotNone(found["b_routed_s"], found)
         self.assertEqual(found["b_holder"], ["B"], found)
-        self.assertIsNotNone(found["b_downtime_s"], found)
+        # three planned promotes: the median downtime, not one attempt
+        # over the lossy link (keel#94)
+        self.assertEqual(len(found["b_downtimes"]), 3, found)
+        for one in found["b_downtimes"]:
+            self.assertIsNotNone(one, found)
+        downtimes = sorted(found["b_downtimes"])
         # a release, a compare-and-swap and the claim's announcement,
         # each a few round trips at 250 ms
-        self.assertLess(found["b_downtime_s"], 15, found)
+        self.assertLess(downtimes[1], 15, found)
 
     def partitioned(self, key: str):
         found = self.found

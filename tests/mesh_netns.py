@@ -152,15 +152,23 @@ def node(root: str, path: str) -> Node:
     return Node(root, path, apply=netns_apply, run=Recorder())
 
 
-def ping(address: str, rounds: int = 3) -> bool:
+def ping(address: str, rounds: int = 3, upto_s: float | None = None) -> bool:
     """One answer of five is enough: the link may lose packets. Up to
     three rounds: a tunnel the last change brought down and up needs a
     new handshake, and on a poor link a lost initiation is sent again
-    only after WireGuard's 5 s rekey timeout"""
-    return any(subprocess.run(["ping", "-6", "-c", "5", "-i", "0.3", "-W",
+    only after WireGuard's 5 s rekey timeout. With `upto_s` the rounds
+    repeat until that many seconds have passed: the ping right after a
+    join waits out the confirmation window (keel#94), the others stay
+    short"""
+    deadline = time.monotonic() + upto_s if upto_s else None
+    while True:
+        if any(subprocess.run(["ping", "-6", "-c", "5", "-i", "0.3", "-W",
                                "3", address], capture_output=True,
                               check=False).returncode == 0
-               for _ in range(rounds))
+               for _ in range(rounds)):
+            return True
+        if deadline is None or time.monotonic() >= deadline:
+            return False
 
 
 def joiner(token_text: str, endpoint: str, after: str) -> None:
@@ -182,7 +190,9 @@ def joiner(token_text: str, endpoint: str, after: str) -> None:
                            utcnow, said, err.append)
     code = joining.run(found, endpoint)
     last = marker.last(root)
-    report = {"code": code, "out": out, "err": err, "ping": ping(OVERLAY_A),
+    from keel.system import DEFAULT_WINDOW
+    report = {"code": code, "out": out, "err": err,
+              "ping": ping(OVERLAY_A, upto_s=DEFAULT_WINDOW),
               "outcome": last.outcome if last else None,
               "address": here.overlay().get("address"),
               "key": here.public_key()[0], "root": root}

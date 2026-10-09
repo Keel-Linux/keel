@@ -613,13 +613,23 @@ def scenario(report: dict, pids: list[int], pairs, roots: list[str],
     # C keeps the claim of epoch 1, for (g)
     report["remembered"] = agent_send("C", "remember")
 
-    # (b) planned: B promotes, A releases first
-    moved_at = time.time()
-    report["b"] = agent_send("B", "promote")
-    report["b_routed_s"] = wait_until(lambda: routed_to(c_pid) == key["B"],
-                                      60)
-    time.sleep(10)
-    report["b_downtime_s"] = gap(answers(log), moved_at - 1, time.time())
+    # (b) planned: B promotes, A releases first; then A and B again, so
+    # the downtime C sees is judged by the median of three attempts,
+    # not by one over the lossy link (keel#94). B holds it again at
+    # the end, as (c) needs
+    def planned_promote(holder: str) -> tuple[dict, float | None,
+                                              float | None]:
+        moved_at = time.time()
+        said = agent_send(holder, "promote")
+        routed_s = wait_until(lambda: routed_to(c_pid) == key[holder], 60)
+        time.sleep(10)
+        return said, routed_s, gap(answers(log), moved_at - 1,
+                                   time.time())
+
+    report["b"], report["b_routed_s"], first_downtime = planned_promote("B")
+    _, _, back_downtime = planned_promote("A")
+    _, _, again_downtime = planned_promote("B")
+    report["b_downtimes"] = [first_downtime, back_downtime, again_downtime]
     report["b_holder"] = [n for n, p in zip(NAMES, pids) if holds(p)]
 
     # (c) B, the primary and etcd's leader, cut off from the majority:

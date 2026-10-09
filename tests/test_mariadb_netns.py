@@ -182,7 +182,13 @@ class TestAMariadbPairOnAPoorNetwork(unittest.TestCase):
         self.assertEqual(found["k104_boot_read_only"], "1", found)
         follow = found["k104_follow_at_boot"]
         self.assertIsNone(follow["problem"], follow)
-        self.assertIn("not proven", " ".join(follow["lines"]), follow)
+        joined = " ".join(follow["lines"])
+        # two legitimate boot outcomes, both read only (keel#94): the
+        # unproven-claim line when A's own claim was still the newest
+        # it knew, or the replica path when the newer claim reached A
+        # first; the samples below judge "never writable"
+        if "not proven" not in joined:
+            self.assertIn("replicating", joined, follow)
         self.assertEqual(found["k104_after_follow"], "1", found)
         self.assertIsNotNone(found["k104_replica_s"],
                              found["k104_a_follow_log"])
