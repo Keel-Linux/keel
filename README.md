@@ -121,7 +121,7 @@ Every command accepts the same three options, so a caller never has to branch:
 | `--cache-dir DIR` | The layer cache. Default: `$KEEL_CACHE_DIR`, else `/var/cache/keel/layers` |
 | `--source URL-or-DIR` | `pull` only, required: where manifests and tarballs are served, for example `http://[2001:db8:19::1]/layers` or `/mnt/builds/layers` |
 | `--rootfs DIR` | `assemble` only, required: the directory to extract into; created, must be empty |
-| `--template FILE` | `assemble` only: also pack the rootfs into this `.tar.zst`, with `FILE.sha512` next to it |
+| `--template FILE` | `assemble` only: also pack the rootfs into this `.tar.zst`, with `FILE.sha512` next to it. A template is a container template: it is refused, and nothing is written, when the rootfs's dpkg database records a kernel, initrd, firmware, bootloader or other package only a machine boots with (`keel.layers.container`, decision 0052); the ISO is made from a rootfs assembled without `--template` |
 | `--sha256 HEX` | `assemble` only: which cached version of `LAYER`, when more than one is cached |
 
 `keel` and `python3 -m keel` are the same program.

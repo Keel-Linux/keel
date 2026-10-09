@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "keel"
-version = "0.23.12"
+version = "0.23.13"
 authors = [{name = "KeelLinux maintainers"}]
 description = "Declarative management of one appliance instance"
 readme = "README.md"

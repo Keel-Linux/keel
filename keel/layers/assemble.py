@@ -10,6 +10,11 @@ when a template path is given the directory is packed (keel.layers.pack).
 Extracting a rootfs restores owners, device nodes and extended
 attributes, which only root can do, so the command refuses to start as
 anyone else instead of producing a tree that looks right and is not.
+
+A template is a container template: before it is packed, the rootfs is
+checked for the packages only a machine boots with (keel.layers.container,
+decision 0052), and refused when it has any. A rootfs assembled without
+a template, which the ISO is made from, is not checked.
 """
 
 import os
@@ -19,6 +24,7 @@ from dataclasses import dataclass
 
 from keel import exits
 from keel.layers.cache import Cache
+from keel.layers.container import check as check_container
 from keel.layers.errors import LayerError
 from keel.layers.extract import Applied, apply_layer
 from keel.layers.manifest import Manifest
@@ -112,5 +118,6 @@ def assemble(
         shutil.rmtree(work)
     packed = None
     if template is not None:
+        check_container(rootfs)
         packed = pack(rootfs, template, top.source_date_epoch)
     return AssembleReport(rootfs, applied, packed)
