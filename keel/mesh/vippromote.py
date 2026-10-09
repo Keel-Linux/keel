@@ -336,7 +336,7 @@ def gone_lease(here: Here, vip: str, lease: str | None,
                                here.err).get(vip) or vipetcd.Seen(vip)
             if now.epoch is not None and same_key(now.epoch.holder, own):
                 return now
-            if lease is None or client.time_to_live(lease) <= 0:
+            if lease is None or vipetcd.gone(client.time_to_live(lease)):
                 return now
         except EtcdError:
             pass

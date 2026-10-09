@@ -1502,7 +1502,8 @@ At these seams, each written down before its tests:
   `tests/etcd_auth_netns.py` on the namespaces, links, members' channel
   and VIP units of the VIP's test: three members in the layout before
   keel#83, the VIP held by a pair, moved by `keel mesh etcd reissue`
-  while the VIP's holders are sampled every 200 ms, the VIP pinged every
+  while the VIP's holders are sampled every 200 ms and watched in a
+  tight loop for two at one instant (tests/vip_overlap.py), the VIP pinged every
   50 ms and each member's quorum read every second; then etcd refuses
   the member outside the pair its writes, deletes and revokes on the
   VIP's keys, a certificate a member signs itself does not reach etcd,

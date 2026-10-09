@@ -171,6 +171,15 @@ class TestTheVipOnAPoorNetwork(unittest.TestCase):
         self.assertEqual(self.found["max_holders"], 1,
                          self.found["double_holder_samples"])
 
+    def test_c_no_two_nodes_carry_it_at_one_instant(self):
+        """keel#126: a watcher of its own, every node read in one tight
+        loop; an overlap only when proven at one instant"""
+        atomic = self.found["atomic"]
+        self.assertTrue(atomic["ended"], atomic)
+        self.assertGreater(atomic["rounds"], 1000, atomic)
+        self.assertEqual(atomic["overlaps"], [], atomic)
+        self.assertEqual(atomic["overlap_rounds"], 0, atomic)
+
     def test_d_the_old_primary_never_claims_it_again(self):
         found = self.found
         self.assertFalse(found["d_b_carried_after_heal"], found)

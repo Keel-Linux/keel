@@ -355,6 +355,45 @@ makes the kernel drop it sooner still, by 10 s after that renewal, also
 for a frozen process (a stopped container), which no controller can
 cover: `tests/test_vip_upgrade_netns.py` (d).
 
+### The margin between the two holders (keel#126)
+
+etcd gives a lease's time to live in whole seconds, rounded down. A
+lease with less than 1 s left shows 0, and a renewal in that second
+keeps it. Thus only -1 shows a lease that is gone: it expired at etcd's
+leader, or somebody revoked it, and no renewal can keep it. The other
+node of the pair, and `keel vip promote`, claim only on -1.
+
+Before 0.23.9, they also claimed on 0. In CI run 37892870474
+(`etcd-auth / trixie`, on a loaded runner), A, the holder, was cut off
+for 10.1 s. After the heal, its renewals failed for some seconds more.
+Its first renewal that the majority confirmed came in the last second of
+its lease. In that second, B read 0 and claimed. Both carried the VIP
+for 0.2 to 0.4 s, until A took B's newer claim from the counter at its
+next turn (1 s at most).
+
+The margin now, with s the send time of the holder's last renewal that
+the majority confirmed:
+
+| Event | When, at the latest or at the earliest |
+| --- | --- |
+| the holder's controller drops the address | s + 10 s + one turn (0.2 s) + one call to the helper |
+| the kernel removes the address | s + 10 s at the latest: the lifetime is int(10 - age) - 1 s, and the kernel can be 0.25 s late (EXPIRY_SLACK, 1 s, covers that and a busy work queue) |
+| etcd's leader gets that renewal | r, not before s |
+| the lease expires | r + 20 s, not before s + 20 s (an election in the majority adds an election timeout) |
+| the other node claims | when etcd shows -1: not before the expiry |
+
+The old holder's address is gone at s + 10 s. A claim is possible at
+s + 20 s at the earliest. The margin is 10 s or more.
+
+On the design case (250 ms ±25 ms, 2% loss on each leg), a renewal gets
+to the leader at about s + 0.16 s (half a round trip and the start of
+etcdctl). The lease thus expires at about s + 20.16 s, and the margin is
+about 10.2 s. Delay and loss move r later, or make the renewal fail,
+which is no renewal: they make the margin larger, never smaller. This
+is also true on a loaded runner (a round trip of 2.1 s was seen). The
+two hosts' clocks measure intervals only; a rate error of 100 ppm is 2
+ms in 20 s.
+
 ## Upgrading a pair without downtime
 
 The maintainer's requirement of 2026-10-10: an `apt full-upgrade` on any
@@ -439,7 +478,9 @@ and the peers without the VIP.
   outside the pair putting an old claim or the current one without its
   lease under the holder key, deleting it, putting an old claim under
   the counter, and revoking the holder's lease, twice in a row and with
-  the holder cut off too, and promote through etcd, on a fake etcd with a clock
+  the holder cut off too, a lease in its last second (etcd shows 0) not
+  gone for the other node nor for promote, and promote through etcd, on
+  a fake etcd with a clock that gives the time to live as etcd does
   (`tests/test_mesh_vipetcd.py`), the client's lease and transaction
   calls against a recording etcdctl, a failed or unparseable call never
   a renewal (`tests/test_mesh_etcdclient.py`), the pair's role
@@ -463,7 +504,10 @@ and the peers without the VIP.
   which starts the controller as its own unit: the controller's uid and
   capabilities, and the helper's bounding set, are read from the
   kernel. A and B are paired with `keel vip pair`, C routes the VIP and
-  pings it every 50 ms; a sampler reads every node's wg0 every 200 ms.
+  pings it every 50 ms; a sampler reads every node's wg0 every 200 ms,
+  and a watcher (`tests/vip_overlap.py`), a process of its own, reads
+  every node in a tight loop, in a palindromic order with CLOCK_MONOTONIC,
+  and proves each instant two nodes carry it (keel#126).
   (a) A promotes and C reaches the VIP; (b) B promotes, planned, A
   releases first, and the longest gap in C's answers is the downtime;
   (c) B, made etcd's leader, is cut off: it drops the VIP within the
@@ -475,8 +519,8 @@ and the peers without the VIP.
   without its lease under the holder key and deletes it (nothing moves),
   then revokes the holder's lease twice in a row: each time it drops the
   VIP at its next renewal and a node carries it again within the TTL.
-  At no sample do
-  two nodes carry it. In CI, `vip / trixie`, with systemd booted.
+  At no sample, and at no instant the watcher reads, do two nodes carry
+  it. In CI, `vip / trixie`, with systemd booted.
 - upgrades: the address's lifetime and its arithmetic, a renewal giving
   it a new one, a restarted controller keeping a bounded address and
   dropping one with none, `--stopped` on a restart, a crash and a stop,

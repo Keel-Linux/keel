@@ -14,7 +14,9 @@ intermediate; the root's holder, A, recorded the intermediates as the
 old keel did. A and B are a VIP's pair, C routes it.
 
 1. A promotes: the VIP at A, C pinging it every 50 ms, a sampler asking
-   every node every 200 ms whether wg0 carries it; each member watched
+   every node every 200 ms whether wg0 carries it, and a watcher that
+   reads every node in a tight loop and proves any instant two carry it
+   (tests/vip_overlap.py, keel#126); each member watched
    every second: its leader and term, and a linearizable read of the
    mesh's keys (which needs the quorum);
 2. the cost of etcdctl, measured on A: a process with no call, and the
@@ -50,6 +52,7 @@ from datetime import timedelta
 
 import etcd_netns
 import vip_netns
+import vip_overlap
 from etcd_netns import (
     NAMES,
     environment,
@@ -315,6 +318,8 @@ def driver() -> None:
     stop = threading.Event()
     sampling = threading.Thread(target=sampler, args=(pids, samples, stop))
     sampling.start()
+    atomic = os.path.join(roots[2], "overlap.jsonl")
+    watcher = vip_overlap.start(atomic, VIP, dict(zip(NAMES, pids)))
     try:
         scenario(report, pids, roots, paths, samples)
     except Exception as e:  # noqa: BLE001 - the report says how it ended
@@ -324,6 +329,7 @@ def driver() -> None:
     finally:
         stop.set()
         sampling.join()
+        report["atomic"] = vip_overlap.stop(watcher, atomic)
     report["samples"] = len(samples)
     report["double_holder_samples"] = [one for one in samples
                                        if len(one["holders"]) > 1][:10]

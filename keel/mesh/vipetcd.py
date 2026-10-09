@@ -47,8 +47,9 @@ do is also bounded by what each node checks, as defence in depth:
   other node. A value written to a key neither fences it nor keeps it;
 - **the other node of the pair claims only once the lease of the newest
   claim it verified is gone**, asked of etcd by the ID signed into the
-  claim (TimeToLive): never because the holder key was deleted or
-  rewritten. A lease that ends before its TTL ran out was revoked, and
+  claim (TimeToLive, -1: `gone`; 0 is a lease in its last second,
+  which a renewal still keeps): never because the holder key was
+  deleted or rewritten. A lease that ends before its TTL ran out was revoked, and
   the holder learns that only at its next renewal, so the other node
   waits GRACE first. etcd cannot expire the lease before TTL seconds
   after the last renewal it answered, so a holder cut off from the
@@ -102,6 +103,13 @@ EPOCH, HOLDER = "epoch", "holder"
 # damaged state file, a key not readable for a moment, the root half
 # gone a moment
 FAILURES = (VipError, NodeError, ValueError, OSError)
+
+
+def gone(ttl: int) -> bool:
+    """Whether etcd's time to live says a lease is gone for good. etcd
+    gives it in whole seconds, rounded down, so 0 is a lease in its last
+    second, which a renewal still keeps; only -1 is gone (keel#126)"""
+    return ttl < 0
 
 
 def prefix(mesh_id: str) -> str:
@@ -442,7 +450,7 @@ class Controller:
         except EtcdError:
             return
         moment = self.clock()
-        if ttl > 0:
+        if not gone(ttl):
             self.alive[lease] = moment + ttl
             return
         expected = self.alive.get(lease)
