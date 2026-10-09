@@ -216,14 +216,22 @@ def keys() -> list[tuple[str, str]]:
 def holds(pid: int) -> bool:
     """Whether the node's wg0 carries the VIP: /proc/PID/net is the net
     namespace of that process, so this forks nothing and three nodes are
-    read within a millisecond of each other"""
+    read within a millisecond of each other. A false reading is read
+    again after a settle (keel#94): a single /proc read can fail on a
+    loaded CI host and read as the address leaving wg0, which the
+    pinger's answer stream disproves; the tests' bounds are seconds"""
     wanted = ipaddress.IPv6Address(VIP).exploded.replace(":", "")
-    try:
-        with open(f"/proc/{pid}/net/if_inet6") as fob:
-            return any(line.split()[0] == wanted and
-                       line.split()[-1] == "wg0" for line in fob)
-    except OSError:
-        return False
+    for pause in (None, 0.05):
+        if pause is not None:
+            time.sleep(pause)
+        try:
+            with open(f"/proc/{pid}/net/if_inet6") as fob:
+                if any(line.split()[0] == wanted and
+                       line.split()[-1] == "wg0" for line in fob):
+                    return True
+        except OSError:
+            pass
+    return False
 
 
 def sampler(pids: list[int], out: list[dict], stop: threading.Event) -> None:

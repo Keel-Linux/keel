@@ -707,17 +707,25 @@ class Writer:
         while not self.halt.is_set():
             n += 1
             started = time.time()
-            one = subprocess.run(
-                ["nsenter", "-t", str(self.pid), "-n", "mariadb", "--batch",
-                 "--connect-timeout=2", "-h", vip_netns.VIP, "-u", APP_USER,
-                 f"--password={APP_PASSWORD}",
-                 "--skip-ssl-verify-server-cert", APP_DB, "--execute",
-                 f"INSERT INTO t (v, at) VALUES ('crash-{n}', {started:.3f})"],
-                capture_output=True, text=True, check=False, timeout=30)
+            try:
+                one = subprocess.run(
+                    ["nsenter", "-t", str(self.pid), "-n", "mariadb",
+                     "--batch", "--connect-timeout=2", "-h", vip_netns.VIP,
+                     "-u", APP_USER, f"--password={APP_PASSWORD}",
+                     "--skip-ssl-verify-server-cert", APP_DB, "--execute",
+                     f"INSERT INTO t (v, at) VALUES ('crash-{n}',"
+                     f" {started:.3f})"], capture_output=True, text=True,
+                    check=False, timeout=30)
+                ok, err = one.returncode == 0, one.stderr.strip()[:12]
+            except subprocess.TimeoutExpired:
+                # a hung attempt must not end the writer: the writes that
+                # come back after the promote are the measured thing
+                # (keel#94); on the lossy link one connection can outlive
+                # the 30 s cap, to the dead primary or a promoting one
+                ok, err = False, "hung past 30s"
             self.done.append({"n": n, "t": round(started, 3),
                               "end": round(time.time(), 3),
-                              "ok": one.returncode == 0,
-                              "err": one.stderr.strip()[:12]})
+                              "ok": ok, "err": err})
             self.halt.wait(0.1)
 
 
