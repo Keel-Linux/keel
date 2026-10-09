@@ -1,0 +1,28 @@
+# Temporary (keel#94): the mariadb job five times, one at a time.
+# Removed before merge.
+name: loop-94m
+on:
+  push:
+    branches: [fix/mariadb-crashed-primary-keel94]
+jobs:
+  mariadb:
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        run: [1, 2, 3, 4, 5]
+    uses: keel-linux/.github/.github/workflows/lxc-trixie.yml@main
+    with:
+      systemd: true
+      timeout: 35
+      run: |
+        apt-get update -qq
+        apt-get install -y -qq --no-install-recommends python3-pytest \
+          python3-yaml wireguard-tools iproute2 iputils-ping openssl \
+          etcd-server etcd-client util-linux mariadb-server mariadb-client \
+          zstd
+        systemctl stop mariadb
+        KEEL_MARIADB_NETNS=1 PYTHONPATH=. python3 -m pytest -q -s \
+          tests/test_mariadb_netns.py
