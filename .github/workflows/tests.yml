@@ -150,6 +150,30 @@ jobs:
         systemctl stop mariadb
         KEEL_MARIADB_NETNS=1 PYTHONPATH=. python3 -m pytest -q -s \
           tests/test_mariadb_netns.py
+  # The unplanned failover of a cloud simple MariaDB pair (keel#108,
+  # keel#118) on the mariadb job's nodes and links, the specs in cloud
+  # simple with etcd disabled, so the VIP moves without a lease, as on
+  # the real pair: the primary killed and cut off, the operator's
+  # promote 2 s after, the writes at the VIP back within 15 s of it plus
+  # the three full timeouts it waits on the dead old primary, and
+  # no acknowledged row lost (tests/test_mariadb_simple_netns.py). The
+  # check is "mariadb-simple / trixie".
+  mariadb-simple:
+    permissions:
+      contents: read
+    uses: keel-linux/.github/.github/workflows/lxc-trixie.yml@main
+    with:
+      systemd: true
+      timeout: 35
+      run: |
+        apt-get update -qq
+        apt-get install -y -qq --no-install-recommends python3-pytest \
+          python3-yaml wireguard-tools iproute2 iputils-ping openssl \
+          etcd-server etcd-client util-linux mariadb-server mariadb-client \
+          zstd
+        systemctl stop mariadb
+        KEEL_MARIADB_SIMPLE_NETNS=1 PYTHONPATH=. python3 -m pytest -q -s \
+          tests/test_mariadb_simple_netns.py
   # A change that ships must come with a changelog entry, or it cannot be
   # installed and never reaches an appliance. The rule and its tests are
   # bin/require-changelog of the .github repository. The check is
