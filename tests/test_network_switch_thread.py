@@ -20,7 +20,7 @@ from keel.network import switch
 
 class TestChangeAndTheHangup(unittest.TestCase):
     def changed(self, seen: dict):
-        def fake(root, pending, text, run):
+        def fake(root, pending, text, run, found=None):
             seen["handler"] = signal.getsignal(signal.SIGHUP)
             return None
         return fake

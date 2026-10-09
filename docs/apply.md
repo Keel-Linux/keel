@@ -1430,7 +1430,10 @@ goes through the same window, marker, lock, timers and boot unit, with
   `[Interface]`, a line keel does not write, a peer address outside the
   interface's own prefixes (wg-quick routes it, `wg set` does not), a
   listen port that is not the file's, an interface that is not up, and
-  a `wg set` that fails. A change is dated on the clock a session's
+  a `wg set` that fails. The line says which way ran: `done with wg
+  set, live` or `done with wg-quick down, then up` (keel#120). A change
+  that only added peers live is marked so in the window's marker, and
+  keel mesh keeps it with no handshake (mesh.md). A change is dated on the clock a session's
   start time is read on (the start of a thread, in seconds since the
   host's boot), not `/proc/uptime`, which lxcfs counts from a container's
   start.

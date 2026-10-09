@@ -40,14 +40,22 @@ from keel.network import marker, switch, wgkeys
 from keel.system import crowdsec, dbreadonly, dbseed, fwinstall
 
 NOT_RUNNABLE = 127
+LIVE_ADDED = "done with wg set, live: peers added, no other peer touched"
+LIVE_CHANGED = ("done with wg set, live: the other peers kept their"
+                " sessions")
+BOUNCED = "done with wg-quick down, then up"
 
 
 class Effects:
     def __init__(self, root: str):
         self.tree = Tree(root)
+        # what the last action did, when "done" does not say it
+        # (keel#120); None for the rest
+        self.ran: str | None = None
 
     def apply(self, action: Change) -> str | None:
         """Carry out one action; None on success, else what went wrong"""
+        self.ran = None
         try:
             if isinstance(action, Run):
                 return self.run(action.argv, timeout=action.timeout)
@@ -122,6 +130,9 @@ class Effects:
             return str(e)
         if said:
             print(f"database.server.tls: {said}", file=sys.stderr)
+        else:
+            self.ran = ("kept: the certificate is not due for renewal, and"
+                        " no file changed")
         return None
 
     def run(self, argv: tuple[str, ...], stdin: str | None = None,
@@ -193,8 +204,14 @@ class Effects:
             down_before=action.down_before,
             uplink_gateways=action.uplink_gateways,
         )
-        return switch.change(self.tree.root, pending, action.content,
-                             self.run)
+        seen: list[str] = []
+        problem = switch.change(self.tree.root, pending, action.content,
+                                self.run, seen)
+        if problem is None and action.kind == marker.OVERLAY:
+            # the way that ran (keel#120)
+            self.ran = (LIVE_ADDED if seen == [switch.ADDED] else
+                        LIVE_CHANGED if seen else BOUNCED)
+        return problem
 
     def make_dir(self, action: MakeDir) -> str | None:
         path = self.tree.path(action.path)

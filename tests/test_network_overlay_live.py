@@ -97,6 +97,18 @@ class TestCommands(RootCase):
             + peer(ONE, "fd00:1::2/128", "[2001:db8::2]:51820"), "wg0",
             dump(AFTER)), [])
 
+    def test_whether_the_lines_only_add_peers(self):
+        """keel#117: an addition alone cannot cut this node off"""
+        self.assertEqual(switch.live_plan(BEFORE, AFTER, "wg0",
+                                          dump(BEFORE)), ([SET_TWO], True))
+        self.assertFalse(switch.live_plan(AFTER, BEFORE, "wg0",
+                                          dump(AFTER))[1])
+        moved = INTERFACE + peer(ONE, "fd00:1::2/128", "[2001:db8::9]:51820")
+        self.assertFalse(switch.live_plan(BEFORE, moved + peer(
+            TWO, "fd00:1::3/128"), "wg0", dump(BEFORE))[1])
+        self.assertEqual(switch.live_plan(BEFORE, BEFORE, "wg0",
+                                          dump(BEFORE)), ([], False))
+
     def test_the_interface_s_drift_is_corrected(self):
         """keel#96: the spec and the file name a peer wg0 lacks; and a
         peer wg0 holds that no file names"""
@@ -220,6 +232,21 @@ class TestLiveChange(RootCase):
         found = marker.read(self.root)
         self.assertEqual((found.changed_at, found.absent), (50.0, False))
         self.assertEqual(marker.saved(self.root), BEFORE)
+
+    def test_the_marker_says_an_addition_was_made_live(self):
+        self.write(BEFORE)
+        switch.change(self.root, pending(), AFTER, Recorder())
+        self.assertTrue(marker.read(self.root).added_live)
+
+    def test_a_removal_or_a_bounce_is_no_live_addition(self):
+        self.write(AFTER)
+        switch.change(self.root, pending(), BEFORE, Recorder())
+        self.assertFalse(marker.read(self.root).added_live)
+        marker.clear(self.root)
+        self.write(BEFORE)
+        self.dumped.side_effect = lambda iface: None
+        switch.change(self.root, pending(), AFTER, Recorder())
+        self.assertFalse(marker.read(self.root).added_live)
 
     def test_its_revert_removes_it_live(self):
         self.write(BEFORE)

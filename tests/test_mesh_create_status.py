@@ -143,9 +143,14 @@ class TestStatus(unittest.TestCase):
             "  handshake 12 s ago"])
         self.assertEqual(found[4], f"  {OTHER}  fd00:6b65:1::7/128  no"
                          " endpoint  no handshake yet")
-        self.assertEqual(found[5], "pending invites: 1")
+        # keel#117: a peer with no handshake is drift, named
+        self.assertEqual(found[5], f"drift: peer {OTHER} has no handshake"
+                         " since wg0 came up: it comes once that member has"
+                         " this node as a peer too (keel mesh sync on that"
+                         " member)")
+        self.assertEqual(found[6], "pending invites: 1")
         self.assertIn(f"  {INVITE}  fd00:6b65:1::3/64  TCP 51820  until"
-                      " 2026-10-03 13:00:00 UTC  pending", found[6])
+                      " 2026-10-03 13:00:00 UTC  pending", found[7])
         invites.consume(self.root, INVITE, NOW)
         self.assertIn("used, waiting for its confirmation",
                       status.lines(self.overlay, self.root, NOW,
@@ -163,6 +168,9 @@ class TestStatus(unittest.TestCase):
         found = status.lines(self.overlay, self.root, NOW, lambda argv: None)
         self.assertIn("public key: unknown (is the interface up?)", found)
         self.assertIn("no handshake known", found[4])
+        self.assertIn(f"drift: peer {JOINER} is not held by wg0: keel mesh"
+                      " sync on this node applies it again, or keel spec"
+                      " apply --system", found)
 
     def test_off_the_live_system(self):
         found = status.lines(self.overlay, self.root, NOW, None)

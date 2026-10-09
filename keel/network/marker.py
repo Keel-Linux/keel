@@ -71,6 +71,11 @@ class Pending:
     revert puts the file back and leaves it down. `uplink_gateways` are
     the gateways network.interfaces declares, IPv6 first, which confirm
     checks an overlay change has not routed into the overlay.
+    `added_live` is an overlay change that only added peers, with `wg
+    set` on the interface that was up (keel.network.switch, keel#117):
+    it removed nothing and restarted nothing, so it cannot cut this node
+    off, and keel mesh keeps it without a handshake
+    (keel.network.session.ADDED).
     """
 
     iface: str
@@ -86,6 +91,7 @@ class Pending:
     absent: bool = False
     down_before: bool = False
     uplink_gateways: tuple[str, ...] = ()
+    added_live: bool = False
 
     def up(self, boot_id: str, uptime: float) -> "Pending":
         return replace(self, boot_id=boot_id, changed_at=uptime)
@@ -150,6 +156,7 @@ def read(root: str) -> Pending | None:
             absent=bool(data.get("absent")),
             down_before=bool(data.get("down_before")),
             uplink_gateways=tuple(data.get("uplink_gateways") or ()),
+            added_live=bool(data.get("added_live")),
         )
     except (KeyError, TypeError, ValueError):
         return None

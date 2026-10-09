@@ -135,8 +135,10 @@ def netns_apply(doc: dict, root: str, window: int) -> int:
         iface=iface, path=relative, window=window,
         addresses=tuple(one.split("/")[0]
                         for one in wireguard.addresses(overlay)),
-        kind=marker.OVERLAY, absent=True).up(marker.boot_id(),
-                                              marker.process_clock()))
+        kind=marker.OVERLAY, absent=True,
+        # peers only added live: keel mesh keeps it (keel#117)
+        added_live=live == switch.ADDED).up(marker.boot_id(),
+                                             marker.process_clock()))
     return 0
 
 
@@ -158,8 +160,9 @@ def ping(address: str, rounds: int = 3, upto_s: float | None = None) -> bool:
     new handshake, and on a poor link a lost initiation is sent again
     only after WireGuard's 5 s rekey timeout. With `upto_s` the rounds
     repeat until that many seconds have passed: the ping right after a
-    join waits out the confirmation window (keel#94), the others stay
-    short"""
+    join waits out the confirmation window (keel#94), a member kept
+    live with no handshake yet (keel#117) waits out its first one, the
+    others stay short"""
     deadline = time.monotonic() + upto_s if upto_s else None
     while True:
         if any(subprocess.run(["ping", "-6", "-c", "5", "-i", "0.3", "-W",
@@ -197,7 +200,10 @@ def joiner(token_text: str, endpoint: str, after: str) -> None:
               "address": here.overlay().get("address"),
               "key": here.public_key()[0], "root": root}
     if after not in ("serve", "-"):
-        report["ping_other"] = ping(after)
+        # a member learned after the join has this node only once the
+        # sync reaches it (keel#117): the first handshake can wait out
+        # several WireGuard rekey timeouts on a poor link
+        report["ping_other"] = ping(after, upto_s=60)
         report["peers"] = [one.get("public_key")
                            for one in here.overlay().get("peers") or []]
     print("RESULT " + json.dumps(report), flush=True)
@@ -244,7 +250,7 @@ def commands(here: Node, root: str, log: list[str]) -> None:
         last = marker.last(root)
         print("CHECK " + json.dumps({
             "peers": keys, "outcome": last.outcome if last else None,
-            "ping": ping(words[1]), "log": log}), flush=True)
+            "ping": ping(words[1], upto_s=60), "log": log}), flush=True)
 
 
 def handshakes(iface: str = "wg0") -> dict[str, int]:

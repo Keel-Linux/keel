@@ -74,9 +74,8 @@ class TestPlan(unittest.TestCase):
                          ("overlay", "wg0", "etc/wireguard/wg0.conf", 90,
                           ("fd00:1::1",)))
         self.assertEqual(switch.content, RENDERED)
-        self.assertIn("wg-quick down, then up", switch.describe())
-        self.assertIn("a change of its peers alone with wg set, live",
-                      switch.describe())
+        # which way ran is said once it ran (keel#120)
+        self.assertIn("bring the overlay wg0 up on a new", switch.describe())
         self.assertIn("over the overlay or the uplink", switch.describe())
 
     def test_missing_tools_are_refused_first(self):

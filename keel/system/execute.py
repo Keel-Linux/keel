@@ -8,7 +8,9 @@ home directory is not populated for an account that was not created),
 the other steps go on, and the summary counts what happened. An Attempt
 that fails is said with what follows from it and fails nothing: it is
 what a machine may not be able to do yet, such as registering with a
-central API while offline. A refusal
+central API while offline. An action that ran says what it did when
+the effects tell (`Effects.ran`): an overlay changed live or bounced,
+a certificate kept because it was not due (keel#120). A refusal
 fails its step the same way in a dry run, because a dry run that planned
 the actions behind a refusal would describe a run that cannot happen.
 """
@@ -59,7 +61,9 @@ def execute(
             else:
                 problem = effects.apply(action)
                 if problem is None:
-                    lines.append(prefix + action.describe() + ": done")
+                    ran = getattr(effects, "ran", None)
+                    lines.append(prefix + action.describe() + ": "
+                                 + (ran or "done"))
                     changed += 1
                 elif isinstance(action, Attempt):
                     lines.append(prefix + action.describe()
