@@ -1,3 +1,24 @@
+keel (0.23.4) unstable; urgency=medium
+
+  * keel vip promote with etcd no longer stops after one read of etcd
+    that fails (keel#94). A member that comes back from a partition
+    answers a linearizable read only after it catches up with the
+    leader. On a link of 250 ms with 2% loss, this can take more than
+    20 s. Promote now tries the first read again for 60 s, and tells
+    the operator that it waits. If etcd does not answer in 60 s,
+    promote stops as before and changes nothing.
+  * Tests (keel#94): the netns drivers wait for a condition, not for a
+    fixed time. The ping after a join tries again until the tunnel
+    answers, for a maximum of 90 s (the WireGuard rekey attempt time),
+    and records how long it took. The vip-upgrade driver reads the
+    epoch again when one read of 2 s fails. A child namespace is used
+    only after unshare made it. A driver that stops on an error gives
+    its partial result and does not hang. The channel tests wait until
+    the listener released the last connection before they post again
+    from the same source.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Mon, 13 Oct 2026 12:00:00 +0000
+
 keel (0.23.3) unstable; urgency=medium
 
   * keel mesh invite draws a random free address of the inviter's

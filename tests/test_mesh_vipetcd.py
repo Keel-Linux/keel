@@ -223,6 +223,36 @@ class TestPromoteWithEtcd(WithEtcd):
         self.assertEqual(code, exits.APPLY_FAILED)
         self.assertIn("did not take the claim", said)
 
+    def test_a_member_back_from_a_partition_is_waited_for(self):
+        """keel#94: a member back from a partition answers a linearizable
+        read only once it caught up with the leader; promote asks again
+        until CATCH_UP and then goes on"""
+        failures = iter([True, True, True])
+        check = self.kv.check
+
+        def catching_up(call: str) -> None:
+            if call == "prefix" and next(failures, False):
+                self.sleep(10)
+                raise vipetcd.EtcdError("etcdctl get: context deadline"
+                                        " exceeded")
+            check(call)
+        with mock.patch.object(self.kv, "check", side_effect=catching_up):
+            code, said = self.promote(0)
+        self.assertEqual(code, exits.OK, said)
+        self.assertIn("waiting for this member's etcd", said)
+        self.assertTrue(self.carried(0))
+
+    def test_a_member_that_never_catches_up_is_given_up(self):
+        self.kv.refuse = "prefix"
+        started = self.monotonic()
+        code, said = self.promote(0)
+        self.assertEqual(code, exits.APPLY_FAILED)
+        self.assertIn("etcd did not answer", said)
+        self.assertGreaterEqual(self.monotonic() - started,
+                                vippromote.CATCH_UP)
+        self.assertLess(self.monotonic() - started,
+                        vippromote.CATCH_UP + 1)
+
     def test_a_controller_that_does_not_carry_it(self):
         said: list[str] = []
         with mock.patch.object(vippromote, "CARRY_WAIT", 1.0):

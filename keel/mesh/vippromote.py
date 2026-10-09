@@ -54,7 +54,10 @@ from keel.network.wireguard import same_key
 
 # a promote asks this member's etcd with keel's usual timeout (10 s), not
 # the controller's short one: a member just back from a partition answers
-# once it caught up, and an operator's command can wait for it
+# once it caught up, and an operator's command can wait for it. On a link
+# of 250 ms with 2% loss, that took more than 20 s (keel#94): the first
+# read is tried again until CATCH_UP
+CATCH_UP = 60.0
 # how long a promote with etcd waits for the controller to carry the VIP
 CARRY_WAIT = 15.0
 # how long it waits for the old holder's key to go: a lease revoked by a
@@ -317,13 +320,33 @@ def gone_lease(here: Here, vip: str, lease: str | None,
         here.sleep(POLL)
 
 
+def caught_up(here: Here, vip: str,
+              out: Callable[[str], None]) -> vipetcd.Seen:
+    """The VIP's keys, read from this member's etcd, asked again until
+    CATCH_UP: a member back from a partition answers once it caught up
+    with the leader. Raises the last EtcdError"""
+    deadline = here.monotonic() + CATCH_UP
+    told_once = False
+    while True:
+        try:
+            return vipetcd.seen(here.local(), here.mesh_id(),
+                                here.err).get(vip) or vipetcd.Seen(vip)
+        except EtcdError as e:
+            if here.monotonic() >= deadline:
+                raise
+            if not told_once:
+                out(f"etcd did not answer yet ({e}): waiting for this"
+                    f" member's etcd to catch up (at most {CATCH_UP:g} s)…")
+                told_once = True
+        here.sleep(POLL)
+
+
 def promoted_etcd(here: Here, vip: str, gone: bool,
                   out: Callable[[str], None]) -> int:
     """With etcd: release, compare-and-swap, the controller carries"""
     own = here.own_key()
     try:
-        now = vipetcd.seen(here.local(), here.mesh_id(),
-                           here.err).get(vip) or vipetcd.Seen(vip)
+        now = caught_up(here, vip, out)
     except EtcdError as e:
         out(f"etcd did not answer: {e}. With etcd, the VIP moves only"
             " through it")
