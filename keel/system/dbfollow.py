@@ -9,9 +9,26 @@ keel-database-follow.service when the VIP's state changes or at boot:
 
 | the VIP here | what is done |
 | --- | --- |
-| held, by this node's newest claim | the server made writable: a replica drained and promoted (keel.system.dbreadonly), read_only off, READ_ONLY ADMIN back |
+| held, by this node's newest claim, and on wg0 | the server made writable: a replica drained and promoted (keel.system.dbreadonly), read_only off, READ_ONLY ADMIN back |
+| held, by this node's newest claim, and not on wg0 | read_only on, the root lock; nothing else (keel#104) |
+| no claim, on a paired node | the same: read only until a claim is proven (keel#104) |
 | held by the other member; released or fenced here | read_only on at once, the root lock, then replication from the holder: a fresh server seeded, one already following it left alone, an old primary rejoined by GTID when it holds nothing the holder lacks, else left read only, reported and alerted |
-| no claim yet | the declared role, the installation's (0020) |
+| no claim yet, declared replica | the replica's row above, from the other member (0020) |
+
+A claim of this node's own is not a proof that it holds the VIP now: a
+node that crashed and booted keeps its last claim in its file, while the
+other member was promoted at a newer epoch (keel#104: writable 31 s on a
+real pair, until keel vip check learned the newer epoch). The proof is
+the VIP on wg0. keel puts it there only after a proof: keel vip promote
+after its fresh claim, keel vip check once a peer answered and none
+knows a newer claim, and with etcd the controller only after a renewal
+of its lease the majority confirmed, for what is left of the release
+time (the kernel's valid_lft removes it then). A boot removes it. So
+the server is read only from its first second (the role's drop-in) and
+read_only goes off only when the address is on wg0. Follow waits up to
+PROOF_WAIT for it, since a promote records its claim before it carries
+the VIP; keel.mesh.vipnode.carry_held writes the VIP's state again when
+it carries the address, so follow runs again then.
 
 The rejoin (0049, "The old primary coming back", MariaDB): the node's
 `@@gtid_binlog_state` against the holder's, read over the overlay as the
@@ -27,6 +44,7 @@ keel's statements go through the server's `mysql` account
 (keel.system.dbmariadb.CLIENT): root has no READ_ONLY ADMIN on a replica.
 """
 
+import fcntl
 import json
 import os
 import subprocess
@@ -37,8 +55,10 @@ from datetime import datetime, timezone
 
 from keel.inspect.dbreading import field_lines
 from keel.inspect.tree import File
+from keel.mesh import vipnet
 from keel.mesh.node import Node, NodeError
 from keel.monitor import alerting
+from keel.network import live, wireguard
 from keel.spec.constants import DEFAULT_PORTS
 from keel.system import dbgtid, dbpair, dbreadonly, dbseed, dbtls
 from keel.system import dbmariadb as mariadb
@@ -53,12 +73,18 @@ from keel.system.dbstate import (
 )
 
 DIVERGED = "var/lib/keel/database/diverged"
+FOLLOW_LOCK = "var/lib/keel/database/follow.lock"
 BACKUPS = "var/backups/keel/mariadb"
 DROPIN_MODE = 0o644
 GTID_QUESTION = mariadb.QUIET_CLIENT + (
     "--execute", "SELECT @@gtid_binlog_state, @@gtid_binlog_pos")
 HOLDER_GTID_SQL = "SELECT @@gtid_binlog_state, @@gtid_slave_pos"
 CHECK = "database-rejoin"
+# how long follow waits for this node's own claim to be proven, the VIP
+# on wg0, before it leaves the server read only: keel vip promote's own
+# wait for the controller to carry it (keel.mesh.vippromote.CARRY_WAIT)
+PROOF_WAIT = 15.0
+PROOF_POLL = 0.5
 NO_PAIR = ("this node declares no appliance.vip: there is no VIP for the"
            " database to follow (keel spec apply converges a declared role)")
 DIVERGED_TITLE = "the old primary diverged and stays read only"
@@ -100,7 +126,22 @@ def followed(root: str, spec: str, confirmed: bool = False,
 
 
 def follow(root: str, spec: str, confirmed: bool, found: Followed,
-           runner=subprocess.run) -> None:
+           runner=subprocess.run, output=live.output,
+           wait: float = PROOF_WAIT, sleep=time.sleep) -> None:
+    """One run at a time: keel-database-follow.service and keel database
+    watch never interleave between the proof and SET read_only OFF"""
+    lock = os.path.join(root, FOLLOW_LOCK)
+    os.makedirs(os.path.dirname(lock), exist_ok=True)
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        _follow(root, spec, confirmed, found, runner, output, wait, sleep)
+    finally:
+        os.close(fd)
+
+
+def _follow(root: str, spec: str, confirmed: bool, found: Followed,
+            runner, output, wait: float, sleep) -> None:
     try:
         doc = Node(root, spec).document()
     except (NodeError, ValueError) as e:
@@ -124,6 +165,12 @@ def follow(root: str, spec: str, confirmed: bool, found: Followed,
         return
     server = declared_server(doc)
     role = dbpair.role_of(pair, str(server.get("role") or ""))
+    # a paired node (it has a pair record: the other member is known)
+    # with no claim at all is not proven either: its state file may have
+    # been removed (keel#104)
+    if role == PRIMARY and not _proven(root, doc, output, wait, sleep):
+        _unproven(root, state, found, runner)
+        return
     if role == PRIMARY:
         _primary(root, state, found, runner)
     elif role == REPLICA:
@@ -135,6 +182,58 @@ def follow(root: str, spec: str, confirmed: bool, found: Followed,
     if found.problem is None:
         _write(root, dbpair.ROLE_FILE, dbpair.role_text(role, pair.vip),
                0o644)
+
+
+def _proven(root: str, doc: dict, output, wait: float, sleep) -> bool:
+    """Whether this node holds the VIP now: its newest claim its own,
+    neither fenced nor released, and the VIP on wg0, waited for up to
+    `wait` seconds"""
+    overlay = ((doc.get("network") or {}).get("overlay") or {}).get(
+        "wireguard") or {}
+    iface = wireguard.interface(overlay)
+    for turn in range(int(wait / PROOF_POLL) + 1):
+        if turn:
+            sleep(PROOF_POLL)
+        pair = dbpair.observe_pair(root, doc)
+        # no claim, or another node's: nothing to wait for
+        if pair is None or pair.role != PRIMARY:
+            return False
+        if vipnet.carried(iface, pair.vip, output):
+            return True
+    return False
+
+
+def _unproven(root: str, state: DatabaseState, found: Followed,
+              runner) -> None:
+    """This node's own claim, not proven: read only and locked, and
+    nothing else, until the VIP is on wg0 (keel#104)"""
+    if not _read_only(root, state, found, runner):
+        return
+    what = "this node's claim of" if state.pair.claimed else \
+        "this node holds no claim of"
+    found.say(f"read only: {what} {state.pair.vip}, not proven (the VIP is"
+              " not on wg0). It takes writes once keel vip check, keel vip"
+              " promote or, with etcd, the controller carries the VIP; a"
+              " newer claim makes it a replica")
+
+
+def _read_only(root: str, state: DatabaseState, found: Followed,
+               runner) -> bool:
+    """read_only on, the drop-in, the root lock; whether all went"""
+    if state.reading.read_only.value is not True:
+        statements = mariadb.set_read_only(True)
+        problem = _send(runner, statements.text)
+        if problem:
+            found.fail(f"{statements.summary} failed: {problem}")
+            return False
+        found.say(statements.summary)
+    _write(root, mariadb.ROLE_DROPIN, mariadb.role_dropin_text(),
+           DROPIN_MODE)
+    problem = dbreadonly.lock(root, runner)
+    if problem:
+        found.fail(problem)
+        return False
+    return True
 
 
 def _primary(root: str, state: DatabaseState, found: Followed,
@@ -175,18 +274,7 @@ def _replica(root: str, doc: dict, server: dict, state: DatabaseState,
              confirmed: bool, found: Followed, runner) -> None:
     """The other node: read only, locked, following the holder"""
     pair = state.pair
-    if state.reading.read_only.value is not True:
-        statements = mariadb.set_read_only(True)
-        problem = _send(runner, statements.text)
-        if problem:
-            found.fail(f"{statements.summary} failed: {problem}")
-            return
-        found.say(statements.summary)
-    _write(root, mariadb.ROLE_DROPIN, mariadb.role_dropin_text(),
-           DROPIN_MODE)
-    problem = dbreadonly.lock(root, runner)
-    if problem:
-        found.fail(problem)
+    if not _read_only(root, state, found, runner):
         return
     host = dbpair.primary_host(pair, server)
     port = int(((server.get("replication") or {}).get("primary") or {})

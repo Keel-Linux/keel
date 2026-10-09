@@ -231,9 +231,36 @@ server match the VIP state keel holds:
 
 | VIP state on this node | `keel database follow` |
 | --- | --- |
-| holds the VIP, newest epoch | promote, as above, when the server is a replica or read only |
+| holds the VIP, newest epoch, the VIP on `wg0` | promote, as above, when the server is a replica or read only |
+| its own claim the newest it knows, the VIP not on `wg0` | `read_only = ON`, the root lock, nothing else: not proven (keel#104) |
 | fenced, or released | `read_only = ON` at once, the root lock, then the rejoin below |
-| no claim known yet | nothing |
+| no claim known yet, on a paired node | `read_only = ON`, the root lock: a declared primary is not proven either (keel#104) |
+
+**A claim in the file is not a proof.** A node that crashed and boots
+keeps its last claim in `/var/lib/keel/vip`, while the other node can
+hold the VIP at a newer epoch. On a real pair (keel#104) the old
+primary set `read_only = OFF` from that claim at boot and was writable
+for 31 s, until `keel vip check` learned the newer epoch. The server is
+read only from its first second (the role's drop-in), and `keel
+database follow` lifts `read_only` only when this node's own claim is
+the newest it knows and the VIP is on `wg0`. A paired node with no
+claim (its state file removed, or before the first promote) stays read
+only too. keel adds the VIP to `wg0` only in these cases: `keel vip
+promote` after its new claim; with etcd, the controller after a renewal
+of its lease that the majority confirmed, with a `valid_lft` that the
+kernel ends at the release deadline; without etcd, `keel vip check`
+when at least one peer answered and no peer that answered knows a newer
+claim. A boot removes the address. Without etcd the address has no
+lifetime: it stays on `wg0` until keel removes it or the node boots, so
+the proof there is weaker (keel#113). `keel database watch` follows a
+server again when it takes writes while the VIP is not on `wg0`. So
+with etcd not reachable at boot, or with no peer that answers, the node
+stays read only. One follow runs at a time
+(`/var/lib/keel/database/follow.lock`). Follow waits up to 15 s for the address, because a promote
+records its claim before it adds the VIP; when keel adds the VIP, it
+writes the VIP's state again, so `keel-database-follow.path` runs
+follow again. `keel database watch` runs follow again within 30 s if
+these runs are missed.
 
 So in cloud advanced the controller's failover promotes the database on
 the new holder within seconds of the claim, and the old primary turns

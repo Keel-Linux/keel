@@ -36,10 +36,11 @@ from keel import exits
 from keel.inspect import constants as paths
 from keel.inspect.collect import database_servers
 from keel.inspect.tree import Tree
-from keel.mesh import etcd
+from keel.mesh import etcd, vipnet
 from keel.mesh.etcdstate import StateError
 from keel.mesh.node import Node, NodeError
 from keel.monitor import alerting
+from keel.network import live, wireguard
 from keel.system import dbpair, dbtls
 from keel.system import dbmariadb as mariadb
 
@@ -88,11 +89,15 @@ def watch(root: str, spec: str, out: Callable[[str], None],
 
 
 def needs_follow(root: str, pair: dbpair.PairState, reading,
-                 doc: dict) -> bool:
-    """Whether the server disagrees with the VIP's role"""
+                 doc: dict, output=live.output) -> bool:
+    """Whether the server disagrees with the VIP's role. A paired server
+    takes writes only while this node holds the VIP and carries it on
+    wg0 (keel#104): writable with no claim, or with the VIP gone from
+    wg0 (its valid_lft ran out), it is followed again"""
     role = pair.role
     if role is None:
-        return False
+        return pair.peer_key is not None and \
+            reading.read_only.value is False
     try:
         with open(os.path.join(root, dbpair.ROLE_FILE)) as fob:
             recorded = fob.read()
@@ -104,7 +109,12 @@ def needs_follow(root: str, pair: dbpair.PairState, reading,
         from keel.system import dbfollow
         replicating = reading.role.value == "replica"
         return not replicating and dbfollow.diverged(root) is None
-    return reading.read_only.value is True
+    if reading.read_only.value is True:
+        return True
+    overlay = ((doc.get("network") or {}).get("overlay") or {}).get(
+        "wireguard") or {}
+    return vipnet.carried(wireguard.interface(overlay), pair.vip,
+                          output) is False
 
 
 def semi_sync(root: str, pair: dbpair.PairState, out, err):

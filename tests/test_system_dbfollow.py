@@ -145,10 +145,11 @@ class FollowTestCase(Pair):
                 return KEYS[index], None
         return None, "no key"
 
-    def pair_nodes(self, claim: int | None = 0):
+    def pair_nodes(self, claim: int | None = 0,
+                   mode: str = "cloud_advanced", etcd: str = "disabled"):
         """A and B paired, their specs declaring the database; A claims
         the VIP, and B's follow sees A as the holder"""
-        self.nodes()
+        self.nodes(mode=mode, etcd=etcd)
         for index, server in ((0, PRIMARY_SPEC), (1, REPLICA_SPEC)):
             here = self.all[index]
             doc = here.node.document()
@@ -171,7 +172,7 @@ class FollowTestCase(Pair):
                                self.said[claim].append)
 
     def follow(self, index: int, server: Server, confirmed: bool = False,
-               live: bool = True) -> dbfollow.Followed:
+               live: bool = True, wait: float = 0.0) -> dbfollow.Followed:
         here = self.all[index]
         found = dbfollow.Followed()
         with mock.patch("keel.inspect.constants.ROOT_DEFAULT", here.root), \
@@ -188,7 +189,8 @@ class FollowTestCase(Pair):
                 mock.patch.object(self.all[index].node, "overlay",
                                   wraps=self.all[index].node.overlay):
             dbfollow.follow(here.root, here.node.path, confirmed, found,
-                            runner=server)
+                            runner=server, output=self.nets[index].output,
+                            wait=wait, sleep=self.sleep)
         return found
 
     def role_file(self, index: int) -> str:
@@ -361,10 +363,14 @@ class TestTheReplica(FollowTestCase):
         found = self.follow(2, Server())
         self.assertIn("declares no appliance.vip", found.problem)
         self.pair_nodes(claim=None)
-        # no claim: the installation's role stands
-        found = self.follow(0, Server())
+        # no claim on a paired node: the declared primary is not proven,
+        # so it stays read only until a claim is (keel#104)
+        server = Server()
+        found = self.follow(0, server)
         self.assertIsNone(found.problem, found.lines)
-        self.assertIn("role=primary", self.role_file(0))
+        self.assertIn("SET GLOBAL read_only = ON;\n", server.sent)
+        self.assertIn("holds no claim", "\n".join(found.lines))
+        self.assertNotIn("role=primary", self.role_file(0))
 
     def test_followed_is_the_effects_face_of_follow(self):
         self.pair_nodes()
@@ -372,6 +378,233 @@ class TestTheReplica(FollowTestCase):
         with mock.patch.object(dbfollow, "follow") as inner:
             self.assertIsNone(dbfollow.followed(here.root, here.node.path))
         inner.assert_called_once()
+
+
+class TestTheOldPrimaryAtBoot(FollowTestCase):
+    """keel#104: a stale claim of its own never makes a server writable.
+    The node is read only from its first second (the role's drop-in),
+    and read_only goes off only once the VIP is on wg0, which keel puts
+    there only after a proof: a peer's answer and no newer claim (keel
+    vip check), the node's own fresh claim (keel vip promote), or, with
+    etcd, a renewal of its lease the majority confirmed"""
+
+    def booted(self, index: int) -> None:
+        """The node crashed and booted: wg0 lost every address"""
+        self.nets[index].addresses.clear()
+
+    def no_write_taken(self, server: Server) -> None:
+        self.assertFalse(any("read_only = OFF" in one for one in server.sent),
+                         server.sent)
+
+    def test_crashed_another_promoted_it_stays_read_only_then_follows(self):
+        # the tester's mesh: a cloud simple pair, no etcd
+        self.pair_nodes(mode="cloud_simple")
+        a, b = self.all[0], self.all[1]
+        # A crashes; B is promoted at a newer epoch with A gone
+        self.down.add(address(0))
+        said: list[str] = []
+        self.assertEqual(vippromote.promote(b, True, said.append), 0, said)
+        self.assertTrue(self.carried(1))
+        # A boots: its file still says it holds epoch 1, unfenced
+        self.down.discard(address(0))
+        self.booted(0)
+        self.assertEqual(dbpair.observe_pair(a.root, a.node.document()).role,
+                         dbpair.PRIMARY)
+        server = Server(read_only="ON")
+        found = self.follow(0, server, wait=3.0)
+        self.assertIsNone(found.problem, found.lines)
+        self.no_write_taken(server)
+        joined = "\n".join(found.lines)
+        self.assertIn("not proven", joined)
+        self.assertNotIn("role=primary", self.role_file(0))
+        # READ_ONLY ADMIN taken too: root writes nothing either
+        self.assertTrue(any("REVOKE READ_ONLY ADMIN" in one
+                            for one in server.sent), server.sent)
+        # it waited for a proof, polling, and none came
+        self.assertGreaterEqual(self.monotonic(), 1003.0)
+        # keel vip check learns epoch 2: A is fenced, then a replica of B
+        vippromote.check(a, lambda line: None)
+        self.assertFalse(self.carried(0))
+        server = Server(read_only="ON", binlog_state="0-1-10",
+                        binlog_pos="0-1-10", holder_state="0-1-10,0-2-20")
+        found = self.follow(0, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.no_write_taken(server)
+        joined = "\n".join(found.lines)
+        self.assertIn(f"rejoined: no errant GTID, replicating from"
+                      f" [{address(1)}]:3306", joined)
+        self.assertIn("role=replica", self.role_file(0))
+
+    def test_a_server_found_writable_without_a_proof_is_made_read_only(self):
+        self.pair_nodes(mode="cloud_simple")
+        self.booted(0)
+        server = Server(read_only="OFF")
+        found = self.follow(0, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertIn("SET GLOBAL read_only = ON;\n", server.sent)
+        self.no_write_taken(server)
+
+    def test_the_holder_proven_again_after_its_boot_takes_writes(self):
+        self.pair_nodes(mode="cloud_simple")
+        self.booted(0)
+        server = Server(read_only="ON")
+        self.follow(0, server)
+        self.no_write_taken(server)
+        # nobody promoted: a peer answers, none knows a newer claim, and
+        # keel vip check carries the VIP again
+        vippromote.check(self.all[0], lambda line: None)
+        self.assertTrue(self.carried(0))
+        server = Server(read_only="ON")
+        found = self.follow(0, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertIn("SET GLOBAL read_only = OFF;\n", server.sent)
+        self.assertIn("role=primary", self.role_file(0))
+
+    def test_no_peer_answers_at_boot_it_stays_read_only(self):
+        self.pair_nodes(mode="cloud_simple")
+        self.booted(0)
+        self.down.update({address(1), address(2)})
+        vippromote.check(self.all[0], lambda line: None)
+        server = Server(read_only="ON")
+        found = self.follow(0, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.no_write_taken(server)
+
+    def test_a_proof_that_comes_while_follow_waits_is_taken(self):
+        """keel vip promote records its claim, then carries the VIP: the
+        follow its record started waits for the address"""
+        self.pair_nodes(mode="cloud_simple")
+        self.booted(0)
+        net = self.nets[0]
+        polls: list[str] = []
+        real = net.output
+
+        def output(argv):
+            polls.append(argv[0])
+            if len(polls) == 2:
+                net.addresses.append(f"{VIP}/128")
+            return real(argv)
+        net.output = output
+        server = Server(read_only="ON")
+        found = self.follow(0, server, wait=5.0)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertIn("SET GLOBAL read_only = OFF;\n", server.sent)
+
+    def test_with_etcd_unreachable_at_boot_it_stays_read_only(self):
+        from keel.mesh import etcdstate, vipetcd
+        from keel.mesh.etcdstate import Cluster, Member
+        from vip_helpers import KEYS as keys
+        self.pair_nodes(claim=None, etcd="enabled")
+        cluster = Cluster("new", tuple(Member(keys[i], address(i))
+                                       for i in range(3)),
+                          bytes(range(16)).hex())
+        for one in self.all:
+            etcdstate.save_cluster(one.root, cluster)
+        a = self.all[0]
+        controller = vipetcd.Controller(
+            vipetcd.Ops(a), lambda: self.kv, __import__("threading").Event(),
+            self.said[0].append, self.monotonic, lambda *args: None)
+        with mock.patch.object(vippromote, "carried_soon",
+                               return_value=True):
+            vippromote.promote(a, False, self.said[0].append)
+        self.assertIsNotNone(vipstate_read(a).lease)
+        # A boots and etcd answers nothing: no renewal, nothing carried
+        self.booted(0)
+        self.kv.refuse = "all"
+        for _ in range(3):
+            self.sleep(vipetcd.RENEW)
+            controller.holding()
+        self.assertFalse(self.carried(0))
+        server = Server(read_only="ON")
+        found = self.follow(0, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.no_write_taken(server)
+        self.assertIn("not proven", "\n".join(found.lines))
+        # etcd back, the lease renewed by the majority: proven
+        self.kv.refuse = None
+        self.sleep(vipetcd.RENEW)
+        controller.holding()
+        self.sleep(vipetcd.RENEW)
+        controller.holding()
+        self.assertTrue(self.carried(0))
+        server = Server(read_only="ON")
+        found = self.follow(0, server)
+        self.assertIn("SET GLOBAL read_only = OFF;\n", server.sent)
+
+
+class TestNoClaimAndNoAddress(FollowTestCase):
+    """The security review of keel#104: no claim is no proof, a VIP gone
+    from wg0 is followed again, and two runs never interleave"""
+
+    def test_a_primary_whose_vip_state_file_was_removed_stays_read_only(
+            self):
+        self.pair_nodes(mode="cloud_simple")
+        a = self.all[0]
+        from keel.mesh import vip as vipstate
+        # docs tell the operator to remove a damaged file; the pair
+        # record stays, and the address is still on wg0
+        os.remove(os.path.join(a.root, vipstate.file_of(VIP)))
+        self.assertTrue(self.carried(0))
+        pair = dbpair.observe_pair(a.root, a.node.document())
+        self.assertFalse(pair.claimed)
+        self.assertIsNotNone(pair.peer_key)
+        server = Server(read_only="ON")
+        found = self.follow(0, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertFalse(any("read_only = OFF" in one for one in server.sent))
+        self.assertNotIn("role=primary", self.role_file(0))
+        # and watch follows a server that is writable with no claim
+        from keel.inspect.dbreading import Reading, Value
+        writable = Reading(role=Value("standalone"), read_only=Value(False))
+        read_only = Reading(role=Value("standalone"), read_only=Value(True))
+        doc = a.node.document()
+        self.assertTrue(dbwatch.needs_follow(a.root, pair, writable, doc,
+                                             self.nets[0].output))
+        self.assertFalse(dbwatch.needs_follow(a.root, pair, read_only, doc,
+                                              self.nets[0].output))
+        self.assertFalse(dbwatch.needs_follow(
+            a.root, dbpair.PairState(VIP, KEYS[0]), writable, doc,
+            self.nets[0].output))
+
+    def test_watch_follows_a_writable_primary_whose_vip_left_wg0(self):
+        from keel.inspect.dbreading import Reading, Value
+        self.pair_nodes()
+        a = self.all[0]
+        self.follow(0, Server(read_only="ON"))
+        self.assertIn("role=primary", self.role_file(0))
+        pair = dbpair.observe_pair(a.root, a.node.document())
+        doc = a.node.document()
+        writable = Reading(role=Value("standalone"), read_only=Value(False))
+        self.assertFalse(dbwatch.needs_follow(a.root, pair, writable, doc,
+                                              self.nets[0].output))
+        # the kernel ended the address (valid_lft): follow again, and
+        # follow makes it read only
+        self.nets[0].addresses.clear()
+        self.assertTrue(dbwatch.needs_follow(a.root, pair, writable, doc,
+                                             self.nets[0].output))
+        server = Server(read_only="OFF")
+        self.follow(0, server)
+        self.assertIn("SET GLOBAL read_only = ON;\n", server.sent)
+
+    def test_follow_runs_under_its_lock(self):
+        import fcntl
+        self.pair_nodes()
+        taken: list[int] = []
+        real = fcntl.flock
+
+        def flock(fd, how):
+            taken.append(how)
+            return real(fd, how)
+        with mock.patch.object(dbfollow.fcntl, "flock", side_effect=flock):
+            self.follow(0, Server())
+        self.assertEqual(taken, [fcntl.LOCK_EX])
+        self.assertTrue(os.path.exists(os.path.join(
+            self.all[0].root, dbfollow.FOLLOW_LOCK)))
+
+
+def vipstate_read(here):
+    from keel.mesh import vip as vipstate
+    return vipstate.read(here.root, VIP)
 
 
 class TestWatch(FollowTestCase):

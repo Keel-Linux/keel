@@ -172,6 +172,29 @@ class TestAMariadbPairOnAPoorNetwork(unittest.TestCase):
                                      for line in found[name]["out"]),
                                  found[name])
 
+    def test_a_crashed_primary_boots_read_only_and_follows_the_new_one(self):
+        """keel#104: B promoted at a newer epoch while A was down; A
+        boots with its old claim, and never takes a write"""
+        found = self.found
+        self.assertEqual(found["k104_promote"]["code"], 0,
+                         found["k104_promote"])
+        self.assertEqual(found["k104_b_read_only"]["out"], "0", found)
+        self.assertEqual(found["k104_boot_read_only"], "1", found)
+        follow = found["k104_follow_at_boot"]
+        self.assertIsNone(follow["problem"], follow)
+        self.assertIn("not proven", " ".join(follow["lines"]), follow)
+        self.assertEqual(found["k104_after_follow"], "1", found)
+        self.assertIsNotNone(found["k104_replica_s"],
+                             found["k104_a_follow_log"])
+        # every sample from the boot to the rejoin: never writable
+        samples = found["k104_read_only_samples"]
+        self.assertTrue(samples, found)
+        self.assertNotIn("0", samples, samples)
+        status = found["k104_a_status"]
+        self.assertEqual(status.get("Slave_IO_Running"), "Yes", status)
+        self.assertEqual(status.get("Master_SSL_Allowed"), "Yes", status)
+        self.assertEqual(status.get("Using_Gtid"), "Slave_Pos", status)
+
     def test_no_two_nodes_ever_carry_the_vip(self):
         self.assertEqual(self.found["max_holders"], 1,
                          self.found["double_holder_samples"])

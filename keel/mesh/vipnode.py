@@ -395,7 +395,13 @@ def carry_held(here: Here, vip: str, age: float | None = None) -> bool:
             valid = None if age is None else vipnet.lifetime(age)
             if valid is None:
                 return False
+        before = vipnet.carried(here.iface(), vip, here.node.output)
         problem = vipnet.carry(here.iface(), vip, here.node.run, valid)
+        if not problem and before is False:
+            # the VIP on wg0 is the proof keel database follow waits for
+            # before the server takes writes (keel#104): the state
+            # written again, so that keel-database-follow.path runs it
+            vipstate.write(here.root, held)
     if problem:
         here.err(f"vip {vip}: cannot carry it: {problem}")
         return False

@@ -6,6 +6,7 @@ a third node in one process (tests/vip_helpers.py)"""
 import json
 import os
 import unittest
+import unittest.mock
 
 from vip_helpers import KEYS, NOW, VIP, FakeNet, Pair, address
 
@@ -231,6 +232,26 @@ class TestTheCheck(Pair):
         self.nets[0].addresses.clear()
         self.assertIn("carried again", self.check(0))
         self.assertTrue(self.carried(0))
+
+    def test_carried_again_the_state_is_written_again_so_follow_runs(self):
+        """keel-database-follow.path watches the VIP's state: the
+        address carried again is the proof follow waits for (keel#104)"""
+        self.nodes()
+        vippromote.promote(self.all[0], False, lambda line: None)
+        self.nets[0].addresses.clear()
+        written: list = []
+        real = vipstate.write
+
+        def spy(root, held):
+            written.append(held)
+            real(root, held)
+        with unittest.mock.patch.object(vipstate, "write", side_effect=spy):
+            self.check(0)
+            self.assertEqual(len(written), 1, written)
+            self.assertTrue(written[0].holds(KEYS[0]))
+            # carried already: nothing written, so no follow for nothing
+            self.check(0)
+            self.assertEqual(len(written), 1, written)
 
     def test_not_carried_again_when_no_peer_answers(self):
         self.nodes()
