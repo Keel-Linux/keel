@@ -496,6 +496,26 @@ def status_value(agent, name: str, variable: str) -> str:
     return (found.get("out") or "").split("\t")[-1]
 
 
+def apply_with_cert_ask_retry(name: str, upto_s: float = 300) -> dict:
+    """`keel apply` on a paired database node, retrying while the only
+    failure is the certificate ask over the members' channel (keel#131):
+    that ask is one message, which can die on the lossy link ("did not
+    sign the database certificate"), and a failed apply changed nothing
+    past the certificate step, so running it again is safe"""
+    from vip_netns import agent_send
+    deadline = time.monotonic() + upto_s
+    tries = 0
+    while True:
+        tries += 1
+        said = agent_send(name, "apply", 900)
+        if not said.get("failed") or time.monotonic() >= deadline or not \
+                any("did not sign the database certificate" in line
+                    for line in said.get("lines") or []):
+            said["tries"] = tries
+            return said
+        time.sleep(3)
+
+
 def replica_status(agent, name: str) -> dict:
     return agent(name, "rstatus").get("status") or {}
 
@@ -540,8 +560,8 @@ def play(report: dict, pids: list[int], pairs, roots: list[str],
             report["setup_error"] = found
             return
     # then apply on each, as its first boot would
-    report["a_apply"] = agent_send("A", "apply", 600)
-    report["b_apply"] = agent_send("B", "apply", 900)
+    report["a_apply"] = apply_with_cert_ask_retry("A", 600)
+    report["b_apply"] = apply_with_cert_ask_retry("B", 900)
     report["b_follow_log"] = agent_send("B", "followlog")
 
     # (a) replication over TLS, a write at the VIP read on B. The I/O
@@ -624,7 +644,7 @@ def play(report: dict, pids: list[int], pairs, roots: list[str],
     # the replica applied again (every boot does), then written to:
     # its own grants went nowhere near its binary log, so the primary's
     # next event is applied (gtid_strict_mode, ER 1950 otherwise)
-    report["b_apply_again"] = agent_send("B", "apply", 600)
+    report["b_apply_again"] = apply_with_cert_ask_retry("B", 600)
     before = count_rows(None, agent_send, "B") or 0
     one = subprocess.run(
         ["nsenter", "-t", str(c_pid), "-n", "mariadb", "--batch",
