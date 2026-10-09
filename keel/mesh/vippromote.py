@@ -124,7 +124,7 @@ def pair(here: Here, at: str, out: Callable[[str], None]) -> int:
             # the VIP is one pair's across the mesh: reserved by a
             # compare-and-swap before the other member is asked to sign
             problem = vipreserve.reserve(
-                vipetcd.local(here), draft, own, signer(here),
+                here.local(), draft, own, signer(here),
                 vipnode.signer_of(here))
             if problem:
                 out(problem)
@@ -157,7 +157,7 @@ def paired_in_etcd(here: Here, both: vippair.Pair, own: str,
     """With etcd, once both members signed: the reservation kept for
     good, and the pair's role asked of the root's holder"""
     try:
-        problem = vipreserve.kept(vipetcd.local(here), both, own,
+        problem = vipreserve.kept(here.local(), both, own,
                                   signer(here), vipnode.signer_of(here))
     except (EtcdError, SigningError) as e:
         problem = str(e)
@@ -189,7 +189,7 @@ def unpair(here: Here, text: str, out: Callable[[str], None]) -> int:
             out("this node is in no formed etcd cluster: nothing is"
                 " reserved, so nothing is released")
             return exits.OK
-        problem = vipreserve.release(vipetcd.local(here), here.mesh_id(),
+        problem = vipreserve.release(here.local(), here.mesh_id(),
                                      vip, here.own_key(),
                                      vipnode.signer_of(here))
     except EtcdError as e:

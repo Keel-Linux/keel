@@ -24,6 +24,7 @@ from keel.mesh import (
     vippromote,
     vipreserve,
 )
+from keel.mesh import etcdclient
 from keel.mesh.etcdclient import EtcdError
 from keel.mesh.etcdstate import Cluster, Member
 from keel.mesh.memberlink import LinkError
@@ -179,6 +180,43 @@ class TestKeelVipPairReserves(WithEtcd):
         self.assertIn("changed while it was made", out)
 
 
+class TestOperatorTimeouts(WithEtcd):
+    """keel#94: keel vip pair and unpair are an operator's commands, and
+    the member asked to sign answers one: each call to etcd has keel's
+    usual timeout, not the controller's short one, which a lease grant on
+    a link of 250 ms with 2% loss can outlast"""
+
+    def timeouts(self, act) -> set[float]:
+        seen: list[float] = []
+        check = self.kv.check
+        # one fake for every client: as etcdclient.local makes a new one
+        self.kv.timeout = etcdclient.TIMEOUT
+
+        def recorded(call: str) -> None:
+            seen.append(self.kv.timeout)
+            check(call)
+        with mock.patch.object(self.kv, "check", side_effect=recorded):
+            act()
+        self.assertTrue(seen)
+        return set(seen)
+
+    def test_pair_and_the_signature_use_keel_s_usual_timeout(self):
+        found = self.timeouts(lambda: self.assertEqual(
+            self.pair(0, address(1))[0], exits.OK))
+        self.assertEqual(found, {etcdclient.TIMEOUT})
+
+    def test_unpair_uses_keel_s_usual_timeout(self):
+        self.assertEqual(self.pair(0, address(1))[0], exits.OK)
+        for one in self.all[:2]:
+            with open(one.node.path) as fob:
+                text = fob.read()
+            with open(one.node.path, "w") as fob:
+                fob.write(text.replace(f"  vip: {VIP}\n", ""))
+        found = self.timeouts(lambda: self.assertEqual(
+            self.unpair(1)[0], exits.OK))
+        self.assertEqual(found, {etcdclient.TIMEOUT})
+
+
 class TestTheMemberAskedToSign(WithEtcd):
     """with etcd, the other member signs only a pair whose VIP is
     reserved for it: an initiator that skips the reservation, or one
@@ -205,8 +243,8 @@ class TestTheMemberAskedToSign(WithEtcd):
     def test_etcd_not_answering_no_signature(self):
         self.kv.refuse = "prefix"
         self.assertIn("etcd did not answer", self.ask())
-        with mock.patch("keel.mesh.vipetcd.local",
-                        side_effect=EtcdError("no certificate")):
+        with mock.patch.object(vipnode.Here, "local",
+                               side_effect=EtcdError("no certificate")):
             self.assertIn("etcd cannot be asked (no certificate)",
                           self.ask())
 
@@ -224,7 +262,7 @@ class TestKeptForGood(WithEtcd):
             self.kv, PAIR, KEYS[0], None, vipnode.signer_of(self.all[0])))
 
     def test_etcd_not_reached_for_the_keep(self):
-        real = vippromote.vipetcd.local
+        real = vipnode.Here.local
         calls = []
 
         def keep_fails(here):
@@ -233,7 +271,8 @@ class TestKeptForGood(WithEtcd):
             if len(calls) == 3:
                 raise EtcdError("no member answered")
             return real(here)
-        with mock.patch("keel.mesh.vipetcd.local", side_effect=keep_fails):
+        with mock.patch.object(vipnode.Here, "local", autospec=True,
+                               side_effect=keep_fails):
             code, out = self.pair(0, address(1))
         self.assertEqual(code, exits.APPLY_FAILED)
         self.assertIn("(no member answered)", out)

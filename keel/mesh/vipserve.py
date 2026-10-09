@@ -142,12 +142,12 @@ def countersigned(here: Here, message: vipmsg.Message) -> Answer:
 def reserved(here: Here, pair: vippair.Pair) -> str | None:
     """With etcd, why the pair's VIP is not reserved for it there, or
     None (keel.mesh.vipreserve); None before etcd"""
-    from keel.mesh import vipetcd, vippromote, vipreserve
+    from keel.mesh import vippromote, vipreserve
     from keel.mesh.etcdclient import EtcdError
     if not vippromote.with_etcd(here):
         return None
     try:
-        client = vipetcd.local(here)
+        client = here.local()
     except EtcdError as e:
         return f"etcd cannot be asked ({e})"
     return vipreserve.held_for(client, pair, vipnode.signer_of(here))

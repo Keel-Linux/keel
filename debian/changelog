@@ -7,6 +7,11 @@ keel (0.23.4) unstable; urgency=medium
     20 s. Promote now tries the first read again for 60 s, and tells
     the operator that it waits. If etcd does not answer in 60 s,
     promote stops as before and changes nothing.
+  * keel vip pair and keel vip unpair, and the member that is asked to
+    sign a pair, call etcd with the usual timeout of keel (10 s), not
+    with the short timeout of the VIP controller (2 s). On a link of
+    250 ms with 2% loss, the lease grant of the reservation took more
+    than 2 s, and keel vip pair stopped (keel#94).
   * Tests (keel#94): the netns drivers wait for a condition, not for a
     fixed time. The ping after a join tries again until the tunnel
     answers, for a maximum of 90 s (the WireGuard rekey attempt time),
