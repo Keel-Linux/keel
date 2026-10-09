@@ -49,7 +49,7 @@ class Probes:
     gateways: Callable[[], list[str] | None] = lambda: []
 
 
-MESH_ORIGINS = (session.MESH, session.SELF)
+MESH_ORIGINS = (session.MESH, session.SELF, session.ADDED)
 
 
 def confirm(root: str, origin: session.Origin, probes: Probes,
@@ -146,6 +146,10 @@ def not_made_here(pending: marker.Pending, origin: session.Origin,
         return ("refused: the network change waiting is not the one keel"
                 f" mesh made, so {origin.detail} cannot confirm it;"
                 f" {LEFT_TO_REVERT}")
+    if origin.kind == session.ADDED and not pending.added_live:
+        return ("refused: the network change waiting did more than add"
+                f" peers live, so {origin.detail} cannot confirm it without"
+                f" a handshake; {LEFT_TO_REVERT}")
     return None
 
 
@@ -206,7 +210,8 @@ def overlay_not_proof(pending: marker.Pending, origin: session.Origin,
     overlay declares; WireGuard binds its source to the key of the peer
     the change added, which the listener checks.
     """
-    if origin.kind in (session.CONSOLE_KIND, session.HOST, session.SELF):
+    if origin.kind in (session.CONSOLE_KIND, session.HOST, session.SELF,
+                       session.ADDED):
         return None
     if origin.kind == session.MESH:
         if origin.local and same_address(origin.local, pending.addresses):
@@ -309,6 +314,15 @@ def route_targets(pending: marker.Pending, origin: session.Origin,
 def overlay_lines(pending: marker.Pending, origin: session.Origin,
                   probes: Probes) -> list[str]:
     """Which of the two paths this confirmation tested"""
+    if origin.kind == session.ADDED:
+        return [f"the change only added peers, with wg set on"
+                f" {pending.iface} while it was up: no peer was removed and"
+                f" the interface was not restarted, so nothing this node"
+                f" reached is cut off. {origin.detail} kept it once the"
+                " routes to the gateways and to the operator's session"
+                " were found to still leave through the uplink; a new peer"
+                " with no handshake shows as drift in keel mesh status and"
+                " keel diff"]
     if origin.kind == session.SELF:
         return [f"the overlay has no peer, so nothing can cross it:"
                 f" {origin.detail} confirmed it once the routes to the"

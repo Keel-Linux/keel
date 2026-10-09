@@ -1,3 +1,26 @@
+keel (0.23.12) unstable; urgency=medium
+
+  * A member that keel mesh sync adds live is kept with no handshake
+    (keel#117). On real nodes, the two members of a missing pair added
+    each other at different times. Each waited 120 s for a handshake
+    that the other could not give yet, both reverted, and each then left
+    the other out for an hour, at different times. A change that only
+    adds peers with wg set on an interface that is up removes nothing
+    and restarts nothing, so it cannot cut the node off. The route check
+    still runs. A change that removes a peer, changes [Interface] or
+    bounces the interface still waits for a handshake.
+  * keel mesh status names a peer with no handshake on a drift line, and
+    keel diff reports network.overlay.wireguard.peers.<key>.handshake:
+    drift for a peer with no handshake since the interface came up, or
+    one the interface does not hold, same with the age of the last
+    handshake for the others. Only on the live system.
+  * keel spec apply says what ran (keel#120). A database certificate
+    that is not due says "kept: the certificate is not due for renewal,
+    and no file changed", not "done". An overlay change says "done with
+    wg set, live" or "done with wg-quick down, then up".
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 09 Oct 2026 21:30:00 +0000
+
 keel (0.23.11) unstable; urgency=medium
 
   * The overlay's file sets MTU = 1280 on each node (keel#119). Before,

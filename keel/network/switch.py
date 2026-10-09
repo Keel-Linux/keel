@@ -189,8 +189,20 @@ def bounce(root: str, iface: str, relative: str, text: str,
     return True, "; ".join(found) or None
 
 
+# what live_change did: added peers alone, or changed more
+ADDED = "added"
+CHANGED = "changed"
+
+
 def live_peers(old: str, new: str, iface: str, dump: str) -> (
         list[tuple[str, ...]] | None):
+    """The `wg set` lines of `live_plan`, or None"""
+    found = live_plan(old, new, iface, dump)
+    return None if found is None else found[0]
+
+
+def live_plan(old: str, new: str, iface: str, dump: str) -> (
+        tuple[list[tuple[str, ...]], bool] | None):
     """The `wg set` lines that take `iface`, as `wg show IFACE dump`
     gives it (`dump`), to file `new`, when the files `old` and `new`
     differ in their peers alone; None when the change needs the bounce
@@ -215,6 +227,10 @@ def live_peers(old: str, new: str, iface: str, dump: str) -> (
     key named twice, and a change of the addresses of a peer outside
     every prefix of the interface's addresses, which wg-quick routes and
     `wg set` does not.
+
+    With the lines, whether they only add peers the interface does not
+    hold (keel#117): such a change removes nothing and changes no peer
+    this node reaches, so it cannot cut this node off.
     """
     before, after = wireguard.parse(old), wireguard.parse(new)
     if before.problems or after.problems or before.inline_key or \
@@ -242,16 +258,19 @@ def live_peers(old: str, new: str, iface: str, dump: str) -> (
                                                    now.get(key)) if one):
             return None
     commands: list[tuple[str, ...]] = []
+    added = True
     for key in sorted(set(held) | set(now)):
         if key not in now:
             commands.append(("wg", "set", iface, "peer",
                              held[key]["public_key"], "remove"))
+            added = False
             continue
         old_ips = set(was[key]["allowed_ips"]) if key in was else set()
         found = peer_fix(iface, now[key], held.get(key), old_ips)
         if found:
             commands.append(found)
-    return commands
+            added = added and key not in held
+    return commands, added and bool(commands)
 
 
 def peer_fix(iface: str, want: dict, have: dict | None,
@@ -352,25 +371,30 @@ def peer_set(iface: str, peer: dict) -> tuple[str, ...]:
 
 
 def live_change(root: str, iface: str, relative: str, text: str,
-                run: Runner) -> bool:
-    """Whether the peers of `text` were set on `iface` live: it is up
-    (`wg show` dumps it), and the file there and `text` differ in peers
-    alone (`live_peers`). A `wg set` that fails leaves the rest to the
-    bounce, on the new file"""
+                run: Runner) -> str | None:
+    """How the peers of `text` were set on `iface` live, None when they
+    were not: it is up (`wg show` dumps it), and the file there and
+    `text` differ in peers alone (`live_plan`). ADDED when the change
+    only added peers, else CHANGED. A `wg set` that fails leaves the
+    rest to the bounce, on the new file, and is None"""
     try:
         current = read_current(root, relative)
     except OSError:
-        return False
+        return None
     if not current:
-        return False
-    commands = live_peers(current, text, iface, wg_dump(iface) or "")
-    if commands is None:
-        return False
-    return all(run(argv) is None for argv in commands)
+        return None
+    found = live_plan(current, text, iface, wg_dump(iface) or "")
+    if found is None:
+        return None
+    commands, added = found
+    if not all(run(argv) is None for argv in commands):
+        return None
+    return ADDED if added else CHANGED
 
 
 def bounce_overlay(root: str, iface: str, relative: str, text: str | None,
-                   run: Runner, up: bool = True) -> tuple[bool, str | None]:
+                   run: Runner, up: bool = True,
+                   seen: list[str] | None = None) -> tuple[bool, str | None]:
     """wg-quick down, the file put in place (or removed), wg-quick up
 
     `text` None removes the file and leaves the interface down: the
@@ -385,13 +409,18 @@ def bounce_overlay(root: str, iface: str, relative: str, text: str | None,
     both directions alike, so the revert of an unconfirmed peer is live
     too. A file that then cannot be put in place gets the bounce on the
     file that is there, so the interface and its file agree again.
+    `seen` gets what the live change did (`live_change`), when it ran.
     """
     staged = None
     if text is not None:
         staged, problem = stage(root, relative, text, OVERLAY_MODE)
         if problem:
             return False, problem
-        if up and live_change(root, iface, relative, text, run):
+        done = live_change(root, iface, relative, text, run) if up \
+            else None
+        if done:
+            if seen is not None:
+                seen.append(done)
             problem = rename(staged, root, relative)
             if problem is None:
                 return True, None
@@ -411,16 +440,16 @@ def bounce_overlay(root: str, iface: str, relative: str, text: str | None,
 
 
 def move(root: str, pending: marker.Pending, text: str | None, run: Runner,
-         autoconf: str | None = None, back: bool = False) -> (
-             tuple[bool, str | None]):
+         autoconf: str | None = None, back: bool = False,
+         seen: list[str] | None = None) -> tuple[bool, str | None]:
     """The sequence of the change's kind, in either direction
 
     `back` is a revert: an overlay that was down before the change is
-    left down on the restored file.
+    left down on the restored file. `seen`: as bounce_overlay's.
     """
     if pending.kind == marker.OVERLAY:
         return bounce_overlay(root, pending.iface, pending.path, text, run,
-                              not (back and pending.down_before))
+                              not (back and pending.down_before), seen)
     return bounce(root, pending.iface, pending.path, text or "", run,
                   autoconf)
 
@@ -464,8 +493,11 @@ def read_current(root: str, relative: str) -> str:
 
 
 def change(root: str, pending: marker.Pending, text: str,
-           run: Runner) -> str | None:
+           run: Runner, seen: list[str] | None = None) -> str | None:
     """Change the network under the window; None when it is up and waiting
+
+    `seen` gets what a live change of the overlay did (ADDED or CHANGED),
+    and nothing when the interface was bounced (keel#120).
 
     A hangup is ignored while it runs: the operator's session dying as the
     interface moves is expected, and dying half way would leave a change
@@ -475,16 +507,16 @@ def change(root: str, pending: marker.Pending, text: str,
     that thread having no session to lose.
     """
     if threading.current_thread() is not threading.main_thread():
-        return changed(root, pending, text, run)
+        return changed(root, pending, text, run, seen)
     previous = signal.signal(signal.SIGHUP, signal.SIG_IGN)
     try:
-        return changed(root, pending, text, run)
+        return changed(root, pending, text, run, seen)
     finally:
         signal.signal(signal.SIGHUP, previous)
 
 
 def changed(root: str, pending: marker.Pending, text: str,
-            run: Runner) -> str | None:
+            run: Runner, seen: list[str] | None = None) -> str | None:
     boot_id = marker.boot_id()
     if boot_id is None or marker.clock(pending.kind) is None:
         return ("cannot read the boot id or the uptime under /proc, which"
@@ -515,12 +547,17 @@ def changed(root: str, pending: marker.Pending, text: str,
         if problem:
             marker.clear(root)
             return f"revert timer not armed, nothing changed: {problem}"
-        written, problem = move(root, pending, text, run, pending.autoconf)
+        seen = [] if seen is None else seen
+        written, problem = move(root, pending, text, run, pending.autoconf,
+                                seen=seen)
         if written and problem is None:
             up_at = marker.clock(pending.kind)
             if up_at is not None:
                 # left undated, the change cannot be confirmed and reverts
-                marker.write(root, pending.up(boot_id, up_at))
+                # a change that only added peers live says so: keel mesh
+                # keeps it without a handshake (keel#117)
+                marker.write(root, replace(pending.up(boot_id, up_at),
+                                           added_live=seen == [ADDED]))
             # if this one fails, the safety timer still reverts, later
             arm(WINDOW_UNIT, pending.window, run)
             return None

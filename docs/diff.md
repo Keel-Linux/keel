@@ -224,6 +224,7 @@ listed after every other section:
 | `derived.monit` | the Monit file apply renders from the manifests and the spec | `/etc/keel/monit/keel-manifest.conf`, compared whole: absent, or a file that differs (a hand edit, or an overlay turned on or off behind the spec), is drift |
 | `derived.monit.included` | `monitor.enabled` | whether `/etc/monit/conf.d/keel-manifest.conf` is keel's link to that file |
 | `derived.firewall` | with `firewall.enabled: true`, the ruleset apply renders; with `false`, nothing | `/etc/keel/firewall/keel-manifest.nft`, compared whole; with `false`, keel's file still there is drift |
+| `network.overlay.wireguard.peers.<key>.handshake` | a handshake | on the live system, `wg show <interface> latest-handshakes`: a peer with none since the interface came up is drift, and so is a peer the interface does not hold; a peer with one is `same`, with its age (keel#117). Not compared under `--root` |
 | `derived.firewall.loaded` | the digest of that ruleset | on the live system, the digest in the comment of the `inet keel` table the kernel holds (`nft list table inet keel`), so a table flushed or edited by hand is drift; not compared under `--root` |
 
 Not compared: `installation`, chosen once and recorded nowhere on the

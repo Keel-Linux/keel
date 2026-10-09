@@ -1,6 +1,10 @@
 # Copyright (c) 2026 KeelLinux maintainers
 """keel mesh status: the peers, their handshakes, the pending invites
 
+A peer with no handshake is drift, said on a line of its own (keel#117):
+keel mesh keeps a peer it added live before the other member has this
+node too.
+
 Read from the spec, from the mesh's identity, from `wg show` (its
 public-key, endpoints and latest-handshakes views, never `dump` or
 `private-key`, which hold the private key) and from the invite files,
@@ -12,6 +16,7 @@ import ipaddress
 from collections.abc import Callable
 from datetime import datetime
 
+from keel.diff.handshakes import LATER, NOT_HELD
 from keel.mesh import identity, invites
 from keel.mesh.token import shown
 from keel.network import wireguard
@@ -74,6 +79,7 @@ def lines(overlay: dict | None, root: str, now: datetime,
                                    "latest-handshakes")))
     peers = overlay.get("peers") or []
     found.append(f"peers: {len(peers)}")
+    drift = []
     for peer in peers:
         key = str(peer.get("public_key"))
         live_key = next((one for one in endpoints | handshakes
@@ -85,6 +91,12 @@ def lines(overlay: dict | None, root: str, now: datetime,
                  if output is not None else "")
         found.append(f"  {key}  {', '.join(allowed(peer))}  {endpoint}"
                      f"{'  ' + state if state else ''}")
+        if output is not None and not state.startswith("handshake "):
+            why = (f"has no handshake since {iface} came up: {LATER}"
+                   if live_key in handshakes else
+                   f"is not held by {iface}: {NOT_HELD}")
+            drift.append(f"drift: peer {key} {why}")
+    found += drift
     waiting = invites.pending(root, now)
     found.append(f"pending invites: {len(waiting)}")
     for one in waiting:

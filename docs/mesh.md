@@ -578,7 +578,23 @@ member answers within the window reverts by itself, the spec is put
 back as it was (so it says what the machine runs, and the members are
 new again to the next sync), and those members are not tried again for
 an hour (`unreached.json`), so a node that is off does not cost the
-mesh an overlay change at every timer. One sync runs at a time
+mesh an overlay change at every timer.
+
+A change that only adds members, made live with `wg set` on the
+interface that is up (apply.md, "A change of the peers alone"), is kept
+at once, with no handshake (keel#117): it removes nothing and restarts
+nothing, so it cannot cut this node off. Each new member is sent one
+packet, and the sync says `member <key> is kept with no handshake yet`.
+On real nodes, two members of a missing pair added each other at
+different times: each waited for a handshake the other could not give
+yet, both reverted, and each then left the other out for an hour, at
+different times, so they never met. Now the first keeps the second,
+and the handshake comes once the second has the first too. Until then
+`keel mesh status` names the member on a `drift:` line, and `keel diff`
+has `network.overlay.wireguard.peers.<key>.handshake` as drift. A
+change that removes a peer, changes `[Interface]`, or bounces the
+interface still waits for a handshake in its window. One sync runs at a
+time
 (`sync.lock`); a sync that finds a network change waiting in its window
 leaves the members to the next one.
 

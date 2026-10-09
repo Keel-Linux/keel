@@ -442,7 +442,14 @@ def changed_and_confirmed(syncer: Syncer, doc: dict, after: dict,
     WireGuard handshake since the change: from a member it added, else,
     when it only removes, from any peer it keeps; with no peer left, by
     the route check alone, as `keel mesh create` confirms a mesh with no
-    peer. Not confirmed, the spec is put back as it was"""
+    peer. Not confirmed, the spec is put back as it was
+
+    A change that only added members, with `wg set` on the interface
+    that was up (Pending.added_live), cannot cut this node off: it is
+    kept at once, with no handshake (keel#117). Two members that add
+    each other at different times then both keep the other, and their
+    handshake comes once both have it; until then keel mesh status and
+    keel diff show the member as drift."""
     since = int(syncer.clock().timestamp())
     try:
         change = syncer.node.change(after)
@@ -465,6 +472,8 @@ def changed_and_confirmed(syncer: Syncer, doc: dict, after: dict,
                    " may remove it names it")
     proof = added or syncer.node.peers("")
     syncer.err("confirming over the overlay…")
+    if added and not dropped and change.made.added_live:
+        return kept_live(syncer, change, doc, added)
     if proof:
         seen = handshake(syncer, proof, since, since + change.made.window)
         if seen is None:
@@ -485,6 +494,33 @@ def changed_and_confirmed(syncer: Syncer, doc: dict, after: dict,
         syncer.err(line)
     if not kept:
         return exits.NETWORK_NOT_CONFIRMED
+    forget(syncer.root, added)
+    return exits.OK
+
+
+def kept_live(syncer: Syncer, change, doc: dict,
+              added: tuple[Peer, ...]) -> int:
+    """A change that only added members live, kept with no handshake:
+    each member is sent a packet, so the handshake comes as soon as it
+    has this node too"""
+    iface = syncer.iface()
+    for member in added:
+        syncer.touch(member.address, iface)
+    origin = session.Origin(
+        session.ADDED, f"keel mesh, which added {len(added)} member(s) live"
+        " and removed none,")
+    kept, lines = syncer.node.confirm(origin, change.made)
+    if not kept:
+        change.shown(syncer.err)
+        put_back(syncer, doc)
+    for line in lines:
+        syncer.err(line)
+    if not kept:
+        return exits.NETWORK_NOT_CONFIRMED
+    for member in added:
+        syncer.err(f"member {member.public_key} is kept with no handshake"
+                   " yet: the handshake comes once that member has this"
+                   " node too")
     forget(syncer.root, added)
     return exits.OK
 

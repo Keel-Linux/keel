@@ -43,9 +43,12 @@ network:
 class Armed:
     """apply, as far as keel mesh sees it: the overlay change armed"""
 
-    def __init__(self, code: int = 0, arms: bool = True):
+    def __init__(self, code: int = 0, arms: bool = True,
+                 added_live: bool = False):
         self.code = code
         self.arms = arms
+        # a change that only added peers live (keel#117)
+        self.added_live = added_live
         self.documents = []
 
     def __call__(self, doc: dict, root: str, window: int) -> int:
@@ -59,7 +62,8 @@ class Armed:
                 iface=iface, path=wireguard.conf_path(iface), window=window,
                 addresses=tuple(one.split("/")[0] for one in
                                 wireguard.addresses(overlay)),
-                kind=marker.OVERLAY, absent=True).up("b1", 50.0))
+                kind=marker.OVERLAY, absent=True,
+                added_live=self.added_live).up("b1", 50.0))
         return self.code
 
 

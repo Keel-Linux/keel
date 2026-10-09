@@ -209,7 +209,9 @@ def inviter() -> None:
 
     # 4. all four over the overlay, and each one's handshakes
     everyone = {**OVERLAY, "D": d_address}
-    pings = {"A": {address: ping(address)
+    # three rounds alone: A changed live, so its sessions with B and C
+    # stay, and no new handshake is waited for (keel#99)
+    pings = {"A": {address: ping(address, 3)
                    for name, address in everyone.items() if name != "A"}}
     for name in ("B", "C", "D"):
         others = " ".join(address for other, address in everyone.items()

@@ -136,6 +136,50 @@ class TestPull(Case):
         self.assertIn("no member this node does not know", self.err[-1])
         self.assertEqual(self.node.apply.documents, [])
 
+    def test_a_member_added_live_is_kept_without_a_handshake(self):
+        """keel#117: each side adds the other at another time; a change
+        that only added peers live cannot cut this node off, so it is
+        kept at once, and the handshake comes once both have the peer"""
+        self.net.handshakes = {}
+        self.node.apply = Armed(added_live=True)
+        self.assertEqual(sync.pull(self.syncer), exits.OK, self.err)
+        self.assertEqual([one["public_key"] for one in self.peers()],
+                         [INVITER, OTHER])
+        self.assertFalse(marker.exists(self.root))
+        self.assertEqual(marker.last(self.root).outcome, marker.CONFIRMED)
+        self.assertEqual(self.slept, [])
+        self.assertIn("fd00:6b65:1::7", self.net.touched)
+        self.assertIn("the change only added peers, with wg set", self.said())
+        self.assertIn(f"member {OTHER} is kept with no handshake yet",
+                      self.said())
+        with open(os.path.join(self.root, sync.UNREACHED)) as fob:
+            self.assertEqual(json.load(fob), {})
+
+    def test_a_live_addition_the_route_check_refuses_is_not_kept(self):
+        self.net.handshakes = {}
+        self.node.apply = Armed(added_live=True)
+        self.node.probes = lambda: probes("wg0")
+        self.assertEqual(sync.pull(self.syncer), exits.NETWORK_NOT_CONFIRMED)
+        self.assertEqual(len(self.peers()), 1)
+        self.assertIn("leaves through wg0", self.said())
+
+    def test_a_change_that_did_more_still_needs_a_handshake(self):
+        """a change that also removes, or that bounced wg0, keeps its
+        window"""
+        self.net.handshakes = {}
+        self.node.apply = Armed(added_live=False)
+        self.assertEqual(sync.pull(self.syncer), exits.NETWORK_NOT_CONFIRMED)
+        self.assertEqual(len(self.peers()), 1)
+
+    def test_a_repair_added_live_is_kept_too(self):
+        self.net.rosters["fd00:6b65:1::1"] = inviter_roster()
+        self.syncer.live_peers = lambda iface: set()
+        self.net.handshakes = {}
+        self.node.apply = Armed(added_live=True)
+        self.assertEqual(sync.pull(self.syncer), exits.OK, self.err)
+        self.assertEqual(len(self.peers()), 1)
+        self.assertEqual(marker.last(self.root).outcome, marker.CONFIRMED)
+
     def test_the_repair_is_not_confirmed_without_a_handshake(self):
         self.net.rosters["fd00:6b65:1::1"] = inviter_roster()
         self.syncer.live_peers = lambda iface: set()

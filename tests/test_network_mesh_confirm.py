@@ -94,6 +94,51 @@ class TestMeshOrigins(RootCase):
                       " leaves through wg0", lines[0])
 
 
+def added():
+    return session.Origin(session.ADDED, "keel mesh, which added 1"
+                          " member(s) live and removed none,")
+
+
+class TestAddedLive(RootCase):
+    """keel#117: a change that only added peers live is kept by keel
+    mesh with no handshake, after the route check; no other change is"""
+
+    def confirm(self, made, routes=None):
+        marker.save(self.root, "")
+        marker.write(self.root, made)
+        return netconfirm.confirm(self.root, added(), probes(routes=routes),
+                                  Recorder(), expected=made,
+                                  clients=("2001:db8:9::5",))
+
+    def test_an_addition_made_live_is_kept(self):
+        made = pending(absent=True, added_live=True).up("b1", 50.0)
+        confirmed, lines = self.confirm(made)
+        self.assertTrue(confirmed, lines)
+        self.assertIn("the change only added peers, with wg set on wg0",
+                      lines[1])
+        self.assertIn("shows as drift in keel mesh status", lines[1])
+        self.assertTrue(marker.read(self.root) is None)
+
+    def test_any_other_change_is_refused(self):
+        confirmed, lines = self.confirm(MADE)
+        self.assertFalse(confirmed)
+        self.assertIn("did more than add peers live", lines[0])
+        self.assertTrue(marker.exists(self.root))
+
+    def test_the_route_check_still_runs(self):
+        made = pending(absent=True, added_live=True).up("b1", 50.0)
+        confirmed, lines = self.confirm(made, routes={"2001:db8:9::5":
+                                                      "wg0"})
+        self.assertFalse(confirmed)
+        self.assertIn("leaves through wg0", lines[0])
+
+    def test_the_marker_keeps_it(self):
+        made = pending(absent=True, added_live=True).up("b1", 50.0)
+        marker.save(self.root, "")
+        marker.write(self.root, made)
+        self.assertTrue(marker.read(self.root).added_live)
+
+
 class TestNeverAnUplinkChange(RootCase):
     def test_a_mesh_origin_cannot_confirm_the_uplink(self):
         uplink = marker.Pending(iface="eth0", path="etc/network/interfaces",

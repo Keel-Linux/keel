@@ -42,9 +42,12 @@ UNKNOWN = "unknown"
 # decision 0048: sources keel mesh hands confirm itself, never read from
 # the process tree. MESH is a join's authenticated session over the
 # overlay, from the peer the change added; SELF is `keel mesh create`
-# confirming an overlay with no peer, which no peer can.
+# confirming an overlay with no peer, which no peer can; ADDED is keel
+# mesh keeping a change that only added peers live (keel#117), which
+# cannot cut this node off and needs no handshake.
 MESH = "mesh"
 SELF = "self"
+ADDED = "added"
 
 
 @dataclass(frozen=True)
