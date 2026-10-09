@@ -1,3 +1,36 @@
+keel (0.23.7) unstable; urgency=medium
+
+  * A node that joins a mesh built by hand gets all the members as peers
+    (keel#99). The members of such a mesh are trust roots of each other
+    and have no admission evidence, so the joiner took only the inviter.
+    The other members took the joiner from the announcement and waited
+    for a handshake that did not come. Now a member names its operator
+    roots (made by --adopt, or the inviter of its own invite) in the
+    join's answer and in its roster. A node takes them from an operator
+    root of its own as named roots, says "member X is a named trust
+    root, named by R", and binds their signing keys from their own
+    rosters. The same applies to a node that a member other than the
+    first node invites. A node that joined before this version gets the
+    missing members at its next keel mesh sync, when its inviter has
+    this version.
+  * A named root signs admission evidence, but names nobody: root
+    status never goes beyond one hop. It removes no other node, here or
+    mesh-wide, has no certificate revoked at the root CA's holder, signs
+    no VIP pair record for another, is no source of the root CA's
+    anchor and gives no node its first etcd certificate. When its namer
+    has a tombstone, it is a plain member again. --adopt never makes a
+    key with a tombstone a root.
+  * keel mesh remove of an operator root of this node asks the rosters
+    of the other peers first. A root is not always a root both ways, so
+    it refuses, and changes nothing, when a peer holds that root as a
+    root and does not hold this node as one, or when a peer does not
+    answer.
+  * The join tells how many members it took. It names on standard error
+    each member that it did not take, and it does not say "this node has
+    them all" when that is not true.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 09 Oct 2026 16:00:00 +0000
+
 keel (0.23.6) unstable; urgency=medium
 
   * A change of the overlay's peers alone is done live with wg set on an

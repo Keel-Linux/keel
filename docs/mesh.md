@@ -263,8 +263,10 @@ the mesh is up with 2 nodes; etcd starts when a third node joins, because 2 etcd
 
 The confirmation's lines and every refusal go to standard error. When
 the inviter knows other peers, the last line says how many nodes the
-mesh has, that this node has them all as peers, and that the inviter
-announces it to them:
+mesh has, how many of them this node has as peers, and that the inviter
+announces it to them. A member the inviter named without evidence this
+node can verify is not a peer: standard error names it, and the last
+line says `this node has 2 of the 3 other(s) as peers`:
 
 ```
 the mesh has 3 nodes: this node has them all as peers, and the inviter announces this node to the 1 other(s) over the overlay (one offline now learns of it at its next keel mesh sync)
@@ -412,12 +414,34 @@ of its admission:
   learned from the root itself, in a roster this node fetched from the
   root's own overlay address (`keel mesh sync`), which WireGuard
   authenticates as that root's; never from an announcement, whose
-  source only the listener reports. A root vouches for nobody: a node
-  is another's root only if that node's operator listed it;
+  source only the listener reports. The roots the operator makes, and
+  the inviter of this node's own invite, are **operator roots**: `keel
+  mesh create --adopt` and `keel mesh sync --adopt` make every peer the
+  node's spec lists an operator root, except a key with a tombstone;
+- **named roots** (keel#99). An operator root names its own operator
+  roots: the inviter in the join's answer, and a root in the roster
+  this node fetched from it. This node takes them as **named roots**,
+  and says `member X is a named trust root, named by R`. Their signing
+  keys are bound from their own rosters, as for every root. A named
+  root signs admission evidence, as any member, but it names nobody,
+  so root status never goes beyond one hop. It has none of an operator
+  root's powers: it removes no other node, here or mesh-wide, has no
+  certificate revoked at the root CA's holder, signs no VIP pair
+  record for another, and is no source of the root CA's anchor. When
+  its namer has a tombstone, it is a plain member again. Without named
+  roots, a node that joined a mesh built by hand, or that a member
+  other than the first node invited, took only the inviter, while the
+  others took it and waited for a handshake that never came;
+- **a root is not always a root both ways.** The inviter is a root of
+  the node it admits, not the other way. So `keel mesh remove` of one
+  of this node's operator roots asks the rosters of its other peers
+  first, and refuses, with nothing changed, when a peer that holds
+  that root as one does not hold this node as one (that peer would not
+  take the tombstone), or when a peer does not answer;
 - **tombstones.** `keel mesh remove` records a removal, signed with the
   remover's key. A node takes a tombstone only when its signer may
   remove that node: **the member that admitted it** (as the evidence
-  the node keeps names), **a trust root**, or **the node itself**,
+  the node keeps names), **an operator root**, or **the node itself**,
   leaving. Any other member, trusted or not, removes a node from its own
   spec only. A node that takes a tombstone drops the peer from its spec,
   every peer a pull or the pending announcements remove in one change,

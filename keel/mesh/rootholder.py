@@ -188,8 +188,9 @@ def learn(root: str, mesh_id: str, cert: str | None, found: dict | None,
 
 
 def trusted_root(store: trust.Store, key: str) -> bool:
-    found = store.find(key)
-    return found is not None and store.members[found].root
+    """An operator root of this node: a named root is no source of the
+    root CA's anchor (keel#99)"""
+    return store.is_operator_root(key)
 
 
 def taken_from(root: str, mesh_id: str, rosters: list, store: trust.Store,

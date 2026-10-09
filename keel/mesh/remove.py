@@ -10,7 +10,8 @@ under 0018's window and confirmed as keel mesh sync confirms a change
 left, by the route check alone. Then this node's roster, the tombstone
 in it, goes to each of its other peers. Each takes the tombstone only
 when the key that signed it may remove that node: the member that
-admitted it, a trust root, or the node itself (trust.may_remove); it
+admitted it, an operator root, or the node itself (trust.may_remove);
+it
 then drops the peer through one window of its own, and no sync adds the
 key again. A member offline then learns it at its next sync.
 
@@ -18,7 +19,11 @@ With etcd, the node's etcd member goes too, but only when this node may
 remove it from the whole mesh, by the same rule (0048, third round,
 point 4: trust.may_remove_everywhere); otherwise the removal is local
 only, and its admitter or a trust root removes it from etcd
-(keel.mesh.etcd.leave).
+(keel.mesh.etcd.leave). A root is not always a root both ways (the
+inviter of a node is its root, not the other way), so the removal of
+one of this node's roots is refused, and nothing changes, unless every
+other peer that holds that root as one holds this node as one too, as
+their rosters say (`root_problem`, keel#99).
 """
 
 import ipaddress
@@ -47,6 +52,26 @@ def named(syncer: Syncer, which: str) -> tuple[str, str] | None:
     return None
 
 
+def root_problem(syncer: Syncer, store: trust.Store, key: str) -> str | None:
+    """Why this node may not remove `key`, one of its operator roots,
+    mesh-wide: a member that holds `key` as a root and not this node
+    would not take the tombstone (trust.everywhere_problem). The
+    rosters of this node's other peers say it; a node this node
+    admitted needs none"""
+    known = store.find(key)
+    if known is None or trust.admitted_by(store.members[known],
+                                          signing.public(syncer.root)):
+        return None
+    public, problem = syncer.node.public_key()
+    if public is None:
+        return problem
+    others = tuple(one for one in syncer.node.peers(public)
+                   if not same_key(one.public_key, key))
+    rosters = sync.asked(syncer, others)
+    return trust.everywhere_problem(store, signing.public(syncer.root),
+                                    public, key, rosters, len(others))
+
+
 def remove(syncer: Syncer, which: str, out: Callable[[str], None]) -> int:
     try:
         found = named(syncer, which)
@@ -70,6 +95,9 @@ def remove(syncer: Syncer, which: str, out: Callable[[str], None]) -> int:
         # asked before the tombstone, which forgets the node's evidence
         everywhere = trust.may_remove_everywhere(
             store, signing.public(syncer.root), found[0])
+        problem = everywhere and root_problem(syncer, store, found[0])
+        if problem:
+            raise ValueError(problem)
         trust.record_removal(store, trust.removal(syncer.root, own,
                                                   found[0], syncer.clock()))
         trust.save(syncer.root, store)

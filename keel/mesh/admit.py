@@ -404,12 +404,15 @@ def reservation_problem(member: etcd.Etcd,
 
 def evidenced(root: str, peers: tuple[protocol.Peer, ...]) -> tuple[
         protocol.Peer, ...]:
-    """`peers` with the evidence this node keeps for each, if any"""
+    """`peers` with the evidence this node keeps for each, if any, and
+    whether it is one of this node's operator roots (keel#99): a named
+    root is never named on"""
     try:
         store = trust.load(root)
     except ValueError:
         store = trust.Store()
-    return tuple(replace(one, admission=store.evidence(one.public_key))
+    return tuple(replace(one, admission=store.evidence(one.public_key),
+                         root=store.is_operator_root(one.public_key))
                  for one in peers)
 
 

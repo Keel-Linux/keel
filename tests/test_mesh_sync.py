@@ -310,6 +310,59 @@ class TestEvidence(Case):
         self.assertIsNone(trust.load(self.root).members[INVITER].sign_key)
         self.assertEqual(len(self.peers()), 1)
 
+    def root_entry(self, key: str = OTHER) -> Peer:
+        """A member of a mesh built by hand: no evidence, a trust root of
+        the member that names it (keel#99)"""
+        return Peer(key, "[2001:db8:3::30]:51820", "fd00:6b65:1::7",
+                    root=True)
+
+    def test_a_root_of_this_node_s_root_is_taken_as_a_root(self):
+        """keel#99: web-2 and web-3, adopted on web-1, are roots there
+        with no evidence; db-1, which trusts web-1, takes them"""
+        self.assertEqual(self.taken(self.root_entry()), [OTHER])
+        found = trust.load(self.root).members[OTHER]
+        self.assertTrue(found.root)
+        self.assertEqual(found.named_by, INVITER)
+        self.assertIn(f"member {OTHER} is a named trust root, named by"
+                      f" {INVITER}", self.said())
+        # its signing key comes from its own roster, never from another
+        self.assertIsNone(found.sign_key)
+        self.assertEqual(marker.last(self.root).outcome, marker.CONFIRMED)
+
+    def test_a_named_root_names_nobody(self):
+        """hop 2: the inviter is a root named by another, and names
+        OTHER: not taken; nor does this node name it on"""
+        store = trust.Store()
+        store.members[INVITER] = trust.Member(INVITER_SIGNER, True,
+                                              named_by=FOURTH)
+        trust.save(self.root, store)
+        self.assertEqual(self.taken(self.root_entry()), [])
+        self.assertIsNone(trust.load(self.root).find(OTHER))
+        self.assertEqual([one.root for one in sync.roster(
+            self.syncer).members], [False])
+
+    def test_a_root_named_by_a_member_that_is_no_root_is_not_taken(self):
+        trust.save(self.root, trust.Store(
+            {INVITER: trust.Member(INVITER_SIGNER, False)}))
+        self.assertEqual(self.taken(self.root_entry()), [])
+        self.assertIsNone(trust.load(self.root).find(OTHER))
+
+    def test_a_root_with_a_tombstone_is_not_taken(self):
+        gone = trust.removal(INVITER_ROOT, MESH, OTHER, NOW)
+        self.assertEqual(self.taken(self.root_entry(), removed=(gone,)), [])
+        self.assertIsNone(trust.load(self.root).find(OTHER))
+
+    def test_an_announcement_names_no_root(self):
+        sync.announced(self.syncer, [("fd00:6b65:1::1",
+                                      inviter_roster(self.root_entry()))])
+        self.assertEqual(len(self.peers()), 1)
+        self.assertIsNone(trust.load(self.root).find(OTHER))
+
+    def test_this_node_s_roster_marks_its_roots(self):
+        found = sync.roster(self.syncer)
+        self.assertEqual([(one.public_key, one.root)
+                          for one in found.members], [(INVITER, True)])
+
     def test_a_damaged_trust_store(self):
         with open(os.path.join(self.root, trust.TRUST), "w") as fob:
             fob.write("x")
