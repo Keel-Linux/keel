@@ -32,8 +32,10 @@ keel-mesh-members does, on their overlay address through wg0.
 
 Two things are not keel's own here. apply: a live apply arms systemd
 timers on the host, which no namespace isolates, so apply writes keel's
-rendered wg-quick file under the node's scratch root, runs `wg-quick up`
-on it in the node's namespace, and records the change as apply does
+rendered wg-quick file under the node's scratch root, brings it up in
+the node's namespace (a change of the peers alone live, with
+keel.network.switch.live_change; anything else with `wg-quick down`,
+then `up`), and records the change as apply does
 (keel.network.marker); everything that confirms a window is the real
 keel.network.confirm with the real `ip` probes. And the listener's
 unit: the root side starts `keel mesh listen` as a process of its own
@@ -66,7 +68,7 @@ from keel import cli
 from keel.mesh import inviting, joining, memberd, sync
 from keel.mesh.node import Node
 from keel.mesh.token import parse
-from keel.network import marker, wireguard
+from keel.network import marker, switch, wireguard
 
 PREFIX = "fd00:6b65:e2e"
 OVERLAY_A = f"{PREFIX}::1"
@@ -96,6 +98,13 @@ def sh(*argv: str, pid: int | None = None) -> str:
     return done.stdout
 
 
+def run_here(argv: tuple[str, ...]) -> str | None:
+    """keel.network.switch's runner, in this namespace"""
+    done = subprocess.run(list(argv), capture_output=True, text=True,
+                          check=False)
+    return (done.stderr.strip() or "failed") if done.returncode else None
+
+
 def netns_apply(doc: dict, root: str, window: int) -> int:
     """apply's overlay step, in this namespace, under the node's root"""
     overlay = doc["network"]["overlay"]["wireguard"]
@@ -105,16 +114,22 @@ def netns_apply(doc: dict, root: str, window: int) -> int:
     os.makedirs(os.path.dirname(conf), exist_ok=True)
     # the key is under the scratch root, where keel made it
     key = os.path.join(root, wireguard.key_path(overlay).lstrip("/"))
+    text = wireguard.render({**overlay, "private_key": {"file": key}})
+    # a change of the peers alone is made live, as keel.network.switch
+    # makes it (keel#99); anything else is wg-quick down, then up
+    live = os.path.exists(conf) and switch.live_change(
+        root, iface, relative, text, run_here)
     with open(os.open(conf, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600),
               "w") as fob:
-        fob.write(wireguard.render({**overlay, "private_key": {"file": key}}))
-    subprocess.run(["wg-quick", "down", conf], capture_output=True,
-                   check=False)
-    up = subprocess.run(["wg-quick", "up", conf], capture_output=True,
-                        text=True, check=False)
-    if up.returncode:
-        print(up.stderr, file=sys.stderr)
-        return 16
+        fob.write(text)
+    if not live:
+        subprocess.run(["wg-quick", "down", conf], capture_output=True,
+                       check=False)
+        up = subprocess.run(["wg-quick", "up", conf], capture_output=True,
+                            text=True, check=False)
+        if up.returncode:
+            print(up.stderr, file=sys.stderr)
+            return 16
     marker.save(root, "", marker.Target(relative, marker.OVERLAY, True))
     marker.write(root, marker.Pending(
         iface=iface, path=relative, window=window,

@@ -20,7 +20,10 @@ The WireGuard overlay (decision 0020) has no ifdown: its sequence is
 `wg-quick down` on the outgoing file under /etc/wireguard, which deletes
 the interface with its addresses and routes, the new file put in place
 the same way, mode 0600, then `wg-quick up` on it; in both directions
-alike. A change that created the file is reverted by removing it.
+alike. A change that created the file is reverted by removing it. A
+change of the peers alone, on an interface that is up, is `wg set` on
+it instead, against what `wg show` says it holds, and the file put in
+place: the other peers keep their sessions (`live_peers`, keel#99).
 
 Two transient timers run the revert, both armed before step 1, so a run
 that dies half way still reverts:
@@ -35,6 +38,7 @@ Their names differ from the unit the package ships
 systemd refuses a transient unit whose name has a unit file.
 """
 
+import ipaddress
 import os
 import signal
 import sys
@@ -43,7 +47,7 @@ from collections.abc import Callable
 from dataclasses import replace
 
 from keel.inspect.network import slaac_off_in
-from keel.network import marker
+from keel.network import marker, wireguard
 
 WINDOW_UNIT = "keel-network-window"
 SAFETY_UNIT = "keel-network-window-safety"
@@ -185,6 +189,185 @@ def bounce(root: str, iface: str, relative: str, text: str,
     return True, "; ".join(found) or None
 
 
+def live_peers(old: str, new: str, iface: str, dump: str) -> (
+        list[tuple[str, ...]] | None):
+    """The `wg set` lines that take `iface`, as `wg show IFACE dump`
+    gives it (`dump`), to file `new`, when the files `old` and `new`
+    differ in their peers alone; None when the change needs the bounce
+    (keel#99)
+
+    `wg-quick down` deletes the interface and every session with it, so
+    each peer kept must do a new handshake, and on an etcd voter the
+    member lost its leader for about 25 s at each bounce. Here each peer
+    the interface holds is compared with the new file: a peer the file
+    does not name is removed, a peer the interface lacks is set, and a
+    peer that differs gets the fields that differ. So drift of the
+    interface is corrected too, as the bounce corrected it (a peer the
+    spec names and wg0 lacks, keel#96). The other peers keep their
+    sessions. The addresses a peer holds that neither file names were
+    set live by another part of keel (a VIP, keel.mesh.vipnet), and are
+    kept. An endpoint the file does not name is the one WireGuard
+    learned, and is kept.
+
+    The bounce stays for: a change of [Interface] between the files, a
+    listen port that is not the file's, a line keel does not write, a
+    key named twice, and a change of the addresses of a peer outside
+    every prefix of the interface's addresses, which wg-quick routes and
+    `wg set` does not.
+    """
+    before, after = wireguard.parse(old), wireguard.parse(new)
+    if before.problems or after.problems or before.inline_key or \
+            after.inline_key:
+        return None
+    if {k: v for k, v in before.section.items() if k != "peers"} != {
+            k: v for k, v in after.section.items() if k != "peers"}:
+        return None
+    if not before.section.get("address") and not before.section.get(
+            "ipv4_address"):
+        return None
+    was, now = by_key(before.section), by_key(after.section)
+    live = from_dump(dump)
+    if was is None or now is None or live is None:
+        return None
+    port, held = live
+    if port != after.section.get("listen_port", wireguard.DEFAULT_PORT):
+        return None
+    networks = [ipaddress.ip_interface(str(before.section[name])).network
+                for name in ("address", "ipv4_address")
+                if before.section.get(name)]
+    for key in set(was) | set(now):
+        if was.get(key) != now.get(key) and not all(
+                on_link(one, networks) for one in (was.get(key),
+                                                   now.get(key)) if one):
+            return None
+    commands: list[tuple[str, ...]] = []
+    for key in sorted(set(held) | set(now)):
+        if key not in now:
+            commands.append(("wg", "set", iface, "peer",
+                             held[key]["public_key"], "remove"))
+            continue
+        old_ips = set(was[key]["allowed_ips"]) if key in was else set()
+        found = peer_fix(iface, now[key], held.get(key), old_ips)
+        if found:
+            commands.append(found)
+    return commands
+
+
+def peer_fix(iface: str, want: dict, have: dict | None,
+             old_ips: set[str]) -> tuple[str, ...] | None:
+    """The `wg set` line that gives the peer `have` (None: the interface
+    lacks it) what the file says (`want`), or None when it has it"""
+    wanted = set(want["allowed_ips"])
+    if have is None:
+        return peer_set(iface, want)
+    target = wanted | (have["allowed_ips"] - old_ips - wanted)
+    argv = []
+    if want.get("endpoint") and want["endpoint"] != have["endpoint"]:
+        argv += ["endpoint", want["endpoint"]]
+    if target != have["allowed_ips"]:
+        argv += ["allowed-ips", ",".join(sorted(target))]
+    keepalive = int(want.get("persistent_keepalive") or 0)
+    if keepalive != have["persistent_keepalive"]:
+        argv += ["persistent-keepalive", str(keepalive or "off")]
+    if not argv:
+        return None
+    return ("wg", "set", iface, "peer", want["public_key"], *argv)
+
+
+def from_dump(text: str | None) -> tuple[int, dict[bytes, dict]] | None:
+    """The listen port and the peers of `wg show IFACE dump`, by their
+    key's bytes; None when it cannot be read"""
+    lines = [one.split("\t") for one in (text or "").splitlines() if one]
+    if not lines or len(lines[0]) != 4 or not lines[0][2].isdigit():
+        return None
+    peers: dict[bytes, dict] = {}
+    for fields in lines[1:]:
+        if len(fields) != 8:
+            return None
+        key = wireguard.key_bytes(fields[0])
+        try:
+            nets = set() if fields[3] == "(none)" else {
+                str(ipaddress.ip_network(one, strict=False))
+                for one in fields[3].split(",")}
+        except ValueError:
+            return None
+        keepalive = fields[7]
+        if key is None or not (keepalive == "off" or keepalive.isdigit()):
+            return None
+        peers[key] = {
+            "public_key": fields[0], "allowed_ips": nets,
+            "endpoint": None if fields[2] == "(none)"
+            else wireguard.canonical_endpoint(fields[2]),
+            "persistent_keepalive": 0 if keepalive == "off"
+            else int(keepalive)}
+    return int(lines[0][2]), peers
+
+
+def wg_dump(iface: str) -> str | None:
+    """`wg show IFACE dump`; None when the interface is not up, or wg
+    cannot answer"""
+    from keel.network import live
+    return live.output(("wg", "show", iface, "dump"))
+
+
+def by_key(section: dict) -> dict[bytes, dict] | None:
+    """The peers of a parsed file by their key's bytes, the addresses
+    in one spelling; None when a key is no key or is named twice"""
+    found: dict[bytes, dict] = {}
+    for one in section.get("peers") or []:
+        key = wireguard.key_bytes(str(one.get("public_key")))
+        if key is None or key in found:
+            return None
+        try:
+            nets = [ipaddress.ip_network(net, strict=False)
+                    for net in one.get("allowed_ips") or []]
+        except ValueError:
+            return None
+        found[key] = {**one, "allowed_ips": sorted(str(net) for net in nets),
+                      "endpoint": one.get("endpoint") and
+                      wireguard.canonical_endpoint(one["endpoint"])}
+    return found
+
+
+def on_link(peer: dict, networks: list) -> bool:
+    """Whether every address of `peer` lies in one of `networks`"""
+    for text in peer["allowed_ips"]:
+        net = ipaddress.ip_network(text)
+        if not any(net.version == one.version and net.subnet_of(one)
+                   for one in networks):
+            return False
+    return True
+
+
+def peer_set(iface: str, peer: dict) -> tuple[str, ...]:
+    argv = ["wg", "set", iface, "peer", peer["public_key"]]
+    if peer.get("endpoint"):
+        argv += ["endpoint", peer["endpoint"]]
+    if peer["allowed_ips"]:
+        argv += ["allowed-ips", ",".join(peer["allowed_ips"])]
+    if peer.get("persistent_keepalive"):
+        argv += ["persistent-keepalive", str(peer["persistent_keepalive"])]
+    return tuple(argv)
+
+
+def live_change(root: str, iface: str, relative: str, text: str,
+                run: Runner) -> bool:
+    """Whether the peers of `text` were set on `iface` live: it is up
+    (`wg show` dumps it), and the file there and `text` differ in peers
+    alone (`live_peers`). A `wg set` that fails leaves the rest to the
+    bounce, on the new file"""
+    try:
+        current = read_current(root, relative)
+    except OSError:
+        return False
+    if not current:
+        return False
+    commands = live_peers(current, text, iface, wg_dump(iface) or "")
+    if commands is None:
+        return False
+    return all(run(argv) is None for argv in commands)
+
+
 def bounce_overlay(root: str, iface: str, relative: str, text: str | None,
                    run: Runner, up: bool = True) -> tuple[bool, str | None]:
     """wg-quick down, the file put in place (or removed), wg-quick up
@@ -195,11 +378,24 @@ def bounce_overlay(root: str, iface: str, relative: str, text: str | None,
     that was down before it. `wg-quick down` failing is not fatal, an
     interface that is not up has nothing to take down; it runs on the
     outgoing file, which is how it finds the routes and hooks to undo.
+
+    A change of the peers alone, on an interface that is up, is made
+    live and the file put in place, with no bounce (`live_change`): in
+    both directions alike, so the revert of an unconfirmed peer is live
+    too. A file that then cannot be put in place gets the bounce on the
+    file that is there, so the interface and its file agree again.
     """
     staged = None
     if text is not None:
         staged, problem = stage(root, relative, text, OVERLAY_MODE)
         if problem:
+            return False, problem
+        if up and live_change(root, iface, relative, text, run):
+            problem = rename(staged, root, relative)
+            if problem is None:
+                return True, None
+            run(("wg-quick", "down", iface))
+            run(("wg-quick", "up", iface))
             return False, problem
     run(("wg-quick", "down", iface))
     problem = (rename(staged, root, relative) if staged
