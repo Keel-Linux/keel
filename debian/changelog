@@ -1,3 +1,22 @@
+keel (0.23.8) unstable; urgency=medium
+
+  * keel vip promote with etcd, and keel database promote that calls it,
+    no longer stop after one read of etcd that fails (keel#94). A member
+    that comes back from a partition, or a cluster that elects a new
+    leader after the old primary is cut off, answers a linearizable read
+    only some seconds later. On a link of 250 ms with 2% loss, this can
+    take more than 20 s. Promote now tries the first read again for
+    60 s, and tells the operator that it waits. If etcd does not answer
+    in 60 s, promote stops as before and changes nothing.
+  * Tests (keel#94): the mariadb case of keel#104 no longer requires the
+    transient "not proven" line from the follow at boot. The old primary
+    can learn the newer epoch before that follow runs, and then it
+    rejoins at once. The test checks what must be true in both orders:
+    the node is read only in every sample from its boot to its rejoin,
+    and it then replicates from the new primary.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 09 Oct 2026 18:00:00 +0000
+
 keel (0.23.7) unstable; urgency=medium
 
   * A node that joins a mesh built by hand gets all the members as peers
