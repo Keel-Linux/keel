@@ -506,7 +506,9 @@ A roster is the node's mesh identity (hex, or null), its WireGuard and
 signing keys, its overlay address, every peer its spec declares
 (`public_key`, `endpoint` or null, `address`, and the evidence it keeps
 for it, or null), at most 256, all the tombstones it keeps (at most
-1024), and the root's CRL for etcd it holds, or null. The
+1024), the root's CRL for etcd it holds, or null, and, since keel#105,
+the mesh's root certificate it holds and the notice of where the
+root's key is (below), each or null. The
 root side refuses (403, logged) a request from an address of no peer's
 `allowed_ips`, and an announcement whose roster names another key than
 the sender's.
@@ -652,6 +654,31 @@ roles").
   cloud advanced node, or `keel mesh etcd form` on a mesh that has none.
   Its key stays on that node, **the root's holder**, whose overlay
   address every member learns with its certificate;
+- **every member learns where the root is** (keel#105). An etcd
+  member learns the holder's address with its certificate. A member
+  that is no etcd member (both nodes of a cloud simple pair) learns it
+  from the rosters: the holder puts in its roster a notice signed by
+  the root's key, the mesh's identity, its overlay address, the time
+  and, once 0051's regions exist, the region (absent: the first
+  region), as 0051 says the holder's address is kept ("a short notice
+  signed by that root's key alone"), and every member relays the newest
+  one it took. A member takes a notice only when it is for its mesh and
+  the first region, newer than the one it keeps, not more than 5
+  minutes ahead of its clock (a notice dated far ahead would make every
+  later one "older"), and verifies with the root certificate it holds;
+  so no member that lacks the root's key can send certificate requests
+  to another address. keel#114 lists what is still open: an old notice
+  replayed to a new node, a trust root that gives a fake root, and the
+  root in the join answer. A member that holds no root certificate
+  takes one only from a roster it fetched from a trust root's own
+  address (`keel mesh sync`), as it learns a trust root's signing key,
+  never from an announcement; it must be a CA, self signed and named
+  for the mesh, and once held it is never replaced (a new root is
+  0051's trust bundle). It is kept in
+  `/var/lib/keel/etcd/root-anchor.crt`, the notice in
+  `/var/lib/keel/etcd/holder.notice`, the address in
+  `/var/lib/keel/etcd/holder`. A node that asks for its database
+  certificate and knows no holder fetches its peers' rosters first;
 - **a member's certificate**, signed by the root: its key is made on the
   member and its request travels in the join request; the root's holder
   signs it, itself when it invites, or through the inviter, which relays

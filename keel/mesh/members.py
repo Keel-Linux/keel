@@ -62,6 +62,11 @@ class Roster:
     # the root's CRL for etcd, the newest this member holds
     # (keel.mesh.etcdca), or None
     crl: str | None = None
+    # the mesh's root certificate this member holds, and the notice of
+    # where the root's key is, signed by it (keel.mesh.rootholder,
+    # keel#105); None when it holds none
+    root: str | None = None
+    holder: dict | None = None
 
 
 def dumps(roster: Roster) -> bytes:
@@ -71,7 +76,8 @@ def dumps(roster: Roster) -> bytes:
         "address": roster.address,
         "members": [asdict(one) for one in roster.members],
         "removed": [asdict(one) for one in roster.removed],
-        "crl": roster.crl}, sort_keys=True).encode()
+        "crl": roster.crl, "root": roster.root,
+        "holder": roster.holder}, sort_keys=True).encode()
 
 
 def loads(body: bytes) -> Roster:
@@ -87,7 +93,22 @@ def loads(body: bytes) -> Roster:
                   address=protocol.overlay(data, "address", False),
                   members=tuple(protocol.peer(one) for one in found),
                   removed=tuple(protocol.removal(one) for one in gone),
-                  crl=crl(data.get("crl")))
+                  crl=crl(data.get("crl")),
+                  root=root_certificate(data.get("root")),
+                  holder=holder_notice(data.get("holder")))
+
+
+def root_certificate(value: object) -> str | None:
+    """A roster's root certificate; one that cannot be read is left out"""
+    from keel.mesh import rootholder
+    return rootholder.certificate(value)
+
+
+def holder_notice(value: object) -> dict | None:
+    """A roster's notice of the root's holder; one that cannot be read
+    is left out"""
+    from keel.mesh import rootholder
+    return rootholder.notice(value)
 
 
 def crl(value: object) -> str | None:

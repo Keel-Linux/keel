@@ -500,8 +500,12 @@ def play(report: dict, pids: list[int], pairs, roots: list[str],
                          f"{UPLINK.format(n=index + 1)}::1")
     for index in range(len(vip_netns.NAMES) - 1):
         server(index, pids[index], roots[index])
-    # the application's data on A, before it is a primary: what a first
-    # boot leaves
+    # the VIP on A first (what the installer does): a paired node with
+    # no claim is read only (keel#104), so A takes the application's
+    # data only once it holds the VIP and follow made it writable
+    report["a_promote"] = agent_send("A", "promote")
+    report["a_follow_after_promote"] = agent_send("A", "follow", 180)
+    # the application's data on A: what a first boot leaves
     for statement in (
             f"CREATE DATABASE {APP_DB}",
             f"CREATE TABLE {APP_DB}.t (id INT AUTO_INCREMENT PRIMARY KEY,"
@@ -513,9 +517,7 @@ def play(report: dict, pids: list[int], pairs, roots: list[str],
         if found.get("code"):
             report["setup_error"] = found
             return
-    # the pair: the VIP on A first (what the installer does), then apply
-    # on each, as its first boot would
-    report["a_promote"] = agent_send("A", "promote")
+    # then apply on each, as its first boot would
     report["a_apply"] = agent_send("A", "apply", 600)
     report["b_apply"] = agent_send("B", "apply", 900)
     report["b_follow_log"] = agent_send("B", "followlog")
@@ -636,6 +638,7 @@ def play(report: dict, pids: list[int], pairs, roots: list[str],
     report["b_bypass"] = agent_send(
         "B", "sql SELECT GRANTEE FROM information_schema.USER_PRIVILEGES"
         " WHERE PRIVILEGE_TYPE = 'READ_ONLY ADMIN'")
+    crashed(report, pids, roots)
     report["alerts"] = [one.get("text", "")[:160] for one in HOOKS["alerts"]]
     for process in vip_netns.AGENTS.values():
         try:
@@ -643,6 +646,82 @@ def play(report: dict, pids: list[int], pairs, roots: list[str],
             process.stdin.close()
         except OSError:
             pass
+
+
+def read_only_of(root: str) -> str:
+    """@@read_only of a node's server, asked by its socket from the
+    driver, so the agent stays free for the command in flight"""
+    try:
+        done = subprocess.run(
+            ["mariadb", f"--socket={socket_of(root)}", "--batch",
+             "--skip-column-names", "--connect-timeout=2", "--execute",
+             "SELECT @@read_only"], capture_output=True, text=True,
+            check=False, timeout=10)
+    except subprocess.TimeoutExpired:
+        return "timed out"
+    return done.stdout.strip() if done.returncode == 0 else "down"
+
+
+def crashed(report: dict, pids: list[int], roots: list[str]) -> None:
+    """keel#104: the primary A crashes (its server killed, its VIP
+    helper gone, cut off), B is promoted at a newer epoch with A gone,
+    and A boots with its last claim still in its file. It is read only
+    from its first second, stays so while it holds no proof, and
+    replicates from B once its controller learns the newer epoch"""
+    import vip_netns
+    from vip_netns import OVERLAY, agent_send, wait_until
+    a_pid = pids[0]
+    a_root = roots[0]
+    sh("systemctl", "kill", "--signal=SIGKILL", service_of(a_root),
+       check=False)
+    sh("systemctl", "stop", f"keel-vip-test-{vip_netns.NAMES[0]}",
+       check=False)
+    vip_netns.leg("to1", "100%")
+    sh("tc", "qdisc", "replace", "dev", "uplink", "root", "netem", "loss",
+       "100%", pid=a_pid)
+    report["k104_promote"] = agent_send("B", "dbpromote gone", 300)
+    report["k104_b_read_only"] = agent_send("B", "sql SELECT @@read_only")
+    # A boots: the link back, its server started from its drop-in, and
+    # what keel-database-follow.service does at boot, before anything
+    # told A of the newer epoch
+    vip_netns.heal(pids, 0)
+    sh("systemctl", "reset-failed", service_of(a_root), check=False)
+    sh("systemctl", "start", service_of(a_root))
+    samples: list[str] = []
+    stop = threading.Event()
+
+    def sample() -> None:
+        while not stop.is_set():
+            samples.append(read_only_of(a_root))
+            stop.wait(0.5)
+    sampler = threading.Thread(target=sample, daemon=True)
+    sampler.start()
+    try:
+        report["k104_boot_read_only"] = read_only_of(a_root)
+        report["k104_follow_at_boot"] = agent_send("A", "follow", 180)
+        report["k104_after_follow"] = read_only_of(a_root)
+        # A's VIP helper starts again: its lease is gone, so it is fenced
+        # and takes B's claim; A's follow makes it B's replica
+        vip_netns.tended(0, a_pid, a_root,
+                         os.path.join(a_root, "instance.yaml"))
+        report["k104_replica_s"] = wait_until(
+            lambda: replica_status(agent_send, "A").get("Master_Host") ==
+            OVERLAY.format(n=2) and replica_status(agent_send, "A").get(
+                "Slave_SQL_Running") == "Yes", 180, 1)
+        # the I/O thread's first connection is a TLS handshake and a
+        # registration over 250 ms: waited for until it streams, as in (a)
+        report["k104_streaming_s"] = wait_until(
+            lambda: replica_status(agent_send, "A").get("Slave_IO_State", "")
+            .startswith("Waiting for master to send event"), 60, 1)
+    finally:
+        stop.set()
+        sampler.join()
+    report["k104_read_only_samples"] = samples
+    report["k104_a_status"] = {
+        k: v for k, v in replica_status(agent_send, "A").items()
+        if k in ("Master_Host", "Slave_IO_Running", "Slave_SQL_Running",
+                 "Using_Gtid", "Master_SSL_Allowed")}
+    report["k104_a_follow_log"] = agent_send("A", "followlog")
 
 
 def main() -> None:

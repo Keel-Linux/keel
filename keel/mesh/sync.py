@@ -59,6 +59,7 @@ from keel.mesh import (
     invites,
     memberlink,
     members,
+    rootholder,
     signing,
     trust,
 )
@@ -137,14 +138,18 @@ def roster(syncer: Syncer) -> Roster:
         raise NodeError(str(e)) from None
     store = trust.load(syncer.root)
     overlay = syncer.node.overlay()
+    mesh_id = identity.read(syncer.root)
+    address = str(ipaddress.IPv6Interface(str(overlay["address"])).ip)
+    anchor, notice = rootholder.offered(
+        syncer.root, mesh_id.hex() if mesh_id else None, address,
+        syncer.clock())
     return Roster(
-        identity.read(syncer.root), public, signer,
-        str(ipaddress.IPv6Interface(str(overlay["address"])).ip),
+        mesh_id, public, signer, address,
         tuple(Peer(one.public_key, one.endpoint, one.address,
                    store.evidence(one.public_key))
               for one in syncer.node.peers(public)),
         tuple(store.removed.values()),
-        etcdstate.read(syncer.root, etcdstate.CRL))
+        etcdstate.read(syncer.root, etcdstate.CRL), anchor, notice)
 
 
 def offered(syncer: Syncer) -> Roster:
@@ -285,6 +290,9 @@ def verified(syncer: Syncer, rosters: list[Roster], own: bytes,
         gone += one.removed
     found = trust.accepted(store, signer, own, entries)
     removed = trust.removals(store, signer, own, gone)
+    # where the root's key is, for every member (keel#105)
+    rootholder.taken_from(syncer.root, own.hex(), rosters, store, fetched,
+                          syncer.err, syncer.clock())
     for one in rosters:
         if one.identity == own and one.crl:
             etcdcare.crl_taken(etcd.Etcd(syncer.node, syncer.clock,

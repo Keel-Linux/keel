@@ -8,9 +8,14 @@ system user reads opens nothing in etcd; its IP SANs this node's own
 overlay address and the pair's VIP, so a client verifying the VIP works
 later; 30 days, renewed with a third left (`ensure`, from apply and
 keel database watch). The root's holder signs it: here when this node
-holds the root, else asked over the members' channel of the holder, or
-of the other member of the pair when the holder is not known (a cloud
-simple pair, whose first node made the root at keel mesh create).
+holds the root, else asked over the members' channel of the holder.
+Every member learns the holder's address from a notice the root's key
+signed, in its peers' rosters (keel.mesh.rootholder, keel#105); a node
+that knows no holder fetches its peers' rosters first, and asks the
+other member of the pair only when none says where the holder is (a
+cloud simple pair, whose first node made the root at keel mesh create).
+When this node holds a root certificate or learned one, the leaf is
+taken only under it.
 
 Files under /etc/mysql/keel-tls, a directory the server can reach as the
 mysql user (/var/lib/keel is root's alone): `ca.pem` (the root; the
@@ -127,7 +132,7 @@ def _asked(member, csr: str, address: str, vip: str | None,
     from keel.mesh.memberlink import LinkError
     from keel.mesh.protocol import ProtocolError
     from keel.mesh.signing import SigningError
-    at = etcdstate.holder(member.root) or peer
+    at = etcdstate.holder(member.root) or _learned(member) or peer
     if at is None:
         raise StateError("this node holds no root CA and knows neither its"
                          " holder nor the other node of the pair to ask")
@@ -148,6 +153,23 @@ def _asked(member, csr: str, address: str, vip: str | None,
     return grant
 
 
+def _learned(member) -> str | None:
+    """The holder's address, from the rosters of this node's peers
+    fetched now (keel#105); None when none says"""
+    from keel.mesh import etcd, identity, rootholder
+    try:
+        mesh_id = identity.read(member.root)
+        own = etcd.own_key(member)
+        if mesh_id is None or own is None:
+            return None
+        rootholder.asked(member.node, own, mesh_id.hex(), member.err,
+                         member.clock())
+    except (ValueError, OSError) as e:
+        member.err(f"the root CA's holder could not be learned: {e}")
+        return None
+    return etcdstate.holder(member.root)
+
+
 def _checked(root: str, grant: etcdstate.Grant, address: str) -> str | None:
     """Why `grant` is not this node's database leaf, or None"""
     try:
@@ -161,7 +183,8 @@ def _checked(root: str, grant: etcdstate.Grant, address: str) -> str | None:
                 etcdpki.subject(grant.certificate) != \
                 etcdstate.database_name(address):
             return f"the certificate does not name this node ({address})"
-        held = etcdstate.read(root, etcdstate.ROOT_CERT)
+        from keel.mesh import rootholder
+        held = rootholder.anchor(root)
         if held and etcdpki.fingerprint(held) != etcdpki.fingerprint(
                 grant.root):
             return "the certificate is under another root than this node's"

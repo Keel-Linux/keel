@@ -1,3 +1,43 @@
+keel (0.23.5) unstable; urgency=medium
+
+  * A cloud simple pair could not get its database certificate when the
+    mesh's root CA was held by a third node (keel#105). Only etcd
+    members wrote /var/lib/keel/etcd/holder, so each pair member asked
+    the other one, which refused. Now every roster carries the root
+    certificate its member holds and a notice of the holder's address,
+    signed by the root's key (decision 0051). A member takes a notice
+    only when it verifies with the root certificate it holds, so no
+    member can send certificate requests to another address. A member
+    with no root certificate takes one only from a roster that it
+    fetched from a trust root, never from an announcement. A node that
+    knows no holder fetches its peers' rosters before it asks. A notice
+    dated more than 5 minutes ahead of the local clock is refused, and
+    the notice has a region field (absent: the first region).
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 09 Oct 2026 13:00:00 +0000
+
+keel (0.23.4) unstable; urgency=medium
+
+  * A crashed old primary took writes after its boot (keel#104): keel
+    database follow set read_only OFF from the claim of the VIP in the
+    node's state file, before keel vip check learned that the other
+    node held the VIP at a newer epoch. On a real pair the old primary
+    was writable for 31 s. Now follow lifts read_only only when the VIP
+    is on wg0, which keel adds only after a proof (a fresh claim, a
+    peer's answer with no newer claim, or with etcd a lease renewal
+    that the majority confirmed). Without the proof the server stays
+    read only and locked, also when etcd or the peers do not answer at
+    boot. Follow waits up to 15 s for the VIP, and the VIP's state is
+    written again when keel adds the VIP, so follow runs again then.
+  * A paired node with no claim of the VIP (its state file removed, or
+    before the first promote) is not proven either: a declared primary
+    stays read only and locked until a claim is proven. keel database
+    watch follows a server again when it takes writes with no claim, or
+    while the VIP is not on wg0 (its valid_lft ran out). One keel
+    database follow runs at a time, under a lock.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 09 Oct 2026 12:00:00 +0000
+
 keel (0.23.3) unstable; urgency=medium
 
   * keel mesh invite draws a random free address of the inviter's
