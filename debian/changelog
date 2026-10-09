@@ -1,3 +1,21 @@
+keel (0.23.5) unstable; urgency=medium
+
+  * A cloud simple pair could not get its database certificate when the
+    mesh's root CA was held by a third node (keel#105). Only etcd
+    members wrote /var/lib/keel/etcd/holder, so each pair member asked
+    the other one, which refused. Now every roster carries the root
+    certificate its member holds and a notice of the holder's address,
+    signed by the root's key (decision 0051). A member takes a notice
+    only when it verifies with the root certificate it holds, so no
+    member can send certificate requests to another address. A member
+    with no root certificate takes one only from a roster that it
+    fetched from a trust root, never from an announcement. A node that
+    knows no holder fetches its peers' rosters before it asks. A notice
+    dated more than 5 minutes ahead of the local clock is refused, and
+    the notice has a region field (absent: the first region).
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 09 Oct 2026 13:00:00 +0000
+
 keel (0.23.4) unstable; urgency=medium
 
   * A crashed old primary took writes after its boot (keel#104): keel

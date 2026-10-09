@@ -196,10 +196,17 @@ form`). So `keel mesh create` makes it in every cloud mode (the
 maintainer, 2026-10-11): in cloud simple the root signs the database's
 certificates alone, and the etcd overlay stays disabled there (0041).
 The database leaf is asked of the root's holder over the members'
-channel (`issue`, kind `database`), or of the other member of the pair
-when the holder is not known yet, which in a cloud simple pair is the
-node that made the mesh; the holder signs only for the address its own
-spec gives the asker's key.
+channel (`issue`, kind `database`); the holder signs only for the
+address its own spec gives the asker's key. Every member knows the
+holder's address from a notice signed by the root's key, which the
+rosters carry (docs/mesh.md, keel#105): on a real mesh whose root was
+held by a cloud advanced node outside the pair, the pair members knew
+no holder, asked each other and were refused. A node that knows no
+holder fetches its peers' rosters before it asks, and asks the other
+member of the pair only when no roster says where the holder is (a
+cloud simple pair whose first node made the mesh). When the node
+holds a root certificate, or learned one from a trust root, the leaf
+is taken only under that root.
 
 ## The replication credential
 
