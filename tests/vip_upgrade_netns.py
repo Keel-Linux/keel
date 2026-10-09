@@ -67,9 +67,20 @@ def helper_unit(index: int) -> str:
     return f"keel-vip-test-{NAMES[index]}"
 
 
-def epoch() -> dict:
-    """The counter's claim, as C reads it from etcd"""
-    return agent_send("C", "epoch")
+def epoch(upto_s: float = 60) -> dict:
+    """The counter's claim, as C reads it from etcd; one linearizable
+    read can outlast its 2 s on the lossy link, and then the answer
+    holds no epoch (keel#133), so the ask repeats until it does;
+    bounded"""
+    deadline = time.monotonic() + upto_s
+    tries = 0
+    while True:
+        tries += 1
+        found = agent_send("C", "epoch")
+        if "epoch" in found or time.monotonic() >= deadline:
+            found["tries"] = tries
+            return found
+        time.sleep(3)
 
 
 def held_by(pids: list[int]) -> list[str]:
