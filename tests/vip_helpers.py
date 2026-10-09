@@ -165,10 +165,13 @@ class FakeKv:
         return 20
 
     def time_to_live(self, lease: str) -> int:
+        """As etcd says it: whole seconds, rounded down, so a lease in
+        its last second says 0 and a renewal still keeps it (keel#126);
+        -1 once it is gone"""
         self.check("time_to_live")
         if lease not in self.leases:
             return -1
-        return max(1, int(self.leases[lease] - self.clock()))
+        return int(self.leases[lease] - self.clock())
 
     def revoke(self, lease: str) -> None:
         self.check("revoke")

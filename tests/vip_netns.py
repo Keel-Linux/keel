@@ -48,8 +48,9 @@ ms.
    makes B drop the VIP at its next renewal and A claim it after its
    grace, never both at once.
 
-At no sample may two nodes carry the VIP. The result is one JSON line,
-`RESULT {...}`.
+At no sample may two nodes carry the VIP, and at no instant: a watcher
+of its own reads every node in a tight loop (tests/vip_overlap.py,
+keel#126). The result is one JSON line, `RESULT {...}`.
 """
 
 import ipaddress
@@ -65,6 +66,7 @@ import time
 from datetime import datetime, timezone
 
 import etcd_netns
+import vip_overlap
 from etcd_netns import (
     NAMES,
     agreed,
@@ -386,6 +388,8 @@ def driver(play=None) -> None:
     stop = threading.Event()
     sampling = threading.Thread(target=sampler, args=(pids, samples, stop))
     sampling.start()
+    atomic = os.path.join(roots[2], "overlap.jsonl")
+    watcher = vip_overlap.start(atomic, VIP, dict(zip(NAMES, pids)))
     try:
         (play or scenario)(report, pids, pairs, roots, samples)
     except Exception as e:  # noqa: BLE001 - the report says how it ended
@@ -393,6 +397,7 @@ def driver(play=None) -> None:
     finally:
         stop.set()
         sampling.join()
+        report["atomic"] = vip_overlap.stop(watcher, atomic)
     counts = [len(one["holders"]) for one in samples]
     report["samples"] = len(samples)
     steps = [b["t"] - a["t"] for a, b in zip(samples, samples[1:])]

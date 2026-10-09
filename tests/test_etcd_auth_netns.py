@@ -191,6 +191,15 @@ class TestTheLiveLayoutMoved(unittest.TestCase):
     def test_never_two_holders(self):
         self.assertEqual(self.found["double_holder_samples"], [])
 
+    def test_never_two_holders_at_one_instant(self):
+        """keel#126: a watcher of its own, every node read in one tight
+        loop; an overlap only when proven at one instant"""
+        atomic = self.found["atomic"]
+        self.assertTrue(atomic["ended"], atomic)
+        self.assertGreater(atomic["rounds"], 1000, atomic)
+        self.assertEqual(atomic["overlaps"], [], atomic)
+        self.assertEqual(atomic["overlap_rounds"], 0, atomic)
+
     def test_the_rollback_turns_auth_off(self):
         self.assertEqual(self.found["rollback"]["code"], 0,
                          self.found["rollback"])

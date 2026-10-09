@@ -1,3 +1,21 @@
+keel (0.23.9) unstable; urgency=medium
+
+  * With etcd, two nodes could carry the VIP for less than a second
+    (keel#126). etcd gives a lease's time to live in whole seconds,
+    rounded down, so a lease with less than 1 s left shows 0, and a
+    renewal in that second keeps it. The other node of the pair took 0
+    as a lease that is gone and claimed. A holder that came back from a
+    cut off in the last second of its lease renewed it and carried the
+    VIP, beside the new holder, until it took the newer claim from the
+    counter. Now the other node, and keel vip promote, claim only when
+    etcd shows -1: the lease expired at etcd's leader, and no renewal
+    can keep it. The old holder's address is gone 10 s or more before
+    a claim is possible; docs/vip.md gives the margin on the design
+    case. The VIP's netns tests also watch the nodes in a tight loop
+    and fail on any instant two nodes carry the VIP.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 09 Oct 2026 20:00:00 +0000
+
 keel (0.23.8) unstable; urgency=medium
 
   * keel vip promote --old-primary-gone took 30.5 s on a real pair with

@@ -333,6 +333,20 @@ class TestPromoteWithEtcd(WithEtcd):
         vipnode.hold(self.all[index], made[0], False, made[1])
         return vipetcd.seen(self.kv, MESH_HEX)[VIP]
 
+    def test_promote_waits_out_a_lease_in_its_last_second(self):
+        """keel#126: 0 is a lease etcd still renews; promote waits for
+        -1"""
+        self.promote(0)
+        self.turn()
+        lease = self.lease()
+        self.kv.leases[lease] = self.monotonic() + 0.6
+        self.assertEqual(self.kv.time_to_live(lease), 0)
+        found = vippromote.gone_lease(self.all[1], VIP, lease, 0.1)
+        self.assertIsNone(found)
+        self.sleep(0.6)
+        found = vippromote.gone_lease(self.all[1], VIP, lease, 0.1)
+        self.assertIsNotNone(found)
+
     def test_waiting_for_the_lease_survives_etcd_away(self):
         calls = iter([True, False])
         here = self.all[1]
@@ -413,6 +427,49 @@ class TestTheController(WithEtcd):
         held = vipnode.current(self.all[0], VIP)
         self.assertTrue(held.fenced)
         self.assertEqual(held.holder, KEYS[1])
+
+    def test_a_lease_in_its_last_second_is_not_gone(self):
+        """keel#126: etcd gives a lease's time to live in whole seconds,
+        rounded down, so a lease with less than a second left says 0,
+        and the holder's renewal in that second keeps it. The replica
+        that claimed on 0 carried the VIP beside a holder that renewed
+        in time; it claims only once etcd says -1"""
+        self.promote(0)
+        self.run_for(5)
+        lease = self.lease()
+        # A cut off: it renews nothing; B and C go on
+        while self.kv.leases[lease] - self.monotonic() > 1.5:
+            self.sleep(1.0)
+            self.turn(1, 2)
+        self.sleep(self.kv.leases[lease] - self.monotonic() - 0.5)
+        self.assertEqual(self.kv.time_to_live(lease), 0)
+        self.turn(1, 2)
+        self.assertFalse(self.carried(1))
+        # A back, its renewal in the lease's last second
+        self.sleep(0.2)
+        self.controllers[0].holding()
+        self.assertTrue(self.carried(0))
+        self.assertGreater(self.kv.time_to_live(lease), 0)
+        self.run_for(30)
+        self.assertEqual(self.holds(), [0])
+        self.assertEqual(self.both, [])
+        self.assertNotIn("claimed at epoch", self.text(1))
+
+    def test_the_replica_claims_once_etcd_says_minus_one(self):
+        """The lease that ends in its last second: 0, then -1; the
+        replica claims at -1, within a second of the expiry"""
+        self.promote(0)
+        self.run_for(5)
+        lease = self.lease()
+        self.controllers[0].stop.set()
+        self.nets[0].addresses.clear()
+        expiry = self.kv.leases[lease]
+        while not self.carried(1):
+            self.sleep(0.25)
+            self.turn(1, 2)
+            self.assertLess(self.monotonic(), expiry + 5)
+        self.assertGreaterEqual(self.monotonic(), expiry)
+        self.assertLess(self.monotonic(), expiry + 1.5)
 
     def test_a_rebooted_old_holder_never_carries_the_replica_s_vip(self):
         self.promote(0)
