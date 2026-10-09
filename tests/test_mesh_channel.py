@@ -17,6 +17,7 @@ import socket
 import ssl
 import tempfile
 import threading
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest import mock
@@ -84,13 +85,29 @@ class Served(unittest.TestCase):
         self.listener.ended = True
         self.thread.join(10)
 
+    def settled(self, within: float = 10.0) -> None:
+        """Every connection the listener took is served and its slot
+        given back. The listener takes one connection per source at a
+        time and gives the slot back after it sent the answer: a client
+        in this process that posts again at once from [::1] can come
+        before that, and its connection is closed unanswered"""
+        deadline = time.monotonic() + within
+        while any(one.name.endswith("(serve_one)")
+                  for one in threading.enumerate()):
+            self.assertLess(time.monotonic(), deadline,
+                            "the listener still serves a connection")
+            time.sleep(0.01)
+
     def post(self, body=None, path=protocol.JOIN, key=KEY, pin=None,
              host="::1"):
         now = protocol.seconds(datetime.now(timezone.utc))
         body = join_body(time=now) if body is None else body
+        # the answer is waited for as the joiner waits for it: the join
+        # signs and checks its evidence with openssl processes, which a
+        # loaded CI runner can make slower than a few seconds (keel#94)
         return channel.post(host, self.port, path, body, key,
                             pin or self.pin, connect_timeout=2,
-                            answer_timeout=5)
+                            answer_timeout=channel.ANSWER_TIMEOUT)
 
     def held(self, source=None, host="127.0.0.1"):
         """A connection that never starts its TLS handshake"""
@@ -151,6 +168,7 @@ class TestPost(Served):
             raw.sendall(b"GET / HTTP/1.0\r\n\r\n")
             with contextlib.suppress(OSError):
                 raw.recv(100)
+        self.settled()
         self.assertEqual(protocol.join_answer(self.post().body).public_key,
                          INVITER)
 
@@ -204,8 +222,10 @@ class TestPerSource(Served):
 class TestBlocked(Served):
     def test_a_source_refused_too_often_is_not_answered(self):
         for _ in range(listener.MAX_REFUSED):
+            self.settled()
             with self.assertRaises(Refused):
                 self.post(body=b"{}")
+        self.settled()
         with self.assertRaises(ChannelError) as caught:
             self.post()
         self.assertNotIsInstance(caught.exception, Refused)
