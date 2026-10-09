@@ -6,7 +6,10 @@ keel (0.23.4) unstable; urgency=medium
     leader. On a link of 250 ms with 2% loss, this can take more than
     20 s. Promote now tries the first read again for 60 s, and tells
     the operator that it waits. If etcd does not answer in 60 s,
-    promote stops as before and changes nothing.
+    promote stops as before and changes nothing. After the claim,
+    promote waits for keel-vip.service to carry the VIP for the TTL of
+    the lease and one renewal (22 s), not 15 s: a controller on a member
+    that comes back from a partition renews the new lease late.
   * keel vip pair and keel vip unpair, and the member that is asked to
     sign a pair, call etcd with the usual timeout of keel (10 s), not
     with the short timeout of the VIP controller (2 s). On a link of

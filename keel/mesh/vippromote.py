@@ -58,8 +58,11 @@ from keel.network.wireguard import same_key
 # of 250 ms with 2% loss, that took more than 20 s (keel#94): the first
 # read is tried again until CATCH_UP
 CATCH_UP = 60.0
-# how long a promote with etcd waits for the controller to carry the VIP
-CARRY_WAIT = 15.0
+# how long a promote with etcd waits for the controller to carry the VIP:
+# the controller carries it after it renewed the claim's lease, which it
+# does within the lease's TTL or the lease is gone. A controller on a
+# member back from a partition renews late (keel#94)
+CARRY_WAIT = vipetcd.TTL + vipetcd.RENEW
 # how long it waits for the old holder's key to go: a lease revoked by a
 # release goes at once; one left to expire goes within its TTL, which a
 # leader change extends by an election timeout

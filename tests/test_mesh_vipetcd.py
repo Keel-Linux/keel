@@ -253,6 +253,23 @@ class TestPromoteWithEtcd(WithEtcd):
         self.assertLess(self.monotonic() - started,
                         vippromote.CATCH_UP + 1)
 
+    def test_the_carry_is_waited_for_while_the_lease_can_live(self):
+        """keel#94: a controller on a member back from a partition renews
+        the new claim's lease late, but before its TTL ends, or the lease
+        is gone; it carries the VIP after that renewal"""
+        start = self.monotonic()
+        late = vipetcd.TTL + vipetcd.RENEW - 0.5
+        with mock.patch.object(vippromote.vipnet, "carried",
+                               side_effect=lambda *a: (
+                                   self.monotonic() - start >= late)):
+            self.assertTrue(vippromote.carried_soon(self.all[0], VIP))
+        start = self.monotonic()
+        late = vipetcd.TTL + vipetcd.RENEW + 1
+        with mock.patch.object(vippromote.vipnet, "carried",
+                               side_effect=lambda *a: (
+                                   self.monotonic() - start >= late)):
+            self.assertFalse(vippromote.carried_soon(self.all[0], VIP))
+
     def test_a_controller_that_does_not_carry_it(self):
         said: list[str] = []
         with mock.patch.object(vippromote, "CARRY_WAIT", 1.0):
