@@ -57,6 +57,20 @@ class TestRoster(unittest.TestCase):
         self.assertEqual(data["identity"], bytes(range(16)).hex())
         self.assertEqual(data["members"][0]["address"], "fd00:6b65:1::7")
 
+    def test_a_trust_root_is_marked_and_an_old_roster_has_none(self):
+        """keel#99: a member the sender holds as a trust root says so; a
+        roster of a keel before it has no mark, and names no root"""
+        marked = roster(members=(Peer(OTHER, None, "fd00:6b65:1::7",
+                                      root=True),))
+        self.assertTrue(members.loads(members.dumps(marked)).members[0].root)
+        data = json.loads(members.dumps(marked))
+        del data["members"][0]["root"]
+        self.assertFalse(members.loads(
+            json.dumps(data).encode()).members[0].root)
+        data["members"][0]["root"] = "yes"
+        self.assertFalse(members.loads(
+            json.dumps(data).encode()).members[0].root)
+
     def test_malformed(self):
         good = json.loads(members.dumps(roster()))
         for name, value in (("identity", "zz"), ("identity", "00"),

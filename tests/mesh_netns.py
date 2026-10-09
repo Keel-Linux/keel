@@ -185,7 +185,7 @@ def joiner(token_text: str, endpoint: str, after: str) -> None:
     report = {"code": code, "out": out, "err": err, "ping": ping(OVERLAY_A),
               "outcome": last.outcome if last else None,
               "address": here.overlay().get("address"),
-              "key": here.public_key()[0]}
+              "key": here.public_key()[0], "root": root}
     if after not in ("serve", "-"):
         report["ping_other"] = ping(after)
         report["peers"] = [one.get("public_key")
@@ -196,29 +196,55 @@ def joiner(token_text: str, endpoint: str, after: str) -> None:
 
 
 def member(here: Node, root: str) -> None:
-    """keel-mesh-members, until the driver says `quit`; `check ADDRESS
-    KEY` waits for the member KEY to be this node's confirmed peer, and
-    pings it"""
+    """keel-mesh-members, until the driver says `quit` (`commands`)"""
     log: list[str] = []
     service, stop = members_service(here, log.append)
+    commands(here, root, log)
+    stop.set()
+    service.join(30)
+
+
+def commands(here: Node, root: str, log: list[str]) -> None:
+    """The driver's lines on standard input, until one is no command:
+    `check ADDRESS KEY` waits for the member KEY to be this node's
+    confirmed peer, and pings it; `ping ADDRESS...` pings each;
+    `handshakes` gives `wg show wg0 latest-handshakes`"""
     for line in sys.stdin:
         words = line.split()
+        if words[:1] == ["ping"]:
+            print("PING " + json.dumps({one: ping(one)
+                                        for one in words[1:]}), flush=True)
+            continue
+        if words[:1] == ["handshakes"]:
+            print("HANDSHAKES " + json.dumps(handshakes()), flush=True)
+            continue
         if words[:1] != ["check"]:
             break
         deadline = time.monotonic() + 300
         while time.monotonic() < deadline:
             keys = [one.get("public_key")
                     for one in here.overlay().get("peers") or []]
+            # the spec is written before the change is made, and a
+            # member that never joined has no last change
+            last = marker.last(root)
             if words[2] in keys and not marker.exists(root) and \
-                    marker.last(root).outcome == marker.CONFIRMED:
+                    last is not None and last.outcome == marker.CONFIRMED:
                 break
             time.sleep(1)
         last = marker.last(root)
         print("CHECK " + json.dumps({
             "peers": keys, "outcome": last.outcome if last else None,
             "ping": ping(words[1]), "log": log}), flush=True)
-    stop.set()
-    service.join(30)
+
+
+def handshakes(iface: str = "wg0") -> dict[str, int]:
+    """Each peer's latest handshake, in seconds since the epoch; 0 for
+    none"""
+    found = {}
+    for line in sh("wg", "show", iface, "latest-handshakes").splitlines():
+        key, _, at = line.partition("\t")
+        found[key] = int(at or 0)
+    return found
 
 
 CHILDREN: list[subprocess.Popen] = []

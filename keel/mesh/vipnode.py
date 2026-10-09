@@ -183,7 +183,8 @@ def trust_roots(here: Here) -> set[str]:
         store = trust.load(here.root)
     except ValueError:
         return set()
-    return {key for key, one in store.members.items() if one.root}
+    # a named root signs no pair record (keel#99)
+    return store.operator_roots()
 
 
 def addresses(here: Here) -> dict[str, str]:

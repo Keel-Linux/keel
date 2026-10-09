@@ -146,7 +146,8 @@ def roster(syncer: Syncer) -> Roster:
     return Roster(
         mesh_id, public, signer, address,
         tuple(Peer(one.public_key, one.endpoint, one.address,
-                   store.evidence(one.public_key))
+                   store.evidence(one.public_key),
+                   store.is_operator_root(one.public_key))
               for one in syncer.node.peers(public)),
         tuple(store.removed.values()),
         etcdstate.read(syncer.root, etcdstate.CRL), anchor, notice)
@@ -272,13 +273,17 @@ class Taken:
 
 
 def verified(syncer: Syncer, rosters: list[Roster], own: bytes,
-             store: trust.Store, fetched: bool) -> Taken:
+             store: trust.Store, fetched: bool, public: str) -> Taken:
     """The members of `rosters` whose evidence chains to a key this node
     trusts, and the tombstones it takes (keel.mesh.trust). A trust root's
     signing key is bound only from a roster `fetched` by this node from
-    the root's own address (`pull`), never from an announcement"""
+    the root's own address (`pull`), never from an announcement; such a
+    roster from an operator root also gives the operator roots that root
+    holds, as named roots (trust.rooted, keel#99)"""
     signer = signing.public(syncer.root)
-    code, entries, gone = exits.OK, [], []
+    code, entries, gone, roots = exits.OK, [], [], []
+    # each roster fetched from an operator root names that root's own
+    # operator roots: named roots here (trust.rooted)
     for one in rosters:
         if one.identity != own:
             syncer.err(mismatch(own, one))
@@ -286,10 +291,15 @@ def verified(syncer: Syncer, rosters: list[Roster], own: bytes,
             continue
         if fetched and trust.bind_root(store, one.public_key, one.sign_key):
             syncer.err(f"trust root {one.address} signs with {one.sign_key}")
+        if fetched and store.is_operator_root(one.public_key):
+            roots.append(one)
         entries += one.members
         gone += one.removed
     found = trust.accepted(store, signer, own, entries)
     removed = trust.removals(store, signer, own, gone)
+    for one in roots:
+        found += trust.rooted(store, public, one.members, one.public_key,
+                              syncer.err)
     # where the root's key is, for every member (keel#105)
     rootholder.taken_from(syncer.root, own.hex(), rosters, store, fetched,
                           syncer.err, syncer.clock())
@@ -314,7 +324,7 @@ def absorb(syncer: Syncer, rosters: list[Roster], public: str,
                              " mesh sync --adopt, sets it; nothing is"
                              " taken")
         store = trust.load(syncer.root)
-        taken = verified(syncer, rosters, own, store, fetched)
+        taken = verified(syncer, rosters, own, store, fetched, public)
         trust.save(syncer.root, store)
         doc = syncer.node.document()
     except (ValueError, NodeError, SigningError) as e:

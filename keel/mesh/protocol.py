@@ -104,12 +104,15 @@ class Removal:
 @dataclass(frozen=True)
 class Peer:
     """A member as the answer names it: key, endpoint or None, address,
-    and the evidence of its admission, None when there is none"""
+    and the evidence of its admission, None when there is none; `root`
+    when the member that names it holds it as a trust root
+    (keel.mesh.trust.rooted, keel#99)"""
 
     public_key: str
     endpoint: str | None
     address: str
     admission: Admission | None = None
+    root: bool = False
 
 
 @dataclass(frozen=True)
@@ -328,7 +331,8 @@ def peer(data: object) -> Peer:
     return Peer(public_key=key(data, "public_key"),
                 endpoint=endpoint(data.get("endpoint")),
                 address=overlay(data, "address", False),
-                admission=None if found is None else admission(found))
+                admission=None if found is None else admission(found),
+                root=data.get("root") is True)
 
 
 def admission(data: object) -> Admission:

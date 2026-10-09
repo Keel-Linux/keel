@@ -16,7 +16,17 @@ signer of an entry it takes is trusted in turn, so evidence chains from
 member to member; an entry without valid evidence is left out. A mesh
 built by hand before `keel mesh` has no evidence: `keel mesh create
 --adopt` and `keel mesh sync --adopt`, explicit acts of the operator,
-make the peers the spec lists trust roots. A root's signing key is
+make the peers the spec lists trust roots: operator roots, as is the
+inviter of this node's own invite. A member names its operator roots
+to a node that holds it as an operator root (in the join's answer, or
+in a roster fetched from it), and that node takes them as named roots
+(`rooted`, keel#99), so a node that joins later is a peer of them too.
+A named root signs admission evidence, as any member, but names
+nobody, has none of an operator root's powers (removing another node,
+here or mesh-wide, a revocation at the CA's holder, a VIP pair's
+record, the root CA's anchor), and is a plain member again once its
+namer has a tombstone: root status never goes beyond one hop. A root's
+signing key is
 learned from the root itself, in a roster this node fetched from the
 root's own overlay address, which WireGuard authenticates; never from
 an announcement. Evidence always names an invite: no member, root or
@@ -24,7 +34,8 @@ not, vouches for a node it did not admit.
 
 A removed key leaves a tombstone (protocol.Removal), signed by the
 remover's key. A node takes a tombstone only from a key that may remove
-that node: the admitting member's, a trust root's, or the node's own;
+that node: the admitting member's, an operator root's, or the node's
+own;
 it then drops the key from its spec (keel.mesh.sync) and never takes it
 again. Tombstones are kept for good, at most MAX_REMOVED of them and
 MAX_REMOVED_PER_SIGNER from one signer, and every roster carries them
@@ -41,7 +52,7 @@ from datetime import datetime
 from keel.mesh import DIR, invites, protocol, signing
 from keel.mesh.protocol import Admission, Peer, ProtocolError, Removal
 from keel.network.marker import path, write_private
-from keel.network.wireguard import same_key
+from keel.network.wireguard import is_key, same_key
 
 TRUST = f"{DIR}/trust.json"
 # tombstones are kept for good (a removed key never comes back), and
@@ -53,11 +64,18 @@ MAX_REMOVED_PER_SIGNER = 64
 @dataclass
 class Member:
     """A member this node trusts: its signing key once known, whether
-    the operator made it a root, and the evidence it was admitted by"""
+    it is a root, and the evidence it was admitted by. `named_by` is the
+    WireGuard key of the operator root that named it (a named root,
+    keel#99); None for a root the operator made (an operator root)"""
 
     sign_key: str | None
     root: bool = False
     admission: Admission | None = None
+    named_by: str | None = None
+
+    @property
+    def operator_root(self) -> bool:
+        return self.root and self.named_by is None
 
 
 @dataclass
@@ -81,6 +99,19 @@ class Store:
         found = self.find(key)
         return None if found is None else self.members[found].admission
 
+    def is_root(self, key: str) -> bool:
+        found = self.find(key)
+        return found is not None and self.members[found].root
+
+    def is_operator_root(self, key: str) -> bool:
+        found = self.find(key)
+        return found is not None and self.members[found].operator_root
+
+    def operator_roots(self) -> set[str]:
+        """The keys of the operator roots: those with a root's powers"""
+        return {key for key, one in self.members.items()
+                if one.operator_root}
+
 
 def load(root: str) -> Store:
     """The store; empty when there is none, ValueError when damaged"""
@@ -91,7 +122,8 @@ def load(root: str) -> Store:
             str(key): Member(
                 one["sign_key"], bool(one["root"]),
                 None if one["admission"] is None
-                else protocol.admission(one["admission"]))
+                else protocol.admission(one["admission"]),
+                named(one.get("named_by")))
             for key, one in data["members"].items()}
         removed = {str(key): protocol.removal(one)
                    for key, one in data["removed"].items()}
@@ -105,9 +137,20 @@ def load(root: str) -> Store:
     return Store(members, removed)
 
 
+def named(value: object) -> str | None:
+    """A namer's key as the store keeps it; a store from before keel#99
+    has none, and its roots are the operator's"""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not is_key(value):
+        raise ValueError("named_by is not a key")
+    return value
+
+
 def save(root: str, store: Store) -> None:
     invites.ensure(root)
     data = {"members": {key: {"sign_key": one.sign_key, "root": one.root,
+                              "named_by": one.named_by,
                               "admission": None if one.admission is None
                               else asdict(one.admission)}
                         for key, one in store.members.items()},
@@ -196,12 +239,12 @@ def recorded(store: Store, found: Admission) -> bool:
 
 def may_remove(store: Store, own: str, found: Removal) -> bool:
     """Whether `found` was signed by a key that may remove its node: this
-    node's own, a trust root's, the node's own (it leaves), or the key
-    of the member that admitted it, as the evidence this node keeps
-    says. Any other member, trusted or not, removes it only from its
+    node's own, an operator root's, the node's own (it leaves), or the
+    key of the member that admitted it, as the evidence this node keeps
+    says. Any other member, a named root too, removes it only from its
     own spec."""
     roots = {one.sign_key for one in store.members.values()
-             if one.root and one.sign_key}
+             if one.operator_root and one.sign_key}
     if found.by == own or found.by in roots:
         return True
     known = store.find(found.public_key)
@@ -215,19 +258,55 @@ def may_remove(store: Store, own: str, found: Removal) -> bool:
 def may_remove_everywhere(store: Store, own: str, key: str) -> bool:
     """Whether this node, signing with `own`, may remove `key` from the
     whole mesh, which etcd's `member remove` does (0048, third round,
-    point 4): it admitted that node (the evidence it keeps for it is
-    signed with `own`), or that node is one of its trust roots. Roots
-    are made by the operator's act on a mesh built by hand, which makes
-    the members each other's roots (keel.mesh.adopt): a node this node
-    holds as a root holds this node as one too, and takes its
-    tombstones (`may_remove`). The node itself leaving is the third
-    case of the rule, and is not `keel mesh remove`'s."""
+    point 4), as far as its own store says: it admitted that node (the
+    evidence it keeps for it is signed with `own`), or that node is one
+    of its operator roots. For a root, the other members must also take
+    this node's tombstone, which this store cannot say
+    (`everywhere_problem`). The node itself leaving is the third case of
+    the rule, and is not `keel mesh remove`'s."""
     known = store.find(key)
     if known is None:
         return False
     member = store.members[known]
-    return member.root or (member.admission is not None
-                           and member.admission.by == own)
+    return member.operator_root or admitted_by(member, own)
+
+
+def admitted_by(member: Member, own: str) -> bool:
+    return member.admission is not None and member.admission.by == own
+
+
+def everywhere_problem(store: Store, own: str, own_key: str, key: str,
+                       rosters: Iterable, asked: int) -> str | None:
+    """Why this node may not remove its root `key` mesh-wide, or None
+
+    A root is not always a root both ways: the inviter of this node is
+    its root, and this node is not the inviter's. A member takes this
+    node's tombstone for `key` only when it holds this node as a root
+    (`may_remove`), so each member that holds `key` as a root must hold
+    this node as one too, as the rosters of `asked` peers say (each
+    marks the operator roots its member holds). A node this node
+    admitted is removed mesh-wide by its admission, with no roster."""
+    known = store.find(key)
+    if known is None or admitted_by(store.members[known], own):
+        return None
+    found = list(rosters)
+    if len(found) < asked:
+        return (f"{asked - len(found)} peer(s) did not answer, so this node"
+                f" cannot tell whether they take its removal of the trust"
+                f" root {key}; nothing was removed: remove it when every"
+                " peer answers, or from the node that admitted it")
+    for one in found:
+        if same_key(one.public_key, key):
+            continue
+        holds = {m.public_key for m in one.members if m.root}
+        if any(same_key(key, held) for held in holds) and not any(
+                same_key(own_key, held) for held in holds):
+            return (f"member {one.address} holds {key} as a trust root and"
+                    " does not hold this node as one, so it would not take"
+                    " this node's removal; nothing was removed: remove it"
+                    f" from a node that member {one.address} holds as a"
+                    " root, or from the node that admitted it")
+    return None
 
 
 def room_for(store: Store, signer: str) -> bool:
@@ -255,20 +334,70 @@ def removals(store: Store, own: str, mesh_id: bytes,
 
 
 def record_removal(store: Store, found: Removal) -> None:
+    """The node removed; the roots it named are plain members again"""
     store.removed[found.public_key] = found
     key = store.find(found.public_key)
     if key is not None:
         del store.members[key]
+    for member in store.members.values():
+        if member.named_by and same_key(member.named_by, found.public_key):
+            member.root, member.named_by = False, None
+
+
+def rooted(store: Store, own_key: str, entries: Iterable[Peer],
+           namer: str, say=None) -> tuple[Peer, ...]:
+    """The entries an operator root of this node (`namer`) names as its
+    own operator roots, made named roots here, their signing keys
+    unbound (keel#99)
+
+    A mesh built by hand has no evidence: `--adopt` made its members
+    each other's roots. A node that joins one, or a node invited by a
+    member that is not the mesh's first, is never vouched for those
+    members by evidence, though the members take it: it lacks them as
+    peers, and their changes that add it are never confirmed. The
+    caller passes entries only from a source that may be `namer`: the
+    inviter in a join's answer, which the invite's HMAC authenticates,
+    or a roster this node fetched from that root's own overlay address,
+    which WireGuard authenticates. A `namer` that is not an operator
+    root of this node names nobody: one hop, no chain. A named root
+    gets no operator root's powers (`Member.operator_root`) and is a
+    plain member once `namer` has a tombstone (`record_removal`). Its
+    signing key is bound from its own roster alone (`bind_root`). An
+    entry whose key has a tombstone, or is this node's own WireGuard
+    key, is left out; a member this node knows already keeps what it
+    is here. `say` gets one line for each root named now.
+    """
+    if not store.is_operator_root(namer):
+        return ()
+    taken = []
+    for entry in entries:
+        if not entry.root or store.gone(entry.public_key) or \
+                same_key(entry.public_key, own_key) or \
+                same_key(entry.public_key, namer):
+            continue
+        if store.find(entry.public_key) is None:
+            store.members[entry.public_key] = Member(None, True,
+                                                     named_by=namer)
+            if say:
+                say(f"member {entry.public_key} is a named trust root,"
+                    f" named by {namer}")
+        taken.append(Peer(entry.public_key, entry.endpoint, entry.address,
+                          None, True))
+    return tuple(taken)
 
 
 def make_roots(store: Store, keys: Iterable[str]) -> None:
-    """The operator's act: these members are trusted as roots"""
+    """The operator's act: these members are trusted as operator roots,
+    a named root among them too; a key with a tombstone never is"""
     for key in keys:
+        if store.gone(key):
+            continue
         known = store.find(key)
         if known is None:
             store.members[key] = Member(None, True)
         else:
             store.members[known].root = True
+            store.members[known].named_by = None
 
 
 def bind_root(store: Store, key: str, sign_key: str) -> bool:

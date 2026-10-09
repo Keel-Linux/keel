@@ -187,6 +187,52 @@ class TestJoin(Case):
         mine = spec_of(self.joiner)["network"]["overlay"]["wireguard"]
         self.assertEqual(len(mine["peers"]), 1)
 
+    def test_a_trust_root_of_the_inviter_is_a_peer_and_a_root_here(self):
+        """keel#99: web-2 and web-3 of a mesh built by hand are web-1's
+        trust roots, with no evidence; db-1, invited by web-1, takes
+        them as peers and as roots, so all of them are one full mesh"""
+        self.other_member(evidenced=False)
+        store = trust.load(self.inviter_root)
+        trust.make_roots(store, (OTHER,))
+        trust.bind_root(store, OTHER, SIGNER)
+        trust.save(self.inviter_root, store)
+        self.assertEqual(self.joining(), exits.OK, self.err)
+        mine = spec_of(self.joiner)["network"]["overlay"]["wireguard"]
+        self.assertEqual([one["public_key"] for one in mine["peers"]],
+                         [INVITER, OTHER])
+        found = trust.load(self.joiner_root).members[OTHER]
+        self.assertTrue(found.root)
+        self.assertEqual(found.named_by, INVITER)
+        self.assertIn(f"member {OTHER} is a named trust root, named by"
+                      f" {INVITER}", self.err)
+        # bound only from its own roster, at this node's next sync
+        self.assertIsNone(found.sign_key)
+        self.assertIn("the mesh has 3 nodes: this node has them all",
+                      self.out[-1])
+
+    def test_a_root_the_inviter_was_named_is_not_named_on(self):
+        """one hop: OTHER is a root the inviter took by naming"""
+        self.other_member(evidenced=False)
+        store = trust.load(self.inviter_root)
+        store.members[OTHER] = trust.Member(SIGNER, True, named_by=JOINER)
+        trust.save(self.inviter_root, store)
+        self.assertEqual(self.joining(), exits.OK, self.err)
+        mine = spec_of(self.joiner)["network"]["overlay"]["wireguard"]
+        self.assertEqual([one["public_key"] for one in mine["peers"]],
+                         [INVITER])
+
+    def test_a_member_left_out_is_said(self):
+        """the join said "this node has them all" of members it never
+        took (keel#99)"""
+        self.other_member(evidenced=False)
+        self.assertEqual(self.joining(), exits.OK, self.err)
+        self.assertNotIn("this node has them all", "\n".join(self.out))
+        self.assertIn("the mesh has 3 nodes: this node has 1 of the 2"
+                      " other(s) as peers", self.out[-1])
+        self.assertIn(f"{OTHER}: not a peer of this node, the inviter"
+                      " gave no evidence of its admission",
+                      "\n".join(self.err))
+
     def test_the_inviter_is_this_node_s_trust_root(self):
         self.assertEqual(self.joining(), exits.OK, self.err)
         store = trust.load(self.joiner_root)

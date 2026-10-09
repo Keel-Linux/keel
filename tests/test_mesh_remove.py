@@ -3,13 +3,16 @@
 every sync from adding it again"""
 
 import os
+from unittest import mock
 
-from mesh_helpers import INVITER, MESH, NOW, OTHER
-from mesh_sync_helpers import FOURTH, Case
+from mesh_helpers import INVITER, JOINER, MESH, NOW, OTHER
+from mesh_sync_helpers import FOURTH, OTHER_SIGNER, Case
 from mesh_wire import Armed
 
 from keel import exits
 from keel.mesh import identity, remove, signing, sync, trust
+from keel.mesh.members import Roster
+from keel.mesh.protocol import Peer
 from keel.network import marker
 
 
@@ -45,6 +48,46 @@ class TestRemove(Case):
         # the inviter still names OTHER, with its evidence: not taken
         self.assertEqual(sync.pull(self.syncer), exits.OK)
         self.assertEqual(len(self.peers()), 1)
+
+    def other_roster(self, *roots):
+        self.net.rosters["fd00:6b65:1::7"] = Roster(
+            MESH, OTHER, OTHER_SIGNER, "fd00:6b65:1::7",
+            tuple(Peer(one, None, "fd00:6b65:1::9", root=True)
+                  for one in roots))
+
+    def test_a_root_held_one_way_is_not_removed(self):
+        """the inviter is this node's root, and OTHER's, which does not
+        hold this node as one: it would not take the tombstone (keel#99)"""
+        self.other_roster(INVITER)
+        self.assertEqual(remove.remove(self.syncer, INVITER, self.out.append),
+                         exits.MESH_REFUSED)
+        self.assertIn("member fd00:6b65:1::7 holds", self.err[-1])
+        self.assertIn("nothing was removed", self.err[-1])
+        self.assertEqual(len(self.peers()), 2)
+        self.assertFalse(trust.load(self.root).gone(INVITER))
+        self.net.down.add("fd00:6b65:1::7")
+        self.assertEqual(remove.remove(self.syncer, INVITER, self.out.append),
+                         exits.MESH_REFUSED)
+        self.assertIn("1 peer(s) did not answer", self.err[-1])
+
+    def test_a_root_held_both_ways_is_removed(self):
+        self.net.handshakes[OTHER] = int(NOW.timestamp())
+        self.other_roster(INVITER, JOINER)
+        self.assertEqual(remove.remove(self.syncer, INVITER, self.out.append),
+                         exits.OK, self.err)
+        self.assertTrue(trust.load(self.root).gone(INVITER))
+
+    def test_the_root_check_s_edges(self):
+        store = trust.load(self.root)
+        # a node this node knows nothing of, or admitted, needs no roster
+        self.assertIsNone(remove.root_problem(self.syncer, store, FOURTH))
+        with mock.patch.object(trust, "admitted_by", return_value=True):
+            self.assertIsNone(remove.root_problem(self.syncer, store,
+                                                  INVITER))
+        with mock.patch.object(self.node, "public_key",
+                               return_value=(None, "no key")):
+            self.assertEqual(remove.root_problem(self.syncer, store,
+                                                 INVITER), "no key")
 
     def test_by_its_overlay_address(self):
         self.assertEqual(remove.remove(self.syncer, "fd00:6b65:1::7",

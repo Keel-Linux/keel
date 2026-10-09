@@ -178,9 +178,11 @@ def taken(member: Etcd, message: etcdmsg.Message) -> Answer:
                       " on this node; send it again once it is kept")
     if grant is not None and not etcdstate.credentials(member.root):
         sender = trusted(member.root, message.sender)
-        if sender is None or not sender.root:
+        # an operator root: a named root never sets this node's etcd
+        # anchor (keel#99)
+        if sender is None or not sender.operator_root:
             raise Refusal(403, "an etcd certificate is taken only from this"
-                          " node's inviter or a trust root")
+                          " node's inviter or an operator trust root")
         etcdstate.take_grant(member.root, grant,
                              etcd.own_address(member.node))
     elif grant is not None and etcdstate.root_fingerprint(member.root) != \
@@ -327,7 +329,8 @@ def pair_bound(member: Etcd, message: etcdmsg.Message, vip: str,
         return sign_key(member.root, member_key)
     try:
         store = trust.load(member.root)
-        roots = {one for one, entry in store.members.items() if entry.root}
+        # a named root signs no pair record (keel#99)
+        roots = store.operator_roots()
     except ValueError:
         roots = set()
     problem = vippair.problem(pair, signer_of, roots)
@@ -438,8 +441,8 @@ def claimed(member: Etcd, address: str) -> str | None:
 
 
 def may_revoke(root: str, sender: str, removed: str) -> bool:
-    """The amendment's rule, as this node knows it: the node itself, a
-    trust root, the member whose key signed the node's admission, or the
+    """The amendment's rule, as this node knows it: the node itself, an
+    operator root, the member whose key signed the node's admission, or the
     member that relayed the node's request to this holder (its inviter,
     giving back a join that was not confirmed)"""
     if same_key(sender, removed):
@@ -447,7 +450,8 @@ def may_revoke(root: str, sender: str, removed: str) -> bool:
     member = trusted(root, sender)
     if member is None:
         return False
-    if member.root:
+    # an operator root; a named root has no root's power (keel#99)
+    if member.operator_root:
         return True
     admitted = trusted(root, removed)
     if admitted is not None and admitted.admission is not None and \

@@ -186,7 +186,7 @@ def requested(joiner: Joiner, after: dict, request: protocol.JoinRequest,
     # them (keel.mesh.sync)
     try:
         taken = trusting(joiner, answer.sign_key, request.sign_key,
-                         answer.peers)
+                         answer.peers, request.public_key)
     except ValueError as e:
         return joiner.refused(str(e))
     after, _ = members.with_members(after, taken, request.public_key)
@@ -194,7 +194,7 @@ def requested(joiner: Joiner, after: dict, request: protocol.JoinRequest,
     if change is None:
         return exits.APPLY_FAILED
     return confirmed(joiner, change, request.public_key, answer.peers,
-                     answer)
+                     answer, taken)
 
 
 def member(joiner: Joiner) -> etcd.Etcd:
@@ -219,17 +219,24 @@ def admitted_by(answer: protocol.JoinAnswer, request: protocol.JoinRequest,
 
 
 def trusting(joiner: Joiner, inviter_signer: str, own_signer: str,
-             peers: tuple[protocol.Peer, ...]) -> tuple[protocol.Peer, ...]:
+             peers: tuple[protocol.Peer, ...],
+             own_public: str) -> tuple[protocol.Peer, ...]:
     """The inviter trusted as this node's root, its signing key as the
     invite's HMAC authenticated it; the members of `peers` whose evidence
-    chains to it. Raises ValueError for a damaged trust store"""
+    chains to it, and those the inviter names as its trust roots. Raises
+    ValueError for a damaged trust store"""
     root = joiner.node.root
     store = trust.load(root)
     trust.make_roots(store, (joiner.token.public_key,))
     trust.bind_root(store, joiner.token.public_key, inviter_signer)
     taken = trust.accepted(store, own_signer, joiner.token.mesh_id, peers)
+    # the inviter's own trust roots, which no evidence names: the
+    # members of a mesh built by hand, the mesh's first node (keel#99)
+    taken += trust.rooted(store, own_public, peers,
+                          joiner.token.public_key, joiner.err)
     trust.save(root, store)
     return taken
+
 
 
 def fallback(joiner: Joiner, after: dict,
@@ -297,7 +304,8 @@ def unconfirmed(joiner: Joiner, change: Change, message: str) -> int:
 
 def confirmed(joiner: Joiner, change: Change, public: str,
               peers: tuple[protocol.Peer, ...],
-              join_answer: protocol.JoinAnswer | None = None) -> int:
+              join_answer: protocol.JoinAnswer | None = None,
+              taken: tuple[protocol.Peer, ...] | None = None) -> int:
     """The mesh session over the overlay, then this node's confirmation
 
     apply's lines are held (keel.mesh.node.Change): this node confirms
@@ -346,7 +354,8 @@ def confirmed(joiner: Joiner, change: Change, public: str,
             f" ({answer.detail}); this node's change reverts by itself")
     try:
         # the fallback's node learns the inviter's signing key here
-        trusting(joiner, answer.sign_key, public_signer(joiner), ())
+        trusting(joiner, answer.sign_key, public_signer(joiner), (),
+                 public)
     except (ValueError, signing.SigningError) as e:
         return unconfirmed(joiner, change, str(e))
     origin = session.Origin(
@@ -359,7 +368,7 @@ def confirmed(joiner: Joiner, change: Change, public: str,
         joiner.err(line)
     if not kept:
         return exits.NETWORK_NOT_CONFIRMED
-    summary(joiner, peers)
+    summary(joiner, peers, peers if taken is None else taken)
     if join_answer is not None and join_answer.etcd_grant is not None:
         # kept only now: a join that reverts leaves etcd alone
         joiner.out(etcd.joined(member(joiner), join_answer.etcd_grant,
@@ -372,8 +381,10 @@ def public_signer(joiner: Joiner) -> str:
     return signing.public(joiner.node.root)
 
 
-def summary(joiner: Joiner, peers: tuple[protocol.Peer, ...]) -> None:
-    """What `join` prints at the end, and confconsole shows"""
+def summary(joiner: Joiner, peers: tuple[protocol.Peer, ...],
+            taken: tuple[protocol.Peer, ...]) -> None:
+    """What `join` prints at the end, and confconsole shows: `peers` are
+    the other members the inviter named, `taken` those this node took"""
     token = joiner.token
     overlay = joiner.node.overlay()
     inviter = ipaddress.IPv6Interface(token.address).ip
@@ -384,7 +395,17 @@ def summary(joiner: Joiner, peers: tuple[protocol.Peer, ...]) -> None:
     if not peers:
         joiner.out(TWO_NODES)
         return
-    joiner.out(f"the mesh has {len(peers) + 2} nodes: this node has them all"
+    left = [one for one in peers
+            if not any(wireguard.same_key(one.public_key, kept.public_key)
+                       for kept in taken)]
+    for one in left:
+        joiner.err(f"{one.public_key}: not a peer of this node, the inviter"
+                   " gave no evidence of its admission that this node can"
+                   " verify; keel mesh sync adds it once a member this node"
+                   " trusts vouches for it")
+    has = ("them all" if not left else
+           f"{len(peers) - len(left) + 1} of the {len(peers) + 1} other(s)")
+    joiner.out(f"the mesh has {len(peers) + 2} nodes: this node has {has}"
                f" as peers, and the inviter announces this node to the"
                f" {len(peers)} other(s) over the overlay (one offline now"
                " learns of it at its next keel mesh sync)")
