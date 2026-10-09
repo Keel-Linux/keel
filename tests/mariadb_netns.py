@@ -289,6 +289,25 @@ def database_command(here, words: list[str]) -> dict | None:
     return VIP_COMMAND(here, words)
 
 
+def follow_when_etcd_answers(ask, upto_s: float = 120) -> dict:
+    """A's boot follow, asked again while its etcd is too new to answer.
+
+    A's etcd is seconds old at boot and the link is the poor one: a
+    single run can fail with "etcd did not answer" (keel#94). The
+    failure is at the observation, before anything was changed, so the
+    run is safe to repeat; bounded"""
+    deadline = time.monotonic() + upto_s
+    tries = 0
+    while True:
+        tries += 1
+        found = ask("A", "follow", 180)
+        found["tries"] = tries
+        if found["problem"] is None or "did not answer" not in \
+                found["problem"] or time.monotonic() >= deadline:
+            return found
+        time.sleep(3)
+
+
 # --- the driver's side: the servers, the writer, the scenario ---------
 
 def driver_main() -> None:
@@ -688,17 +707,25 @@ class Writer:
         while not self.halt.is_set():
             n += 1
             started = time.time()
-            one = subprocess.run(
-                ["nsenter", "-t", str(self.pid), "-n", "mariadb", "--batch",
-                 "--connect-timeout=2", "-h", vip_netns.VIP, "-u", APP_USER,
-                 f"--password={APP_PASSWORD}",
-                 "--skip-ssl-verify-server-cert", APP_DB, "--execute",
-                 f"INSERT INTO t (v, at) VALUES ('crash-{n}', {started:.3f})"],
-                capture_output=True, text=True, check=False, timeout=30)
+            try:
+                one = subprocess.run(
+                    ["nsenter", "-t", str(self.pid), "-n", "mariadb",
+                     "--batch", "--connect-timeout=2", "-h", vip_netns.VIP,
+                     "-u", APP_USER, f"--password={APP_PASSWORD}",
+                     "--skip-ssl-verify-server-cert", APP_DB, "--execute",
+                     f"INSERT INTO t (v, at) VALUES ('crash-{n}',"
+                     f" {started:.3f})"], capture_output=True, text=True,
+                    check=False, timeout=30)
+                ok, err = one.returncode == 0, one.stderr.strip()[:12]
+            except subprocess.TimeoutExpired:
+                # a hung attempt must not end the writer: the writes that
+                # come back after the promote are the measured thing
+                # (keel#94); on the lossy link one connection can outlive
+                # the 30 s cap, to the dead primary or a promoting one
+                ok, err = False, "hung past 30s"
             self.done.append({"n": n, "t": round(started, 3),
                               "end": round(time.time(), 3),
-                              "ok": one.returncode == 0,
-                              "err": one.stderr.strip()[:12]})
+                              "ok": ok, "err": err})
             self.halt.wait(0.1)
 
 
@@ -850,7 +877,7 @@ def crashed(report: dict, pids: list[int], roots: list[str]) -> None:
     sampler.start()
     try:
         report["k104_boot_read_only"] = read_only_of(a_root)
-        report["k104_follow_at_boot"] = agent_send("A", "follow", 180)
+        report["k104_follow_at_boot"] = follow_when_etcd_answers(agent_send)
         report["k104_after_follow"] = read_only_of(a_root)
         # A's VIP helper starts again: its lease is gone, so it is fenced
         # and takes B's claim; A's follow makes it B's replica

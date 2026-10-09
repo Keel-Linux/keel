@@ -115,6 +115,21 @@ def where(root: str) -> tuple[str, ...]:
     return ("--root", root, "--spec", os.path.join(root, "instance.yaml"))
 
 
+def healthy_when_asked(pid: int, root: str, upto_s: float = 90) -> dict:
+    """`keel mesh upgrade-check`, asked again until every endpoint is
+    healthy. C's etcd restarted a moment ago: one call can answer "not
+    now" before C's health reached the others (keel#94); bounded"""
+    deadline = time.monotonic() + upto_s
+    tries = 0
+    while True:
+        tries += 1
+        found = keel_in(pid, "mesh", "upgrade-check", *where(root))
+        found["tries"] = tries
+        if found["code"] == 0 or time.monotonic() >= deadline:
+            return found
+        time.sleep(3)
+
+
 def keel_in(pid: int, *argv: str, timeout: float = 600) -> dict:
     """`keel ARGV` in a node's namespace: its code, what it said, how long
     it took"""
@@ -221,8 +236,7 @@ def scenario(report: dict, pids: list[int], pairs, roots: list[str],
     etcds.start(2)
     report["c_gate_started"] = etcds.gate(2, "started")
     report["c_down_s"] = round(time.time() - down_at, 2)
-    report["upgrade_check_healthy"] = keel_in(a_pid, "mesh", "upgrade-check",
-                                              *where(roots[0]))
+    report["upgrade_check_healthy"] = healthy_when_asked(a_pid, roots[0])
     report["b_gate_after"] = etcds.gate(1, "stop", wait=60)
     report["b_gate_after_started"] = etcds.gate(1, "started")
     report["c_holders_seen"] = window(samples_, down_at)

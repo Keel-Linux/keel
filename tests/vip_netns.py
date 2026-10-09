@@ -216,14 +216,22 @@ def keys() -> list[tuple[str, str]]:
 def holds(pid: int) -> bool:
     """Whether the node's wg0 carries the VIP: /proc/PID/net is the net
     namespace of that process, so this forks nothing and three nodes are
-    read within a millisecond of each other"""
+    read within a millisecond of each other. A false reading is read
+    again after a settle (keel#94): a single /proc read can fail on a
+    loaded CI host and read as the address leaving wg0, which the
+    pinger's answer stream disproves; the tests' bounds are seconds"""
     wanted = ipaddress.IPv6Address(VIP).exploded.replace(":", "")
-    try:
-        with open(f"/proc/{pid}/net/if_inet6") as fob:
-            return any(line.split()[0] == wanted and
-                       line.split()[-1] == "wg0" for line in fob)
-    except OSError:
-        return False
+    for pause in (None, 0.05):
+        if pause is not None:
+            time.sleep(pause)
+        try:
+            with open(f"/proc/{pid}/net/if_inet6") as fob:
+                if any(line.split()[0] == wanted and
+                       line.split()[-1] == "wg0" for line in fob):
+                    return True
+        except OSError:
+            pass
+    return False
 
 
 def sampler(pids: list[int], out: list[dict], stop: threading.Event) -> None:
@@ -286,6 +294,24 @@ def agent_send(name: str, line: str, timeout: float = 180) -> dict:
         if said.startswith("ANSWER "):
             return json.loads(said[len("ANSWER "):])
     return {"error": f"no answer to {line!r}"}
+
+
+def promote_when_etcd_answers(name: str, upto_s: float = 120) -> dict:
+    """`keel vip promote`, retrying when its first etcd read times out
+    (keel#94): on the lossy link one etcdctl call can answer "context
+    deadline exceeded" before the promote wrote anything, and a promote
+    that read nothing changed nothing, so it is safe to run again"""
+    deadline = time.monotonic() + upto_s
+    tries = 0
+    while True:
+        tries += 1
+        said = agent_send(name, "promote")
+        if said.get("code") == 0 or time.monotonic() >= deadline or not \
+                any("etcd did not answer" in line
+                    for line in said.get("said") or []):
+            said["tries"] = tries
+            return said
+        time.sleep(3)
 
 
 def routed_to(pid: int) -> str | None:
@@ -602,7 +628,7 @@ def scenario(report: dict, pids: list[int], pairs, roots: list[str],
     log = os.path.join(roots[2], "ping.log")
 
     # (a) A takes the VIP first, at epoch 1; C reaches it at A
-    report["a"] = agent_send("A", "promote")
+    report["a"] = promote_when_etcd_answers("A")
     report["a_routed_s"] = wait_until(lambda: routed_to(c_pid) == key["A"],
                                       60)
     pinger(c_pid, log)
@@ -613,13 +639,23 @@ def scenario(report: dict, pids: list[int], pairs, roots: list[str],
     # C keeps the claim of epoch 1, for (g)
     report["remembered"] = agent_send("C", "remember")
 
-    # (b) planned: B promotes, A releases first
-    moved_at = time.time()
-    report["b"] = agent_send("B", "promote")
-    report["b_routed_s"] = wait_until(lambda: routed_to(c_pid) == key["B"],
-                                      60)
-    time.sleep(10)
-    report["b_downtime_s"] = gap(answers(log), moved_at - 1, time.time())
+    # (b) planned: B promotes, A releases first; then A and B again, so
+    # the downtime C sees is judged by the median of three attempts,
+    # not by one over the lossy link (keel#94). B holds it again at
+    # the end, as (c) needs
+    def planned_promote(holder: str) -> tuple[dict, float | None,
+                                              float | None]:
+        moved_at = time.time()
+        said = promote_when_etcd_answers(holder)
+        routed_s = wait_until(lambda: routed_to(c_pid) == key[holder], 60)
+        time.sleep(10)
+        return said, routed_s, gap(answers(log), moved_at - 1,
+                                   time.time())
+
+    report["b"], report["b_routed_s"], first_downtime = planned_promote("B")
+    _, _, back_downtime = planned_promote("A")
+    _, _, again_downtime = planned_promote("B")
+    report["b_downtimes"] = [first_downtime, back_downtime, again_downtime]
     report["b_holder"] = [n for n, p in zip(NAMES, pids) if holds(p)]
 
     # (c) B, the primary and etcd's leader, cut off from the majority:
@@ -648,7 +684,7 @@ def scenario(report: dict, pids: list[int], pairs, roots: list[str],
     # (f) the follower case: B, fenced since (c), promoted again by
     # hand (A releases), C given etcd's leadership, and B, a follower and
     # the primary, cut off; A claims
-    report["f_promote_b"] = agent_send("B", "promote")
+    report["f_promote_b"] = promote_when_etcd_answers("B")
     report["f_b_holds_s"] = wait_until(lambda: holds(b_pid), 60)
     report["f_lead"] = lead(c_pid, roots[2])
     partition(report, "f", pids, roots, samples, 1, 0, log, key)
@@ -662,7 +698,7 @@ def scenario(report: dict, pids: list[int], pairs, roots: list[str],
     # holder's lease twice in a row: each time the holder drops the VIP at
     # its next renewal and, having lost nothing, claims it again at the
     # next epoch; nobody stays fenced, never two at once
-    report["g_promote_b"] = agent_send("B", "promote")
+    report["g_promote_b"] = promote_when_etcd_answers("B")
     wait_until(lambda: holds(b_pid), 60)
     time.sleep(5)
     keys_at = time.time()
