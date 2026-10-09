@@ -1,0 +1,57 @@
+# Temporary (keel#94): each fixed netns job five times, one of each kind
+# at a time, as the CI load of one pull request. Removed before merge.
+name: loop-94
+on:
+  push:
+    branches: [fix/flaky-netns-keel94]
+  workflow_dispatch:
+jobs:
+  mesh:
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        run: [1, 2, 3, 4, 5]
+    uses: keel-linux/.github/.github/workflows/lxc-trixie.yml@main
+    with:
+      timeout: 25
+      run: |
+        apt-get update -qq
+        apt-get install -y -qq --no-install-recommends python3-pytest \
+          python3-yaml wireguard-tools iproute2 iputils-ping openssl
+        PYTHONPATH=. python3 -m pytest -q tests/test_mesh_netns.py \
+          tests/test_mesh_channel.py
+  vip:
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        run: [1, 2, 3, 4, 5]
+    uses: keel-linux/.github/.github/workflows/lxc-trixie.yml@main
+    with:
+      systemd: true
+      timeout: 30
+      run: |
+        apt-get update -qq
+        apt-get install -y -qq --no-install-recommends python3-pytest \
+          python3-yaml wireguard-tools iproute2 iputils-ping openssl \
+          etcd-server etcd-client util-linux
+        KEEL_VIP_NETNS=1 PYTHONPATH=. python3 -m pytest -q -s \
+          tests/test_vip_netns.py
+  vip-upgrade:
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        run: [1, 2, 3, 4, 5]
+    uses: keel-linux/.github/.github/workflows/lxc-trixie.yml@main
+    with:
+      systemd: true
+      timeout: 30
+      run: |
+        apt-get update -qq
+        apt-get install -y -qq --no-install-recommends python3-pytest \
+          python3-yaml wireguard-tools iproute2 iputils-ping openssl \
+          etcd-server etcd-client util-linux
+        KEEL_VIP_UPGRADE_NETNS=1 PYTHONPATH=. python3 -m pytest -q -s \
+          tests/test_vip_upgrade_netns.py
