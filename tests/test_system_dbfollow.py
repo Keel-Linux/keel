@@ -322,8 +322,12 @@ class TestTheReplica(FollowTestCase):
             self.follow(1, server)
         alerted.assert_not_called()
         from keel.inspect import collect
-        self.assertEqual(collect.divergence(collect.Tree(self.all[1].root)),
-                         recorded)
+        # the second run refreshed the record's "at" (it is when the
+        # divergence was last seen, keel#129): what stays stable is what
+        # the record says, not when it last said it
+        seen = collect.divergence(collect.Tree(self.all[1].root))
+        self.assertEqual({key: seen[key] for key in ("errant", "holder")},
+                         {key: recorded[key] for key in ("errant", "holder")})
 
     def test_confirmed_the_errant_node_is_reseeded_after_a_dump(self):
         self.pair_nodes()
