@@ -230,6 +230,33 @@ without the flag when the old primary does not answer: 0049, second
 round, point 3), then the database: drain the relay log, `STOP SLAVE`,
 `RESET SLAVE ALL`, `read_only = OFF`, `READ_ONLY ADMIN` back. The
 semi-synchronous roles need no flip (both sides enabled on both nodes).
+When the old primary is gone, `STOP SLAVE IO_THREAD` takes seconds
+(measured on 11.8): a thread that tries to connect ends only when the
+try times out (`slave_net_timeout`, 10 s), and a connected thread with
+semi-synchronous replication tries to connect to the primary to end its
+dump thread (5 s). A `KILL` of the thread does not shorten it. On a real
+pair that cost 7.5 s of refused writes while the new primary already
+carried the VIP (keel#118). The thread receives nothing from the moment
+the stop marks it killed, long before it ends; a thread that connects
+again (`MASTER_CONNECT_RETRY=2`) after that ends without receiving. So
+the stop runs in a client of its own; once the stop is in the server's
+killing phase (its process list `STATE` is `Killing slave`; its `INFO`
+is set earlier, when it is dispatched) or ended without an error, the
+SQL thread drains, the received position is read again, the killing
+phase is checked again, and `read_only = OFF`; `STOP SLAVE` and `RESET
+SLAVE ALL` follow while the server already takes writes. The SQL thread
+is not stopped first: it has nothing more to apply, and `STOP SLAVE
+SQL_THREAD` waits behind the I/O thread's stop (4.7 s measured). On
+11.8 against a frozen primary, the server took writes 0.35 s after the
+promotion started (0.26 s with the thread connecting), against 5 s and
+7 s before. A planned promote takes the same path; its stop ends at
+once, since the primary answers. Follow, `keel database watch`'s follow
+and spec apply's replication actions take one lock,
+`/var/lib/keel/database/follow.lock`. When the position moved after the drain, or
+cannot be read, the old order applies: the stop waited for, the SQL
+thread started and drained again, then the promotion.
+`keel-database-follow.path` starts follow when the claim is written,
+and follow looks for the VIP on `wg0` every 0.2 s.
 
 **The database follows the VIP** (0020: everything that depends on the
 role follows the elected role). `keel-database-follow.path` watches

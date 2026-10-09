@@ -230,10 +230,12 @@ class TestThePrimary(FollowTestCase):
         found = self.follow(0, server)
         self.assertIsNone(found.problem, found.lines)
         self.assertIn("drained and promoted", " ".join(found.lines))
-        self.assertTrue(any("STOP SLAVE IO_THREAD" in one
-                            for one in server.sent))
-        self.assertTrue(any("RESET SLAVE ALL" in one and "read_only = OFF"
-                            in one for one in server.sent))
+        self.assertIn("STOP SLAVE IO_THREAD", [one[-1] for one in
+                                               server.argv])
+        # writable once drained, the primary forgotten after
+        sent = "".join(server.sent)
+        self.assertLess(sent.index("read_only = OFF"),
+                        sent.index("RESET SLAVE ALL"))
 
     def test_the_privilege_goes_back_to_what_the_replica_took_it_from(self):
         self.pair_nodes()
@@ -595,7 +597,8 @@ class TestNoClaimAndNoAddress(FollowTestCase):
         def flock(fd, how):
             taken.append(how)
             return real(fd, how)
-        with mock.patch.object(dbfollow.fcntl, "flock", side_effect=flock):
+        with mock.patch.object(dbfollow.dbreadonly.fcntl, "flock",
+                               side_effect=flock):
             self.follow(0, Server())
         self.assertEqual(taken, [fcntl.LOCK_EX])
         self.assertTrue(os.path.exists(os.path.join(

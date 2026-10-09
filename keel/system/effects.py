@@ -76,13 +76,15 @@ class Effects:
                 return wgkeys.adopt(self.tree.path(action.conf),
                                     self.tree.path(action.path.lstrip("/")))
             if isinstance(action, SeedReplica):
-                return dbseed.seed(self.tree.root, action)
+                with dbreadonly.replication_locked(self.tree.root):
+                    return dbseed.seed(self.tree.root, action)
             if isinstance(action, LockReplica):
                 return dbreadonly.lock(self.tree.root)
             if isinstance(action, UnlockAccounts):
                 return dbreadonly.unlock(self.tree.root)
             if isinstance(action, PromoteReplica):
-                return dbreadonly.promote(self.tree.root, action)
+                with dbreadonly.replication_locked(self.tree.root):
+                    return dbreadonly.promote(self.tree.root, action)
             if isinstance(action, EnsureDatabaseTls):
                 return self.database_tls(action)
             if isinstance(action, FollowVip):

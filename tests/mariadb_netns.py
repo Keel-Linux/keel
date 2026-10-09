@@ -268,7 +268,10 @@ def database_command(here, words: list[str]) -> dict | None:
         from keel import cli
         out = io.StringIO()
         started = time.monotonic()
-        with LOCK, contextlib.redirect_stdout(out), \
+        # not under LOCK: on a machine keel-database-follow.path runs
+        # follow while the promote goes on (when the claim is written),
+        # and follow's own lock orders the two runs (keel#118)
+        with contextlib.redirect_stdout(out), \
                 contextlib.redirect_stderr(out):
             code = cli.main(["database", "promote", "--spec", path, "--root",
                              root] + (["--old-primary-gone"]
@@ -765,6 +768,22 @@ def acked_missing(writer: Writer, agent_send) -> list[str]:
     return sorted(acked - held)[:20]
 
 
+def promote_gone(agent_send) -> dict:
+    """keel database promote --old-primary-gone on B, as an operator runs
+    it: run again when etcd had no leader to answer (A, cut off, may
+    have been etcd's leader: the election takes up to 5 s), at most
+    three times; the attempts are kept"""
+    attempts = []
+    for _ in range(3):
+        found = agent_send("B", "dbpromote gone", 300)
+        attempts.append({"code": found.get("code"),
+                         "took_s": found.get("took_s")})
+        said = " ".join(found.get("out") or [])
+        if found.get("code") != 16 or "etcd did not answer" not in said:
+            break
+    return {**found, "attempts": attempts}
+
+
 def crashed(report: dict, pids: list[int], roots: list[str]) -> None:
     """keel#104: the primary A crashes (its server killed, its VIP
     helper gone, cut off), B is promoted at a newer epoch with A gone,
@@ -790,7 +809,11 @@ def crashed(report: dict, pids: list[int], roots: list[str]) -> None:
     watched = NewPrimary(pids[1], roots[1])
     writer.start()
     watched.start()
-    time.sleep(5)
+    # writes acknowledged before the kill, so the downtime has a start:
+    # a connection at the VIP over 250 ms takes 1.3 to 1.9 s
+    report["k108_first_ack_s"] = wait_until(
+        lambda: any(one["ok"] for one in writer.done), 60, 0.2)
+    time.sleep(3)
     killed_at = time.time()
     sh("systemctl", "kill", "--signal=SIGKILL", service_of(a_root),
        check=False)
@@ -800,7 +823,7 @@ def crashed(report: dict, pids: list[int], roots: list[str]) -> None:
     sh("tc", "qdisc", "replace", "dev", "uplink", "root", "netem", "loss",
        "100%", pid=a_pid)
     promote_at = time.time()
-    report["k104_promote"] = agent_send("B", "dbpromote gone", 300)
+    report["k104_promote"] = promote_gone(agent_send)
     promoted_at = time.time()
     wait_until(lambda: watched.writable_at is not None, 60, 0.2)
     time.sleep(5)
