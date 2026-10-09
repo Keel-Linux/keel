@@ -1,3 +1,24 @@
+keel (0.23.11) unstable; urgency=medium
+
+  * The overlay's file sets MTU = 1280 on each node (keel#119). Before,
+    wg-quick took the MTU of the route to an endpoint less 80. A node
+    on an uplink of 1500 bytes got 1420, and a node behind PPPoE got
+    1412. WireGuard pads each packet up to the MTU of its interface, so
+    the node of 1420 sent full TCP segments as 1500 bytes on the wire.
+    The path to the PPPoE site is 1492 bytes and dropped them. When the
+    ICMPv6 "packet too big" did not come in time, the members' channel
+    stopped at its 30 s timeout: "did not answer: timed out", with fresh
+    handshakes. 1280 is the minimum MTU of IPv6, which is 1360 bytes on
+    the wire.
+  * A change of the MTU line is a change of [Interface]: wg-quick down,
+    then up, under the window. The first apply of this version on a node
+    of an earlier version does this one time. A change of the peers
+    alone stays live with wg set.
+  * keel inspect reads MTU = 1280 as keel's own line. It names another
+    MTU value in the report.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 09 Oct 2026 21:00:00 +0000
+
 keel (0.23.10) unstable; urgency=medium
 
   * After keel vip promote --old-primary-gone the new primary refused
@@ -49,7 +70,6 @@ keel (0.23.8) unstable; urgency=medium
     etcd nothing fences a live old primary, so its asks keep the full
     timeout; the help and docs/vip.md say that such an old primary stays
     writable until it learns the newer claim.
-
  -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 09 Oct 2026 18:00:00 +0000
 
 keel (0.23.7) unstable; urgency=medium

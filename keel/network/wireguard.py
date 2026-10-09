@@ -14,6 +14,16 @@ saves under /var/lib/keel/network for a revert and compares; instead a
 PostUp line hands the key file to `wg set`, so only `wg` and the kernel
 read it. wg-quick runs PostUp through bash's `eval`, which is why a key
 path may only hold characters a shell gives no meaning (KEY_PATH_RE).
+
+The file sets the MTU of the interface (keel#119). Without it, wg-quick
+takes the MTU of the route to an endpoint less 80, so two nodes can
+have different ones: 1420 on an uplink of 1500 and 1412 behind PPPoE.
+WireGuard pads each packet to a multiple of 16 bytes, up to the MTU of
+its own interface, so a node of 1420 sends a full TCP segment as 1500
+bytes on the wire. A path of 1492 drops it, and when the ICMPv6 "packet
+too big" is lost or rate limited, the members' channel waits until its
+timeout. OVERLAY_MTU is the minimum MTU of IPv6, which the overlay
+carries: 1360 bytes on the wire over IPv6, the same on every node.
 """
 
 import base64
@@ -47,6 +57,9 @@ HEADER = (
 # The wg-quick keys the spec has a field for; any other is reported by
 # inspect as a line the spec cannot hold, never silently dropped.
 INTERFACE_KEYS = ("address", "listenport", "postup", "privatekey")
+# the minimum MTU of IPv6 (RFC 8200), with the IPv6, UDP and WireGuard
+# headers (80 bytes) under every path of 1360 bytes or more (keel#119)
+OVERLAY_MTU = 1280
 PEER_KEYS = ("publickey", "endpoint", "allowedips", "persistentkeepalive")
 ULA_PREFIX = 0xFD
 GLOBAL_ID_BYTES = 5
@@ -166,6 +179,7 @@ def render(overlay: dict) -> str:
         "[Interface]",
         f"Address = {', '.join(addresses(overlay))}",
         f"ListenPort = {port(overlay)}",
+        f"MTU = {OVERLAY_MTU}",
         f"PostUp = {POST_UP}{key_path(overlay)}",
     ]
     for peer in overlay.get("peers") or []:
@@ -187,13 +201,16 @@ class Parsed:
     line, which keel never writes; the parse does not keep the value, and
     only apply reads it, to move it into the key file
     (keel.network.wgkeys.adopt). `problems` are lines
-    the spec cannot hold (DNS, MTU, a preshared key...), which inspect
-    reports rather than dropping them in silence.
+    the spec cannot hold (DNS, a preshared key...), which inspect
+    reports rather than dropping them in silence. `mtu` is the value of
+    the MTU line, None without one: keel writes OVERLAY_MTU, which the
+    spec does not declare; another value is a problem too.
     """
 
     section: dict
     inline_key: bool
     problems: tuple[str, ...]
+    mtu: int | None = None
 
 
 def parse(text: str) -> Parsed:
@@ -201,6 +218,7 @@ def parse(text: str) -> Parsed:
     peers: list[dict] = []
     problems: list[str] = []
     inline = False
+    mtu: int | None = None
     current: dict | None = None
     for raw in text.splitlines():
         line = raw.split("#", 1)[0].strip()
@@ -218,12 +236,23 @@ def parse(text: str) -> Parsed:
         key, value = key.strip().lower(), value.strip()
         if not sep:
             problems.append(f"line {line!r} is not key = value")
+        elif current is None and key == "mtu":
+            mtu = mtu_line(value, problems)
         elif current is None:
             inline = interface_line(iface, key, value, problems) or inline
         else:
             peer_line(current, key, value, problems)
     return Parsed(iface | ({"peers": peers} if peers else {}), inline,
-                  tuple(problems))
+                  tuple(problems), mtu)
+
+
+def mtu_line(value: str, problems: list[str]) -> int | None:
+    """The MTU of [Interface]; a value keel does not write is a problem"""
+    found = int(value) if value.isdigit() else None
+    if found != OVERLAY_MTU:
+        problems.append(f"[Interface] mtu = {value}: keel writes"
+                        f" MTU = {OVERLAY_MTU}")
+    return found
 
 
 def interface_line(iface: dict, key: str, value: str,

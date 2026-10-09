@@ -145,6 +145,19 @@ class TestCommands(RootCase):
                 self.assertIsNone(switch.live_peers(old, new, "wg0",
                                                     dump(BEFORE)))
 
+    def test_a_change_of_the_mtu_is_a_bounce(self):
+        """keel#119: `wg set` cannot change the MTU; wg-quick up sets it,
+        so a file of 0.23.7 bounces once to take MTU = 1280"""
+        with_mtu = BEFORE.replace("[Interface]\n", "[Interface]\nMTU = 1280\n")
+        self.assertIsNone(switch.live_peers(BEFORE, with_mtu, "wg0",
+                                            dump(BEFORE)))
+        added = with_mtu + peer(TWO, "fd00:1::3/128", "[2001:db8::3]:51820",
+                                25)
+        self.assertEqual(switch.live_peers(with_mtu, added, "wg0",
+                                           dump(BEFORE)),
+                         switch.live_peers(BEFORE, AFTER, "wg0",
+                                           dump(BEFORE)))
+
     def test_a_dump_that_cannot_be_read_or_another_port_is_a_bounce(self):
         good = dump(BEFORE)
         for found in ("", "x\ty\n", good.replace("51820\toff", "x\toff"),

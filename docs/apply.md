@@ -1392,7 +1392,9 @@ goes through the same window, marker, lock, timers and boot unit, with
   as they are, since keel cannot tell which one the peers know.
 - **keel owns the file.** It is rewritten whenever it is not exactly what
   the spec renders. It holds no private key: a `PostUp` line gives the
-  key file to `wg set`.
+  key file to `wg set`. It sets `MTU = 1280` (docs/spec.md, keel#119).
+  A change of the MTU line is a change of `[Interface]`: wg-quick down,
+  then up, under the window, as `wg set` cannot change an MTU.
 - **The interface is read too.** On the live system the file alone is
   not the overlay: `ip link show dev <interface>` says whether it is up.
   A right file whose change was confirmed (`wg-quick@<interface>`

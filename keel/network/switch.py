@@ -209,7 +209,8 @@ def live_peers(old: str, new: str, iface: str, dump: str) -> (
     kept. An endpoint the file does not name is the one WireGuard
     learned, and is kept.
 
-    The bounce stays for: a change of [Interface] between the files, a
+    The bounce stays for: a change of [Interface] between the files (its
+    MTU too, which only wg-quick up sets, keel#119), a
     listen port that is not the file's, a line keel does not write, a
     key named twice, and a change of the addresses of a peer outside
     every prefix of the interface's addresses, which wg-quick routes and
@@ -217,7 +218,7 @@ def live_peers(old: str, new: str, iface: str, dump: str) -> (
     """
     before, after = wireguard.parse(old), wireguard.parse(new)
     if before.problems or after.problems or before.inline_key or \
-            after.inline_key:
+            after.inline_key or before.mtu != after.mtu:
         return None
     if {k: v for k, v in before.section.items() if k != "peers"} != {
             k: v for k, v in after.section.items() if k != "peers"}:

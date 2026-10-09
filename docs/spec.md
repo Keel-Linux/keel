@@ -332,12 +332,19 @@ once the change is confirmed ([docs/apply.md](apply.md)); `keel inspect`
 reads it back, with the public key the key file gives, and `keel diff`
 compares each peer with the peer of the same key. The file holds no
 private key: a `PostUp` line gives the key file to `wg set`, so the key
-is read by `wg` alone:
+is read by `wg` alone. The `MTU` line is always 1280, the minimum MTU of
+IPv6, on every node (keel#119): without it, wg-quick takes the MTU of
+the route to an endpoint less 80, so a node behind PPPoE has 1412 and a
+node on an uplink of 1500 has 1420. WireGuard pads each packet up to the
+MTU of its interface, so the node of 1420 sends full segments as 1500
+bytes on the wire, and a path of 1492 drops them. With 1280 a packet is
+at most 1360 bytes on the wire over IPv6:
 
 ```
 [Interface]
 Address = fd00:6b65:1::1/64
 ListenPort = 51820
+MTU = 1280
 PostUp = wg set %i private-key /etc/wireguard/wg0.key
 
 [Peer]

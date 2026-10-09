@@ -29,8 +29,10 @@ jobs:
   # the real wg-quick and TLS, as root in the container
   # (tests/test_mesh_netns.py); four, a join into a mesh built by hand
   # (tests/test_mesh4_netns.py, keel#99); and a peer added and reverted
-  # live on the real wg (tests/test_network_overlay_live_netns.py). The
-  # check is "mesh / trixie".
+  # live on the real wg (tests/test_network_overlay_live_netns.py); and
+  # an answer through wg0 to a node behind a link of 1492 bytes that
+  # sends no ICMPv6 (tests/test_network_overlay_mtu_netns.py, keel#119).
+  # The check is "mesh / trixie".
   mesh:
     uses: keel-linux/.github/.github/workflows/lxc-trixie.yml@main
     with:
@@ -41,7 +43,7 @@ jobs:
           python3-yaml wireguard-tools iproute2 iputils-ping openssl
         PYTHONPATH=. python3 -m pytest -q tests/test_mesh_netns.py \
           tests/test_mesh4_netns.py tests/test_network_overlay_live_netns.py \
-          tests/test_mesh_channel.py
+          tests/test_network_overlay_mtu_netns.py tests/test_mesh_channel.py
   # etcd over the mesh (decisions 0025, 0048, 0050) in a Debian trixie
   # system container: three namespaces, the real wg-quick and trixie's
   # etcd 3.5 and etcdctl, keel's CA and rendered configuration, on links of 250 ms

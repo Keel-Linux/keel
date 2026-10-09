@@ -115,6 +115,7 @@ class TestRender(unittest.TestCase):
         self.assertEqual(body, (
             "\nAddress = fd00:1::1/64, 10.66.0.1/24\n"
             "ListenPort = 51821\n"
+            "MTU = 1280\n"
             "PostUp = wg set %i private-key /etc/keel/wg/overlay.key\n"
             "\n[Peer]\n"
             f"PublicKey = {PEER_KEY}\n"
@@ -134,6 +135,15 @@ class TestRender(unittest.TestCase):
         self.assertIn("ListenPort = 51820\n", text)
         self.assertIn("private-key /etc/wireguard/wg0.key\n", text)
         self.assertNotIn("[Peer]", text)
+
+    def test_the_mtu_fits_every_path_of_the_ipv6_minimum(self):
+        """keel#119: wg-quick takes the MTU of the route to an endpoint
+        less 80, so two nodes can have different ones (1420 and 1412
+        on a PPPoE link), and WireGuard pads a packet up to its own MTU.
+        IPv6 needs 1280 inside; 1280 + 80 = 1360 on the wire."""
+        self.assertEqual(wireguard.OVERLAY_MTU, 1280)
+        self.assertIn("\nMTU = 1280\n",
+                      wireguard.render({"address": "fd00:1::1/64"}))
 
 
 class TestParse(unittest.TestCase):
@@ -168,6 +178,21 @@ class TestParse(unittest.TestCase):
                      "dns", "not key = value", "presharedkey",
                      "[Other]"):
             self.assertIn(word, joined)
+
+
+    def test_the_mtu_keel_writes_is_read_and_another_is_said(self):
+        parsed = wireguard.parse(wireguard.render(OVERLAY))
+        self.assertEqual(parsed.mtu, 1280)
+        self.assertNotIn("mtu", parsed.section)
+        other = wireguard.parse("[Interface]\nAddress = fd00:1::1/64\n"
+                                "MTU = 1420\n")
+        self.assertEqual(other.mtu, 1420)
+        self.assertEqual(other.problems, (
+            "[Interface] mtu = 1420: keel writes MTU = 1280",))
+        garbage = wireguard.parse("[Interface]\nMTU = big\n")
+        self.assertIsNone(garbage.mtu)
+        self.assertEqual(len(garbage.problems), 1)
+        self.assertIsNone(wireguard.parse("[Interface]\n").mtu)
 
 
 class TestSuggest(unittest.TestCase):
