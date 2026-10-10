@@ -1,0 +1,15 @@
+#!/bin/sh
+# keel's postinst: after an upgrade, each WireGuard interface that is up
+# gets the MTU its file says, live, with no restart (keel#139). The file
+# keel writes sets MTU = 1280 (keel#119), and only wg-quick up reads it,
+# so an interface up before the upgrade kept its old MTU until a reboot.
+# A failure here is said and never fails the upgrade.
+set -e
+
+if [ "$1" = "configure" ] && command -v keel >/dev/null 2>&1; then
+    keel network mtu || echo "keel: the overlay's MTU was not set; keel spec apply --system sets it" >&2
+fi
+
+#DEBHELPER#
+
+exit 0

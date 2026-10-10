@@ -61,6 +61,19 @@ class TestLivePeers(unittest.TestCase):
         self.assertEqual(added["index"], first["index"])
         self.assertEqual(added["handshake"], first["handshake"])
 
+    def test_the_file_s_mtu_is_set_live(self):
+        """keel#139: wg0 at 1420 under a file of MTU = 1280"""
+        self.assertEqual(self.found["file_mtu"], 1280)
+        self.assertEqual(self.found["added"]["mtu"], 1280)
+        self.assertEqual(self.found["added"]["quick"], [])
+
+    def test_keel_network_mtu_sets_it_with_no_restart(self):
+        self.assertEqual(self.found["converge_before"], 1420)
+        self.assertEqual(self.found["converge"], [
+            "wg0: MTU 1420 set to 1280, as its file says (ip link set, no"
+            " restart)"])
+        self.assertEqual(self.found["converge_after"], 1280)
+
     def test_its_revert_keeps_them_too(self):
         first, reverted = self.found["first"], self.found["reverted"]
         worked, line = self.found["revert"]

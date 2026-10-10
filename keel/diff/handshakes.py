@@ -1,16 +1,23 @@
 # Copyright (c) 2026 KeelLinux maintainers
-"""Drift of the overlay's peers: a peer with no WireGuard handshake
+"""Drift of the overlay: a peer with no recent handshake, and the MTU
 
 keel mesh keeps a peer it added live with no handshake (keel#117): the
 addition cannot cut this node off, and the handshake comes once the
 other member has this node as a peer too. Until then the peer is
 drift: `network.overlay.wireguard.peers.<key>.handshake`, with the age
 of the last handshake when there is one. A peer the interface does not
-hold is drift too. Read from `wg show <interface> latest-handshakes` on
-the live system only (never `dump`, which holds the private key);
-nothing is compared under another root.
+hold is drift too, and so is a last handshake older than STALE
+(keel#140): WireGuard does a new handshake every 2 minutes while packets
+flow, so a member silent for longer does not answer. Read from `wg show
+<interface> latest-handshakes` on the live system only (never `dump`,
+which holds the private key); nothing is compared under another root.
+
+`network.overlay.wireguard.mtu` compares the MTU the live interface has
+with the one its file sets (keel#139): only `wg-quick up` reads the
+line, so an interface up before it came kept its old MTU.
 """
 
+import os
 from collections.abc import Callable
 from datetime import datetime, timezone
 
@@ -20,8 +27,11 @@ from keel.network.wireguard import same_key
 from keel.system.ovstate import overlay_of
 
 WANTED = "a handshake"
-LATER = ("it comes once that member has this node as a peer too (keel"
-         " mesh sync on that member)")
+# WireGuard's rekey time is 120 s while packets flow; a minute more for
+# a lost initiation
+STALE = 180
+UNREACHABLE = ("the member does not answer: it is unreachable (down, cut"
+               " off, or without this node as a peer)")
 
 NOT_HELD = ("keel mesh sync on this node applies it again, or keel spec"
             " apply --system")
@@ -70,9 +80,43 @@ def handshake_fields(declared: dict, live: bool, output: Reader | None = None,
         elif not at.isdigit() or at == "0":
             fields.append(FieldDiff(
                 name, DRIFT, WANTED, "none",
-                note=f"no handshake since {iface} came up: {LATER}"))
+                note=f"no handshake since {iface} came up: {UNREACHABLE}"))
         else:
             ago = max(int(now.timestamp()) - int(at), 0)
-            fields.append(FieldDiff(name, SAME, f"{WANTED} ({ago} s ago)",
-                                    f"{WANTED} ({ago} s ago)"))
+            seen_at = f"{WANTED} ({ago} s ago)"
+            if ago > STALE:
+                fields.append(FieldDiff(
+                    name, DRIFT, f"{WANTED} within {STALE} s", seen_at,
+                    note=f"older than {STALE} s: {UNREACHABLE}"))
+            else:
+                fields.append(FieldDiff(name, SAME, seen_at, seen_at))
     return fields
+
+
+def mtu_fields(declared: dict, root: str, live: bool,
+               output: Reader | None = None) -> list[FieldDiff]:
+    """The live interface's MTU against its file's, on the live system,
+    when the file sets one"""
+    from keel.network import mtu
+    overlay = overlay_of(declared) or {}
+    if not live or not overlay.get("address"):
+        return []
+    iface = wireguard.interface(overlay)
+    try:
+        with open(os.path.join(root, wireguard.conf_path(iface))) as fob:
+            wanted = wireguard.parse(fob.read()).mtu
+    except OSError:
+        return []
+    if wanted is None:
+        return []
+    now = mtu.live_mtu(iface, output)
+    name = "network.overlay.wireguard.mtu"
+    if now is None:
+        return [FieldDiff(name, UNKNOWN, wanted, None,
+                          f"ip link show dev {iface} gave no MTU: is it up?")]
+    if now == wanted:
+        return [FieldDiff(name, SAME, wanted, now)]
+    return [FieldDiff(name, DRIFT, wanted, now,
+                      note="only wg-quick up reads the file's MTU; keel"
+                      " network mtu, or keel spec apply --system, sets it"
+                      " live with no restart")]

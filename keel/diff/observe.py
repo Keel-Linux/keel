@@ -3,7 +3,7 @@
 
 from keel.diff.appliance import appliance_fields, vip_fields
 from keel.diff.compare import compare
-from keel.diff.handshakes import handshake_fields
+from keel.diff.handshakes import handshake_fields, mtu_fields
 from keel.diff.report import Comparison
 from keel.inspect import ROOT_DEFAULT, inspect_root
 
@@ -18,4 +18,5 @@ def diff_root(declared: dict, root: str = ROOT_DEFAULT) -> Comparison:
     found = compare(declared, inspect_root(root))
     return Comparison(found.root, found.fields + tuple(
         appliance_fields(declared, root) + vip_fields(declared, root)
-        + handshake_fields(declared, root == ROOT_DEFAULT)))
+        + handshake_fields(declared, root == ROOT_DEFAULT)
+        + mtu_fields(declared, root, root == ROOT_DEFAULT)))

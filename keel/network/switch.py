@@ -48,6 +48,8 @@ from dataclasses import replace
 
 from keel.inspect.network import slaac_off_in
 from keel.network import marker, wireguard
+from keel.network import mtu as mtu_module
+from keel.network.mtu import set_mtu as mtu_cmd
 
 WINDOW_UNIT = "keel-network-window"
 SAFETY_UNIT = "keel-network-window-safety"
@@ -194,14 +196,15 @@ ADDED = "added"
 CHANGED = "changed"
 
 
-def live_peers(old: str, new: str, iface: str, dump: str) -> (
-        list[tuple[str, ...]] | None):
+def live_peers(old: str, new: str, iface: str, dump: str,
+               live_mtu: int | None = None) -> list[tuple[str, ...]] | None:
     """The `wg set` lines of `live_plan`, or None"""
-    found = live_plan(old, new, iface, dump)
+    found = live_plan(old, new, iface, dump, live_mtu)
     return None if found is None else found[0]
 
 
-def live_plan(old: str, new: str, iface: str, dump: str) -> (
+def live_plan(old: str, new: str, iface: str, dump: str,
+              live_mtu: int | None = None) -> (
         tuple[list[tuple[str, ...]], bool] | None):
     """The `wg set` lines that take `iface`, as `wg show IFACE dump`
     gives it (`dump`), to file `new`, when the files `old` and `new`
@@ -221,9 +224,14 @@ def live_plan(old: str, new: str, iface: str, dump: str) -> (
     kept. An endpoint the file does not name is the one WireGuard
     learned, and is kept.
 
-    The bounce stays for: a change of [Interface] between the files (its
-    MTU too, which only wg-quick up sets, keel#119), a
-    listen port that is not the file's, a line keel does not write, a
+    The MTU of the new file is set live with `ip link set` when the
+    interface (`live_mtu`, as `ip link show` gives it) has another one:
+    an interface up before the MTU line came kept its old MTU, as did
+    every change made live (keel#139). With no `live_mtu`, a change of
+    the MTU line is a bounce, as is a file that drops it.
+
+    The bounce stays for: any other change of [Interface] between the
+    files, a listen port that is not the file's, a line keel does not write, a
     key named twice, and a change of the addresses of a peer outside
     every prefix of the interface's addresses, which wg-quick routes and
     `wg set` does not.
@@ -234,7 +242,10 @@ def live_plan(old: str, new: str, iface: str, dump: str) -> (
     """
     before, after = wireguard.parse(old), wireguard.parse(new)
     if before.problems or after.problems or before.inline_key or \
-            after.inline_key or before.mtu != after.mtu:
+            after.inline_key:
+        return None
+    mtu = mtu_line(before.mtu, after.mtu, live_mtu, iface)
+    if mtu is False:
         return None
     if {k: v for k, v in before.section.items() if k != "peers"} != {
             k: v for k, v in after.section.items() if k != "peers"}:
@@ -257,8 +268,8 @@ def live_plan(old: str, new: str, iface: str, dump: str) -> (
                 on_link(one, networks) for one in (was.get(key),
                                                    now.get(key)) if one):
             return None
-    commands: list[tuple[str, ...]] = []
-    added = True
+    commands: list[tuple[str, ...]] = [mtu] if mtu else []
+    added = not mtu
     for key in sorted(set(held) | set(now)):
         if key not in now:
             commands.append(("wg", "set", iface, "peer",
@@ -271,6 +282,17 @@ def live_plan(old: str, new: str, iface: str, dump: str) -> (
             commands.append(found)
             added = added and key not in held
     return commands, added and bool(commands)
+
+
+def mtu_line(before: int | None, after: int | None, now: int | None,
+             iface: str) -> tuple[str, ...] | None | bool:
+    """The `ip link set` line that gives `iface` the new file's MTU, None
+    when it has it, False when only the bounce can (keel#139)"""
+    if after is None:
+        return None if before is None else False
+    if now is None:
+        return None if before == after else False
+    return None if now == after else mtu_cmd(iface, after)
 
 
 def peer_fix(iface: str, want: dict, have: dict | None,
@@ -321,6 +343,11 @@ def from_dump(text: str | None) -> tuple[int, dict[bytes, dict]] | None:
             "persistent_keepalive": 0 if keepalive == "off"
             else int(keepalive)}
     return int(lines[0][2]), peers
+
+
+def wg_mtu(iface: str) -> int | None:
+    """The MTU `iface` has now (keel.network.mtu), None when unknown"""
+    return mtu_module.live_mtu(iface)
 
 
 def wg_dump(iface: str) -> str | None:
@@ -383,7 +410,8 @@ def live_change(root: str, iface: str, relative: str, text: str,
         return None
     if not current:
         return None
-    found = live_plan(current, text, iface, wg_dump(iface) or "")
+    found = live_plan(current, text, iface, wg_dump(iface) or "",
+                      wg_mtu(iface))
     if found is None:
         return None
     commands, added = found
