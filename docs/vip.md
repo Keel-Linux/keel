@@ -206,8 +206,12 @@ record:
    carries the VIP only when a majority of the peers that answered took
    it**; with no peer answering (a mesh of the two nodes alone, the
    other one gone), the operator's flag is the acceptance. With
-   etcd, the claim is the counter's compare-and-swap, and the controller
-   adds the address once it renewed the claim's lease. A transaction
+   etcd, the claim is the counter's compare-and-swap. The promote adds
+   the address at once, for what is left of the release time after it
+   asked for the lease (the majority granted it and wrote the claim with
+   it, as a renewal confirms it), and the controller extends it once it
+   renewed the claim's lease; the promote checks that renewal before it
+   returns (keel#138). A transaction
    that etcd does not answer in time may have committed (keel#135): the
    counter is read first; this node's own claim at the epoch is the
    claim made, and is recorded with its lease; another claim ends the

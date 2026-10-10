@@ -603,3 +603,30 @@ class TestEffects(ReadOnlyTestCase):
         self.assertIn(dbreadonly.RECORD, LockReplica(()).describe())
         self.assertIn("READ_ONLY ADMIN back", UnlockAccounts().describe())
         self.assertIn("wait up to 60 s", PromoteReplica(60).describe())
+
+
+class TestQuiesce(unittest.TestCase):
+    """keel#138: read_only on, waited for up to QUIESCE_TIMEOUT: it
+    waits for the commits in flight, which wait for the replica"""
+
+    def test_read_only_on_by_the_server_s_own_account(self):
+        runner = Runner()
+        self.assertIsNone(dbreadonly.quiesce(runner))
+        self.assertEqual(runner.calls[0][1], "SET GLOBAL read_only = ON;\n")
+        self.assertEqual(runner.argv[0][:4], ["runuser", "-u", "mysql",
+                                              "--"])
+
+    def test_a_server_that_does_not_answer_in_time_is_said(self):
+        def slow(argv, **kwargs):
+            self.assertEqual(kwargs["timeout"], dbreadonly.QUIESCE_TIMEOUT)
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+        self.assertIn("did not turn read only within",
+                      dbreadonly.quiesce(slow))
+
+    def test_a_failure_is_said(self):
+        self.assertIn("ERROR 2002", dbreadonly.quiesce(
+            Runner({"other": (1, "", "ERROR 2002")})))
+
+        def missing(argv, **kwargs):
+            raise FileNotFoundError(2, "No such file or directory")
+        self.assertIn("cannot run runuser", dbreadonly.quiesce(missing))
