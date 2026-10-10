@@ -495,12 +495,15 @@ def drop_fenced(here: Here, vip: str, why: str,
              f"{'; ' + problem if problem else ''}")
 
 
-def announce(here: Here, claim: Claim) -> dict[str, str]:
-    """The claim told to every peer at once, as the new holder does; each
-    peer's address to what it said: "applied", "known" (both accepted
-    it), "refused: why" (it answered no) or "unreachable: why"
+def announce(here: Here, claim: Claim,
+             only: set[str] | None = None) -> dict[str, str]:
+    """The claim told to every peer at once (or to those of `only`), as
+    the new holder does; each peer's address to what it said: "applied",
+    "known" (both accepted it), "refused: why" (it answered no) or
+    "unreachable: why"
     """
-    peers = [one.address for one in here.node.peers("")]
+    peers = [one.address for one in here.node.peers("")
+             if only is None or one.address in only]
 
     def one(at: str) -> str:
         try:
@@ -518,10 +521,13 @@ def announce(here: Here, claim: Claim) -> dict[str, str]:
         return dict(zip(peers, pool.map(one, peers)))
 
 
-def epochs(here: Here, vip: str) -> dict[str, Claim | None | str]:
-    """Every peer asked, at once, for the newest claim it took of `vip`:
-    its address to that claim, verified, None for none, or why not"""
-    peers = [one.address for one in here.node.peers("")]
+def epochs(here: Here, vip: str,
+           only: set[str] | None = None) -> dict[str, Claim | None | str]:
+    """Every peer (or those of `only`) asked, at once, for the newest
+    claim it took of `vip`: its address to that claim, verified, None
+    for none, or why not"""
+    peers = [one.address for one in here.node.peers("")
+             if only is None or one.address in only]
 
     def one(at: str) -> Claim | None | str:
         try:

@@ -1,3 +1,22 @@
+keel (0.23.15) unstable; urgency=medium
+
+  * In cloud simple, one member outside the pair that is down made every
+    keel vip promote wait two 10 s timeouts, for its epoch and for the
+    announcement: a planned promote took about 21 s on a real pair
+    (keel#137). Now the other member of the pair alone gates the
+    handover: its epoch, its release and its taking the claim, each
+    waited for in full, as nothing fences a live old primary without
+    etcd. The members outside the pair are told after, in the
+    background, and what each said is logged. With --old-primary-gone
+    every peer is asked and told, and the claim is carried on a
+    majority of those that answer, as before. With etcd the peers are
+    told in the background too. A replica that holds the primary's
+    claim asks the release at the next epoch at once, and asks the
+    epoch only when the primary refuses that as stale: two round trips
+    with the other member, not three.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Sat, 10 Oct 2026 12:00:00 +0000
+
 keel (0.23.14) unstable; urgency=medium
 
   * keel vip promote failed with "etcd did not take the claim: etcdctl

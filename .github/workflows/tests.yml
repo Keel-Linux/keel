@@ -104,6 +104,23 @@ jobs:
           etcd-server etcd-client util-linux
         KEEL_VIP_CLAIM_NETNS=1 PYTHONPATH=. python3 -m pytest -q -s \
           tests/test_vip_claim_netns.py
+  # keel vip promote in cloud simple with a member outside the pair down
+  # (keel#137), on the vip job's nodes and links, every spec in cloud
+  # simple: a planned promote takes the VIP in less than 3 s, and no two
+  # nodes carry it at one instant (tests/test_vip_simple_netns.py). The
+  # check is "vip-simple / trixie".
+  vip-simple:
+    uses: keel-linux/.github/.github/workflows/lxc-trixie.yml@main
+    with:
+      systemd: true
+      timeout: 30
+      run: |
+        apt-get update -qq
+        apt-get install -y -qq --no-install-recommends python3-pytest \
+          python3-yaml wireguard-tools iproute2 iputils-ping openssl \
+          etcd-server etcd-client util-linux
+        KEEL_VIP_SIMPLE_NETNS=1 PYTHONPATH=. python3 -m pytest -q -s \
+          tests/test_vip_simple_netns.py
   # Upgrades on a pair whose VIP is active (the maintainer's requirement
   # of 2026-10-10), on the nodes and links of the vip job: keel-vip.service
   # try-restarted on the holder and the replica as keel-overlay-vip's
