@@ -1,3 +1,24 @@
+keel (0.23.14) unstable; urgency=medium
+
+  * keel vip promote failed with "etcd did not take the claim: etcdctl
+    txn: no answer within 10.5 s" on a poor link, and a second promote
+    then failed with "keel-vip.service did not add the address to wg0
+    within 15 s" (keel#135). The claim's transaction had one try, and a
+    transaction that times out may have committed: then the claim was
+    in etcd with a lease that no node renewed, so no controller carried
+    the address. That second failure is a consequence of the first.
+    Now, after a transaction that etcd did not answer in time, the
+    counter is read first: this node's own claim at the epoch is the
+    claim made; another claim ends the claim; an unchanged counter is
+    tried again with the same comparison, never a blind write, at most
+    3 times, none started 30 s after the first, a lease older than 10 s
+    replaced first. The leases of the tries that did not win are
+    revoked, so a late transaction with one of them fails. A promote
+    that finds this node's own claim in etcd records it with its lease,
+    so the controller renews the lease and carries the address.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Sat, 10 Oct 2026 09:00:00 +0000
+
 keel (0.23.13) unstable; urgency=medium
 
   * keel assemble refuses to pack a template whose rootfs records a

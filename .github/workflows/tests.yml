@@ -86,6 +86,24 @@ jobs:
           etcd-server etcd-client util-linux
         KEEL_VIP_NETNS=1 PYTHONPATH=. python3 -m pytest -q -s \
           tests/test_vip_netns.py
+  # keel vip promote when etcd does not answer the claim's transaction in
+  # time (keel#135), on the vip job's nodes and links: one claim
+  # committed in etcd with its answer lost, one not run with its answer
+  # lost, injected by tests/etcdctl_shim.py on the agents' PATH; each
+  # promote takes the VIP, and no two nodes carry it at one instant
+  # (tests/test_vip_claim_netns.py). The check is "vip-claim / trixie".
+  vip-claim:
+    uses: keel-linux/.github/.github/workflows/lxc-trixie.yml@main
+    with:
+      systemd: true
+      timeout: 30
+      run: |
+        apt-get update -qq
+        apt-get install -y -qq --no-install-recommends python3-pytest \
+          python3-yaml wireguard-tools iproute2 iputils-ping openssl \
+          etcd-server etcd-client util-linux
+        KEEL_VIP_CLAIM_NETNS=1 PYTHONPATH=. python3 -m pytest -q -s \
+          tests/test_vip_claim_netns.py
   # Upgrades on a pair whose VIP is active (the maintainer's requirement
   # of 2026-10-10), on the nodes and links of the vip job: keel-vip.service
   # try-restarted on the holder and the replica as keel-overlay-vip's

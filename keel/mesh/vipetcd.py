@@ -174,6 +174,15 @@ def local(here: Here) -> Client:
     return client
 
 
+# a claim's transaction that etcd did not answer in time is tried again
+# (keel#135): at most CLAIM_TRIES times, and none started CLAIM_WITHIN
+# seconds after the first; a lease older than FRESH is replaced before a
+# try, so the claim that wins has most of its TTL left
+CLAIM_TRIES = 3
+CLAIM_WITHIN = 30.0
+FRESH = TTL / 2
+
+
 def claim(client: Client, mesh_id: str, vip: str, now: Seen,
           known: int, sign: Callable[[str, int, str], Claim],
           clock: Callable[[], float]) -> tuple[Claim, str, float] | None:
@@ -183,29 +192,104 @@ def claim(client: Client, mesh_id: str, vip: str, now: Seen,
     revision read; the claim, its lease and when the lease was asked
     for, or None when another write came first. `known` is the epoch
     this node holds. The holder key is written beside it, for show: no
-    decision reads it. Raises EtcdError, VipError."""
+    decision reads it. Raises EtcdError, VipError.
+
+    A transaction that etcd did not answer in time may have committed
+    (keel#135). So before another try the counter is read: this node's
+    own claim at the epoch is the claim made; another claim, or any
+    other write, ends it (None); an unchanged counter is tried again
+    with the same comparison, on the revision read before the first
+    try, never a blind write. Every lease of a try that did not win is
+    revoked, so a late transaction with it fails in etcd."""
     epoch = max(now.epoch.epoch if now.epoch else 0, known) + 1
+    compare = [modified(key_of(mesh_id, vip, EPOCH), now.revision)]
+    started = clock()
+    tried: dict[str, tuple[Claim, float]] = {}
+    current = None
+    problem: EtcdError | None = None
+    for turn in range(CLAIM_TRIES):
+        if turn and clock() - started >= CLAIM_WITHIN:
+            break
+        if current is None or clock() - tried[current][1] >= FRESH:
+            current = _leased(client, vip, epoch, sign, clock, tried)
+        made = tried[current][0]
+        try:
+            if client.swap(compare, [
+                    (key_of(mesh_id, vip, EPOCH), made.raw, None),
+                    (key_of(mesh_id, vip, HOLDER), made.raw, current)]):
+                return _won(client, tried, current)
+            answered = True
+        except EtcdError as e:
+            problem, answered = e, False
+        found = _landed(client, mesh_id, vip, now.revision, tried)
+        if found == OTHER or (answered and found == UNCHANGED):
+            _revoked(client, tried, None)
+            return None
+        if found not in (UNCHANGED, UNKNOWN):
+            return _won(client, tried, found)
+    found = _landed(client, mesh_id, vip, now.revision, tried)
+    if found not in (UNCHANGED, UNKNOWN, OTHER):
+        return _won(client, tried, found)
+    _revoked(client, tried, None)
+    if found == OTHER:
+        return None
+    raise problem or EtcdError("etcd did not take the claim")
+
+
+OTHER, UNCHANGED, UNKNOWN = "other", "unchanged", "unknown"
+
+
+def _leased(client: Client, vip: str, epoch: int, sign, clock,
+            tried: dict) -> str:
+    """A new lease and the claim signed with it, kept in `tried`; the
+    lease. Raises EtcdError, VipError (the lease revoked then)"""
     asked = clock()
     lease = client.grant(TTL)
     try:
-        made = sign(vip, epoch, lease)
+        tried[lease] = (sign(vip, epoch, lease), asked)
     except VipError:
         try:
             client.revoke(lease)
         except EtcdError:
             pass
+        _revoked(client, tried, None)
         raise
-    ok = client.swap(
-        [modified(key_of(mesh_id, vip, EPOCH), now.revision)],
-        [(key_of(mesh_id, vip, EPOCH), made.raw, None),
-         (key_of(mesh_id, vip, HOLDER), made.raw, lease)])
-    if not ok:
+    return lease
+
+
+def _landed(client: Client, mesh_id: str, vip: str, revision: int,
+            tried: dict) -> str:
+    """What the counter holds after a try: the lease of this node's own
+    claim of `tried` when one of them landed, OTHER for any other write,
+    UNCHANGED when it is still at `revision`, UNKNOWN when etcd did not
+    answer"""
+    try:
+        now = seen(client, mesh_id).get(vip) or Seen(vip)
+    except EtcdError:
+        return UNKNOWN
+    if now.revision == revision:
+        return UNCHANGED
+    for lease, (made, _) in tried.items():
+        if now.epoch is not None and now.epoch.raw == made.raw:
+            return lease
+    return OTHER
+
+
+def _won(client: Client, tried: dict, lease: str) -> tuple[Claim, str, float]:
+    _revoked(client, tried, lease)
+    made, asked = tried[lease]
+    return made, lease, asked
+
+
+def _revoked(client: Client, tried: dict, kept: str | None) -> None:
+    """Every lease of `tried` but `kept` revoked, as far as etcd answers"""
+    for lease in list(tried):
+        if lease == kept:
+            continue
         try:
             client.revoke(lease)
         except EtcdError:
             pass
-        return None
-    return made, lease, asked
 
 
 def stale(client: Client, mesh_id: str, vip: str, made: Claim,
