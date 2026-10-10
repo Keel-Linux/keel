@@ -526,14 +526,25 @@ def promoted_etcd(here: Here, vip: str, gone: bool,
     vipnode.hold(here, made[0], False, made[1])
     out(f"this node holds {vip} at epoch {made[0].epoch}, by etcd's lease"
         f" {made[1]}")
-    if not carried_soon(here, vip):
-        out(f"keel-vip.service did not add {vip} to {here.iface()} within"
-            f" {CARRY_WAIT:g} s: is it running? Its lease expires"
-            f" {vipetcd.TTL} s after its last renewal")
-        return exits.APPLY_FAILED
-    # etcd holds the claim; the peers are told in the background (keel#137)
+    # the majority granted the lease and wrote the claim with it after
+    # `asked`, as a renewal would confirm it: the address is carried now,
+    # for what is left of the release time after that moment, and the
+    # controller extends it once it renewed (keel#138: the wait for its
+    # next renewal was most of a planned promote's write gap)
+    carried = vipnode.carry_held(here, vip, here.monotonic() - made[2])
+    # etcd holds the claim; the peers are told in the background (keel#137),
+    # as soon as the address is here, so they route the VIP to it at once
     out("the peers are told in the background")
-    in_background(here, made[0], set())
+    if carried:
+        in_background(here, made[0], set())
+    if not carried_soon(here, vip):
+        out(f"keel-vip.service did not carry {vip} on {here.iface()} and"
+            f" renew its lease within {CARRY_WAIT:g} s: is it running? The"
+            f" address goes {vipetcd.RELEASE_AFTER:g} s after the claim, and"
+            f" the lease {vipetcd.TTL} s after its last renewal")
+        return exits.APPLY_FAILED
+    if not carried:
+        in_background(here, made[0], set())
     return exits.OK
 
 
@@ -579,12 +590,30 @@ def raced(here: Here, vip: str, own: str,
 
 
 def carried_soon(here: Here, vip: str) -> bool:
+    """Whether keel-vip.service carries the VIP within CARRY_WAIT: the
+    address on wg0 and, for a claim on an etcd lease, a renewal of that
+    lease by the controller (its time to live goes up), since the promote
+    adds the address itself for the release time alone (keel#138)"""
     deadline = here.monotonic() + CARRY_WAIT
-    while not vipnet.carried(here.iface(), vip, here.node.output):
+    lease = vipnode.current(here, vip).lease
+    first = None
+    while True:
+        if vipnet.carried(here.iface(), vip, here.node.output):
+            if lease is None:
+                return True
+            try:
+                left = here.local().time_to_live(lease)
+            except EtcdError:
+                left = None
+            now = here.monotonic()
+            if left is not None:
+                if first is None:
+                    first = (now, left)
+                elif left > first[1] - (now - first[0]) + 1:
+                    return True
         if here.monotonic() >= deadline:
             return False
         here.sleep(POLL)
-    return True
 
 
 def check(here: Here, out: Callable[[str], None]) -> int:

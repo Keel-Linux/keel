@@ -227,7 +227,10 @@ declared.
 **`keel database promote [--old-primary-gone]`** on the replica, as
 today, in this order: `keel vip promote` (release before take; refused
 without the flag when the old primary does not answer: 0049, second
-round, point 3), then the database: drain the relay log, `STOP SLAVE`,
+round, point 3; the old primary turns its database read only before it
+drops the address, so the commits in flight end, and their clients get
+the answer, while the replica is still connected: keel#138), then the
+database: drain the relay log, `STOP SLAVE`,
 `RESET SLAVE ALL`, `read_only = OFF`, `READ_ONLY ADMIN` back. The
 semi-synchronous roles need no flip (both sides enabled on both nodes).
 When the old primary is gone, `STOP SLAVE IO_THREAD` takes seconds

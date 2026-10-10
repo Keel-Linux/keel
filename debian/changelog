@@ -1,3 +1,26 @@
+keel (0.23.16) unstable; urgency=medium
+
+  * A write in flight at a planned promote waited 15 s for its answer,
+    and the new primary took 10 s to take writes (keel#138). The 10 s
+    were the announcement to a member outside the pair that was down,
+    which keel#137 takes out of the handover. The write: the old primary
+    dropped the VIP while the commit waited for the replica's
+    acknowledgement, so the answer had no address to come from. Now the
+    old primary, when it declares a database, turns it read only before
+    it releases the VIP: SET GLOBAL read_only = ON returns once the
+    commits in flight ended, which the replica, still connected,
+    acknowledges; then the address goes. A failure is logged and the
+    release goes on.
+  * With etcd, a planned promote waited for the controller's next lease
+    renewal before the VIP was on wg0 (a 5.6 s write gap at 250 ms).
+    The majority granted the lease and wrote the claim with it, as a
+    renewal confirms it, so the promote now adds the address itself,
+    for what is left of the release time after the lease was asked for;
+    the controller extends it once it renewed, and the promote checks
+    that renewal before it returns.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Sat, 10 Oct 2026 14:00:00 +0000
+
 keel (0.23.15) unstable; urgency=medium
 
   * In cloud simple, one member outside the pair that is down made every
