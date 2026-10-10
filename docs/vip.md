@@ -184,21 +184,28 @@ in the next.
 On the node that is to become the primary, which must hold the pair
 record:
 
-1. it finds the newest claim: before etcd, every peer is asked its epoch
-   at once; with etcd, the counter;
+1. it finds the newest claim: before etcd, the claim of the other
+   member of the pair that this node holds, else that member is asked
+   its epoch (every peer with `--old-primary-gone`); a release refused
+   as stale asks the epoch, then the release again; with etcd, the
+   counter;
 2. when another node holds the VIP, it asks it to release, for the next
    epoch: **the old primary drops the address first and answers after**.
    When the old primary does not answer, **it refuses, unless
    `--old-primary-gone`**. With etcd and `--old-primary-gone`, it waits
    for the old primary's lease to expire, up to its TTL, and **never
    revokes another node's lease** (third round, point 5);
-3. it claims at the next epoch. Before etcd, the claim is announced to
-   every peer, and **this node carries the VIP only when a majority of
-   the peers that answered took it**; with a majority refusing, or none
-   answering without `--old-primary-gone`, it exits non-zero and does
-   not carry it. With `--old-primary-gone` and no peer answering (a mesh
-   of the two nodes alone, the other one gone), the operator's flag is
-   the acceptance. With
+3. it claims at the next epoch. Before etcd, **the other member of the
+   pair alone gates the handover** (keel#137): this node carries the VIP
+   only once that member took the claim; when it refuses or does not
+   answer, it exits non-zero and does not carry it. The members outside
+   the pair are told after, in the background, and what each said is
+   logged: one that is down no longer holds up the promote (two 10 s
+   timeouts on keel 0.23.13). With `--old-primary-gone` the other member
+   is declared gone, so every peer is asked and told, and **this node
+   carries the VIP only when a majority of the peers that answered took
+   it**; with no peer answering (a mesh of the two nodes alone, the
+   other one gone), the operator's flag is the acceptance. With
    etcd, the claim is the counter's compare-and-swap, and the controller
    adds the address once it renewed the claim's lease. A transaction
    that etcd does not answer in time may have committed (keel#135): the
@@ -210,7 +217,8 @@ record:
    leases of the tries that did not win are revoked, so a late
    transaction with one of them fails in etcd;
 4. each peer routes the VIP with one `wg set`; one that did not answer
-   takes it at its next check.
+   takes it at its next check. With etcd, the peers are told in the
+   background too.
 
 With `--old-primary-gone`, the operator declared the other member of
 the pair gone. **With etcd**, its lease fences it: each ask of it in

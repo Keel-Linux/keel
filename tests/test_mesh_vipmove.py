@@ -116,6 +116,132 @@ class TestPromote(Pair):
         self.assertFalse(self.carried(0))
         self.assertTrue(self.carried(1))
 
+    def slow(self, index: int, host: str, seconds: float,
+             answers: bool = True):
+        """Node `index`'s exchanges with `host` take `seconds`, then
+        answer, or fail as a dead node does"""
+        import time as clock
+        real = self.all[index].exchange
+
+        def exchange(at: str, iface: str, body: bytes) -> bytes:
+            if at == host:
+                clock.sleep(seconds)
+                if not answers:
+                    raise LinkError(f"[{at}]:51821 through {iface}: timed out")
+            return real(at, iface, body)
+        self.all[index].exchange = exchange
+
+    def test_a_member_outside_the_pair_down_does_not_hold_up_the_promote(
+            self):
+        """keel#137: one unreachable member outside the pair added two
+        10 s timeouts to every promote. Only the other member of the
+        pair gates the handover; the others are told after, in the
+        background, and what they said is logged"""
+        import time as clock
+        from unittest import mock
+        self.nodes()
+        self.promote(0)
+        self.slow(1, address(2), 1.0, answers=False)
+        started = clock.monotonic()
+        with mock.patch.object(vippromote, "BACKGROUND", True):
+            code, said = self.promote(1)
+        took = clock.monotonic() - started
+        self.assertEqual(code, exits.OK, said)
+        self.assertLess(took, 0.8, said)
+        self.assertTrue(self.carried(1))
+        self.assertFalse(self.carried(0))
+        self.assertIn(f"released by {address(0)}", said)
+        self.assertIn("taken by the other member of the pair", said)
+        self.assertEqual(vippromote.announced(), 1)
+        self.assertIn(f"vip {VIP}: {address(2)}: unreachable",
+                      self.text(1))
+
+    def test_a_member_outside_the_pair_still_learns_the_claim_after(self):
+        from unittest import mock
+        self.nodes()
+        self.promote(0)
+        self.slow(1, address(2), 0.5)
+        with mock.patch.object(vippromote, "BACKGROUND", True):
+            code, said = self.promote(1)
+        self.assertEqual(code, exits.OK, said)
+        self.assertEqual(vippromote.announced(), 1)
+        self.assertEqual(self.routed(2), KEYS[1])
+        self.assertIn(f"vip {VIP}: {address(2)}: applied", self.text(1))
+
+    def kinds(self, index: int) -> list[tuple[str, str]]:
+        """Every message node `index` sends: (to, kind)"""
+        real = self.all[index].exchange
+        sent: list[tuple[str, str]] = []
+
+        def exchange(at: str, iface: str, body: bytes) -> bytes:
+            sent.append((at, vipmsg.loads(body).kind))
+            return real(at, iface, body)
+        self.all[index].exchange = exchange
+        return sent
+
+    def test_a_planned_promote_asks_no_epoch_it_knows(self):
+        """Two round trips with the other member, not three: the replica
+        holds the primary's claim, so it asks the release at the next
+        epoch at once"""
+        self.nodes()
+        self.promote(0)
+        sent = self.kinds(1)
+        code, said = self.promote(1)
+        self.assertEqual(code, exits.OK, said)
+        self.assertEqual([kind for at, kind in sent if at == address(0)],
+                         [vipmsg.RELEASE, vipmsg.CLAIM])
+
+    def test_a_release_refused_as_stale_asks_the_epoch_and_again(self):
+        """B missed A's newer claim: A refuses the release as stale, B
+        asks its epoch, and asks the release again at the next one"""
+        self.nodes()
+        self.promote(0)
+        self.down.add(address(1))
+        self.promote(0)
+        held = vipnode.current(self.all[0], VIP)
+        self.down.clear()
+        # A claims again at a newer epoch while B is away
+        made = vipnode.signed_claim(self.all[0], VIP, held.epoch + 1)
+        vipnode.hold(self.all[0], made, True)
+        sent = self.kinds(1)
+        code, said = self.promote(1)
+        self.assertEqual(code, exits.OK, said)
+        kinds = [kind for at, kind in sent if at == address(0)]
+        self.assertEqual(kinds, [vipmsg.RELEASE, vipmsg.EPOCH,
+                                 vipmsg.RELEASE, vipmsg.CLAIM], said)
+        self.assertEqual(vipnode.current(self.all[1], VIP).epoch,
+                         held.epoch + 2)
+        self.assertFalse(self.carried(0))
+
+    def test_the_other_member_refusing_the_claim_stops_it(self):
+        self.nodes()
+        self.promote(0)
+        real = self.all[1].exchange
+        seen: list[str] = []
+
+        def exchange(at: str, iface: str, body: bytes) -> bytes:
+            message = vipmsg.loads(body)
+            seen.append(message.kind)
+            if at == address(0) and message.kind == vipmsg.CLAIM:
+                raise LinkError(f"[{at}]:51821 refused: stale claim")
+            return real(at, iface, body)
+        self.all[1].exchange = exchange
+        code, said = self.promote(1)
+        self.assertEqual(code, exits.MESH_REFUSED, said)
+        self.assertIn("did not take the claim", said)
+        self.assertFalse(self.carried(1))
+        self.assertTrue(vipnode.current(self.all[1], VIP).released)
+
+    def test_a_first_promote_with_the_other_member_down_is_refused(self):
+        self.nodes()
+        self.down.add(address(1))
+        code, said = self.promote(0)
+        self.assertEqual(code, exits.MESH_REFUSED, said)
+        self.assertFalse(self.carried(0))
+        # --old-primary-gone: the operator's word, as before
+        code, said = self.promote(0, gone=True)
+        self.assertEqual(code, exits.OK, said)
+
     def test_a_node_that_declares_no_vip_promotes_nothing(self):
         self.nodes()
         code, said = self.promote(2)
@@ -148,7 +274,10 @@ class TestPromote(Pair):
         self.down.add(address(2))
         code, said = self.promote(0)
         self.assertEqual(code, exits.OK)
-        self.assertIn(f"{address(2)}: [{address(2)}]:51821", said)
+        # a member outside the pair is told after the handover, and what
+        # it said is logged (keel#137)
+        self.assertIn(f"{address(2)}: unreachable: [{address(2)}]:51821",
+                      self.text(0))
 
 
 class TestTheChannelRefuses(Pair):
