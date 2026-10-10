@@ -316,6 +316,24 @@ def network_revert(args) -> int:
     return exits.OK if worked else exits.APPLY_FAILED
 
 
+def network_mtu(args) -> int:
+    """Each WireGuard interface up whose MTU is not its file's, set live
+    (keel#139); what the package's postinst runs, so an upgrade needs no
+    reboot. Only on the live system"""
+    root = getattr(args, "root", inspection.ROOT_DEFAULT)
+    refusal = system.needs_root(root, "network mtu")
+    if refusal:
+        error(refusal)
+        return exits.APPLY_NEEDS_ROOT
+    from keel.network import mtu
+    failed = False
+    for line in mtu.converge(root):
+        bad = "failed" in line or "cannot be read" in line
+        failed = failed or bad
+        (error if bad else print)(line)
+    return exits.APPLY_FAILED if failed else exits.OK
+
+
 def network_wireguard_key(args) -> int:
     """Print this node's WireGuard public key, making the key pair first
 

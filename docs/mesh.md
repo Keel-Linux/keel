@@ -591,7 +591,9 @@ yet, both reverted, and each then left the other out for an hour, at
 different times, so they never met. Now the first keeps the second,
 and the handshake comes once the second has the first too. Until then
 `keel mesh status` names the member on a `drift:` line, and `keel diff`
-has `network.overlay.wireguard.peers.<key>.handshake` as drift. A
+has `network.overlay.wireguard.peers.<key>.handshake` as drift. A last
+handshake older than 180 s is drift too, and both say the member does
+not answer: it is unreachable (keel#140). A
 change that removes a peer, changes `[Interface]`, or bounces the
 interface still waits for a handshake in its window. One sync runs at a
 time

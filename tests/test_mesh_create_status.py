@@ -144,10 +144,11 @@ class TestStatus(unittest.TestCase):
         self.assertEqual(found[4], f"  {OTHER}  fd00:6b65:1::7/128  no"
                          " endpoint  no handshake yet")
         # keel#117: a peer with no handshake is drift, named
+        # keel#140: a member that does not answer is unreachable
         self.assertEqual(found[5], f"drift: peer {OTHER} has no handshake"
-                         " since wg0 came up: it comes once that member has"
-                         " this node as a peer too (keel mesh sync on that"
-                         " member)")
+                         " since wg0 came up: the member does not answer: it"
+                         " is unreachable (down, cut off, or without this"
+                         " node as a peer)")
         self.assertEqual(found[6], "pending invites: 1")
         self.assertIn(f"  {INVITE}  fd00:6b65:1::3/64  TCP 51820  until"
                       " 2026-10-03 13:00:00 UTC  pending", found[7])
@@ -155,6 +156,22 @@ class TestStatus(unittest.TestCase):
         self.assertIn("used, waiting for its confirmation",
                       status.lines(self.overlay, self.root, NOW,
                                    self.wg)[-1])
+
+    def test_a_handshake_older_than_three_minutes_is_drift(self):
+        """keel#140: an 8 h old handshake was said to be same"""
+        old = int(NOW.timestamp()) - 29057
+
+        def wg(argv):
+            if argv[-1] == "latest-handshakes":
+                return f"{JOINER}\t{old}\n{OTHER}\t{old + 29000}\n"
+            return self.wg(argv)
+        found = status.lines(self.overlay, self.root, NOW, wg)
+        self.assertIn(f"drift: peer {JOINER} has its last handshake 29057 s"
+                      " ago: the member does not answer: it is unreachable"
+                      " (down, cut off, or without this node as a peer)",
+                      found)
+        self.assertFalse(any(OTHER in one and one.startswith("drift")
+                             for one in found))
 
     def test_no_secret_is_asked_for(self):
         asked = []

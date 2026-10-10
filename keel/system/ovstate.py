@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from keel.inspect import constants as paths
 from keel.inspect.tree import Tree
 from keel.mesh import vip
-from keel.network import live, marker, wireguard
+from keel.network import live, marker, mtu, wireguard
 from keel.network.wireguard import MODULE, WANTS
 from keel.spec.secretstore import secret_file_error
 
@@ -35,6 +35,9 @@ class OverlayState:
     inline_key: bool = False
     up: bool | None = None
     uplink_gateways: tuple[str, ...] = ()
+    # the MTU the interface has now (keel#139), None off the live system
+    # or when it is not up
+    live_mtu: int | None = None
 
 
 def overlay_of(doc: dict) -> dict | None:
@@ -72,6 +75,7 @@ def observe_overlay(root: str, doc: dict) -> OverlayState | None:
         inline_key=wireguard.parse(current).inline_key if current else False,
         up=live.link_up(iface) if is_live else None,
         uplink_gateways=gateways_of(doc),
+        live_mtu=mtu.live_mtu(iface) if is_live else None,
     )
 
 

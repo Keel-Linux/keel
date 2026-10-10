@@ -10,14 +10,18 @@ Then keel.network.switch, with a runner that hands `wg` its commands
 and gives wg-quick the file under the scratch root (systemd's timers
 are recorded, not armed):
 
-1. a stray peer set on wg0 by hand, then a change of wg0's file that
+1. a stray peer set on wg0 by hand, and its MTU set to 1420 by hand
+   (an interface up before the file's `MTU = 1280` came, keel#139),
+   then a change of wg0's file that
    adds a third peer: no wg-quick, the stray peer is gone (the change
    is made against what `wg show wg0 dump` holds), the interface is the
-   same one (its index), and its handshake with wg1 is the one from
-   before the change;
+   same one (its index), its handshake with wg1 is the one from
+   before the change, and its MTU is the file's 1280;
 2. the revert of that change (`keel network revert`): the same;
 3. a change of [Interface] (the port): wg-quick down, then up, and a
-   new interface, as before.
+   new interface, as before;
+4. wg0 at 1420 again, then keel.network.mtu.converge (`keel network
+   mtu`, which the package's postinst runs): back to 1280.
 
 The result is one JSON line on standard output, `RESULT {...}`.
 """
@@ -31,7 +35,7 @@ import time
 # keel.network.confirm and keel.inspect import each other: the
 # package's own order first
 import keel.commands  # noqa: F401, I001
-from keel.network import marker, switch, wireguard
+from keel.network import marker, mtu, switch, wireguard
 
 CONF = wireguard.conf_path("wg0")
 THIRD = "9vm/AzCVQQsWt1cU2eyjom4cABkNuodiHL8nDjKohEE="
@@ -101,6 +105,7 @@ def shaken(key: str) -> int:
 
 def state(key: str, run: Runner) -> dict:
     found = {"index": index(), "handshake": handshake(key),
+             "mtu": mtu.live_mtu("wg0"),
              "peers": sh("wg", "show", "wg0", "peers").split(),
              "quick": run.quick()}
     run.calls.clear()
@@ -139,6 +144,10 @@ def main() -> None:
     added = wireguard.render({**overlay, "peers": overlay["peers"] + [{
         "public_key": THIRD, "allowed_ips": ["fd00:1::3/128"]}]})
     sh("wg", "set", "wg0", "peer", STRAY, "allowed-ips", "fd00:1::9/128")
+    # wg0 as an upgrade left it: the file says MTU = 1280, wg0 has 1420
+    # (keel#139)
+    sh("ip", "link", "set", "dev", "wg0", "mtu", "1420")
+    report["file_mtu"] = wireguard.parse(added).mtu
     pending = marker.Pending(iface="wg0", path=CONF, window=120,
                              addresses=("fd00:1::1",), kind=marker.OVERLAY)
     report["change"] = switch.change(root, pending, added, run)
@@ -152,6 +161,11 @@ def main() -> None:
     report["port_change"] = switch.change(root, pending, ported, run)
     report["ported"] = state(one, run)
     switch.revert(root, run)
+    # keel network mtu, which the postinst runs, on wg0 at 1420 again
+    sh("ip", "link", "set", "dev", "wg0", "mtu", "1420")
+    report["converge_before"] = mtu.live_mtu("wg0")
+    report["converge"] = mtu.converge(root)
+    report["converge_after"] = mtu.live_mtu("wg0")
     print("RESULT " + json.dumps(report), flush=True)
 
 

@@ -16,7 +16,7 @@ import ipaddress
 from collections.abc import Callable
 from datetime import datetime
 
-from keel.diff.handshakes import LATER, NOT_HELD
+from keel.diff.handshakes import NOT_HELD, STALE, UNREACHABLE
 from keel.mesh import identity, invites
 from keel.mesh.token import shown
 from keel.network import wireguard
@@ -42,6 +42,19 @@ def handshake(value: str | None, now: datetime) -> str:
         return "no handshake yet"
     ago = int(now.timestamp()) - int(value)
     return f"handshake {max(ago, 0)} s ago"
+
+
+def drift_of(value: str | None, now: datetime, iface: str) -> str | None:
+    """Why a peer is drift: not held, no handshake, or one older than
+    STALE (keel#140); None for a recent one"""
+    if value is None:
+        return f"is not held by {iface}: {NOT_HELD}"
+    if not value.isdigit() or value == "0":
+        return f"has no handshake since {iface} came up: {UNREACHABLE}"
+    ago = int(now.timestamp()) - int(value)
+    if ago > STALE:
+        return f"has its last handshake {ago} s ago: {UNREACHABLE}"
+    return None
 
 
 def mesh_identity(root: str) -> str:
@@ -91,10 +104,9 @@ def lines(overlay: dict | None, root: str, now: datetime,
                  if output is not None else "")
         found.append(f"  {key}  {', '.join(allowed(peer))}  {endpoint}"
                      f"{'  ' + state if state else ''}")
-        if output is not None and not state.startswith("handshake "):
-            why = (f"has no handshake since {iface} came up: {LATER}"
-                   if live_key in handshakes else
-                   f"is not held by {iface}: {NOT_HELD}")
+        why = drift_of(handshakes.get(live_key) if live_key else None,
+                       now, iface) if output is not None else None
+        if why:
             drift.append(f"drift: peer {key} {why}")
     found += drift
     waiting = invites.pending(root, now)

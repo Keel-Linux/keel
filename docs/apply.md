@@ -1431,7 +1431,14 @@ goes through the same window, marker, lock, timers and boot unit, with
   interface's own prefixes (wg-quick routes it, `wg set` does not), a
   listen port that is not the file's, an interface that is not up, and
   a `wg set` that fails. The line says which way ran: `done with wg
-  set, live` or `done with wg-quick down, then up` (keel#120). A change
+  set, live` or `done with wg-quick down, then up` (keel#120).
+  **The MTU** of the file (`MTU = 1280`, keel#119) is read by `wg-quick
+  up` alone, so an interface up before the line came keeps its old MTU.
+  The live path sets it with `ip link set dev <interface> mtu N`, with no
+  restart, and a kept file whose interface has another MTU gets the same
+  action, said as drift (keel#139). The package's postinst runs `keel
+  network mtu`, which does the same for each WireGuard interface that is
+  up, so an upgrade needs no reboot. A change
   that only added peers live is marked so in the window's marker, and
   keel mesh keeps it with no handshake (mesh.md). A change is dated on the clock a session's
   start time is read on (the start of a thread, in seconds since the

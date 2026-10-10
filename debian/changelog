@@ -1,3 +1,22 @@
+keel (0.23.15) unstable; urgency=medium
+
+  * After the upgrade to 0.23.13, wg0.conf had MTU = 1280 and the live
+    wg0 kept 1420 until a reboot (keel#139): only wg-quick up reads the
+    line, apply planned nothing and keel diff did not see it. The live
+    change of the overlay now sets the file's MTU with ip link set,
+    with no restart. A kept file whose interface has another MTU gets
+    the same action in keel spec apply, said as drift. keel network mtu
+    does it for each WireGuard interface that is up, and the package's
+    postinst runs it, so an upgrade needs no reboot. keel diff reports
+    network.overlay.wireguard.mtu: the live MTU against the file's.
+  * A handshake older than 180 s is drift in keel diff and keel mesh
+    status, not same (keel#140): WireGuard does a new handshake every 2
+    minutes while packets flow. The drift says the member does not
+    answer and is unreachable, and no longer tells the operator to run
+    keel mesh sync on it.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Sat, 10 Oct 2026 10:00:00 +0000
+
 keel (0.23.13) unstable; urgency=medium
 
   * keel assemble refuses to pack a template whose rootfs records a

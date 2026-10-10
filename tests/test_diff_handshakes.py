@@ -24,7 +24,8 @@ SPEC = {"network": {"overlay": {"wireguard": {
 
 def wg(argv):
     assert argv == ("wg", "show", "wg0", "latest-handshakes")
-    return f"{ONE}\t{int(NOW.timestamp()) - 40}\n{TWO}\t0\nnoise\n"
+    return (f"{ONE}\t{int(NOW.timestamp()) - 40}\n{TWO}\t0\n"
+            f"{THREE}\t{int(NOW.timestamp()) - 29057}\nnoise\n")
 
 
 class TestHandshakes(unittest.TestCase):
@@ -34,8 +35,21 @@ class TestHandshakes(unittest.TestCase):
         self.assertEqual(found[ONE].status, SAME)
         self.assertIn("a handshake (40 s ago)", found[ONE].line())
         self.assertEqual(found[TWO].status, DRIFT)
-        self.assertIn("observed none; no handshake since wg0 came up",
+        self.assertIn("observed none; no handshake since wg0 came up: the"
+                      " member does not answer: it is unreachable",
                       found[TWO].line())
+        # keel#140: 8 h old is drift, with its age
+        self.assertEqual(found[THREE].status, DRIFT)
+        self.assertIn("declared a handshake within 180 s, observed a"
+                      " handshake (29057 s ago); older than 180 s: the"
+                      " member does not answer", found[THREE].line())
+        self.assertNotIn("keel mesh sync on that member", found[TWO].line())
+
+    def test_a_peer_the_interface_does_not_hold(self):
+        def wg(argv):
+            return f"{ONE}\t{int(NOW.timestamp())}\n"
+        found = {one.field.split(".")[4]: one
+                 for one in handshakes.handshake_fields(SPEC, True, wg, NOW)}
         self.assertEqual(found[THREE].status, DRIFT)
         self.assertIn("wg0 does not hold this peer", found[THREE].line())
         self.assertEqual(
@@ -55,6 +69,50 @@ class TestHandshakes(unittest.TestCase):
         from unittest import mock
         with mock.patch("keel.network.live.output", side_effect=wg):
             self.assertEqual(len(handshakes.handshake_fields(SPEC, True)), 3)
+
+
+class TestMtu(unittest.TestCase):
+    """keel#139: the live MTU against the file's"""
+
+    def setUp(self):
+        import os
+        import shutil
+        import tempfile
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root)
+        os.makedirs(os.path.join(self.root, "etc/wireguard"))
+        self.conf = os.path.join(self.root, "etc/wireguard/wg0.conf")
+
+    def write(self, text):
+        with open(self.conf, "w") as fob:
+            fob.write(text)
+
+    def fields(self, mtu=None, live=True):
+        def ip(argv):
+            assert argv == ("ip", "link", "show", "dev", "wg0")
+            return None if mtu is None else (
+                f"9: wg0: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu {mtu} qdisc"
+                " noqueue state UNKNOWN\n")
+        return handshakes.mtu_fields(SPEC, self.root, live, ip)
+
+    def test_a_live_mtu_that_is_not_the_file_s_is_drift(self):
+        self.write("[Interface]\nMTU = 1280\n")
+        [found] = self.fields(1420)
+        self.assertEqual(found.status, DRIFT)
+        self.assertIn("declared 1280, observed 1420", found.line())
+        self.assertIn("keel network mtu", found.line())
+        [found] = self.fields(1280)
+        self.assertEqual(found.status, SAME)
+        [found] = self.fields(None)
+        self.assertEqual(found.status, UNKNOWN)
+
+    def test_nothing_without_a_line_a_file_or_the_live_system(self):
+        self.assertEqual(self.fields(1420), [])
+        self.write("[Interface]\nListenPort = 51820\n")
+        self.assertEqual(self.fields(1420), [])
+        self.write("[Interface]\nMTU = 1280\n")
+        self.assertEqual(self.fields(1420, live=False), [])
+        self.assertEqual(handshakes.mtu_fields({}, self.root, True), [])
 
 
 if __name__ == "__main__":

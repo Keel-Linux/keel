@@ -232,6 +232,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_root_option(revert_parser, "revert the change of")
     revert_parser.set_defaults(handler=commands.network_revert)
+    mtu_parser = network_actions.add_parser(
+        "mtu",
+        help="set the MTU of each WireGuard interface that is up to the"
+        " one its file says, live, with no restart (keel#139); what the"
+        " package runs when it is upgraded",
+    )
+    add_root_option(mtu_parser, "read the WireGuard files of")
+    mtu_parser.set_defaults(handler=commands.network_mtu)
     add_wireguard_parser(network_actions)
     mesh_options = mesh_parser.Options(
         add_common_options, add_root_option, port_number, window_seconds)
