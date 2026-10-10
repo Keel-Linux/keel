@@ -200,7 +200,15 @@ record:
    of the two nodes alone, the other one gone), the operator's flag is
    the acceptance. With
    etcd, the claim is the counter's compare-and-swap, and the controller
-   adds the address once it renewed the claim's lease;
+   adds the address once it renewed the claim's lease. A transaction
+   that etcd does not answer in time may have committed (keel#135): the
+   counter is read first; this node's own claim at the epoch is the
+   claim made, and is recorded with its lease; another claim ends the
+   promote; an unchanged counter is tried again with the same
+   comparison, never a blind write, at most 3 times and none started
+   30 s after the first, a lease older than 10 s replaced first. The
+   leases of the tries that did not win are revoked, so a late
+   transaction with one of them fails in etcd;
 4. each peer routes the VIP with one `wg set`; one that did not answer
    takes it at its next check.
 

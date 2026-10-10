@@ -414,6 +414,23 @@ def raced(here: Here, vip: str, own: str,
         return exits.MESH_REFUSED
     out(f"this node holds {vip} at epoch {now.epoch.epoch}, claimed by its"
         " controller")
+    held = vipnode.current(here, vip)
+    if now.epoch.lease and (held.claim is None or
+                            held.claim.raw != now.epoch.raw or
+                            held.lease != now.epoch.lease):
+        # this node's own claim in etcd that its file does not hold with
+        # its lease (a transaction that committed after its answer was
+        # lost, keel#135): recorded, so the controller renews the lease
+        # and carries the address
+        problem = vipnode.verified(here, now.epoch)
+        if problem:
+            out(f"this node's claim in etcd is not taken: {problem}")
+            return exits.APPLY_FAILED
+        try:
+            vipnode.hold(here, now.epoch, False, now.epoch.lease)
+        except VipError as e:
+            out(f"this node's claim in etcd is not taken: {e}")
+            return exits.APPLY_FAILED
     if not carried_soon(here, vip):
         out(f"keel-vip.service did not add {vip} to {here.iface()} within"
             f" {CARRY_WAIT:g} s: is it running?")
