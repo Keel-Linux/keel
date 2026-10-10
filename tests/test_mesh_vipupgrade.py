@@ -174,6 +174,76 @@ class TestStopped(WithEtcd):
         self.assertFalse(self.carried(0))
 
 
+class TestHandOver(WithEtcd):
+    """A restart renews the lease once, as the unit stops, and gives the
+    address a full lifetime from that renewal, so the next controller
+    has the release time to start and renew. On a link of 250 ms with
+    2% loss, the next controller's start and first renewal took longer
+    than what the last renewal of the old one had left, and the kernel
+    removed the address for a moment (vip-upgrade / trixie)"""
+
+    def stopped(self, restarting=True):
+        return vipetcd.stopped(self.all[0], restarting=restarting,
+                               client=lambda: self.kv, clock=self.monotonic)
+
+    def slow(self) -> int:
+        """The holder, its last renewal 5 s old, 4 s left on wg0"""
+        self.promote(0)
+        self.turn()
+        self.sleep(5.0)
+        self.nets[0].lifetimes[HOST] = 4
+        return len(self.kv.calls)
+
+    def test_a_restart_renews_once_and_gives_a_full_lifetime(self):
+        before = self.slow()
+        self.assertEqual(self.stopped(), ([], [VIP]))
+        self.assertEqual(self.kv.calls[before:], ["keepalive", "prefix"])
+        self.assertEqual(self.nets[0].lifetimes[HOST],
+                         vipnet.lifetime(0.0))
+        self.assertTrue(self.carried(0))
+
+    def test_no_answer_leaves_the_lifetime_to_the_kernel(self):
+        self.slow()
+        self.kv.refuse = "all"
+        self.assertEqual(self.stopped(), ([], [VIP]))
+        self.assertEqual(self.nets[0].lifetimes[HOST], 4)
+
+    def test_a_lease_gone_drops_it(self):
+        self.slow()
+        self.kv.expire(self.lease())
+        self.assertEqual(self.stopped(), ([VIP], []))
+        self.assertFalse(self.carried(0))
+
+    def test_an_address_not_carried_again_is_said(self):
+        self.slow()
+        with mock.patch.object(vipnode, "carry_held", return_value=False):
+            self.assertEqual(self.stopped(), ([], [VIP]))
+        self.assertIn("renewed as the unit restarts, but not carried",
+                      self.text(0))
+
+    def test_a_vip_on_no_lease_is_left_to_the_kernel(self):
+        self.slow()
+        held = vipnode.current(self.all[0], VIP)
+        from dataclasses import replace
+        self.assertTrue(vipetcd.handed_over(
+            self.all[0], replace(held, lease=None), lambda: self.kv,
+            self.monotonic))
+
+    def test_the_default_client_is_this_member_s_etcd(self):
+        self.slow()
+        with mock.patch.object(vipetcd, "local",
+                               return_value=self.kv) as local:
+            self.assertEqual(vipetcd.stopped(self.all[0], restarting=True,
+                                             clock=self.monotonic),
+                             ([], [VIP]))
+        local.assert_called_once_with(self.all[0])
+
+    def test_a_stop_renews_nothing(self):
+        before = self.slow()
+        self.assertEqual(self.stopped(restarting=False), ([VIP], []))
+        self.assertEqual(self.kv.calls[before:], [])
+
+
 class TestTheUnit(unittest.TestCase):
     def cgroup(self, text: str) -> str:
         fd, path = tempfile.mkstemp()

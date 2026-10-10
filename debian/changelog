@@ -1,3 +1,18 @@
+keel (0.23.18) unstable; urgency=medium
+
+  * A try-restart of keel-vip.service on the holder could remove the VIP
+    from wg0 for a moment (keel#87; seen in vip-upgrade / trixie, 4.47 s
+    after the restart, on main too). The address keeps the lifetime of
+    the old controller's last confirmed renewal, and on a link of 250 ms
+    with 2% loss the next controller's start and first renewal took
+    longer than what was left. keel vip tend --stopped now renews the
+    lease once, as the controller does (a keep-alive, then a
+    linearizable read), before it lets the unit restart, and gives the
+    address the lifetime that renewal leaves. With no answer from etcd
+    the address stays as it was; a lease gone drops it.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Sat, 10 Oct 2026 16:00:00 +0000
+
 keel (0.23.15) unstable; urgency=medium
 
   * After the upgrade to 0.23.13, wg0.conf had MTU = 1280 and the live

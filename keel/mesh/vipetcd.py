@@ -529,7 +529,9 @@ class Controller:
         holder.join()
 
 
-def stopped(here: Here, restarting: bool = False
+def stopped(here: Here, restarting: bool = False,
+            client: Callable[[], Client] | None = None,
+            clock: Callable[[], float] = vipnode.boottime
             ) -> tuple[list[str], list[str]]:
     """What the unit's ExecStopPost runs: every VIP this node carries
     dropped, so a helper that stopped never leaves one behind it,
@@ -539,14 +541,21 @@ def stopped(here: Here, restarting: bool = False
     confirmed renewal, and the next controller extends it only once it
     renewed the same lease itself. An address with no lifetime is always
     dropped. The VIPs dropped and kept. Never fenced: a controller
-    started again carries it once it renewed its lease."""
+    started again carries it once it renewed its lease.
+
+    A kept address is renewed once first (`handed_over`): on a slow
+    link, the next controller's start and first renewal took longer
+    than what the old one's last renewal had left, and the kernel
+    removed the address for a moment (vip-upgrade / trixie, keel#87)."""
     dropped, kept = [], []
     for held in vipstate.held_all(here.root):
         if vipnet.carried(here.iface(), held.vip,
                           here.node.output) is False:
             continue
         if restarting and vipnet.bounded(here.iface(), held.vip,
-                                         here.node.output):
+                                         here.node.output) and \
+                handed_over(here, held, client or (lambda: local(here)),
+                            clock):
             kept.append(held.vip)
             continue
         problem = vipnet.drop(here.iface(), held.vip, here.node.run,
@@ -555,3 +564,31 @@ def stopped(here: Here, restarting: bool = False
             here.err(f"vip {held.vip}: {problem}")
         dropped.append(held.vip)
     return dropped, kept
+
+
+def handed_over(here: Here, held: Held, client: Callable[[], Client],
+                clock: Callable[[], float]) -> bool:
+    """One renewal of this node's lease, as the controller makes it (a
+    keep-alive, then a linearizable read, which needs the majority), and
+    the address given the lifetime that renewal leaves; whether the
+    address stays. With no answer it stays as it is, the kernel's to end
+    by the last renewal's deadline; a lease gone drops it"""
+    if not held.lease or not held.holds(here.own_key()):
+        return True
+    sent = clock()
+    try:
+        etcd = client()
+        ttl = etcd.keepalive(held.lease)
+        if ttl > 0:
+            etcd.prefix(key_of(here.mesh_id(), held.vip, EPOCH))
+    except (EtcdError, *FAILURES) as e:
+        here.err(f"vip {held.vip}: not renewed as the unit restarts ({e});"
+                 " the kernel ends the address by the last renewal's"
+                 " deadline")
+        return True
+    if ttl <= 0:
+        return False
+    if not vipnode.carry_held(here, held.vip, clock() - sent):
+        here.err(f"vip {held.vip}: renewed as the unit restarts, but not"
+                 " carried again")
+    return True
