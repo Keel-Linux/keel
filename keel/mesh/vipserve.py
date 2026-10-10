@@ -15,15 +15,19 @@ message is (keel.mesh.etcdserve); then:
   and the epoch this node knows;
 - `release` is taken only by a node whose own spec declares that VIP,
   from the other member its pair record names, fresh, for an epoch
-  newer than any this node knows: it drops the address, then answers;
+  newer than any this node knows: it turns its database read only
+  when it declares one (the commits in flight end first, keel#138),
+  drops the address, then answers;
 - `pair` is the other member's pair record (keel.mesh.vippair), signed
   here too when this node's spec declares that VIP, and kept;
 - `secret` is answered with a secret the pair shares, only to the other
   member of the pair record, fresh (keel.system.dbsecret); 404 while
   this node holds none, and the asker tries again later.
 
-Nothing here applies a change under 0018's window, and nothing waits:
-each answer is the time of an `ip` or a `wg set`.
+Nothing here applies a change under 0018's window, and nothing waits
+but a release on a database: each answer is the time of an `ip` or a
+`wg set`, and a release also waits for SET GLOBAL read_only = ON (up to
+dbreadonly.QUIESCE_TIMEOUT).
 """
 
 import json
@@ -198,5 +202,27 @@ def released(here: Here, message: vipmsg.Message) -> Answer:
 
     def revoke(lease: str) -> None:
         here.local().revoke(lease)
+    quiesced(here, vip)
     vipnode.release(here, vip, revoke)
     return Answer(200, b'{"released": true}')
+
+
+def quiesced(here: Here, vip: str) -> None:
+    """The database of a node that declares one made read only before
+    the VIP goes (keel#138): the commits in flight end first, their
+    clients get the answer while the address is still here, and no new
+    write is taken. A failure is logged and the release goes on: the
+    database follows the VIP's state after, as before"""
+    try:
+        doc = here.node.document()
+    except NodeError:
+        return
+    if not (doc.get("database") or {}).get("server"):
+        return
+    from keel.system import dbreadonly
+    problem = dbreadonly.quiesce()
+    if problem:
+        here.err(f"vip {vip}: the database could not be made read only"
+                 f" first ({problem}); the release goes on")
+        return
+    here.err(f"vip {vip}: the database is read only before the release")

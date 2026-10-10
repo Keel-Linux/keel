@@ -223,6 +223,23 @@ class TestAMariadbPairOnAPoorNetwork(unittest.TestCase):
         self.assertLess(found["first_ok_after_s"] - found["carried_s"], 3.0,
                         found)
 
+    def test_a_planned_promote_s_write_gap_is_under_3_s(self):
+        """keel#138: a write in flight at the release got its answer
+        late (the old primary dropped the VIP while the commit waited
+        for the replica), and the new primary took 10 s to take writes.
+        Both ways, A to B and back: the longest gap between two
+        acknowledged writes under 3 s, no write waiting 10 s, no
+        acknowledged row lost"""
+        for key in ("k138_to_b", "k138_to_a"):
+            with self.subTest(promote=key):
+                found = self.found[f"{key}_gap"]
+                print(f"{key}: {found}", file=sys.stderr)
+                self.assertEqual(self.found[key]["code"], 0, self.found[key])
+                self.assertIsNotNone(self.found[f"{key}_writable_s"], found)
+                self.assertLess(found["longest_gap_s"], 3.0, found)
+                self.assertLess(found["longest_write_s"], 10.0, found)
+                self.assertEqual(self.found[f"{key}_missing"], [], found)
+
     def test_no_two_nodes_ever_carry_the_vip(self):
         self.assertEqual(self.found["max_holders"], 1,
                          self.found["double_holder_samples"])
