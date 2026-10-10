@@ -54,6 +54,9 @@ ACCOUNTS_QUESTION = QUIET + ("SELECT User, Host FROM mysql.user",)
 STATUS_QUESTION = mariadb.CLIENT + ("--execute", "SHOW REPLICA STATUS\\G")
 NO_BINLOG = "SET SESSION sql_log_bin = 0;\n"
 POLL_SECONDS = 1.0
+# how long the old primary waits for read_only before it releases the
+# VIP: the semi-synchronous timeout (10 s) and room
+QUIESCE_TIMEOUT = 15
 # the lock follow and spec apply take around the replication's statements
 REPLICATION_LOCK = "var/lib/keel/database/follow.lock"
 IO_STOP = "STOP SLAVE IO_THREAD"
@@ -228,6 +231,31 @@ def promote(
         return (f"the server takes writes, but {forget.summary} failed:"
                 f" {problem}. Run STOP SLAVE; RESET SLAVE ALL before its"
                 " next restart")
+    return None
+
+
+def quiesce(runner=subprocess.run) -> str | None:
+    """read_only on, before the old primary lets the VIP go (keel#138);
+    None, or why not
+
+    SET GLOBAL read_only = ON returns once the commits in flight ended,
+    and a commit with semi-synchronous replication ends when the
+    replica, still connected then, acknowledged it. So a client whose
+    write was in flight gets its answer before the address goes, and no
+    new write is taken. Bounded by QUIESCE_TIMEOUT: a replica that does
+    not acknowledge costs rpl_semi_sync_master_timeout (10 s) at most."""
+    statements = mariadb.set_read_only(True)
+    try:
+        done = runner(list(mariadb.CLIENT), input=statements.text,
+                      capture_output=True, text=True, check=False,
+                      timeout=QUIESCE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return f"the server did not turn read only within" \
+            f" {QUIESCE_TIMEOUT} s"
+    except OSError as e:
+        return f"cannot run {mariadb.CLIENT[0]}: {e.strerror}"
+    if done.returncode != 0:
+        return (done.stderr or "").strip() or f"exited {done.returncode}"
     return None
 
 

@@ -575,3 +575,60 @@ class TestTheNodeErrors(Pair):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheReleaseQuiescesTheDatabase(Pair):
+    """keel#138: a write in flight at the release lost its answer: the
+    old primary dropped the VIP while the commit waited for the
+    replica's acknowledgement. The database turns read only first,
+    which waits for the commits in flight (the replica is still
+    connected), and only then is the address dropped"""
+
+    def promote(self, index: int) -> tuple[int, str]:
+        said: list[str] = []
+        code = vippromote.promote(self.all[index], False, said.append)
+        return code, "\n".join(said)
+
+    def test_the_database_is_read_only_before_the_address_goes(self):
+        from unittest import mock
+        from keel.mesh import vipserve
+        self.nodes()
+        self.promote(0)
+        order: list[str] = []
+        node = self.all[0].node
+        real = node.run
+
+        def run(argv):
+            if argv[:4] == ("ip", "-6", "addr", "del"):
+                order.append("drop")
+            return real(argv)
+        node.run = run
+        with mock.patch.object(vipserve, "quiesced",
+                               side_effect=lambda here, vip:
+                               order.append("read only")):
+            code, said = self.promote(1)
+        self.assertEqual(code, exits.OK, said)
+        self.assertEqual(order[:2], ["read only", "drop"], order)
+
+    def test_quiesced_asks_the_database_only_where_one_is_declared(self):
+        from unittest import mock
+        from keel.mesh import vipserve
+        self.nodes()
+        here = self.all[0]
+        with mock.patch("keel.system.dbreadonly.quiesce",
+                        return_value=None) as asked:
+            vipserve.quiesced(here, VIP)
+        asked.assert_not_called()
+        doc = here.node.document()
+        doc["database"] = {"server": {"engine": "mariadb",
+                                      "role": "primary"}}
+        here.node.write(doc)
+        with mock.patch("keel.system.dbreadonly.quiesce",
+                        return_value=None) as asked:
+            vipserve.quiesced(here, VIP)
+        asked.assert_called_once()
+        self.assertIn("read only before the release", self.text(0))
+        with mock.patch("keel.system.dbreadonly.quiesce",
+                        return_value="ERROR 2002"):
+            vipserve.quiesced(here, VIP)
+        self.assertIn("ERROR 2002); the release goes on", self.text(0))

@@ -262,3 +262,57 @@ class TestRacedRefusesWhatItCannotTake(ClaimCase):
             code, said = self.raced()
         self.assertEqual(code, exits.APPLY_FAILED)
         self.assertIn("epoch 4 is known", said)
+
+
+class TestThePromoteCarriesItAtOnce(ClaimCase):
+    """keel#138: after the compare-and-swap the promote waited for the
+    controller's next renewal before the VIP was on wg0 (5.6 s write gap
+    at 250 ms). The lease was granted and the claim written with it by
+    the majority, after the moment `asked`: the promote carries the
+    address itself, for what is left of the release time after that
+    moment, and the controller extends it once it renewed"""
+
+    def test_the_address_is_on_wg0_when_the_promote_returns(self):
+        with mock.patch.object(vippromote, "carried_soon",
+                               side_effect=lambda here, vip: self.carried(
+                                   self.all.index(here))):
+            said: list[str] = []
+            code = vippromote.promote(self.all[0], False, said.append)
+        self.assertEqual(code, exits.OK, said)
+        self.assertTrue(self.carried(0))
+        lifetime = self.nets[0].lifetimes[f"{VIP}/128"]
+        self.assertIsNotNone(lifetime)
+        self.assertLessEqual(lifetime, vipetcd.RELEASE_AFTER)
+
+    def test_too_old_a_lease_is_left_to_the_controller(self):
+        real = vipetcd.claim
+
+        def slow(*args, **kwargs):
+            made = real(*args, **kwargs)
+            self.sleep(vipetcd.RELEASE_AFTER)
+            return made
+        with mock.patch.object(vipetcd, "claim", side_effect=slow), \
+                mock.patch.object(vippromote, "carried_soon",
+                                  side_effect=self.carry_soon):
+            said: list[str] = []
+            code = vippromote.promote(self.all[0], False, said.append)
+        self.assertEqual(code, exits.OK, said)
+        self.assertTrue(self.carried(0))
+
+
+class TestAPlannedPromoteDoesNotWaitForTheLease(ClaimCase):
+    def test_a_released_primary_s_lease_is_not_waited_for(self):
+        """keel#138: the primary that released dropped the address first
+        and revoked its own lease; the claim's compare-and-swap is on the
+        counter alone, so the promote claims at once (a second of etcd
+        calls at 250 ms)"""
+        self.promote(0)
+        self.turn()
+        self.kv.calls.clear()
+        code, said = self.promote(1)
+        self.assertEqual(code, exits.OK, said)
+        self.assertIn("released by", said)
+        self.assertNotIn("waiting for the primary's lease", said)
+        self.assertNotIn("time_to_live", self.kv.calls[:self.kv.calls.index(
+            "swap")])
+        self.assertEqual(self.holds(), [1])
