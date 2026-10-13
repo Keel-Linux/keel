@@ -209,6 +209,33 @@ def follow_dropin_text(
             + f"primary_conninfo = '{file_value(conninfo)}'\n")
 
 
+def role_statements(password: str) -> Statements:
+    """The statements that make the replication role true, as declared
+
+    One idempotent block: the role a replica logs in as, created when it
+    is not there, given the pair's password when it is. `password` is
+    escaped as a literal, and control characters are refused by the
+    credential gate before the planner builds on this (keel.system
+    .dbstate.credential), so a value from a secret file is safe here.
+    """
+    quoted = literal(password)
+    return Statements(
+        "DO $keel$\n"
+        "BEGIN\n"
+        "   IF NOT EXISTS (SELECT FROM pg_roles"
+        f" WHERE rolname = '{REPLICATION_USER}') THEN\n"
+        f"      CREATE ROLE {REPLICATION_USER}"
+        " WITH LOGIN REPLICATION PASSWORD " + quoted + ";\n"
+        "   ELSE\n"
+        f"      ALTER ROLE {REPLICATION_USER}"
+        " WITH LOGIN REPLICATION PASSWORD " + quoted + ";\n"
+        "   END IF;\n"
+        "END\n"
+        "$keel$;\n",
+        "ensure the replication role holds the pair's password",
+    )
+
+
 def promote() -> Statements:
     """Take writes: the one SQL step of a promotion
 

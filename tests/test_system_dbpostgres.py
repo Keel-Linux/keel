@@ -166,6 +166,28 @@ class TestUserDatabases(unittest.TestCase):
         self.assertEqual(dbpostgres.user_databases(["postgres"]), [])
 
 
+class TestRoleStatements(unittest.TestCase):
+    def test_the_replication_role_is_ensured_with_the_password(self):
+        found = dbpostgres.role_statements("s3cret")
+        self.assertIn("CREATE ROLE", found.text)
+        self.assertIn(dbpostgres.REPLICATION_USER, found.text)
+        self.assertIn(dbpostgres.literal("s3cret"), found.text)
+        self.assertIn("replication", found.summary)
+
+    def test_an_existing_role_gets_the_new_password(self):
+        found = dbpostgres.role_statements("new-one")
+        self.assertIn("ALTER ROLE", found.text)
+        self.assertIn(dbpostgres.literal("new-one"), found.text)
+
+    def test_a_quote_in_the_password_is_doubled_not_broken(self):
+        found = dbpostgres.role_statements("it's")
+        self.assertIn(dbpostgres.literal("it's"), found.text)
+
+    def test_the_block_uses_a_dollar_quoted_label(self):
+        found = dbpostgres.role_statements("x")
+        self.assertIn("$keel$", found.text)
+
+
 class TestQuestions(unittest.TestCase):
     def test_the_schemas_question_lists_databases_as_the_postgres_user(self):
         question = dbpostgres.schemas_question()
