@@ -14,6 +14,17 @@ keel (0.23.15) unstable; urgency=medium
     minutes while packets flow. The drift says the member does not
     answer and is unreachable, and no longer tells the operator to run
     keel mesh sync on it.
+  * The PostgreSQL converge begins (handbook decision 0054, the second
+    engine after MariaDB under 0013's one-at-a-time rule):
+    keel.system.dbpostgres is the pure twin of keel.system.dbmariadb:
+    the versioned cluster paths resolved from the root, the drop-in
+    text (hba_file moves the whole authorization surface into keel's
+    file, a primary carries wal_level and the sender and slot limits),
+    the pg_hba text per declared origin, the primary_conninfo follow
+    drop-in with its two-layer password escaping, the pg_promote()
+    statement, and the literal escaping. No dispatch yet: nothing calls
+    it, and the decision note records the design before the code, the
+    way 0013 asks.
 
  -- Marcos Méndez <mendez.foto@gmail.com>  Sat, 10 Oct 2026 10:00:00 +0000
 
