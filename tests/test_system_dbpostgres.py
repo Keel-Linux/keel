@@ -7,6 +7,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 from keel.system import dbpostgres
 
@@ -68,6 +69,44 @@ class TestClusterPaths(unittest.TestCase):
         self.assertEqual(
             dbpostgres.rel(os.path.join(self.root, "etc/x"), self.root),
             "etc/x")
+
+
+class TestUnits(unittest.TestCase):
+    """The cluster's own unit for every stop and start (keel#153)
+
+    On Debian, postgresql@17-main.service is PartOf= and Before= the
+    umbrella postgresql.service. A stop of the umbrella returns before
+    the cluster stops, and a start of the active umbrella starts
+    nothing: the old server wrote its pg_control into the new copy of a
+    reseed (found on real nodes, keel 0.23.18)."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root)
+        env = mock.patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop(dbpostgres.SERVICE_ENV, None)
+
+    def test_the_server_unit_is_the_cluster_s_own(self):
+        os.makedirs(os.path.join(self.root, "etc/postgresql/17/main"))
+        self.assertEqual(dbpostgres.service(self.root),
+                         "postgresql@17-main")
+
+    def test_the_boot_unit_stays_the_umbrella(self):
+        """the generator of postgresql-common wires the cluster into the
+        umbrella, so enable and is-enabled ask the umbrella"""
+        os.makedirs(os.path.join(self.root, "etc/postgresql/17/main"))
+        self.assertEqual(dbpostgres.boot_unit(), "postgresql")
+
+    def test_no_cluster_names_the_umbrella(self):
+        self.assertEqual(dbpostgres.service(self.root), "postgresql")
+
+    def test_the_environment_names_the_unit_of_a_test(self):
+        os.makedirs(os.path.join(self.root, "etc/postgresql/17/main"))
+        os.environ[dbpostgres.SERVICE_ENV] = "postgresql-keel-a"
+        self.assertEqual(dbpostgres.service(self.root), "postgresql-keel-a")
+        self.assertEqual(dbpostgres.boot_unit(), "postgresql-keel-a")
 
 
 class TestDropinText(unittest.TestCase):

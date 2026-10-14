@@ -36,6 +36,7 @@ import fcntl
 import io
 import os
 import subprocess
+import threading
 import time
 from collections.abc import Iterator
 
@@ -231,19 +232,52 @@ def promote(
     return None
 
 
+# the locks this thread holds, by path, and how many times it took each
+_HELD = threading.local()
+
+
+def _held() -> dict:
+    found = getattr(_HELD, "paths", None)
+    if found is None:
+        found = _HELD.paths = {}
+    return found
+
+
 @contextlib.contextmanager
 def replication_locked(root: str) -> Iterator[None]:
     """One writer of the replication's statements at a time: keel
     database follow, keel database watch's follow and spec apply's
-    replication actions (keel#118)"""
+    replication actions (keel#118), and a PostgreSQL start (keel#153)
+
+    Reentrant in one thread: the follow holds it and its observation
+    starts the server under it. flock locks an open file description,
+    so a second open of the file in the same thread would wait for the
+    first one forever. Another thread or process waits."""
     path = os.path.join(root, REPLICATION_LOCK)
+    held = _held()
+    if held.get(path):
+        held[path] += 1
+        try:
+            yield
+        finally:
+            held[path] -= 1
+        return
     os.makedirs(os.path.dirname(path), exist_ok=True)
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
+        held[path] = 1
+        try:
+            yield
+        finally:
+            del held[path]
     finally:
         os.close(fd)
+
+
+def holds_replication_lock(root: str) -> bool:
+    """Whether this thread holds the lock of the replication"""
+    return bool(_held().get(os.path.join(root, REPLICATION_LOCK)))
 
 
 class _Ran:

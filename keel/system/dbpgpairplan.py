@@ -159,7 +159,7 @@ def _configuration(server: dict, state: DatabaseState,
                 "let the server bind the VIP before it carries it"),
         ]
     if state.enabled == "disabled":
-        actions.append(Run(("systemctl", "enable", dbpostgres.service()),
+        actions.append(Run(("systemctl", "enable", dbpostgres.boot_unit()),
                            "enable the server, so it starts at boot"))
     if loose:
         actions.append(Note(NAME_NOTE.format(names=", ".join(loose))))
@@ -188,12 +188,12 @@ def _configuration(server: dict, state: DatabaseState,
             " to the replication role"))
     if not (dropin_kept and pair_kept):
         actions.append(Run(
-            ("systemctl", "restart", dbpostgres.service()),
+            ("systemctl", "restart", dbpostgres.boot_unit()),
             "restart the server, which is the only way these take"
             " effect"))
     else:
         actions.append(Run(
-            ("systemctl", "reload", dbpostgres.service()),
+            ("systemctl", "reload", dbpostgres.boot_unit()),
             "reload the server, which is how hba and ident rules take"
             " effect"))
     return Step(FIELD, tuple(actions))

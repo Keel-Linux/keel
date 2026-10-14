@@ -165,7 +165,7 @@ class TestThePairPlan(unittest.TestCase):
         runs = [one.argv for one in only(plan[0], Run)]
         self.assertIn(("sysctl", "-q", "-w",
                        "net.ipv6.ip_nonlocal_bind=1"), runs)
-        self.assertIn(("systemctl", "restart", dbpostgres.service()), runs)
+        self.assertIn(("systemctl", "restart", dbpostgres.boot_unit()), runs)
 
     def test_an_unchanged_node_restarts_nothing(self):
         dropin, pair_dropin, hba, ident = wanted_files(DOC, state())
@@ -196,8 +196,8 @@ class TestThePairPlan(unittest.TestCase):
                        hba="stale\n", ident=ident, nonlocal_bind="1"),
             False)
         runs = [one.argv for one in only(plan[0], Run)]
-        self.assertIn(("systemctl", "reload", dbpostgres.service()), runs)
-        self.assertNotIn(("systemctl", "restart", dbpostgres.service()),
+        self.assertIn(("systemctl", "reload", dbpostgres.boot_unit()), runs)
+        self.assertNotIn(("systemctl", "restart", dbpostgres.boot_unit()),
                          runs)
         written = [one.path for one in only(plan[0], WriteFile)]
         self.assertEqual(written, [PG_HBA])
@@ -208,8 +208,8 @@ class TestThePairPlan(unittest.TestCase):
             DOC, state(dropin=dropin, pair_dropin="stale\n", hba=hba,
                        ident=ident, nonlocal_bind="1"), False)
         runs = [one.argv for one in only(plan[0], Run)]
-        self.assertIn(("systemctl", "restart", dbpostgres.service()), runs)
-        self.assertNotIn(("systemctl", "reload", dbpostgres.service()),
+        self.assertIn(("systemctl", "restart", dbpostgres.boot_unit()), runs)
+        self.assertNotIn(("systemctl", "reload", dbpostgres.boot_unit()),
                          runs)
 
     def test_a_name_origin_gets_a_line_but_pins_no_certificate(self):
@@ -264,7 +264,7 @@ class TestThePairPlan(unittest.TestCase):
     def test_a_disabled_server_is_enabled(self):
         plan = plan_database(DOC, state(enabled="disabled"), False)
         runs = [one.argv for one in only(plan[0], Run)]
-        self.assertIn(("systemctl", "enable", dbpostgres.service()), runs)
+        self.assertIn(("systemctl", "enable", dbpostgres.boot_unit()), runs)
 
 
 class TestTheGates(unittest.TestCase):

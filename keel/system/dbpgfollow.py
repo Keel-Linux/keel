@@ -115,7 +115,7 @@ def _unproven(root: str, state: DatabaseState, found, runner) -> None:
         found.say("in recovery: this node takes no writes until"
                   f" {state.pair.vip} is proven on wg0")
         return
-    problem = _run(runner, ("systemctl", "stop", dbpostgres.service()))
+    problem = _run(runner, ("systemctl", "stop", dbpostgres.service(root)))
     if problem:
         found.fail(f"this node's claim of {state.pair.vip} is not proven"
                    f" (the VIP is not on wg0) and the server could not be"
@@ -357,7 +357,8 @@ def _fence(root: str, found, runner) -> bool:
         found.fail(f"this node holds data and takes writes, and it could"
                    f" not be made a standby: {e.strerror or e}")
         return False
-    problem = _run(runner, ("systemctl", "restart", dbpostgres.service()))
+    problem = _run(runner, ("systemctl", "restart",
+                            dbpostgres.service(root)))
     if problem:
         found.fail(f"this node holds data and takes writes, and the"
                    f" restart that makes it a standby failed: {problem}")

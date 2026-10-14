@@ -227,9 +227,9 @@ def observe_database(
     binary = engine.installed(tree.glob)
     enabled = ""
     dropin, hba, pair_dropin, ident = _database_files(name, tree)
-    probe = _probe(name)
+    probe = _probe(name, root)
     if live and binary is not None and probe is not None:
-        down = dbready.ready(probe[0], probe[1], start, dbready.READY_TIMEOUT)
+        down = _ready(name, root, probe, start)
         if down:
             return DatabaseState(
                 engine=name,
@@ -243,7 +243,8 @@ def observe_database(
                 down=down,
                 pair=pair,
             )
-        enabled = dbready.enabled(probe[0])
+        enabled = dbready.enabled(
+            dbpostgres.boot_unit() if name == "postgresql" else probe[0])
     answers = {} if binary is None else {
         key: run_command(tree, argv)
         for key, argv in engine.questions.items()
@@ -325,18 +326,36 @@ def _read_as(tree: Tree, relative: str) -> File:
     return File(relative, found.text, found.problem)
 
 
-def _probe(name: str) -> tuple[str, tuple[str, ...]] | None:
+def _probe(name: str, root: str = "/") -> tuple[str, tuple[str, ...]] | None:
     """The readiness probe of an engine keel configures, or None
 
     Only an engine the planner converges is made to answer before it is
     asked anything (keel.system.dbready); another engine's server is
-    left alone, the way a Redis is today.
+    left alone, the way a Redis is today. PostgreSQL's unit is the
+    cluster's own (keel.system.dbpostgres.service): the umbrella is
+    active while the cluster is down.
     """
     if name == "mariadb":
         return service(), PING
     if name == "postgresql":
-        return dbpostgres.service(), dbpostgres.PING
+        return dbpostgres.service(root), dbpostgres.PING
     return None
+
+
+def _ready(name: str, root: str, probe: tuple, start: bool) -> str:
+    """keel.system.dbready.ready; a PostgreSQL start under the lock of
+    the replication
+
+    A start that takes no lock started the old server again while the
+    watch's follow reseeded the node (keel#153). The seed and the follow
+    hold this lock, so a start waits for them. The lock is reentrant in
+    one thread: the follow observes, and may start, while it holds it.
+    """
+    if not (start and name == "postgresql"):
+        return dbready.ready(probe[0], probe[1], start, dbready.READY_TIMEOUT)
+    from keel.system import dbreadonly
+    with dbreadonly.replication_locked(root):
+        return dbready.ready(probe[0], probe[1], start, dbready.READY_TIMEOUT)
 
 
 def _schemas_question(name: str) -> tuple[str, ...]:
