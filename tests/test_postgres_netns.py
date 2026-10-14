@@ -12,9 +12,14 @@ the pair's slot on A); a write on the primary through its loopback is
 read on B, the lag measured from the write's acknowledgement; the
 pair's synchronous commit on, a commit paying one round trip; the
 replica refusing writes while it is in recovery; `keel diff` clean on
-both. Cases (b) to (e) are the follow-up pull request's. In CI a
-missing tool fails instead of skipping; it runs in its own job,
-"postgres / trixie", which sets KEEL_POSTGRES_NETNS.
+both. Then cases (b) to (e): the replica cut off, a commit waiting and
+alerted, acknowledged after the heal; the primary cut off and killed
+while the application writes, the operator's promote, no acknowledged
+row lost and the downtime; the old primary back, never acknowledging a
+write, fenced, dumped, recorded and alerted once; and its confirmed
+reseed, the one rejoin path of 0054. In CI a missing tool fails
+instead of skipping; it runs in its own job, "postgres / trixie",
+which sets KEEL_POSTGRES_NETNS.
 """
 
 import glob
@@ -69,7 +74,7 @@ class TestAPostgresqlPairOnAPoorNetwork(unittest.TestCase):
             prefix + ["env", f"PATH={path}:/usr/sbin:{os.environ.get('PATH', '')}",
                       f"PYTHONPATH={REPO}:{REPO}/tests", f"TMPDIR={SCRATCH}",
                       sys.executable, DRIVER],
-            capture_output=True, text=True, check=False, timeout=1800)
+            capture_output=True, text=True, check=False, timeout=2700)
         for line in done.stdout.splitlines():
             if line.startswith("RESULT "):
                 print(line, file=sys.stderr)
@@ -168,6 +173,115 @@ class TestAPostgresqlPairOnAPoorNetwork(unittest.TestCase):
                                      and ": drift" in line
                                      for line in found[name]["out"]),
                                  found[name])
+
+    def test_b_a_commit_waits_for_the_cut_replica_and_is_alerted(self):
+        """No timeout and no fallback (0054): the commit waits while the
+        replica is cut off, the primary keeps the VIP, the watch alerts
+        within the 10 s wait and one watch run, and the commit is
+        acknowledged after the heal"""
+        found = self.found
+        print(f"(b): alerted {found['b_waits_alerted_s']} s after the cut;"
+              f" acknowledged {found['b_ack_after_heal_s']} s after the"
+              f" heal; synchronous again {found['b_sync_after_heal_s']} s",
+              file=sys.stderr)
+        self.assertIsNotNone(found["b_sync_before_s"], found)
+        self.assertIsNotNone(found["b_waits_alerted_s"], found["b_alerts"])
+        self.assertLess(found["b_waits_alerted_s"], 45, found["b_alerts"])
+        self.assertTrue(found["b_pending_at_alert"], found["b_cut_write"])
+        self.assertTrue(found["b_pending_at_heal"], found["b_cut_write"])
+        self.assertTrue(found["b_a_holds_vip"], found)
+        self.assertTrue(found["b_cut_write"]["ok"], found["b_cut_write"])
+        # the walreceiver is back within its own timeout (60 s) and one
+        # retry (5 s), whatever TCP's backoff was
+        self.assertLess(found["b_ack_after_heal_s"], 90, found)
+        self.assertIsNotNone(found["b_sync_after_heal_s"], found)
+        self.assertIsNotNone(found["b_back_alerted_s"], found["b_alerts"])
+        self.assertEqual(found["b_row_on_b"], "1", found)
+
+    def test_c_the_unplanned_failover_loses_no_acknowledged_row(self):
+        """The primary cut off and killed while the application writes;
+        the operator's keel database promote --old-primary-gone on B"""
+        found = self.found
+        downtime = found["c_downtime"]
+        print(f"(c) downtime: {downtime}", file=sys.stderr)
+        self.assertEqual(found["c_promote"]["code"], 0, found["c_promote"])
+        self.assertEqual(found["c_acked_missing"], [], downtime)
+        self.assertIsNotNone(downtime["carried_s"], downtime)
+        self.assertIsNotNone(downtime["promoted_s"], downtime)
+        # follow does not lag the VIP (keel#118, the MariaDB twin's bound)
+        self.assertLess(downtime["promoted_s"] - downtime["carried_s"], 3.0,
+                        downtime)
+        # a base backup copies no slot: the new holder made the pair's
+        self.assertIn("keel", found["c_b_slot"], found)
+        # the new primary has no standby, so its commits wait, alerted
+        self.assertIsNotNone(found["c_b_waits_alerted_s"], found["alerts"])
+        # writes are acknowledged again once the old primary streams
+        self.assertIsNotNone(downtime["first_ok_after_s"], downtime)
+        self.assertLess(downtime["first_ok_after_reseed_s"], 30, downtime)
+
+    def test_c_the_writes_resume_within_5_s_after_the_vip_lands(self):
+        """The maintainer's client-side bound (keel#148): the writes
+        resume at most 5 s after the VIP lands on the new primary. Under
+        0054 this cannot hold: the new primary keeps FIRST 1 (keel), so
+        with the old primary gone every commit waits until it is
+        reseeded, which waits for the operator's confirmation. Measured
+        216 s in CI. The bound stays, and its failure is the design
+        question of docs/replication-postgresql.md"""
+        downtime = self.found["c_downtime"]
+        self.assertIsNotNone(downtime["first_ok_after_s"], downtime)
+        self.assertLess(downtime["first_ok_after_s"] - downtime["carried_s"],
+                        5.0, downtime)
+
+    def test_e_the_old_primary_back_takes_no_write_and_is_fenced(self):
+        """Back from its crash it never acknowledges a write; it is
+        fenced as a standby that follows nobody, dumped (the dump holds
+        its own unacknowledged rows), recorded and alerted once"""
+        found = self.found
+        boot = found["e_follow_at_boot"]
+        joined = " ".join(boot["lines"])
+        if boot["problem"] is None:
+            self.assertIn("stopped", joined, boot)
+        else:
+            self.assertIn("diverged", boot["problem"], boot)
+        self.assertIsNotNone(found["e_diverged_s"], found["e_follow_log"])
+        self.assertTrue(found["e_boot_writes"], found)
+        self.assertFalse(any(one["ok"] for one in found["e_boot_writes"]),
+                         found["e_boot_writes"])
+        record = found["e_record"]
+        self.assertEqual(record["holder"], "fd00:6b65:f1b::2", record)
+        self.assertEqual(record["own_timeline"], "1", record)
+        self.assertEqual(record["holder_timeline"], "2", record)
+        self.assertEqual(found["e_in_recovery"], "t", found)
+        self.assertEqual(found["e_receivers"], "0", found)
+        self.assertNotEqual(found["e_refused"]["code"], 0, found)
+        self.assertIn("read-only", found["e_refused"]["err"], found)
+        self.assertTrue(found["e_a_unacked"], found["c_writes"])
+        self.assertEqual(found["e_a_holds"], found["e_a_unacked"], found)
+        self.assertEqual(found["e_dump_holds"], found["e_a_unacked"],
+                         found["e_dumps"])
+        self.assertEqual(len(found["e_dumps"]), 1, found["e_dumps"])
+        self.assertEqual(found["e_dumps_later"], found["e_dumps"])
+        self.assertEqual(len(found["e_alerts"]), 1, found["e_alerts"])
+        self.assertTrue(any(line.startswith("database.server.diverged")
+                            and "timeline 1 against the holder's 2" in line
+                            for line in found["e_diff"]["out"]),
+                        found["e_diff"])
+
+    def test_d_the_confirmed_reseed_rejoins_the_old_primary(self):
+        found = self.found
+        print(f"(d) reseed: {found['d_apply'].get('took_s')} s, streaming"
+              f" {found['d_streaming_s']} s after", file=sys.stderr)
+        self.assertFalse(found["d_apply"]["failed"], found["d_apply"])
+        self.assertIsNotNone(found["d_streaming_s"], found["d_status"])
+        self.assertEqual(found["d_status"]["in_recovery"], "t", found)
+        self.assertTrue(found["d_a_status_line"], found["d_status"])
+        self.assertIsNone(found["d_record_after"], found)
+        self.assertIsNotNone(found["d_b_sync_s"], found)
+        self.assertIsNotNone(found["d_first_ack_s"], found)
+        self.assertIsNotNone(found["d_rows_equal_s"], found)
+        self.assertEqual(found["d_a_holds_unacked"],
+                         found["d_b_holds_unacked"], found)
+        self.assertIsNotNone(found["d_back_alerted_s"], found["alerts"])
 
     def test_no_two_nodes_ever_carry_the_vip(self):
         self.assertEqual(self.found["max_holders"], 1,

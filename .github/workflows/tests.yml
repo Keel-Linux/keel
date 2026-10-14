@@ -188,22 +188,25 @@ jobs:
   # sslmode=verify-full, the pair's slot on the primary), a write on
   # the primary through its loopback read on the replica, the pair's
   # synchronous commit on, the replica refusing writes while it is in
-  # recovery, keel diff clean (tests/test_postgres_netns.py; the
-  # fallback, the promote, the failover and rejoin, the diverged old
-  # primary and the replica's refusals are the follow-up pull
-  # request's). The check is "postgres / trixie".
+  # recovery, keel diff clean; then cases (b) to (e): the replica cut
+  # off (the commit waits, alerted), the primary cut off and killed
+  # while the application writes (the operator's promote, no
+  # acknowledged row lost, the downtime), the old primary back (fenced,
+  # dumped, recorded, alerted) and its confirmed reseed
+  # (tests/test_postgres_netns.py). zstd packs the rejoin's dump. The
+  # check is "postgres / trixie".
   postgres:
     permissions:
       contents: read
     uses: keel-linux/.github/.github/workflows/lxc-trixie.yml@main
     with:
       systemd: true
-      timeout: 35
+      timeout: 50
       run: |
         apt-get update -qq
         apt-get install -y -qq --no-install-recommends python3-pytest \
           python3-yaml wireguard-tools iproute2 iputils-ping openssl \
-          etcd-server etcd-client util-linux postgresql
+          etcd-server etcd-client util-linux postgresql zstd
         systemctl stop postgresql
         KEEL_POSTGRES_NETNS=1 PYTHONPATH=. python3 -m pytest -q -s \
           tests/test_postgres_netns.py
