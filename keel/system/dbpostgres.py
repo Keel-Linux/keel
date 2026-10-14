@@ -193,6 +193,26 @@ def rel(path: str, root: str) -> str:
     return os.path.relpath(path, root)
 
 
+def overlay_addresses(doc: dict) -> list[str]:
+    """This node's WireGuard overlay addresses, without their prefix
+
+    The twin of keel.system.dbmariadb.overlay_addresses, which see: the
+    value is network, not engine, and lives here so the pair's planner
+    reads one engine's module alone.
+    """
+    overlay = ((doc.get("network") or {}).get("overlay") or {})
+    wireguard = overlay.get("wireguard") or {}
+    found = []
+    for key in ("address", "ipv4_address"):
+        value = wireguard.get(key)
+        if not value:
+            continue
+        try:
+            found.append(str(ipaddress.ip_interface(str(value)).ip))
+        except ValueError:
+            continue
+    return found
+
 
 def dropin_text(listen: list | None, role: str, hba: str) -> str:
     """The configuration file the declared role needs, as it is written

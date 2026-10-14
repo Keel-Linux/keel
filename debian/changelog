@@ -48,7 +48,6 @@ keel (0.23.17) unstable; urgency=medium
     release). They now live in the cluster's configuration directory,
     the way Debian keeps pg_hba.conf; only GUC drop-ins stay in
     conf.d.
- (fix: keel's PostgreSQL client carried MariaDB's --batch, which psql has not (0054))
   * A database pair of PostgreSQL (handbook decision 0054): the pair
     converge, the follow of the VIP, the network-namespace gate.
     This change is the TLS layer: the database leaf of the mesh root
