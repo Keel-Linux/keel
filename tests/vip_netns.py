@@ -57,6 +57,7 @@ import ipaddress
 import json
 import os
 import re
+import select
 import shutil
 import subprocess
 import sys
@@ -282,12 +283,22 @@ def first(samples: list[dict], since: float, test) -> float | None:
 
 
 def agent_send(name: str, line: str, timeout: float = 180) -> dict:
-    """One command to a node's agent, and its JSON answer"""
+    """One command to a node's agent, and its JSON answer
+
+    The read is bounded by select, not by readline alone: an agent that
+    never answers (its server hangs on a synchronous commit that waits
+    for a standby that never connected — found by this test on the
+    lossy link) leaves readline blocked past the deadline, and the
+    driver waits forever instead of failing this command"""
     process = AGENTS[name]
     process.stdin.write(line + "\n")
     process.stdin.flush()
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
+        wait = max(0.0, deadline - time.monotonic())
+        ready, _, _ = select.select([process.stdout], [], [], wait)
+        if not ready:
+            break
         said = process.stdout.readline()
         if not said:
             break
@@ -469,6 +480,16 @@ def tended(index: int, pid: int, root: str, spec: str) -> None:
     os.makedirs(scratch, mode=0o700, exist_ok=True)
     command = (sys.executable, "-m", "keel", "vip", "tend", "--root", root,
                "--spec", spec)
+    # the unit's name is the node's, host-global: a generation whose
+    # driver was killed (a pytest timeout) leaves it loaded against the
+    # old root, and systemd-run then fails with "already loaded", one
+    # helper per generation piling up (found by this test's run on the
+    # lossy link, where a hang let the runner's kill leak the units)
+    subprocess.run(["systemctl", "stop", f"{unit}.service"],
+                   capture_output=True, check=False)
+    # daemon-reload is what collects the stopped transient, so the
+    # systemd-run below starts against a clean unit name
+    sh("systemctl", "daemon-reload")
     sh("systemd-run", f"--unit={unit}", "--collect", "--quiet",
        f"--setenv=TMPDIR={scratch}",
        # keel-vip.service's: what runs once the helper stopped, and its

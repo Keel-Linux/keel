@@ -83,6 +83,11 @@ class DatabaseState:
     # PostgreSQL's whole authorization surface (0054), written beside the
     # drop-in and pointed at by its hba_file line; empty for other engines
     hba: File = field(default_factory=lambda: File(""))
+    # PostgreSQL's pair drop-in and the user name map it points at
+    # (0054): the synchronous commit policy, and the map of the hba
+    # lines' cert method; empty for other engines
+    pair_dropin: File = field(default_factory=lambda: File(""))
+    ident: File = field(default_factory=lambda: File(""))
     credential: Credential = field(default_factory=Credential)
     # SHOW REPLICA STATUS as the server printed it, for the one thing the
     # reading does not keep: whether the SQL thread still runs.
@@ -214,13 +219,14 @@ def observe_database(
     name = str(server.get("engine") or "")
     engine = _engine(name)
     live = tree.root == paths.ROOT_DEFAULT
-    pair = dbpair.observe_pair(root, doc) if name == "mariadb" else None
+    pair = dbpair.observe_pair(root, doc) \
+        if name in ("mariadb", "postgresql") else None
     if engine is None:
         return DatabaseState(engine=name, live=live, pair=pair)
 
     binary = engine.installed(tree.glob)
     enabled = ""
-    dropin, hba = _database_files(name, tree)
+    dropin, hba, pair_dropin, ident = _database_files(name, tree)
     probe = _probe(name)
     if live and binary is not None and probe is not None:
         down = dbready.ready(probe[0], probe[1], start, dbready.READY_TIMEOUT)
@@ -232,6 +238,8 @@ def observe_database(
                 machine_id=tree.read(MACHINE_ID),
                 dropin=dropin,
                 hba=hba,
+                pair_dropin=pair_dropin,
+                ident=ident,
                 down=down,
                 pair=pair,
             )
@@ -262,6 +270,8 @@ def observe_database(
         machine_id=tree.read(MACHINE_ID),
         dropin=dropin,
         hba=hba,
+        pair_dropin=pair_dropin,
+        ident=ident,
         revoked=tree.read(READ_ONLY_RECORD),
         credential=secret,
         status=status,
@@ -271,30 +281,42 @@ def observe_database(
         pair=pair,
         role_dropin=tree.read(ROLE_DROPIN),
         nonlocal_bind=tree.read(NONLOCAL_BIND_LIVE),
-        tls_ready=dbtls.present(root),
-        tls_issuer=dbtls.issuer_name(root) if pair is not None else "",
+        tls_ready=dbtls.present(root, name)
+        if pair is not None else False,
+        tls_issuer=dbtls.issuer_name(root, name) if pair is not None else "",
     )
 
 
-def _database_files(name: str, tree: Tree) -> tuple[File, File]:
-    """The engine's drop-in, and PostgreSQL's hba file, off the tree
+def _database_files(name: str, tree: Tree) -> tuple[File, File, File, File]:
+    """The engine's drop-in, and PostgreSQL's pair files, off the tree
 
     PostgreSQL's paths carry the installed version, so they are resolved
     from the cluster directories (keel.system.dbpostgres); they are
     carried relative to the root, the way plans carry paths, because the
-    planner writes these files and has no root of its own. A root with
-    no cluster installed reads as two empty files with the reason, never
-    an exception into the observer.
+    planner writes these files and has no root of its own: the drop-in,
+    the hba file of its hba_file line, the pair drop-in, and the user
+    name map that one points at. A root with no cluster installed reads
+    as empty files with the reason, never an exception into the observer.
     """
     if name != "postgresql":
-        return tree.read(DROPIN), File("")
+        empty = File("")
+        return tree.read(DROPIN), empty, empty, empty
     try:
-        _, dropdir, _, hba = dbpostgres.cluster_paths(tree.root)
+        _, conf, dropdir, _ = dbpostgres.cluster_paths(tree.root)
     except FileNotFoundError as e:
-        return File("", problem=str(e)), File("", problem=str(e))
+        return (File("", problem=str(e)), File("", problem=str(e)),
+                File("", problem=str(e)), File("", problem=str(e)))
     dropin = dbpostgres.rel(
         os.path.join(dropdir, dbpostgres.DROPIN_NAME), tree.root)
-    return _read_as(tree, dropin), _read_as(tree, dbpostgres.rel(hba, tree.root))
+    pair_dropin = dbpostgres.rel(
+        os.path.join(dropdir, dbpostgres.PAIR_DROPIN_NAME), tree.root)
+    hba = dbpostgres.rel(
+        os.path.join(conf, dbpostgres.HBA_NAME), tree.root)
+    ident = dbpostgres.rel(
+        os.path.join(conf, dbpostgres.IDENT_NAME), tree.root)
+    return (_read_as(tree, dropin),
+            _read_as(tree, hba),
+            _read_as(tree, pair_dropin), _read_as(tree, ident))
 
 
 def _read_as(tree: Tree, relative: str) -> File:

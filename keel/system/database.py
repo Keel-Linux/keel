@@ -203,8 +203,11 @@ def plan_database(
         return []
     server = declared_server(doc)
     role = str(server.get("role") or "")
-    if state.pair is not None and state.engine == mariadb_name():
-        from keel.system.dbpairplan import plan_pair
+    if state.pair is not None and state.engine in CONVERGED:
+        if state.engine == mariadb_name():
+            from keel.system.dbpairplan import plan_pair
+        else:
+            from keel.system.dbpgpairplan import plan_pair
         return plan_pair(doc, state, confirmed,
                          spec or "/etc/keel/instance.yaml", _cannot_act)
     refusal = _cannot_act(state, role)
@@ -304,7 +307,7 @@ def plan_promote(doc: dict, state: DatabaseState | None,
     """
     if state is None:
         return [Step(PROMOTE_FIELD, (Refuse(NO_SERVER),))]
-    if state.pair is not None and state.engine == mariadb_name():
+    if state.pair is not None and state.engine in CONVERGED:
         from keel.system.actions import FollowVip
         refusal = _cannot_act(state, REPLICA)
         if refusal:

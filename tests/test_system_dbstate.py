@@ -298,7 +298,8 @@ class TestTheCopyIsAskedForOnlyWhenOneWouldBeMade(unittest.TestCase):
 
 
 PG_DROPIN = "etc/postgresql/17/main/conf.d/99-keel-database.conf"
-PG_HBA = "etc/postgresql/17/main/conf.d/99-keel-pg_hba.conf"
+# not conf.d: that directory is swept as GUC, and the hba is not GUC
+PG_HBA = "etc/postgresql/17/main/keel-pg_hba.conf"
 
 
 class TestPostgreSQLIsStartedBeforeItIsAsked(unittest.TestCase):
@@ -315,7 +316,7 @@ class TestPostgreSQLIsStartedBeforeItIsAsked(unittest.TestCase):
         os.makedirs(confd)
         with open(os.path.join(confd, dbpostgres.DROPIN_NAME), "w") as fob:
             fob.write("listen_addresses = '*'\n")
-        with open(os.path.join(confd, dbpostgres.HBA_DROPIN_NAME), "w") as fob:
+        with open(os.path.join(root, PG_HBA), "w") as fob:
             fob.write("# the whole authorization surface\n")
         with open(os.path.join(root, "etc/machine-id"), "w") as fob:
             fob.write("abc\n")

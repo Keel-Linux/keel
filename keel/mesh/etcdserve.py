@@ -59,6 +59,11 @@ from keel.mesh.node import NodeError
 from keel.mesh.protocol import ProtocolError
 from keel.network.wireguard import is_key, same_key
 
+# The database engines a database leaf is named for (the CN carries the
+# word); the same list keel.system.database converges, kept here so the
+# holder signs nothing it cannot name (0054)
+ENGINES = ("mariadb", "postgresql")
+
 
 class Refusal(Exception):
     def __init__(self, status: int, reason: str):
@@ -276,7 +281,9 @@ def database_issued(member: Etcd, message: etcdmsg.Message, address: str,
                     key: str) -> Answer:
     """On the root's holder: a member's database leaf, for the address
     the holder's spec gives the sender's own key alone (its own address
-    when the holder asks itself), with the VIP asked as a second SAN"""
+    when the holder asks itself), with the VIP asked as a second SAN;
+    the engine word (mariadb or postgresql) names the certificate and
+    is taken from the asker's request"""
     try:
         csr = etcdmsg.csr(message.body.get("csr"))
         vip = message.body.get("vip")
@@ -286,6 +293,9 @@ def database_issued(member: Etcd, message: etcdmsg.Message, address: str,
         raise Refusal(400, str(e)) from None
     if csr is None:
         raise Refusal(400, "no request to sign")
+    engine = message.body.get("engine") or "mariadb"
+    if engine not in ENGINES:
+        raise Refusal(400, f"unknown database engine {engine!r}")
     if not same_key(key, message.sender):
         raise Refusal(403, "a database certificate is asked by the member"
                       " it is for, and no other")
@@ -296,7 +306,8 @@ def database_issued(member: Etcd, message: etcdmsg.Message, address: str,
     if vip is not None:
         pair_bound(member, message, vip, key)
     try:
-        found = etcdstate.database_grant(member.root, csr, address, vip, key)
+        found = etcdstate.database_grant(member.root, csr, address, vip, key,
+                                         engine=engine)
     except StateError as e:
         raise Refusal(403, str(e)) from None
     member.err(f"etcd: a database certificate for {address} signed with"

@@ -114,13 +114,25 @@ def write_pgpass(directory: str, host: str, port: int, password: str) -> str:
     """The pgpass file, created exclusively at mode 0600; its path
 
     libpq ignores a pgpass file any easier to read, so the mode is what
-    makes it usable, not only what makes it safe.
+    makes it usable, not only what makes it safe. The clients run as
+    the server user (dbpostgres.CLIENT and AS_POSTGRES), so the file
+    and its spool directory are handed to that user: left root-owned,
+    libpq cannot read them and answers the server's password challenge
+    with nothing (found by the pair's network-namespace test of this
+    release). Best effort: a dev host without the user keeps root
+    ownership, the way _as_postgres has it
     """
     path = os.path.join(directory, PGPASS)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                  0o600)
     with os.fdopen(fd, "w") as fob:
         fob.write(pgpass_line(host, port, password))
+    try:
+        uid = pwd.getpwnam("postgres").pw_uid
+        os.chown(directory, uid, -1)
+        os.chown(path, uid, -1)
+    except (KeyError, OSError):
+        pass
     return path
 
 
@@ -141,13 +153,22 @@ def pgpass_value(value: str) -> str:
     return str(value).replace("\\", "\\\\").replace(":", "\\:")
 
 
-def conninfo(host: str, port: int, pgpass: str) -> str:
-    """The connection string the clients take, the password by file only"""
+def conninfo(host: str, port: int, pgpass: str, tls: str = "") -> str:
+    """The connection string the clients take, the password by file only
+
+    `tls` is the pair's client side (keel.system.dbtls.options_lines,
+    engine postgresql): without it a replication-protocol connection
+    reaches the primary with no certificate, and the pair's cert method
+    refuses it — pg_basebackup answers "connection requires a valid
+    client certificate", falls back to no TLS, and finds no line at all
+    (found by the pair's network-namespace test of this release)
+    """
     return (
         f"host={dbpostgres.conninfo_value(host)} port={int(port)}"
         f" user={dbpostgres.REPLICATION_USER} dbname=postgres"
         f" passfile={dbpostgres.conninfo_value(pgpass)}"
         f" application_name=keel {CONNECT_TIMEOUT}"
+        + (f" {tls.strip()}" if tls else "")
     )
 
 
@@ -155,10 +176,11 @@ def _seed(
     root: str, pgpass: str, action, runner, clock, sleep,
 ) -> str | None:
     where = {"host": action.host, "port": action.port}
-    found, problem = _probe(pgpass, action.host, action.port, runner)
+    found, problem = _probe(pgpass, action.host, action.port, runner,
+                            getattr(action, "tls", ""))
     if problem:
         return f"{problem}; {KEPT}"
-    _, dropdir, datadir, _ = dbpostgres.cluster_paths(root)
+    _, _, dropdir, datadir = dbpostgres.cluster_paths(root)
     problem = _room(datadir, found["size"], action)
     if problem:
         return f"{problem}; {KEPT}"
@@ -183,10 +205,11 @@ def _seed(
     return None
 
 
-def _probe(pgpass: str, host: str, port: int, runner) -> tuple[dict, str]:
+def _probe(pgpass: str, host: str, port: int, runner,
+           tls: str = "") -> tuple[dict, str]:
     """Ask the primary what it is; the reason it cannot be copied"""
     out = {}
-    argv = dbpostgres.CLIENT + (conninfo(host, port, pgpass),
+    argv = dbpostgres.CLIENT + (conninfo(host, port, pgpass, tls),
                                 "--command", PROBE_SQL)
     problem = _run(runner, argv, output=out)
     where = {"host": host, "port": port,
@@ -226,7 +249,8 @@ def _basebackup(fresh: str, pgpass: str, action, runner) -> str:
     argv = dbpostgres.AS_POSTGRES + (
         "pg_basebackup", f"--pgdata={fresh}", "--format=plain",
         "--wal-method=stream", "--checkpoint=fast",
-        "--dbname", conninfo(action.host, action.port, pgpass),
+        "--dbname", conninfo(action.host, action.port, pgpass,
+                             getattr(action, "tls", "")),
     )
     return _run(runner, argv)
 
@@ -264,7 +288,8 @@ def _standby_in_place(dropdir: str, datadir: str, fresh: str,
                      | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, "w") as fob:
             fob.write(dbpostgres.follow_dropin_text(
-                action.host, action.port, action.password, action.tls))
+                action.host, action.port, action.password, action.tls,
+                slot=str(getattr(action, "slot", "") or "")))
         _as_postgres(follow)
     except OSError as e:
         return f"cannot write the standby files: {e.strerror or e}"
