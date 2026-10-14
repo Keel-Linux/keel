@@ -273,6 +273,23 @@ class TestFollowDropinText(unittest.TestCase):
             " sslmode=verify-full sslrootcert=/etc/p/ca.pem")
         self.assertIn("application_name=keel sslmode=verify-full", text)
 
+    def test_the_tls_block_is_one_line_inside_the_value(self):
+        """keel.system.dbtls.options_lines gives one option per line;
+        a configuration value ends at the newline, so the conninfo this
+        file hands the server must be flattened or the server refuses
+        the file (found by the pair's network-namespace test of this
+        release)"""
+        text = dbpostgres.follow_dropin_text(
+            "fd1a::1", 5432, "secret",
+            "sslmode=verify-full\nsslrootcert=/etc/p/ca.pem\n"
+            "sslcert=/etc/p/server.pem\nsslkey=/etc/p/server.key\n")
+        quoted = text.split("primary_conninfo = ", 1)[1].split("\n")[0]
+        self.assertIn("sslmode=verify-full", quoted)
+        self.assertIn("sslkey=/etc/p/server.key", quoted)
+        self.assertEqual(text.count("\n"),
+                         text.count("\n", 0, text.index("primary_conninfo"))
+                         + 1)
+
 
 class TestEscaping(unittest.TestCase):
     def test_the_sql_literal_doubles_quotes(self):

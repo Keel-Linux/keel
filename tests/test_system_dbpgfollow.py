@@ -357,6 +357,23 @@ class TestTheReplica(FollowTestCase):
         self.assertFalse(self.ran(server, "pg_dumpall"))
         self.assertFalse(self.ran(server, "pg_basebackup"))
 
+    def test_the_seed_and_the_timeline_ask_carry_the_pair_tls(self):
+        """The replication protocol's line is the cert method: a copy
+        or a timeline ask that presents no certificate is refused by
+        the primary (found by the pair's network-namespace test of
+        this release)"""
+        self.pair_nodes()
+        server = Server(timeline="00000003000000000000004A")
+        found = self.follow(1, server, confirmed=True)
+        self.assertIsNone(found.problem, found.lines)
+        asked = "\n".join(one for argv in server.argv for one in argv)
+        self.assertIn("sslmode=verify-full", asked)
+        self.assertIn("sslcert=", asked)
+        timeline = next(" ".join(argv) for argv in server.argv
+                        if "IDENTIFY_SYSTEM" in argv)
+        self.assertIn("sslmode=verify-full", timeline)
+        self.assertIn("replication=database", timeline)
+
     def test_without_the_certificate_nothing_follows(self):
         self.pair_nodes()
         layout = dbtls.LAYOUTS["postgresql"]

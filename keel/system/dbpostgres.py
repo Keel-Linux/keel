@@ -359,11 +359,16 @@ def follow_dropin_text(
     replication slot (constant SLOT, 0054): a pair's standby streams
     from it, so the primary keeps its WAL while the replica is away.
     """
+    # dbtls.options_lines is one option per line; a configuration value
+    # ends at the newline, so the block is flattened before it lands in
+    # this file's single-quoted string
+    flat_tls = " ".join(tls.split())
     conninfo = (
         f"host={conninfo_value(host)} port={int(port)}"
         f" user={REPLICATION_USER}"
         f" password={conninfo_value(password)}"
-        f" application_name=keel{tls}"
+        f" application_name=keel"
+        + (f" {flat_tls}" if flat_tls else "")
     )
     lines = [DROPIN_HEADER,
              f"primary_conninfo = '{file_value(conninfo)}'\n"]

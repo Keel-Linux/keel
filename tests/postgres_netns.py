@@ -249,13 +249,18 @@ def database_command(here, words: list[str]) -> dict | None:
                 "conninfo": conninfo.get("out"),
                 "err": recovery.get("err") or status.get("err")}
     if words[:1] == ["repl-probe"]:
-        # pg_basebackup of the other member as the replication role, the
-        # certificate and key given and the password by a pgpass file:
-        # the physical replication protocol the standby itself speaks,
-        # so the pair's hba line (database replication, the cert method
-        # and the keel map) is exactly what accepts or refuses — the
-        # database leaf is taken, an etcd member's leaf of the same root
-        # refused
+        # IDENTIFY_SYSTEM on a physical replication connection as the
+        # replication role, the certificate and key given and the
+        # password by a pgpass file: the connection matches the pair's
+        # hba line (the replication keyword, the cert method and the
+        # keel map) exactly — the database leaf is taken, an etcd
+        # member's leaf of the same root refused. replication=true (the
+        # walreceiver's dialect), not =database: a logical connection
+        # asks for the postgres database and the scram probe line under
+        # it, and a password prompt would read the agent's own command
+        # pipe. The ask is one handshake, not a copy of the data
+        # directory: what a copy proved would be the link's patience,
+        # not the authorization
         from keel.system import dbsecret, dbpostgres, dbtls
         cert, key, host = words[1], words[2], words[3]
         lay = dbtls.LAYOUTS["postgresql"]
@@ -270,20 +275,23 @@ def database_command(here, words: list[str]) -> dict | None:
             fob.write(f"*:{PORT}:replication:"
                       f"{dbpostgres.REPLICATION_USER}:{password}\n")
         os.chmod(pgpass, 0o600)
-        target = os.path.join(root, "var/tmp/probe-basebackup")
-        shutil.rmtree(target, ignore_errors=True)
-        done = subprocess.run(
-            ["pg_basebackup", "--verbose", "--checkpoint=fast",
-             "-X", "none", "--pgdata", target,
-             "--dbname",
-             f"host={host} port={PORT} user={dbpostgres.REPLICATION_USER}"
-             f" connect_timeout=30 sslmode=verify-full"
-             f" sslrootcert={os.path.join(root, lay.ca)}"
-             f" sslcert={os.path.join(root, cert)}"
-             f" sslkey={os.path.join(root, key)}"],
-            capture_output=True, text=True, check=False, timeout=120,
-            env=dict(os.environ, PGPASSFILE=pgpass))
-        shutil.rmtree(target, ignore_errors=True)
+        try:
+            done = subprocess.run(
+                ["psql", "--no-psqlrc", "--tuples-only",
+                 f"host={host} port={PORT}"
+                 f" user={dbpostgres.REPLICATION_USER}"
+                 f" dbname=postgres connect_timeout=30"
+                 f" sslmode=verify-full"
+                 f" sslrootcert={os.path.join(root, lay.ca)}"
+                 f" sslcert={os.path.join(root, cert)}"
+                 f" sslkey={os.path.join(root, key)}"
+                 " replication=true",
+                 "--command", "IDENTIFY_SYSTEM"],
+                capture_output=True, text=True, check=False, timeout=120,
+                env=dict(os.environ, PGPASSFILE=pgpass))
+        except subprocess.TimeoutExpired:
+            return {"code": -1, "out": "IDENTIFY_SYSTEM timed out",
+                    "err": "IDENTIFY_SYSTEM timed out"}
         return {"code": done.returncode,
                 "out": (done.stdout + done.stderr).strip()[-300:],
                 "err": done.stderr.strip()[-300:]}
@@ -480,6 +488,15 @@ NetworkNamespacePath=/proc/{pid}/ns/net
 KillSignal=SIGINT
 TimeoutStopSec=60
 """)
+    # the unit's name is this node's, host-global, the way the
+    # product's is: a generation whose driver was killed (a pytest
+    # timeout) leaves it active against the old root, and a start
+    # against an active unit is a no-op that leaves this generation
+    # with no server of its own (found by this test's run on the
+    # lossy link, where a hang let the runner's kill leak the unit
+    # into the next generation)
+    subprocess.run(["systemctl", "stop", unit], capture_output=True,
+                   check=False)
     sh("systemctl", "daemon-reload")
     sh("systemctl", "start", unit)
     UNITS.append(unit)
@@ -535,7 +552,9 @@ def monitor_settings(root: str, name: str, gateway: str) -> None:
 
 
 def count_rows(agent, name: str) -> int | None:
-    found = agent(name, f"sql SELECT COUNT(*) FROM {APP_DB}.t")
+    # the application's database, the table in its public schema: a
+    # qualified "shop.t" would name a schema, not the database
+    found = agent(name, f"sql-db {APP_DB} SELECT COUNT(*) FROM t")
     try:
         return int(found["out"])
     except (KeyError, ValueError):

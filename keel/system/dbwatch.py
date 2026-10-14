@@ -120,14 +120,32 @@ def needs_follow(root: str, pair: dbpair.PairState, reading,
 
 def semi_sync(root: str, pair: dbpair.PairState, out, err):
     """The fallback alerted on its change, on the primary; the server's
-    reading, or None"""
+    reading, or None
+
+    PostgreSQL has no semi-synchronous fallback (its pair's synchronous
+    commit waits, docs/replication-postgresql.md), so its reading is
+    returned without the semi-sync asks and watch follows a mismatched
+    server the same way it does for mariadb (found by the pair's
+    network-namespace test of this release: a mariadb-only read called a
+    healthy postgresql node "no server" and needs_follow never ran)"""
     tree = Tree(root)
-    reading = next((one.reading() for one in database_servers(tree)
-                    if one.engine.name == "mariadb"), None)
-    if reading is None or not reading.semi_sync.known:
+    readings = {one.engine.name: one.reading()
+                for one in database_servers(tree)}
+    reading = readings.get("mariadb") or readings.get("postgresql")
+    if reading is None:
+        out("database watch: no database server; nothing to watch")
+        return None
+    if reading.semi_sync.known:
+        return _semi_sync_mariadb(root, pair, reading, out, err)
+    if "mariadb" in readings:
         out("database watch: semi-synchronous status not readable"
-            f" ({reading.semi_sync.problem if reading else 'no server'})")
-        return reading
+            f" ({reading.semi_sync.problem})")
+    return reading
+
+
+def _semi_sync_mariadb(root: str, pair: dbpair.PairState, reading,
+                       out, err):
+    """The fallback to asynchronous replication, on the primary"""
     master = str(reading.semi_sync.value.get("master", "")).lower()
     now = "on" if master == "on" else "off"
     before = _read_state(root)

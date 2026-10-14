@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 from keel.system import dbpgseed, dbpostgres
 
@@ -52,11 +53,53 @@ class TestPgpass(unittest.TestCase):
         with open(path) as fob:
             self.assertIn("repl", fob.read())
 
+    def test_the_file_and_its_directory_are_the_server_users(self):
+        """The clients run as postgres (dbpostgres.CLIENT, AS_POSTGRES):
+        a root-owned pgpass in a root-owned spool is unreadable to them,
+        libpq ignores it, and the probe answers the server's password
+        challenge with nothing ("no password supplied" — found by the
+        pair's network-namespace test of this release)"""
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory)
+        with mock.patch.object(dbpgseed.pwd, "getpwnam") as getpwnam, \
+                mock.patch.object(dbpgseed.os, "chown") as chown:
+            getpwnam.return_value.pw_uid = 999
+            path = dbpgseed.write_pgpass(directory, HOST, PORT, PASSWORD)
+        getpwnam.assert_called_once_with("postgres")
+        self.assertEqual(
+            [one.args for one in chown.call_args_list],
+            [(directory, 999, -1), (path, 999, -1)])
+
+    def test_a_dev_host_without_the_user_keeps_root_ownership(self):
+        """best effort, the way dbpgseed._as_postgres has it: the file
+        is written all the same and nothing is raised"""
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory)
+        with mock.patch.object(dbpgseed.pwd, "getpwnam",
+                               side_effect=KeyError("postgres")):
+            path = dbpgseed.write_pgpass(directory, HOST, PORT, PASSWORD)
+        self.assertTrue(os.path.exists(path))
+
     def test_the_conninfo_names_the_pgpass_file_not_the_password(self):
         found = dbpgseed.conninfo(HOST, PORT, "/tmp/x/pgpass")
         self.assertIn("passfile=/tmp/x/pgpass", found)
         self.assertIn(f"host={HOST}", found)
         self.assertNotIn(PASSWORD, found)
+
+    def test_the_conninfo_carries_the_pair_tls_when_given(self):
+        """The replication protocol authenticates with the pair's
+        certificate (the hba line's cert method, 0054), so the copy and
+        the timeline asks reach the primary with no certificate at all
+        without it: pg_basebackup answers "connection requires a valid
+        client certificate", falls back to no TLS, and finds no line
+        (found by the pair's network-namespace test of this release)"""
+        tls = "sslmode=verify-full\nsslrootcert=/x/ca.pem" \
+            "\nsslcert=/x/server.pem\nsslkey=/x/server.key\n"
+        found = dbpgseed.conninfo(HOST, PORT, "/tmp/x/pgpass", tls)
+        self.assertIn("sslmode=verify-full", found)
+        self.assertIn("sslrootcert=/x/ca.pem", found)
+        self.assertIn("sslcert=/x/server.pem", found)
+        self.assertIn("sslkey=/x/server.key", found)
 
 
 class TestReach(unittest.TestCase):
@@ -161,6 +204,23 @@ class TestSeed(unittest.TestCase):
             dbpostgres.FOLLOW_DROPIN_NAME)
         with open(follow) as fob:
             self.assertIn("primary_slot_name = 'keel'\n", fob.read())
+
+    def test_the_copy_and_the_probe_carry_the_pair_tls(self):
+        """Without the client certificate the primary's cert method
+        refuses the replication connection (found by the pair's
+        network-namespace test of this release)"""
+        action = SeedAction(tls="sslmode=verify-full sslcert=/x/server.pem")
+        self.assertIsNone(dbpgseed.seed(self.root, action,
+                                        runner=self.runner,
+                                        clock=self.clock))
+        asked = " ".join(" ".join(str(a) for a in argv) for argv in self.ran)
+        for keyword in ("sslmode=verify-full", "sslcert=/x/server.pem"):
+            self.assertIn(keyword, asked)
+        follow = os.path.join(
+            self.root, "etc/postgresql/17/main/conf.d",
+            dbpostgres.FOLLOW_DROPIN_NAME)
+        with open(follow) as fob:
+            self.assertIn("sslmode=verify-full", fob.read())
 
     def test_an_unreachable_primary_stops_before_anything_moves(self):
         def runner(argv, **kwargs):

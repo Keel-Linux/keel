@@ -227,7 +227,8 @@ def _holder_timeline(root: str, host: str, port: int,
                                            state.credential.value)
             out: dict = {}
             problem = _run(runner, dbpostgres.CLIENT + (
-                dbpgseed.conninfo(host, port, pgpass)
+                dbpgseed.conninfo(host, port, pgpass,
+                                  dbtls.options_lines(root, "postgresql"))
                 + " replication=database",
                 "--command", IDENTIFY_SYSTEM), output=out)
     except OSError:
