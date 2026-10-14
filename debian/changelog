@@ -1,3 +1,25 @@
+keel (0.23.20) unstable; urgency=medium
+
+  * A new PostgreSQL pair could stop with both servers fenced, and no
+    keel command made the VIP's holder writable (keel#152). The image
+    has a user database, so the watch fenced each new node while the
+    other member held the VIP. The holder then refused each promote:
+    a fenced standby receives nothing, so the drain cannot finish.
+    keel database follow now promotes a fenced holder with no drain
+    when this loses nothing of the pair: when the node never had a
+    role in the pair, or when its divergence record shows 2 system
+    identifiers (2 clusters that never shared a history). After
+    keel database promote --old-primary-gone, the operator says that
+    the other member is gone, and the fenced holder takes writes too.
+    Else the holder stays fenced, and the refusal says what to do.
+  * The divergence record of a PostgreSQL node now holds the system
+    identifiers of the node and of the holder.
+  * keel database follow on a node that declares appliance.vip and no
+    database.server said "this node declares no appliance.vip". It now
+    says that the node declares no database.server.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Thu, 15 Oct 2026 10:00:00 +0000
+
 keel (0.23.19) unstable; urgency=medium
 
   * The reseed of a PostgreSQL standby stopped the umbrella unit

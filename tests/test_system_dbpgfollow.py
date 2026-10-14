@@ -53,7 +53,8 @@ class Server:
                  timeline: str = "2",
                  holder_timeline: str = "2", holder_down: bool = False,
                  positions: str = "t\t0/4000100\t0/4000098\n",
-                 dump_fails: bool = False, streaming: str = ""):
+                 dump_fails: bool = False, streaming: str = "",
+                 system: str = "72377", holder_system: str = "72377"):
         self.row = ("t" if in_recovery else "f") + "\t0\t5432\n"
         self.receiver = receiver
         self.standby = standby
@@ -65,6 +66,8 @@ class Server:
         self.positions = positions
         self.dump_fails = dump_fails
         self.streaming = streaming
+        self.system = system
+        self.holder_system = holder_system
         self.sent: list[str] = []
         self.argv: list[list[str]] = []
 
@@ -114,7 +117,8 @@ class Server:
                     argv, 1, "" if text else b"", "no route" if text
                     else b"no route")
             if sql == dbpgfollow.IDENTIFY_SYSTEM:
-                out = f"72377\t{self.holder_timeline}\t0/4000098\n"
+                out = (f"{self.holder_system}\t{self.holder_timeline}"
+                       "\t0/4000098\n")
             else:
                 # the seed's probe of the primary: not in recovery,
                 # nothing of its own
@@ -125,6 +129,8 @@ class Server:
             out = self.streaming
         elif sql == dbpgfollow.TIMELINE_SQL:
             out = self.timeline + "\n"
+        elif sql == dbpgfollow.SYSTEM_SQL:
+            out = self.system + "\n"
         elif "pg_is_in_recovery()" in sql:
             out = self.row
         elif "conninfo FROM pg_stat_wal_receiver" in sql:
@@ -279,6 +285,104 @@ class TestThePrimary(FollowTestCase):
         self.assertIsNone(found.problem, found.lines)
         self.assertTrue(any("pg_create_physical_replication_slot" in one
                             for one in server.sent))
+
+    # a standby that follows nobody: what the fence leaves (keel#152)
+    FENCED = {"in_recovery": True, "receiver": "", "standby": "\n",
+              "positions": "t\t0/3000000\t\n"}
+
+    def record_divergence(self, index: int, own: str, holder: str) -> None:
+        dbpgfollow._write(self.all[index].root, dbfollow.DIVERGED,
+                          json.dumps({"own_timeline": "1",
+                                      "holder_timeline": "1",
+                                      "own_system": own,
+                                      "holder_system": holder,
+                                      "holder": address(1), "dump": ""})
+                          + "\n", 0o600)
+
+    def test_a_fenced_fresh_holder_takes_writes(self):
+        """keel#152, the setup deadlock: the image's user database made
+        both new nodes fenced standbys, and no keel command made the
+        VIP's holder writable. A node that never had a role in the pair
+        loses nothing of it: it is promoted, with no drain"""
+        self.pair_nodes()
+        server = Server(**self.FENCED)
+        found = self.follow(0, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertTrue(any("pg_promote()" in one for one in server.sent))
+        self.assertIn("never had a role in the pair", " ".join(found.lines))
+        self.assertIn("role=primary", self.role_file(0))
+
+    def test_a_fenced_holder_of_another_history_takes_writes(self):
+        """the same deadlock after the watch recorded the divergence of
+        two clusters that two initdb runs made: the system identifiers
+        differ, so the copy never shared a history with the other
+        member, and nothing of the pair is lost"""
+        self.pair_nodes()
+        self.record_divergence(0, own="111", holder="222")
+        dbpgfollow._write(self.all[0].root, dbpair.ROLE_FILE,
+                          dbpair.role_text("replica", VIP), 0o644)
+        server = Server(**self.FENCED)
+        found = self.follow(0, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertTrue(any("pg_promote()" in one for one in server.sent))
+        self.assertIn("never shared a history", " ".join(found.lines))
+        self.assertIsNone(dbfollow.diverged(self.all[0].root))
+
+    def test_a_fenced_old_primary_that_gets_the_vip_stays_refused(self):
+        """case (e)'s fenced old primary shares the pair's history and
+        may stand behind the newer primary's writes: a planned promote
+        onto it must not lose them"""
+        self.pair_nodes()
+        self.record_divergence(0, own="72377", holder="72377")
+        server = Server(**self.FENCED)
+        found = self.follow(0, server)
+        self.assertIn("--old-primary-gone", found.problem)
+        self.assertFalse(any("pg_promote()" in one for one in server.sent))
+
+    def test_a_fenced_holder_that_had_a_role_stays_refused(self):
+        """no divergence record: the holder could not be asked when it
+        was fenced, so nothing proves that the copy is not behind"""
+        self.pair_nodes()
+        dbpgfollow._write(self.all[0].root, dbpair.ROLE_FILE,
+                          dbpair.role_text("primary", VIP), 0o644)
+        server = Server(**self.FENCED)
+        found = self.follow(0, server)
+        self.assertIn("--old-primary-gone", found.problem)
+        self.assertFalse(any("pg_promote()" in one for one in server.sent))
+
+    def test_the_old_primary_gone_a_fenced_holder_takes_writes(self):
+        """after case (e), the newer primary lost: the operator's flag
+        says it is gone, so the fenced last node takes writes, alone"""
+        self.pair_nodes()
+        self.pair_dropin(0, dbpostgres.pair_dropin_text())
+        self.record_divergence(0, own="72377", holder="72377")
+        server = Server(**self.FENCED, streaming="0\n")
+        found = self.follow(0, server, alone=True)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertTrue(any("pg_promote()" in one for one in server.sent))
+        self.assertIn(dbpgfollow.ALONE_SAID, found.lines)
+
+    def test_the_divergence_record_names_both_system_identifiers(self):
+        self.pair_nodes()
+        server = Server(timeline="1", holder_timeline="1", system="111",
+                        holder_system="222")
+        with mock.patch("keel.monitor.alerting.alert", return_value=True):
+            self.follow(1, server)
+        recorded = dbfollow.diverged(self.all[1].root)
+        self.assertEqual(recorded["own_system"], "111")
+        self.assertEqual(recorded["holder_system"], "222")
+
+    def test_no_database_section_says_so(self):
+        """keel#152, minor: the follow said "no appliance.vip" to a spec
+        that declares the VIP and no database.server"""
+        self.pair_nodes()
+        here = self.all[1]
+        doc = here.node.document()
+        del doc["database"]
+        here.node.write(doc)
+        found = self.follow(1, Server())
+        self.assertIn("database.server", found.problem)
+        self.assertNotIn("appliance.vip", found.problem)
 
     def pair_dropin(self, index: int, text: str | None = None) -> str:
         path = os.path.join(self.all[index].root, PAIR_DROPIN)

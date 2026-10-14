@@ -66,6 +66,16 @@ TIMELINE_SQL = (
     "::bit(32)::int END"
 )
 IDENTIFY_SYSTEM = "IDENTIFY_SYSTEM"
+# this node's system identifier, which initdb chooses and a base backup
+# copies: two clusters with one never shared a history (keel#152)
+SYSTEM_SQL = "SELECT system_identifier FROM pg_control_system()"
+FENCED_REFUSED = (
+    "this node holds the VIP as a fenced standby that follows nobody, and"
+    " its copy may stand behind the pair's newest writes: it takes no"
+    " writes. If the other member is gone, run keel database promote"
+    " --old-primary-gone here; else move the VIP back with keel vip"
+    " promote on the other member"
+)
 
 
 class PairSeed:
@@ -130,7 +140,20 @@ def _unproven(root: str, state: DatabaseState, found, runner) -> None:
 def _primary(root: str, state: DatabaseState, found, runner,
              alone: bool = False) -> None:
     """The holder: recovery ended, replicating from nobody"""
-    if state.reading.role.value == REPLICA:
+    if state.reading.role.value == REPLICA and _fenced(root, state):
+        why = _fenced_may_write(root, alone)
+        if why is None:
+            found.fail(FENCED_REFUSED)
+            return
+        action = PromoteReplica(DRAIN_TIMEOUT, engine="postgresql")
+        problem = dbpgpromote.promote(root, action, runner, drain=False)
+        if problem:
+            found.fail(problem)
+            return
+        found.say("promoted with no drain: this node holds the VIP as a"
+                  f" fenced standby that follows nobody, and {why}; it"
+                  " takes writes")
+    elif state.reading.role.value == REPLICA:
         action = PromoteReplica(DRAIN_TIMEOUT, engine="postgresql")
         problem = dbpgpromote.promote(root, action, runner)
         if problem:
@@ -144,6 +167,58 @@ def _primary(root: str, state: DatabaseState, found, runner,
     if found.problem is None:
         _alone(root, alone, found, runner)
     _forget_divergence(root)
+
+
+def _fenced(root: str, state: DatabaseState) -> bool:
+    """Whether this standby follows nobody: no primary in its reading
+    and no follow drop-in, what _fence leaves"""
+    if state.reading.primary.value:
+        return False
+    try:
+        _, _, dropdir, _ = dbpostgres.cluster_paths(root)
+    except FileNotFoundError:
+        return False
+    return not os.path.exists(os.path.join(
+        dropdir, dbpostgres.FOLLOW_DROPIN_NAME))
+
+
+def _fenced_may_write(root: str, alone: bool) -> str | None:
+    """Why a fenced standby that holds the VIP may take writes, or None
+
+    A fenced standby receives nothing, so the drain of a promotion
+    cannot prove that it holds the pair's newest writes (keel#152: both
+    new nodes were fenced, and no keel command made the holder
+    writable). It takes writes only when that loses nothing of the
+    pair, or when the operator says the other member is gone:
+
+    - keel database promote --old-primary-gone;
+    - its divergence record names two system identifiers: the two
+      clusters never shared a history (two initdb runs);
+    - no divergence record and no role file: this node never had a role
+      in the pair.
+    """
+    if alone or os.path.exists(os.path.join(root, ALONE_MARK)):
+        return ("keel database promote --old-primary-gone says the other"
+                " member is gone")
+    try:
+        with open(os.path.join(root, DIVERGED)) as fob:
+            recorded = json.load(fob)
+    except FileNotFoundError:
+        recorded = None
+    except (OSError, ValueError):
+        return None
+    if isinstance(recorded, dict):
+        own = str(recorded.get("own_system") or "")
+        theirs = str(recorded.get("holder_system") or "")
+        if own and theirs and own != theirs:
+            return (f"its copy never shared a history with the other"
+                    f" member (system identifier {own} against {theirs})")
+        return None
+    if recorded is None and \
+            not os.path.exists(os.path.join(root, dbpair.ROLE_FILE)):
+        return ("this node never had a role in the pair, so nothing of"
+                " the pair is lost")
+    return None
 
 
 # the pair's standby, streaming: whatever its sync_state, which is
@@ -306,7 +381,8 @@ def _replica(root: str, server: dict, state: DatabaseState,
         _seed(root, host, port, state, found, runner)
         return
     own = _own_timeline(root, runner)
-    theirs = _holder_timeline(root, host, port, state, runner)
+    identified = _holder_identity(root, host, port, state, runner)
+    theirs = identified[1] if identified else None
     if theirs is None:
         found.fail(f"the holder at [{host}]:{port} did not answer its"
                    " timeline over TLS; nothing else was changed")
@@ -323,7 +399,8 @@ def _replica(root: str, server: dict, state: DatabaseState,
             return
         found.say(f"a dump of what this node holds is kept at {kept}")
     if not confirmed:
-        _diverged(root, state, host, own, theirs, kept, found)
+        _diverged(root, state, host, own, theirs, kept, found,
+                  systems=(_own_system(runner), identified[0]))
         return
     found.say("confirmed with --destroy-local-database: what this node"
               f" holds is discarded (timeline {own or 'unknown'} against"
@@ -423,10 +500,21 @@ def _own_timeline(root: str, runner) -> str | None:
     return found if found.isdigit() else None
 
 
-def _holder_timeline(root: str, host: str, port: int,
-                     state: DatabaseState, runner) -> str | None:
-    """The holder's timeline, asked as the replication role over TLS
-    with the replication protocol; None when it did not answer"""
+def _own_system(runner) -> str:
+    """This node's system identifier, or an empty string"""
+    out: dict = {}
+    if _run(runner, dbpostgres.CLIENT + ("--command", SYSTEM_SQL),
+            output=out):
+        return ""
+    found = (out.get("stdout") or "").strip()
+    return found if found.isdigit() else ""
+
+
+def _holder_identity(root: str, host: str, port: int,
+                     state: DatabaseState, runner) -> tuple | None:
+    """The holder's system identifier and timeline, asked as the
+    replication role over TLS with the replication protocol; None when
+    it did not answer"""
     try:
         with spool(root) as directory:
             pgpass = dbpgseed.write_pgpass(directory, host, port,
@@ -442,14 +530,16 @@ def _holder_timeline(root: str, host: str, port: int,
     if problem:
         return None
     columns = (out.get("stdout") or "").strip().split("\t")
-    return columns[1] if len(columns) > 1 else None
+    return (columns[0], columns[1]) if len(columns) > 1 else None
 
 
 def _diverged(root: str, state: DatabaseState, holder: str, own: str | None,
-              theirs: str, kept: str, found) -> None:
+              theirs: str, kept: str, found,
+              systems: tuple = ("", "")) -> None:
     first = not os.path.exists(os.path.join(root, DIVERGED))
     _write(root, DIVERGED, json.dumps({
         "own_timeline": own, "holder_timeline": theirs, "holder": holder,
+        "own_system": systems[0], "holder_system": systems[1],
         "dump": kept,
         "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")},
         sort_keys=True) + "\n", 0o600)

@@ -57,6 +57,19 @@ In keel 0.23.18. The numbers under "Measured" come from the CI job
   names it, and a fenced node takes no write after it. Both
   timelines are numbers (a standby's from its last checkpoint);
   `keel diff` and `keel database status` show them.
+- **A fenced node that holds the VIP** (keel#152). A fenced standby
+  receives nothing, so the drain of a promotion cannot prove that it
+  holds the pair's newest writes. Follow promotes it with no drain
+  only in 3 cases:
+  - the node never had a role in the pair: no divergence record and
+    no `/var/lib/keel/role`. This is a new node that the watch fenced
+    because the image has a user database;
+  - its divergence record shows 2 system identifiers: the 2 clusters
+    never shared a history (2 `initdb` runs);
+  - the operator ran `keel database promote --old-primary-gone`.
+
+  Else the holder stays fenced, and follow refuses with what to do.
+  The divergence record holds the 2 system identifiers for this rule.
 - **The holder makes the pair's slot.** A base backup copies no slot,
   so a promoted standby has none; follow makes the slot `keel` on the
   holder on each run, or the reseed of the old primary would never
