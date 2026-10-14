@@ -1,5 +1,8 @@
 # MariaDB primary and replica on the mesh
 
+The PostgreSQL twin of this pair is
+[docs/replication-postgresql.md](replication-postgresql.md) (0054).
+
 Phase 2, step 3 of the roadmap: a MariaDB pair on the WireGuard mesh
 whose primary is the holder of the pair's VIP (handbook decisions 0013,
 0020, 0028, 0031, 0049 and its third round, 0050, 0051; tracker#57; the

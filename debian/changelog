@@ -61,6 +61,31 @@ keel (0.23.17) unstable; urgency=medium
     the pg_rewind revisit), the idempotent replication slot keel, the
     hba clientcert=verify-full lines with the keel map of a written
     pg_ident.conf, and the slot in the follow drop-in.
+  * The PostgreSQL pair's follow of the VIP (0054): a primary whose
+    standby claim is not proven is stopped (a primary has no read-only
+    boot, so an unproven primary may not keep serving); a proven standby
+    holder is drained (the replay caught up to the received WAL) and
+    promoted with pg_promote(); a replica holding no user database is
+    seeded with pg_basebackup over TLS without asking; one holding data
+    is dumped first (pg_dumpall, compressed under /var/backups/keel/
+    postgresql/), reseeds on --destroy-local-database, and until then
+    its divergence (the timelines it forked from the holder's) is
+    recorded in /var/lib/keel/database/diverged and it is not touched.
+    The rejoin after a promotion is the confirmed reseed and nothing
+    else: no pg_rewind and no resume, 0054's rule, so wal_log_hints
+    does not come back.
+  * The PostgreSQL pair's end to end test under the design case (0050),
+    the CI job "postgres / trixie": tests/postgres_netns.py runs the
+    pair's case (a) of docs/replication-postgresql.md on tests/
+    vip_netns.py's three nodes and trixie's PostgreSQL as a server per
+    node in its network namespace — the seed over TLS with the
+    walreceiver's sslmode=verify-full and the pair's slot, the
+    synchronous commit (a commit pays the standby's acknowledgement,
+    one round trip), a write on the primary through its loopback read
+    on the replica, the replica refusing writes while it is in
+    recovery, the other member's database leaf taken and its etcd leaf
+    refused, keel diff clean on both. The failover, the rejoin and the
+    diverged old primary are the follow-up pull request's.
 
 keel (0.23.16) unstable; urgency=medium
 

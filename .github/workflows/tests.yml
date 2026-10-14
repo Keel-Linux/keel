@@ -179,6 +179,34 @@ jobs:
         systemctl stop mariadb
         KEEL_MARIADB_SIMPLE_NETNS=1 PYTHONPATH=. python3 -m pytest -q -s \
           tests/test_mariadb_simple_netns.py
+  # A PostgreSQL pair on the mesh (decision 0054) in a Debian trixie
+  # system container: the vip job's three nodes and links (250 ms
+  # +-25 ms with 2% loss measured first), etcd, the VIP's units, and
+  # trixie's PostgreSQL 17 as a server per node in its namespace: case
+  # (a) of docs/replication.md, the PostgreSQL wording — the replica
+  # seeded over TLS with pg_basebackup (the walreceiver streams with
+  # sslmode=verify-full, the pair's slot on the primary), a write on
+  # the primary through its loopback read on the replica, the pair's
+  # synchronous commit on, the replica refusing writes while it is in
+  # recovery, keel diff clean (tests/test_postgres_netns.py; the
+  # fallback, the promote, the failover and rejoin, the diverged old
+  # primary and the replica's refusals are the follow-up pull
+  # request's). The check is "postgres / trixie".
+  postgres:
+    permissions:
+      contents: read
+    uses: keel-linux/.github/.github/workflows/lxc-trixie.yml@main
+    with:
+      systemd: true
+      timeout: 35
+      run: |
+        apt-get update -qq
+        apt-get install -y -qq --no-install-recommends python3-pytest \
+          python3-yaml wireguard-tools iproute2 iputils-ping openssl \
+          etcd-server etcd-client util-linux postgresql
+        systemctl stop postgresql
+        KEEL_POSTGRES_NETNS=1 PYTHONPATH=. python3 -m pytest -q -s \
+          tests/test_postgres_netns.py
   # A change that ships must come with a changelog entry, or it cannot be
   # installed and never reaches an appliance. The rule and its tests are
   # bin/require-changelog of the .github repository. The check is
