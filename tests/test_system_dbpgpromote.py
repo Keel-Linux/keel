@@ -68,6 +68,24 @@ class TestPromote(unittest.TestCase):
         self.assertEqual(self.ran, [question, list(dbpostgres.CLIENT)])
         self.assertEqual(self.slept, 0.0)
 
+    def test_the_client_s_answer_splits_on_the_tab(self):
+        """psql pads its aligned default with spaces and a bar; the
+        client asks for one tab between the columns, so the standby's
+        row reads as a standby (found when the pair's cases (b) to (e)
+        were built: every promote read "not in recovery")"""
+        def psql(argv, **kwargs):
+            self.ran.append(list(argv))
+            if "text" in kwargs and kwargs["text"] is not None:
+                return answer()
+            if "--no-align" in argv and "--field-separator=\t" in argv:
+                return answer("t\t0/1000\t0/1000\n")
+            return answer(" t                 | 0/1000 | 0/1000\n")
+        problem = dbpgpromote.promote(
+            "/", PromoteAction(), runner=psql,
+            clock=self.clock, sleep=self.sleep)
+        self.assertIsNone(problem)
+        self.assertIn("--tuples-only", dbpostgres.CLIENT)
+
     def test_a_standbehind_waits_until_replay_reaches_receive(self):
         problem = dbpgpromote.promote(
             "/", PromoteAction(timeout=10),

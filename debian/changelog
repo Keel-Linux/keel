@@ -1,3 +1,19 @@
+keel (0.23.18) unstable; urgency=medium
+
+  * keel's PostgreSQL client asked psql for its aligned output. psql
+    pads the columns with spaces and a bar, and keel's readers split a
+    row on the tab, so no answer split into its columns: every keel
+    database promote read "not in recovery", the seed's probe could not
+    see a standby, and the holder's timeline was never read (found
+    when the pair's network-namespace test's cases (b) to (e) were
+    built; case (a) never asked these questions). The client
+    now asks for unaligned output with a tab between the columns, the
+    way inspect asks. It also stops at the first failed statement on
+    its standard input: psql went on and exited 0, so a refused
+    pg_promote() or role statement read as done. The replication
+    role's statement does nothing on a standby now, where the role
+    arrives with the copy and ALTER ROLE is refused.
+
 keel (0.23.17) unstable; urgency=medium
 
   * keel's PostgreSQL client carried MariaDB's --batch, which psql has

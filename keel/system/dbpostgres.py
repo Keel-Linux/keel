@@ -85,9 +85,18 @@ HBA_BASE = (
 # keel's own statements go through the unix socket as the postgres OS
 # user, the way keel.inspect.dbengines' psql_argv does. runuser keeps
 # the environment, so the tests point PGHOST at a socket of the node's
-# own.
+# own. The answers are unaligned with a tab between the columns, the
+# way keel.inspect.dbengines' psql_argv asks them: keel's readers split
+# a row on the tab, and psql's aligned default pads the columns with
+# spaces and a bar, so no row split into its columns (found when the
+# pair's cases (b) to (e) were built: every promote read "not in
+# recovery"). ON_ERROR_STOP makes a failed statement on standard input
+# fail the client: without it psql goes on to the next statement and
+# exits 0, so a refused pg_promote() or role statement read as done.
 AS_POSTGRES = ("runuser", "-u", "postgres", "--")
-CLIENT = AS_POSTGRES + ("psql", "--no-psqlrc", "--tuples-only")
+CLIENT = AS_POSTGRES + ("psql", "--no-psqlrc", "--tuples-only",
+                        "--no-align", "--field-separator=\t",
+                        "--set=ON_ERROR_STOP=1")
 QUIET_CLIENT = CLIENT
 # Whether the server answers at all, asked before anything else
 # (keel.system.dbready): no credential, only the socket.
@@ -387,13 +396,19 @@ def role_statements(password: str) -> Statements:
     .dbstate.credential), so a value from a secret file is safe here.
     The SET comes first for the reason slot_statements gives: the
     block commits WAL, and the pair's synchronous commit must not
-    wait for the standby this role lets connect.
+    wait for the standby this role lets connect. On a standby the
+    block does nothing: the role arrives with the primary's copy, and
+    a standby refuses ALTER ROLE in its read-only transaction (an
+    apply on a standby failed once the client stopped at an error).
     """
     quoted = literal(password)
     return Statements(
         "SET synchronous_commit = local;\n"
         "DO $keel$\n"
         "BEGIN\n"
+        "   IF pg_is_in_recovery() THEN\n"
+        "      RETURN;\n"
+        "   END IF;\n"
         "   IF NOT EXISTS (SELECT FROM pg_roles"
         f" WHERE rolname = '{REPLICATION_USER}') THEN\n"
         f"      CREATE ROLE {REPLICATION_USER}"
