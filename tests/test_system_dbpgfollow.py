@@ -35,6 +35,7 @@ FOLLOW_DROPIN = "etc/postgresql/17/main/conf.d/" + dbpostgres.FOLLOW_DROPIN_NAME
 PAIR_DROPIN = "etc/postgresql/17/main/conf.d/" + dbpostgres.PAIR_DROPIN_NAME
 STANDBY_SIGNAL = DATADIR + "/" + dbpostgres.STANDBY_SIGNAL
 SYSTEM_DATABASES = "postgres\ntemplate0\ntemplate1\n"
+REAL_RUN = subprocess.run
 IDENTIFY_SYSTEM_ANSWER = "72377\t2\t0/4000098\n"
 # the cluster's own unit: a stop of the umbrella postgresql returns
 # before the cluster stops (keel#153)
@@ -73,6 +74,11 @@ class Server:
 
     def __call__(self, argv, **kwargs):
         argv = list(argv)
+        if argv[:1] == ["openssl"]:
+            # the members' channel signs with openssl: the follow asks
+            # the other members (keel#154), and this fake is
+            # subprocess.run for the whole process
+            return REAL_RUN(argv, **kwargs)
         self.argv.append(argv)
         stdin = kwargs.get("input")
         if isinstance(stdin, bytes):
@@ -219,7 +225,10 @@ class FollowTestCase(Pair):
                            return_value="enabled"), \
                 mock.patch("keel.system.dbseed.subprocess.run", server), \
                 mock.patch.object(self.all[index].node, "overlay",
-                                  wraps=self.all[index].node.overlay):
+                                  wraps=self.all[index].node.overlay), \
+                mock.patch.object(dbfollow, "_here", return_value=here):
+            # _here: this node on the fixture's members' channel, never
+            # the real network (keel#154: follow asks the other members)
             dbfollow.follow(here.root, here.node.path, confirmed, found,
                             runner=server, output=self.nets[index].output,
                             wait=wait, sleep=self.sleep, alone=alone)
@@ -473,6 +482,8 @@ class TestThePrimary(FollowTestCase):
         stops nothing, it says so"""
         self.pair_nodes()
         self.nets[0].addresses.clear()
+        # no other member answers: follow asks them first (keel#154)
+        self.down.update({address(1), address(2)})
         receiver = f"user=repl host={address(1)} port=5432 " \
                    "password=******** sslmode=verify-full\n"
         server = Server(in_recovery=True, receiver=receiver)
@@ -684,6 +695,99 @@ class TestPromotion(unittest.TestCase):
                       "\n".join(one.summary for one in actions
                                 if hasattr(one, "summary")))
 
+
+
+class TestWithoutEtcd(FollowTestCase):
+    """keel#154: in a pair without etcd nothing ran keel vip check, so a
+    returned old primary never learned the newer claim, and each watch
+    started its server for its follow to stop again"""
+
+    def returned_old_primary(self) -> None:
+        """A claimed and carried the VIP; B took it with
+        --old-primary-gone while A was away; A is back, its VIP gone
+        from wg0 by the reboot, its own claim the newest it knows"""
+        self.pair_nodes(claim=0)
+        self.down.add(address(0))
+        vippromote.promote(self.all[1], True, self.said[1].append)
+        self.down.discard(address(0))
+        self.nets[0].addresses.remove(f"{VIP}/128")
+        self.assertTrue(self.carried(1))
+
+    def follow_learning(self, index: int, server: Server, **kwargs):
+        here = self.all[index]
+        with mock.patch.object(dbfollow, "_here", return_value=here) as made:
+            found = self.follow(index, server, **kwargs)
+        return found, made
+
+    def test_a_returned_old_primary_learns_the_newer_claim(self):
+        self.returned_old_primary()
+        server = Server()
+        with mock.patch("keel.monitor.alerting.alert", return_value=True):
+            found, _ = self.follow_learning(0, server)
+        said = " ".join(found.lines)
+        self.assertIn("took epoch 2", said)
+        self.assertIn("fenced", said)
+        self.assertNotIn(["systemctl", "stop", UNIT], server.argv)
+        self.assertNotIn("is not proven", said)
+
+    def test_an_unproven_primary_s_server_is_not_started(self):
+        """the other member does not answer: the claim stays unproven,
+        and the follow does not start a server that it then stops"""
+        self.returned_old_primary()
+        # no other member answers: B and the third node, which B told
+        self.down.update({address(1), address(2)})
+        started = []
+        real = dbfollow.observe_database
+
+        def observe(*args, **kwargs):
+            started.append(kwargs.get("start"))
+            return real(*args, **kwargs)
+
+        with mock.patch.object(dbfollow, "observe_database", observe):
+            found, _ = self.follow_learning(0, Server())
+        self.assertEqual(started, [False])
+        self.assertIn("is not proven", " ".join(found.lines))
+
+    def test_a_stopped_unproven_primary_stays_stopped(self):
+        import dataclasses
+        self.returned_old_primary()
+        # no other member answers: B and the third node, which B told
+        self.down.update({address(1), address(2)})
+        real = dbfollow.observe_database
+
+        def observe(*args, **kwargs):
+            return dataclasses.replace(real(*args, **kwargs),
+                                       down=f"{UNIT} is inactive")
+
+        server = Server()
+        with mock.patch.object(dbfollow, "observe_database", observe):
+            found, _ = self.follow_learning(0, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertIn("stays stopped", " ".join(found.lines))
+        self.assertFalse(any(one[:1] == ["systemctl"]
+                             for one in server.argv))
+
+    def test_a_holder_back_with_no_newer_claim_carries_the_vip_again(self):
+        """keel vip check without etcd: a peer answered and none knows a
+        newer claim, so the holder carries the VIP again"""
+        self.pair_nodes(claim=0)
+        self.nets[0].addresses.remove(f"{VIP}/128")
+        found, _ = self.follow_learning(0, Server())
+        self.assertIsNone(found.problem, found.lines)
+        self.assertTrue(self.carried(0))
+        self.assertIn("unchanged (the primary, writable)", found.lines)
+
+    def test_a_holder_that_carries_the_vip_asks_nobody(self):
+        self.pair_nodes(claim=0)
+        found, made = self.follow_learning(0, Server())
+        self.assertIsNone(found.problem, found.lines)
+        made.assert_not_called()
+
+    def test_with_etcd_the_controller_tells_and_follow_asks_nobody(self):
+        self.returned_old_primary()
+        with mock.patch.object(vippromote, "with_etcd", return_value=True):
+            found, _ = self.follow_learning(0, Server())
+        self.assertNotIn("took epoch 2", " ".join(found.lines))
 
 if __name__ == "__main__":
     unittest.main()

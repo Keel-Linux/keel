@@ -53,3 +53,16 @@ class TestControl(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFollowUnit(unittest.TestCase):
+    """keel database follow at boot asks the other members for a newer
+    claim when there is no etcd (keel#154): over wg0, so after it"""
+
+    def test_the_boot_follow_runs_after_wg0(self):
+        unit = join(dirname(CONTROL), "keel.keel-database-follow.service")
+        with open(unit) as fob:
+            after = [line for line in fob if line.startswith("After=")]
+        self.assertTrue(any("wg-quick@wg0.service" in line.split()
+                            or "wg-quick@wg0.service" in line
+                            for line in after), after)

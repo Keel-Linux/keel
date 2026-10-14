@@ -1,3 +1,23 @@
+keel (0.23.21) unstable; urgency=medium
+
+  * In a VIP pair without etcd, nothing ran keel vip check (keel#154).
+    keel-vip-check.timer is part of keel-vip.service, which needs etcd.
+    So a returned old primary never learned the newer claim, and each
+    watch run started its PostgreSQL server for 17 s. keel database
+    follow now does the check of the pair's VIP: at boot, at each VIP
+    change and at each watch run. It asks the other members only when
+    its newest claim is its own, the VIP is not on wg0, and there is no
+    etcd. A newer claim is taken, and the server follows the holder in
+    the same run. If a peer answers and none knows a newer claim, the
+    holder carries the VIP again, as keel vip check does.
+  * keel database follow no longer starts the PostgreSQL server of a
+    claim that is not proven. It stopped that server again, and the
+    server took writes in the time between.
+  * keel-database-follow.service runs after wg-quick@wg0.service, so
+    the follow at boot can ask the other members over wg0.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Thu, 15 Oct 2026 11:00:00 +0000
+
 keel (0.23.20) unstable; urgency=medium
 
   * A new PostgreSQL pair could stop with both servers fenced, and no
