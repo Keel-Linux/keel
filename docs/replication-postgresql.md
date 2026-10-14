@@ -6,11 +6,11 @@ time the way 0013 has it. What a pair is (the VIP decides the role,
 the pair record derives the origins, the credential and the primary's
 address), the database leaf of the mesh root CA, the follow of the
 VIP's state and the units that run it are the same and are written
-there. This file has what PostgreSQL does differently, and the case
-(a) wording of the end to end test.
+there. This file has what PostgreSQL does differently, and the
+PostgreSQL wording of the end to end test's cases (a) to (e).
 
-In keel 0.23.17; measured under the design case of 0050 in CI
-(`postgres / trixie`), the numbers under "Measured" as they come.
+In keel 0.23.18. The numbers under "Measured" come from the CI job
+`postgres / trixie`, under the design case of 0050.
 
 ## What differs from the MariaDB pair
 
@@ -32,7 +32,11 @@ In keel 0.23.17; measured under the design case of 0050 in CI
   one round trip, 250 ms in the design case. While the replica is
   away the primary waits; there is no asynchronous fallback to report
   as drift, the way the 10 s timeout of MariaDB's semi-synchronous
-  replication is one.
+  replication is one (one exception: the new primary after
+  `--old-primary-gone`, below). `keel database watch` alerts instead, once,
+  when no standby streams from the primary or a commit waited more
+  than 10 s for it, and once more when the standby acknowledges
+  again (the state file's key `sync_commit`).
 - **The replication slot `keel`** on the primary keeps its WAL while
   the replica is away; the walreceiver names itself `keel`.
 - **The rejoin after a promotion is a confirmed reseed and nothing
@@ -44,7 +48,26 @@ In keel 0.23.17; measured under the design case of 0050 in CI
   and reseeds on `--destroy-local-database`, and until then the
   divergence is recorded (`/var/lib/keel/database/diverged`, the
   timelines this node's own history forked from the holder's) and the
-  node stays as it is, read only in recovery.
+  node stays as it is, read only in recovery. An old primary is not
+  in recovery when it comes back, and PostgreSQL cannot be made read
+  only while it runs, so follow fences it first: `standby.signal` in
+  its data directory, no follow drop-in, a restart. The server is
+  then a standby that follows nobody; it refuses every write and
+  serves the dump. The dump is taken once per divergence: the record
+  names it, and a fenced node takes no write after it. Both
+  timelines are numbers (a standby's from its last checkpoint);
+  `keel diff` and `keel database status` show them.
+- **The holder makes the pair's slot.** A base backup copies no slot,
+  so a promoted standby has none; follow makes the slot `keel` on the
+  holder on each run, or the reseed of the old primary would never
+  stream.
+- **The seed is compressed on the primary** (`pg_basebackup
+  --compress=server-zstd`, unpacked by the plain format): a fresh
+  cluster is about 40 MB raw and under 3 MB compressed, and the
+  design case's link carries about 50 kB/s on one connection.
+- **keel's psql client** answers unaligned, a tab between the
+  columns, and stops at the first failed statement on its standard
+  input (`ON_ERROR_STOP`): without it psql exits 0 after an error.
 - **TLS is the same leaf, the libpq spelling.** The files live under
   `/etc/postgresql/keel-tls` (0640 root:postgres for the key);
   `ssl_ca_file`, `ssl_cert_file`, `ssl_key_file`, `ssl_crl_file` in
@@ -96,21 +119,110 @@ A restarted and serving again at once (a primary has no read-only
 boot: a standby's refusal is recovery), `keel diff` clean on both. In
 CI, `postgres / trixie`, with systemd booted.
 
-**Cases (b) to (e) are the follow-up pull request's**, the twin of
-MariaDB's: the replica cut (with etcd, the lease's release fences the
-VIP first; the synchronous commit waits and the failover is the
-operator's `keel database promote`), the unplanned failover with the
-application writing, the old primary rejoining, and the diverged old
-primary, dumped, recorded and alerted, reseeding once confirmed.
+## Cases (b) to (e)
+
+The same run goes on after case (a), the twin of MariaDB's cases. The
+application is co-located (0054): it writes through the loopback of
+the node that carries the VIP. A client whose commit waits for the
+standby is killed after 30 s, never cancelled: a cancelled wait
+answers success with a warning that the commit is only local.
+
+- **(b) The replica cut off.** B is cut off from everyone, both ways,
+  for 40 s. A keeps the VIP: C renews its lease, and B holds no lease
+  to release, so nothing is fenced. A commit on A waits for B, with
+  no timeout and no fallback. A's watch alerts. After the heal, the
+  commit is acknowledged, A has its synchronous standby again, the
+  watch alerts the end, and the row is on B.
+- **(c) The unplanned failover, the application writing.** A is cut
+  off, so the write in flight on it waits for B and is in A's WAL
+  unacknowledged. Then A's server and its VIP helper are killed. The
+  operator runs `keel database promote --old-primary-gone` on B: with
+  etcd it waits for A's lease to end (0049), then B carries the VIP
+  and its follow drains, promotes, makes the pair's slot and commits
+  alone (the exception below). The writes resume within 5 s of the VIP
+  on B (keel#148), B's watch alerts at each run, and no row that the
+  application saw acknowledged is missing on B.
+- **(e) The diverged old primary.** A boots: its server starts as a
+  primary, and its boot follow, with its own old claim not proven,
+  stops it. Its VIP helper starts and takes B's newer claim; follow
+  fences the server, dumps it, records the divergence (timeline 1
+  against B's 2) and alerts once. Every write on A from its boot to
+  the fence is unacknowledged. The dump holds A's unacknowledged
+  rows. Two watch runs later there is still one dump and one alert.
+- **(d) The old primary rejoins.** The operator confirms the reseed
+  on A (`keel spec apply --system-only --destroy-local-database`).
+  A streams from B, the divergence record is gone, `FIRST 1 (keel)` is
+  back on B and each commit waits for A again, B's watch alerts the
+  end, and the rows of A and B agree.
+
+Under 0054 every old primary that holds data diverges by its
+timeline, so (d) is the confirmed reseed of (e)'s node, one cycle.
+
+## The one exception: the new primary after --old-primary-gone
+
+0054 says the pair's synchronous commit has no timeout and no
+fallback. There is one exception (decided 2026-10-14 under the
+maintainer's delegation; the handbook records it under 0054). When
+`keel database promote --old-primary-gone` promotes a standby, the new
+primary commits alone:
+
+- keel empties `synchronous_standby_names` in the pair drop-in and
+  reloads the server. It does not restart it: the clients stay
+  connected, and the commits that waited are released.
+- `keel database watch` alerts at each run while the primary commits
+  alone with no standby streaming, on the same path as the "commits
+  wait" alert.
+- When a standby streams again, after the confirmed reseed, keel
+  writes `FIRST 1 (keel)` back and reloads; the watch alerts the end.
+  `keel spec apply` does not take the empty line for drift.
+
+The reason: the flag is the operator's statement that the old primary
+is gone. A commit then has no second node to wait for, and without the
+exception every write on the new primary waits until the old primary
+is reseeded, which itself waits for the operator's confirmation. Case
+(c) measured that wait at 216 s from the VIP on the new primary, and
+keel#148 bounds the writes' return at 5 s. A commit that the new
+primary takes alone is on one node only until the reseed; the alert
+says so at each run.
+
+Without the flag nothing changes. A planned promote and the cut
+replica of case (b) keep the synchronous wait. `keel database promote
+--old-primary-gone` writes its statement
+(`/var/lib/keel/database/old-primary-gone`) before it moves the VIP,
+so the follow that the claim starts uses it at the promotion; the mark
+is used once.
 
 ## Measured
 
 Under the design case, 250 ms ±25 ms with 2 % loss on every leg.
-Case (a) is the CI job's (`postgres / trixie`); the numbers land here
-as the runs come.
+All rows are the CI job's (`postgres / trixie`), runs of keel#149 on
+2026-10-14 (the overlay measured at 227 to 229 ms minimum, 251 ms
+median, 3.25 to 5 % loss). Where the runs differ, each number is given.
+The rows of (c) after the VIP lands on B are the run with the exception
+of --old-primary-gone; the row before it is the run without.
 
 | What | Measured |
 | --- | --- |
-| (a) a synchronous commit on the primary, the standby acknowledging | one round trip, 0.28 to 0.31 s at 250 ms on the MariaDB twin |
-| (a) a write visible on the replica, from its acknowledgement | within the replay, 0.04 to 0.07 s on the twin |
-| (b) to (e) | the follow-up pull request's |
+| (a) B's apply, with its seed (the copy compressed on the primary) | 88 to 108 s; about 730 s before the compression |
+| (a) the walreceiver streaming, after B's apply | 0.5 s |
+| (a) a write on the primary through its loopback: connect and the synchronous commit | 0.47 to 0.74 s |
+| (a) a write visible on the replica, from its acknowledgement | 0.17 to 0.36 s (polled through the agent) |
+| (b) the commit on A, with B cut off for 40 s | waits the whole cut: no timeout, no fallback |
+| (b) A's watch alerts that its commits wait | 13.5 to 20.5 s after the cut |
+| (b) the waiting commit acknowledged, after the heal | 20.9 to 22.2 s (TCP's retry after the cut) |
+| (b) A synchronous again, the end alerted | at the acknowledgement; at the next watch |
+| (c) `keel database promote --old-primary-gone` on B | 35.0 to 43.8 s: most of it the wait for A's lease (0049) |
+| (c) B carries the VIP; B out of recovery | 35.3 s after the cut; 0.3 s later |
+| (c) acknowledged rows missing on B | none (15 acknowledged) |
+| (c) without the exception: the first write, from the VIP on B | 216 s: B's commits waited until A streamed |
+| (c) with the exception: the first write, from the VIP on B | 1.1 to 1.9 s (the bound of keel#148 is 5 s); B out of recovery 0.3 to 1.4 s after the VIP |
+| (c) the write downtime, from the last acknowledgement on A | 24.6 to 40.7 s: the wait for A's lease, then 1.1 to 1.9 s |
+| (c) B commits alone; its watch alerts | at each run (twice within 12.5 s) |
+| (d) after the reseed, on B | `FIRST 1 (keel)` back, synchronous at once, the end alerted |
+| (e) A's boot follow (its own old claim, not proven) | the server stopped |
+| (e) fenced, dumped, recorded and alerted, from A's VIP helper start | 8 s and 10 s |
+| (e) writes on A from its boot to the fence | 7 and 8 tried, none acknowledged; 3 answered "committed locally" when the stop ended their wait |
+| (e) the dump; the alert | holds A's unacknowledged row; one dump and one alert after two more watch runs |
+| (d) the confirmed reseed (`keel spec apply --system-only --destroy-local-database`) | 98 to 129 s; A streams 0.2 to 0.8 s after |
+| (d) after the reseed | B synchronous again, the end alerted, the rows of A and B equal |
+| the whole driver | 500 to 536 s |
