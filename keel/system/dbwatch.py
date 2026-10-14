@@ -43,6 +43,7 @@ from keel.monitor import alerting
 from keel.network import live, wireguard
 from keel.system import dbpair, dbtls
 from keel.system import dbmariadb as mariadb
+from keel.system import dbpostgres
 
 STATE = "var/lib/keel/database/semi-sync"
 CHECK = "database-semi-sync"
@@ -153,31 +154,49 @@ def semi_sync(root: str, pair: dbpair.PairState, out, err):
 def certificate(root: str, doc: dict, spec: str, pair: dbpair.PairState,
                 out, err) -> bool:
     """The leaf renewed when due; whether it is in place"""
-    own = mariadb.overlay_addresses(doc)
-    if not own:
+    from keel.mesh import vippair
+    from keel.system.dbstate import declared_server
+    server = declared_server(doc)
+    engine = str(server.get("engine") or "mariadb")
+    addresses = mariadb.overlay_addresses(doc) if engine == "mariadb" \
+        else dbpostgres.overlay_addresses(doc)
+    if not addresses:
         return True
     member = etcd.Etcd(Node(root, spec), lambda: datetime.now(timezone.utc),
                        err)
     try:
         key = etcd.own_key(member)
-        said = dbtls.ensure(member, own[0], pair.vip, pair.peer_address,
-                            key or "")
+        try:
+            record = vippair.read(root, pair.vip)
+        except ValueError:
+            record = None
+        said = dbtls.ensure(member, addresses[0], pair.vip,
+                            pair.peer_address, key or "", pair=record,
+                            engine=engine)
     except (StateError, NodeError, ValueError) as e:
         err(f"database watch: {e}")
+        until = dbtls.expires(root, engine) or "unknown"
         alerting.alert(root, err, TLS_TITLE, f"{os.uname().nodename}: {e}."
                        " Replication over TLS stops when the certificate"
-                       f" expires ({dbtls.expires(root) or 'unknown'}).",
+                       f" expires ({until}).",
                        "database-tls")
         return False
     if said:
         out(f"database watch: {said}")
-    if dbtls.refresh_crl(root):
-        import subprocess
-        done = subprocess.run(list(mariadb.CLIENT), input="FLUSH SSL;\n",
-                              capture_output=True, text=True, check=False)
-        out("database watch: the root's CRL refreshed for the server"
-            + ("" if done.returncode == 0 else
-               f" (FLUSH SSL failed: {done.stderr.strip()[-120:]})"))
+    if dbtls.refresh_crl(root, engine):
+        if engine == "mariadb":
+            import subprocess
+            done = subprocess.run(list(mariadb.CLIENT),
+                                  input="FLUSH SSL;\n",
+                                  capture_output=True, text=True,
+                                  check=False)
+            out("database watch: the root's CRL refreshed for the server"
+                + ("" if done.returncode == 0 else
+                   f" (FLUSH SSL failed: {done.stderr.strip()[-120:]})"))
+        else:
+            out("database watch: the root's CRL refreshed for the server"
+                " (a running PostgreSQL keeps its SSL files until the"
+                " next restart)")
     return True
 
 

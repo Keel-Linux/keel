@@ -325,7 +325,8 @@ class EnsureDatabaseTls:
         return (f"make or renew the database certificate for {self.address}"
                 f" and {self.vip}, signed by the mesh's root CA (here, or"
                 " asked of its holder over the members' channel), under"
-                " /etc/mysql/keel-tls")
+                " the engine's TLS directory (etc/mysql/keel-tls or"
+                " etc/postgresql/keel-tls)")
 
 
 @dataclass(frozen=True)

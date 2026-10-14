@@ -4,6 +4,16 @@ keel (0.23.17) unstable; urgency=medium
     not, so every psql keel ran refused to start (found by the pair's
     network-namespace test of this release): the flag is out, and
     --tuples-only was already there.
+  * keel database watch renewed the pair's database certificate without
+    the pair's signed record, so the root's holder refused every renewal
+    (a certificate for the VIP needs the pair's signed record; found by
+    the pair's network-namespace test of this release); the watch also
+    read the leaf's expiry and refreshed the CRL in the MariaDB layout
+    whatever the node declared, and FLUSH SSL is a MariaDB statement:
+    the watch now sends the record, reads the engine's layout, and
+    flushes only a MariaDB server (a running PostgreSQL takes the new
+    CRL at its next restart). The TLS action's line no longer names
+    /etc/mysql/keel-tls on a PostgreSQL node.
   * the pair's replication line asked scram-sha-256 for the
     certificate's map: pg refuses map= with a password method and
     the server dies loading the file (found by the pair's
