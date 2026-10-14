@@ -19,6 +19,17 @@ keel (0.23.18) unstable; urgency=medium
     keel database follow now makes the slot on the holder (the
     statement does nothing when the slot is there, and commits without
     the standby).
+  * An old PostgreSQL primary that came back holding data stayed a
+    writable primary: keel recorded its divergence and said "read
+    only", and the next follow started the server that the unproven
+    claim had stopped. keel database follow now fences it first: the
+    server becomes a standby that follows nobody (standby.signal, no
+    follow drop-in, a restart), so it refuses every write until the
+    confirmed reseed. Its timeline is read in recovery too, as a
+    number like the holder's, and the dump is taken once per
+    divergence: the record names it, and a fenced node takes no write
+    since. keel diff and keel database status show the two timelines
+    of a PostgreSQL divergence, where they said "unknown".
 
 keel (0.23.17) unstable; urgency=medium
 

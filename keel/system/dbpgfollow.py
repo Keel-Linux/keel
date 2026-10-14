@@ -12,7 +12,7 @@ The other rows:
 | --- | --- |
 | held, by this node's newest claim, and on wg0 | a standby drained and promoted (keel.system.dbpgpromote); a primary left alone |
 | held by this node's newest claim, not on wg0 | a primary is stopped: pg cannot be made read only while it runs, and a stopped server takes no writes; a standby refuses them already |
-| held by the other member | a standby of the holder left alone; anything else seeded from the holder, or reseeded once confirmed |
+| held by the other member | a standby of the holder left alone; a server that holds data and takes writes (an old primary) fenced first, a standby that follows nobody; then seeded from the holder, or reseeded once confirmed |
 
 The rejoin (0054, "rejoin after promotion = confirmed reseed", no
 pg_rewind this version): timelines answer whether the copy on disk is
@@ -56,7 +56,15 @@ DIVERGED_TEXT = (
 )
 BACKUPS = "var/backups/keel/postgresql"
 CHECK = "database-rejoin"
-TIMELINE_SQL = "SELECT pg_walfile_name(pg_current_wal_lsn())"
+# this node's timeline as a number: a primary's from its current WAL
+# file's name, a standby's (a fenced old primary) from its last
+# checkpoint, since pg_walfile_name refuses during recovery
+TIMELINE_SQL = (
+    "SELECT CASE WHEN pg_is_in_recovery()"
+    " THEN (SELECT timeline_id FROM pg_control_checkpoint())"
+    " ELSE ('x' || substr(pg_walfile_name(pg_current_wal_lsn()), 1, 8))"
+    "::bit(32)::int END"
+)
 IDENTIFY_SYSTEM = "IDENTIFY_SYSTEM"
 
 
@@ -162,6 +170,10 @@ def _replica(root: str, server: dict, state: DatabaseState,
         found.say(f"unchanged (a standby of [{host}]:{port})")
         _forget_divergence(root)
         return
+    held = dbpostgres.user_databases((state.schemas.text or "").splitlines())
+    if held and state.reading.role.value != REPLICA and \
+            not _fence(root, found, runner):
+        return
     if not state.credential.known:
         found.fail(state.credential.problem)
         return
@@ -169,7 +181,6 @@ def _replica(root: str, server: dict, state: DatabaseState,
         found.fail("the database certificate is not in place yet"
                    " (database.server.tls)")
         return
-    held = dbpostgres.user_databases((state.schemas.text or "").splitlines())
     if not held:
         _seed(root, host, port, state, found, runner)
         return
@@ -177,21 +188,78 @@ def _replica(root: str, server: dict, state: DatabaseState,
     theirs = _holder_timeline(root, host, port, state, runner)
     if theirs is None:
         found.fail(f"the holder at [{host}]:{port} did not answer its"
-                   " timeline over TLS; nothing was changed")
+                   " timeline over TLS; nothing else was changed")
         return
-    kept = _dump(root, runner)
-    if kept.startswith("not kept"):
-        found.fail(f"a dump of what this node holds was {kept}; nothing"
-                   " was changed")
-        return
-    found.say(f"a dump of what this node holds is kept at {kept}")
+    kept = _kept_dump(root)
+    if kept:
+        found.say(f"the dump of what this node holds is kept at {kept}"
+                  " (this node took no write since: it is in recovery)")
+    else:
+        kept = _dump(root, runner)
+        if kept.startswith("not kept"):
+            found.fail(f"a dump of what this node holds was {kept};"
+                       " nothing else was changed")
+            return
+        found.say(f"a dump of what this node holds is kept at {kept}")
     if not confirmed:
-        _diverged(root, state, host, own, theirs, found)
+        _diverged(root, state, host, own, theirs, kept, found)
         return
     found.say("confirmed with --destroy-local-database: what this node"
               f" holds is discarded (timeline {own or 'unknown'} against"
               f" the holder's {theirs})")
     _seed(root, host, port, state, found, runner)
+
+
+def _fence(root: str, found, runner) -> bool:
+    """An old primary made a standby that follows nobody; whether it is
+
+    The other member holds the VIP, and this server takes writes and
+    holds data: an old primary that came back. A PostgreSQL server
+    cannot be made read only while it runs, and a stopped one is
+    started again by the next follow, so the fence is recovery itself:
+    standby.signal in the data directory, no follow drop-in, a restart.
+    The server then refuses every write, serves the dump below, and
+    connects to nobody until the confirmed reseed replaces its copy
+    (found when the pair's cases (b) to (e) were built: the diverged
+    old primary stayed a writable primary)."""
+    try:
+        _, _, dropdir, datadir = dbpostgres.cluster_paths(root)
+        signal = os.path.join(datadir, dbpostgres.STANDBY_SIGNAL)
+        fd = os.open(signal, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+        os.close(fd)
+        dbpgseed._as_postgres(signal)
+        try:
+            os.remove(os.path.join(dropdir, dbpostgres.FOLLOW_DROPIN_NAME))
+        except FileNotFoundError:
+            pass
+    except OSError as e:
+        found.fail(f"this node holds data and takes writes, and it could"
+                   f" not be made a standby: {e.strerror or e}")
+        return False
+    problem = _run(runner, ("systemctl", "restart", dbpostgres.service()))
+    if problem:
+        found.fail(f"this node holds data and takes writes, and the"
+                   f" restart that makes it a standby failed: {problem}")
+        return False
+    found.say("fenced: the other member holds the VIP and this server"
+              " held data and took writes, so it is a standby that"
+              " follows nobody now (standby.signal, no follow drop-in):"
+              " it refuses every write until it is reseeded")
+    return True
+
+
+def _kept_dump(root: str) -> str | None:
+    """The dump the recorded divergence names, when it is still there:
+    a fenced node is in recovery and takes no write, so that dump still
+    holds what the node holds, and a run of follow or watch every 30 s
+    does not dump it again"""
+    try:
+        with open(os.path.join(root, DIVERGED)) as fob:
+            recorded = json.load(fob)
+    except (OSError, ValueError):
+        return None
+    path = recorded.get("dump") if isinstance(recorded, dict) else None
+    return path if isinstance(path, str) and os.path.isfile(path) else None
 
 
 def _following(state: DatabaseState, host: str, port: int) -> bool:
@@ -222,15 +290,15 @@ def _seed(root: str, host: str, port: int, state: DatabaseState, found,
 
 
 def _own_timeline(root: str, runner) -> str | None:
-    """This node's timeline, from its current WAL file's name, or None
-    when the server did not answer"""
+    """This node's timeline as a number, the way IDENTIFY_SYSTEM gives
+    the holder's, or None when the server did not answer"""
     out: dict = {}
     problem = _run(runner, dbpostgres.CLIENT
                    + ("--command", TIMELINE_SQL), output=out)
     if problem:
         return None
-    name = (out.get("stdout") or "").strip()
-    return name[:8] or None
+    found = (out.get("stdout") or "").strip()
+    return found if found.isdigit() else None
 
 
 def _holder_timeline(root: str, host: str, port: int,
@@ -256,10 +324,11 @@ def _holder_timeline(root: str, host: str, port: int,
 
 
 def _diverged(root: str, state: DatabaseState, holder: str, own: str | None,
-              theirs: str, found) -> None:
+              theirs: str, kept: str, found) -> None:
     first = not os.path.exists(os.path.join(root, DIVERGED))
     _write(root, DIVERGED, json.dumps({
         "own_timeline": own, "holder_timeline": theirs, "holder": holder,
+        "dump": kept,
         "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")},
         sort_keys=True) + "\n", 0o600)
     found.fail(

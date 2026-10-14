@@ -412,6 +412,19 @@ def diverged(root: str) -> dict | None:
     return found if isinstance(found, dict) else None
 
 
+def described(record: dict) -> str:
+    """What a recorded divergence holds, either engine's record: the
+    errant GTIDs of MariaDB, or the two timelines of PostgreSQL (0054),
+    which has no transaction ids to list"""
+    errant = ", ".join(str(one) for one in record.get("errant") or [])
+    if errant:
+        return errant
+    if record.get("holder_timeline") is not None:
+        return (f"timeline {record.get('own_timeline') or 'unknown'}"
+                f" against the holder's {record.get('holder_timeline')}")
+    return "unknown"
+
+
 def _holder_gtid(root: str, host: str, port: int, state: DatabaseState,
                  runner) -> str | None:
     """The holder's binlog state and slave position, as `repl` over TLS"""

@@ -46,7 +46,7 @@ class Server:
                  standby: str = "\n",
                  hba: str = "local\t\t\nhost\t127.0.0.1\t255.255.255.255\n",
                  schemas: str = SYSTEM_DATABASES + "shop\n",
-                 timeline: str = "00000002000000000000004A",
+                 timeline: str = "2",
                  holder_timeline: str = "2", holder_down: bool = False,
                  positions: str = "t\t0/4000100\t0/4000098\n",
                  dump_fails: bool = False):
@@ -76,6 +76,11 @@ class Server:
             if flag in argv:
                 sql = argv[argv.index(flag) + 1]
         text = bool(kwargs.get("text"))
+        if argv[:2] == ["systemctl", "restart"]:
+            # the fence's restart: standby.signal makes the start a
+            # recovery
+            self.row = "t" + self.row[1:]
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
         if argv[:2] == ["ss", "-lntH"]:
             out = f"LISTEN 0 80 [{address(1)}]:5432 [::]:*\n"
             return subprocess.CompletedProcess(argv, 0, out, "")
@@ -111,6 +116,8 @@ class Server:
                 out = "f\t0\t100\n"
         elif "pg_last_wal_replay_lsn" in sql:
             out = self.positions
+        elif sql == dbpgfollow.TIMELINE_SQL:
+            out = self.timeline + "\n"
         elif "pg_is_in_recovery()" in sql:
             out = self.row
         elif "conninfo FROM pg_stat_wal_receiver" in sql:
@@ -121,8 +128,6 @@ class Server:
             out = self.hba
         elif "datname FROM pg_database" in sql:
             out = self.schemas
-        elif "pg_walfile_name" in sql:
-            out = self.timeline + "\n"
         elif "pg_last_wal_replay_lsn" in sql:
             out = self.positions
         elif "status FROM pg_stat_wal_receiver" in sql:
@@ -329,20 +334,34 @@ class TestTheReplica(FollowTestCase):
         divergence is recorded and it is not connected until the
         operator confirms the reseed"""
         self.pair_nodes()
-        server = Server(timeline="00000003000000000000004A",
+        root = self.all[1].root
+        with open(os.path.join(root, FOLLOW_DROPIN), "w") as fob:
+            fob.write("primary_conninfo = 'host=elsewhere'\n")
+        server = Server(timeline="3",
                         holder_timeline="2")
         with mock.patch("keel.monitor.alerting.alert",
                         return_value=True) as alerted:
             found = self.follow(1, server)
         self.assertIn("diverged", found.problem)
-        self.assertIn("00000003", found.problem)
+        self.assertIn("timeline 3 against the holder's 2", found.problem)
         self.assertFalse(self.ran(server, "pg_basebackup"))
+        # fenced first: a standby that follows nobody, which refuses
+        # every write (found when the pair's cases (b) to (e) were
+        # built: the diverged old primary stayed a writable primary)
+        self.assertIn("fenced", " ".join(found.lines))
+        self.assertTrue(os.path.exists(os.path.join(root, STANDBY_SIGNAL)))
+        self.assertFalse(os.path.exists(os.path.join(root, FOLLOW_DROPIN)))
+        restart = server.argv.index(["systemctl", "restart",
+                                     dbpostgres.service()])
+        dumped = next(n for n, argv in enumerate(server.argv)
+                      if "pg_dumpall" in argv)
+        self.assertLess(restart, dumped)
         kept = os.listdir(os.path.join(self.all[1].root,
                                        dbpgfollow.BACKUPS))
         self.assertTrue(kept[0].startswith("rejoin-"), kept)
         self.assertTrue(kept[0].endswith(".zst"), kept)
         recorded = dbfollow.diverged(self.all[1].root)
-        self.assertEqual(recorded["own_timeline"], "00000003")
+        self.assertEqual(recorded["own_timeline"], "3")
         self.assertEqual(recorded["holder_timeline"], "2")
         self.assertEqual(recorded["holder"], address(0))
         self.assertEqual(alerted.call_count, 1)
@@ -353,10 +372,30 @@ class TestTheReplica(FollowTestCase):
         alerted.assert_not_called()
         self.assertIn("diverged", found.problem)
         self.assertEqual(self.ran(server, "pg_basebackup"), False)
+        # nor fenced or dumped again: in recovery it took no write, and
+        # the dump the record names still holds what it holds
+        self.assertEqual(sum("pg_dumpall" in argv for argv in server.argv),
+                         1)
+        self.assertEqual(server.argv.count(
+            ["systemctl", "restart", dbpostgres.service()]), 1)
+        self.assertEqual(len(os.listdir(os.path.join(
+            root, dbpgfollow.BACKUPS))), 1)
+        self.assertTrue(dbfollow.diverged(root)["dump"].endswith(".zst"))
+
+    def test_a_standby_that_follows_nobody_is_not_fenced_again(self):
+        """In recovery it refuses writes already: no restart"""
+        self.pair_nodes()
+        server = Server(in_recovery=True, timeline="1")
+        with mock.patch("keel.monitor.alerting.alert", return_value=True):
+            found = self.follow(1, server)
+        self.assertIn("timeline 1 against the holder's 2", found.problem)
+        self.assertNotIn(["systemctl", "restart", dbpostgres.service()],
+                         server.argv)
+        self.assertNotIn("fenced", " ".join(found.lines))
 
     def test_confirmed_the_old_primary_is_reseeded_after_a_dump(self):
         self.pair_nodes()
-        server = Server(timeline="00000003000000000000004A",
+        server = Server(timeline="3",
                         holder_timeline="2")
         found = self.follow(1, server, confirmed=True)
         self.assertIsNone(found.problem, found.lines)
@@ -379,7 +418,11 @@ class TestTheReplica(FollowTestCase):
         server = Server(holder_down=True)
         found = self.follow(1, server)
         self.assertIn("did not answer its timeline", found.problem)
-        self.assertIn("nothing was changed", found.problem)
+        self.assertIn("nothing else was changed", found.problem)
+        # the fence comes first all the same: it holds data and is not
+        # the holder
+        self.assertIn(["systemctl", "restart", dbpostgres.service()],
+                      server.argv)
         self.assertFalse(self.ran(server, "pg_dumpall"))
         self.assertFalse(self.ran(server, "pg_basebackup"))
 
@@ -389,7 +432,7 @@ class TestTheReplica(FollowTestCase):
         the primary (found by the pair's network-namespace test of
         this release)"""
         self.pair_nodes()
-        server = Server(timeline="00000003000000000000004A")
+        server = Server(timeline="3")
         found = self.follow(1, server, confirmed=True)
         self.assertIsNone(found.problem, found.lines)
         asked = "\n".join(one for argv in server.argv for one in argv)
@@ -411,6 +454,24 @@ class TestTheReplica(FollowTestCase):
         self.nodes(vips=(None, None), paired=False)
         found = self.follow(2, Server())
         self.assertIn("declares no appliance.vip", found.problem)
+
+
+class TestTheRecord(unittest.TestCase):
+    """diff and status read either engine's record: PostgreSQL's has
+    timelines, no errant GTID, and said "unknown" before"""
+
+    def test_the_timelines_describe_a_postgresql_divergence(self):
+        record = {"own_timeline": "1", "holder_timeline": "2",
+                  "holder": "fd00::2"}
+        self.assertEqual(dbfollow.described(record),
+                         "timeline 1 against the holder's 2")
+        self.assertEqual(dbfollow.described({"errant": ["0-7-15"]}),
+                         "0-7-15")
+        from keel.diff.compare import diverged
+        from keel.inspect.report import Inspection
+        fields = diverged({"appliance": {"vip": VIP}}, Inspection(
+            "/", "t", {}, (), role="replica", diverged=record))
+        self.assertIn("timeline 1 against the holder's 2", fields[0].note)
 
 
 class TestPromotion(unittest.TestCase):

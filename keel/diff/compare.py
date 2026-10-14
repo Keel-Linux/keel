@@ -278,10 +278,10 @@ def diverged(declared: dict, inspection: Inspection) -> list[FieldDiff]:
     """An old primary that came back holding what the new one lacks"""
     if not paired(declared) or not inspection.diverged:
         return []
-    errant = ", ".join(str(one) for one in
-                       inspection.diverged.get("errant") or [])
-    return [FieldDiff(DIVERGED_FIELD, DRIFT, "none", errant or "unknown",
-                      note=DIVERGED_NOTE.format(errant=errant or "unknown"))]
+    from keel.system.dbfollow import described
+    errant = described(inspection.diverged)
+    return [FieldDiff(DIVERGED_FIELD, DRIFT, "none", errant,
+                      note=DIVERGED_NOTE.format(errant=errant))]
 
 
 def read_only(declared: dict, inspection: Inspection) -> list[FieldDiff]:
