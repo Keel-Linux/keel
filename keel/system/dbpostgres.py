@@ -87,7 +87,7 @@ HBA_BASE = (
 # the environment, so the tests point PGHOST at a socket of the node's
 # own.
 AS_POSTGRES = ("runuser", "-u", "postgres", "--")
-CLIENT = AS_POSTGRES + ("psql", "--no-psqlrc", "--batch", "--tuples-only")
+CLIENT = AS_POSTGRES + ("psql", "--no-psqlrc", "--tuples-only")
 QUIET_CLIENT = CLIENT
 # Whether the server answers at all, asked before anything else
 # (keel.system.dbready): no credential, only the socket.

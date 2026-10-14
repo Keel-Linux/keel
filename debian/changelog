@@ -1,5 +1,9 @@
 keel (0.23.17) unstable; urgency=medium
 
+  * keel's PostgreSQL client carried MariaDB's --batch, which psql has
+    not, so every psql keel ran refused to start (found by the pair's
+    network-namespace test of this release): the flag is out, and
+    --tuples-only was already there.
   * the pair's replication line asked scram-sha-256 for the
     certificate's map: pg refuses map= with a password method and
     the server dies loading the file (found by the pair's
@@ -44,6 +48,7 @@ keel (0.23.17) unstable; urgency=medium
     release). They now live in the cluster's configuration directory,
     the way Debian keeps pg_hba.conf; only GUC drop-ins stay in
     conf.d.
+ (fix: keel's PostgreSQL client carried MariaDB's --batch, which psql has not (0054))
   * A database pair of PostgreSQL (handbook decision 0054): the pair
     converge, the follow of the VIP, the network-namespace gate.
     This change is the TLS layer: the database leaf of the mesh root
