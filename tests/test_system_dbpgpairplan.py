@@ -176,6 +176,19 @@ class TestThePairPlan(unittest.TestCase):
             [type(one) for one in plan[0].actions],
             [EnsureDatabaseTls, Note])
 
+    def test_a_primary_that_commits_alone_is_not_drift(self):
+        """After keel database promote --old-primary-gone the empty
+        synchronous_standby_names is follow's runtime state (0054):
+        apply neither writes the line back nor restarts the server"""
+        dropin, pair_dropin, hba, ident = wanted_files(DOC, state())
+        plan = plan_database(
+            DOC, state(dropin=dropin,
+                       pair_dropin=dbpostgres.alone_text(pair_dropin),
+                       hba=hba, ident=ident, nonlocal_bind="1"), False)
+        self.assertEqual(
+            [type(one) for one in plan[0].actions],
+            [EnsureDatabaseTls, Note])
+
     def test_an_hba_change_alone_reloads(self):
         dropin, pair_dropin, _, ident = wanted_files(DOC, state())
         plan = plan_database(

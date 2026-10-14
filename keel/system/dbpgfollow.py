@@ -86,17 +86,19 @@ class PairSeed:
 
 
 def follow(root: str, state: DatabaseState, server: dict, role: str,
-           confirmed: bool, found, runner, proven) -> bool:
+           confirmed: bool, found, runner, proven, alone: bool = False) -> bool:
     """The PostgreSQL rows; `proven` is the caller's wait for this
     node's own claim to carry, and the ROLE_FILE write stays with it
     (keel.system.dbfollow). Returns whether the ROLE_FILE may record
     the role: an unproven claim never does (keel#104), the way a
-    MariaDB primary that is read only on a stale claim records nothing"""
+    MariaDB primary that is read only on a stale claim records nothing.
+    `alone` is keel database promote --old-primary-gone: the holder
+    then commits alone while no standby streams (_alone)"""
     if role == dbpair.PRIMARY and not proven():
         _unproven(root, state, found, runner)
         return False
     if role == dbpair.PRIMARY:
-        _primary(root, state, found, runner)
+        _primary(root, state, found, runner, alone)
     elif role == REPLICA:
         _replica(root, server, state, confirmed, found, runner)
     else:
@@ -125,7 +127,8 @@ def _unproven(root: str, state: DatabaseState, found, runner) -> None:
               " it is seeded from the holder once the VIP decides")
 
 
-def _primary(root: str, state: DatabaseState, found, runner) -> None:
+def _primary(root: str, state: DatabaseState, found, runner,
+             alone: bool = False) -> None:
     """The holder: recovery ended, replicating from nobody"""
     if state.reading.role.value == REPLICA:
         action = PromoteReplica(DRAIN_TIMEOUT, engine="postgresql")
@@ -138,7 +141,125 @@ def _primary(root: str, state: DatabaseState, found, runner) -> None:
     else:
         found.say("unchanged (the primary, writable)")
     _ensure_slot(found, runner)
+    if found.problem is None:
+        _alone(root, alone, found, runner)
     _forget_divergence(root)
+
+
+# the pair's standby, streaming: whatever its sync_state, which is
+# async while the primary commits alone
+STREAMING_SQL = (
+    "SELECT count(*) FROM pg_stat_replication"
+    " WHERE application_name = 'keel' AND state = 'streaming'"
+)
+ALONE_SAID = (
+    "commits alone: keel database promote --old-primary-gone says the old"
+    " primary is gone, so this primary takes commits with no standby"
+    " (synchronous_standby_names empty, reloaded) until a standby"
+    " streams again (0054)"
+)
+SYNCHRONOUS_SAID = (
+    "synchronous again: a standby streams, so the pair's line is back"
+    " (FIRST 1 (keel), reloaded) and each commit waits for it (0054)"
+)
+
+
+# the operator's statement that the old primary is gone, written by keel
+# database promote --old-primary-gone before it moves the VIP: the follow
+# that keel-database-follow.path runs the moment the claim is written
+# reads it too, so the new primary commits alone at its promotion, not
+# when the command's own follow comes round (seconds later: the
+# command's observation asks the gone primary first)
+ALONE_MARK = "var/lib/keel/database/old-primary-gone"
+
+
+def mark_alone(root: str) -> None:
+    _write(root, ALONE_MARK, "keel database promote --old-primary-gone\n",
+           0o600)
+
+
+def unmark_alone(root: str) -> None:
+    try:
+        os.remove(os.path.join(root, ALONE_MARK))
+    except FileNotFoundError:
+        pass
+
+
+def _alone(root: str, alone: bool, found, runner) -> None:
+    """The one exception to the pair's no-fallback rule (0054): with
+    --old-primary-gone and no standby streaming, the holder commits
+    alone; once a standby streams, the synchronous line is back"""
+    alone = alone or os.path.exists(os.path.join(root, ALONE_MARK))
+    streaming = standbys_streaming(runner)
+    if streaming is None:
+        return
+    if alone and not streaming:
+        problem = commit_alone(root, runner)
+        if problem:
+            found.fail(problem)
+            return
+        unmark_alone(root)
+        found.say(ALONE_SAID)
+        return
+    unmark_alone(root)
+    if streaming:
+        problem, changed = synchronous_again(root, runner)
+        if problem:
+            found.fail(problem)
+        elif changed:
+            found.say(SYNCHRONOUS_SAID)
+
+
+def standbys_streaming(runner) -> int | None:
+    """How many standbys of the pair stream from this server, or None
+    when it did not answer"""
+    out: dict = {}
+    if _run(runner, dbpostgres.CLIENT + ("--command", STREAMING_SQL),
+            output=out):
+        return None
+    found = (out.get("stdout") or "").strip()
+    return int(found) if found.isdigit() else None
+
+
+def _pair_dropin(root: str) -> str:
+    _, _, dropdir, _ = dbpostgres.cluster_paths(root)
+    return os.path.join(dropdir, dbpostgres.PAIR_DROPIN_NAME)
+
+
+def commit_alone(root: str, runner) -> str:
+    """The pair drop-in with an empty synchronous_standby_names, and the
+    server reloaded: never restarted, the clients stay connected and
+    the waiting commits are released; why not, or an empty string"""
+    return _rewrite(root, dbpostgres.alone_text, runner)[0]
+
+
+def synchronous_again(root: str, runner) -> tuple[str, bool]:
+    """The pair's synchronous line back, reloaded, when the drop-in has
+    the primary committing alone; why not, and whether it changed"""
+    return _rewrite(root, dbpostgres.synchronous_text, runner)
+
+
+def _rewrite(root: str, change, runner) -> tuple[str, bool]:
+    try:
+        path = _pair_dropin(root)
+        with open(path) as fob:
+            text = fob.read()
+    except OSError as e:
+        return (f"the pair drop-in cannot be read: {e.strerror or e}",
+                False)
+    wanted = change(text)
+    if wanted == text:
+        return "", False
+    try:
+        _write(root, os.path.relpath(path, root), wanted, 0o644)
+    except OSError as e:
+        return (f"the pair drop-in cannot be written: {e.strerror or e}",
+                False)
+    problem = _run(runner, dbpostgres.CLIENT
+                   + ("--command", "SELECT pg_reload_conf()"))
+    if problem:
+        return f"the server did not reload the pair drop-in: {problem}", True
+    return "", True
 
 
 def _ensure_slot(found, runner) -> None:

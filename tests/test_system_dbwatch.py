@@ -69,7 +69,7 @@ class TestSyncCommit(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp()
         self.out: list[str] = []
-        self.answer = "1\t0\n"
+        self.answer = "1\t0\t0\t1\n"
         self.asked: list[list[str]] = []
         self.primary = dbpair.PairState(VIP, "own-key", "peer-key",
                                         "fd00:6b65:f1b::2", role="primary")
@@ -99,7 +99,7 @@ class TestSyncCommit(unittest.TestCase):
         self.assertIn(dbwatch.SYNC_SQL, self.asked[0])
 
     def test_commits_that_wait_are_alerted_once_and_their_end_once(self):
-        self.answer = "1\t2\n"
+        self.answer = "1\t2\t0\t1\n"
         alerted = self.ask()
         self.assertEqual(alerted.call_count, 1)
         self.assertEqual(alerted.call_args.args[2], dbwatch.SYNC_WAITS)
@@ -107,7 +107,7 @@ class TestSyncCommit(unittest.TestCase):
                       alerted.call_args.args[3])
         # the next watch, still waiting: no second alert
         self.ask().assert_not_called()
-        self.answer = "1\t0\n"
+        self.answer = "1\t0\t0\t1\n"
         alerted = self.ask()
         self.assertEqual(alerted.call_count, 1)
         self.assertEqual(alerted.call_args.args[2], dbwatch.SYNC_BACK)
@@ -116,11 +116,34 @@ class TestSyncCommit(unittest.TestCase):
     def test_no_standby_at_all_is_a_wait(self):
         """A new primary after a failover: no standby streams, so
         every commit waits until the other node is reseeded"""
-        self.answer = "0\t0\n"
+        self.answer = "0\t0\t0\t0\n"
         alerted = self.ask()
         self.assertEqual(alerted.call_count, 1)
         self.assertIn("no standby streams from it",
                       alerted.call_args.args[3])
+
+    def test_a_primary_that_commits_alone_is_alerted_at_each_run(self):
+        """keel database promote --old-primary-gone: the new primary
+        commits alone (0054's one exception), and the watch says so at
+        every run, the way the wait is alerted"""
+        self.answer = "0\t0\t1\t0\n"
+        for _ in range(2):
+            alerted = self.ask()
+            self.assertEqual(alerted.call_count, 1)
+            self.assertEqual(alerted.call_args.args[2], dbwatch.SYNC_ALONE)
+            self.assertEqual(alerted.call_args.args[4], dbwatch.SYNC_CHECK)
+        self.assertIn("synchronous commit alone", self.out[-1])
+
+    def test_a_standby_that_streams_again_brings_the_line_back(self):
+        self.answer = "0\t0\t1\t0\n"
+        self.ask()
+        self.answer = "0\t0\t1\t1\n"
+        with mock.patch("keel.system.dbpgfollow.synchronous_again",
+                        return_value=("", True)) as again:
+            alerted = self.ask()
+        again.assert_called_once()
+        self.assertEqual(alerted.call_count, 1)
+        self.assertEqual(alerted.call_args.args[2], dbwatch.SYNC_BACK)
 
     def test_the_question_names_the_pair_s_standby_and_the_wait(self):
         from keel.system import dbpostgres

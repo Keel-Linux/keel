@@ -1074,9 +1074,16 @@ def crashed(report: dict, pids: list[int], roots: list[str]) -> None:
     mark(report, "case_c_promoted")
     report["c_b_slot"] = pg_ask(b_root, "SELECT slot_name FROM"
                                 " pg_replication_slots")
-    # the new primary has no standby: its watch alerts that commits wait
-    report["c_b_waits_alerted_s"] = wait_until(
-        lambda: alerted("B", dbwatch.SYNC_WAITS, since), 60, 0.5)
+    # the operator said the old primary is gone: the new primary commits
+    # alone (0054's one exception), reloaded, and its watch alerts at
+    # each run while it does
+    report["c_b_sync_names"] = pg_ask(b_root,
+                                      "SHOW synchronous_standby_names")
+    report["c_b_alone_alerted_s"] = wait_until(
+        lambda: len(alerted("B", dbwatch.SYNC_ALONE, since)) >= 2,
+        3 * WATCH_EVERY + 10, 0.5)
+    report["c_b_waits_alerts"] = len(alerted("B", dbwatch.SYNC_WAITS,
+                                             since))
     # (e) A boots: the link back, its server started from its crash (a
     # primary, writable, with no standby to acknowledge it), and what
     # keel-database-follow.service does at boot, before its VIP helper
@@ -1154,6 +1161,8 @@ def crashed(report: dict, pids: list[int], roots: list[str]) -> None:
     report["d_status"] = agent_send("A", "wstatus")
     report["d_b_sync_s"] = wait_until(
         lambda: sync_standbys(b_root) == "1", 120, 1)
+    report["d_b_sync_names"] = pg_ask(b_root,
+                                      "SHOW synchronous_standby_names")
     # the writer's next write on B is acknowledged: the downtime's end
     report["d_first_ack_s"] = wait_until(
         lambda: any(one["ok"] and one["t"] > reseeded_at

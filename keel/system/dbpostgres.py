@@ -132,11 +132,39 @@ PRIMARY_LINES = (
 # is away the primary stops committing; wal_log_hints is the revisit
 # path for pg_rewind, not used in this version.
 SLOT = "keel"
+SYNC_LINE = f"synchronous_standby_names = 'FIRST 1 ({SLOT})'\n"
 PAIR_LINES = (
-    f"synchronous_standby_names = 'FIRST 1 ({SLOT})'\n"
-    "synchronous_commit = on\n"
+    SYNC_LINE
+    + "synchronous_commit = on\n"
     "wal_log_hints = on\n"
 )
+# The one exception to the rule above (0054, amended 2026-10-14): when
+# the operator promotes with --old-primary-gone, the new primary has no
+# standby, and with the line above every commit would wait until the
+# old primary is reseeded. The operator's flag says the old primary is
+# gone, so the new primary commits alone: the line is replaced by this
+# one and the server reloads (no restart). keel writes the line back
+# once a standby streams again (keel.system.dbpgfollow.synchronous_again).
+ALONE_LINES = (
+    "# keel database promote --old-primary-gone: this primary commits\n"
+    "# alone until a standby streams again; keel then writes the pair's\n"
+    "# synchronous line back (0054)\n"
+    "synchronous_standby_names = ''\n"
+)
+
+
+def alone_text(text: str) -> str:
+    """The pair drop-in's text with the primary committing alone"""
+    return text.replace(SYNC_LINE, ALONE_LINES)
+
+
+def synchronous_text(text: str) -> str:
+    """The pair drop-in's text with the pair's synchronous line back"""
+    return text.replace(ALONE_LINES, SYNC_LINE)
+
+
+def commits_alone(text: str) -> bool:
+    return ALONE_LINES in text
 # The user name map of pg_ident.conf: a replication connection's
 # certificate CN is `<member> postgresql`, never the database user
 # `repl`, so the cert method needs this map, the twin of MariaDB's

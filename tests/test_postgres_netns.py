@@ -213,24 +213,19 @@ class TestAPostgresqlPairOnAPoorNetwork(unittest.TestCase):
                         downtime)
         # a base backup copies no slot: the new holder made the pair's
         self.assertIn("keel", found["c_b_slot"], found)
-        # the new primary has no standby, so its commits wait, alerted
-        self.assertIsNotNone(found["c_b_waits_alerted_s"], found["alerts"])
-        # writes are acknowledged again once the old primary streams,
-        # and not before: the reseed's copy is not the pair's standby
-        # (found by this test: the copy acknowledged commits)
+        # --old-primary-gone: the new primary commits alone, alerted at
+        # each watch run (0054's one exception)
+        self.assertEqual(found["c_b_sync_names"], "", found)
+        self.assertIsNotNone(found["c_b_alone_alerted_s"], found["alerts"])
         self.assertIsNotNone(downtime["first_ok_after_s"], downtime)
-        self.assertLess(downtime["first_ok_after_reseed_s"], 30, downtime)
         self.assertIsNotNone(found["d_a_streaming_s"], found)
-        self.assertEqual(found["d_acked_before_a_streamed"], [], downtime)
 
     def test_c_the_writes_resume_within_5_s_after_the_vip_lands(self):
-        """The maintainer's client-side bound (keel#148): the writes
-        resume at most 5 s after the VIP lands on the new primary. Under
-        0054 this cannot hold: the new primary keeps FIRST 1 (keel), so
-        with the old primary gone every commit waits until it is
-        reseeded, which waits for the operator's confirmation. Measured
-        216 s in CI. The bound stays, and its failure is the design
-        question of docs/replication-postgresql.md"""
+        """The client-side bound of keel#148: the writes resume at most
+        5 s after the VIP lands on the new primary. With
+        --old-primary-gone the new primary commits alone (0054's one
+        exception); before it, every commit waited until the old primary
+        was reseeded (216 s in CI)"""
         downtime = self.found["c_downtime"]
         self.assertIsNotNone(downtime["first_ok_after_s"], downtime)
         self.assertLess(downtime["first_ok_after_s"] - downtime["carried_s"],
@@ -281,6 +276,8 @@ class TestAPostgresqlPairOnAPoorNetwork(unittest.TestCase):
         self.assertTrue(found["d_a_status_line"], found["d_status"])
         self.assertIsNone(found["d_record_after"], found)
         self.assertIsNotNone(found["d_b_sync_s"], found)
+        # the pair's synchronous line is back on B once A streams
+        self.assertEqual(found["d_b_sync_names"], "FIRST 1 (keel)", found)
         self.assertIsNotNone(found["d_first_ack_s"], found)
         self.assertIsNotNone(found["d_rows_equal_s"], found)
         self.assertEqual(found["d_a_holds_unacked"],

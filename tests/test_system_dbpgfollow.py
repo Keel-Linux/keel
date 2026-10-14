@@ -32,6 +32,7 @@ REPLICA_SPEC = {"engine": "postgresql", "role": "replica",
 BINARY = "usr/lib/postgresql/17/bin/postgres"
 DATADIR = "var/lib/postgresql/17/main"
 FOLLOW_DROPIN = "etc/postgresql/17/main/conf.d/" + dbpostgres.FOLLOW_DROPIN_NAME
+PAIR_DROPIN = "etc/postgresql/17/main/conf.d/" + dbpostgres.PAIR_DROPIN_NAME
 STANDBY_SIGNAL = DATADIR + "/" + dbpostgres.STANDBY_SIGNAL
 SYSTEM_DATABASES = "postgres\ntemplate0\ntemplate1\n"
 IDENTIFY_SYSTEM_ANSWER = "72377\t2\t0/4000098\n"
@@ -49,7 +50,7 @@ class Server:
                  timeline: str = "2",
                  holder_timeline: str = "2", holder_down: bool = False,
                  positions: str = "t\t0/4000100\t0/4000098\n",
-                 dump_fails: bool = False):
+                 dump_fails: bool = False, streaming: str = ""):
         self.row = ("t" if in_recovery else "f") + "\t0\t5432\n"
         self.receiver = receiver
         self.standby = standby
@@ -60,6 +61,7 @@ class Server:
         self.holder_down = holder_down
         self.positions = positions
         self.dump_fails = dump_fails
+        self.streaming = streaming
         self.sent: list[str] = []
         self.argv: list[list[str]] = []
 
@@ -116,6 +118,8 @@ class Server:
                 out = "f\t0\t100\n"
         elif "pg_last_wal_replay_lsn" in sql:
             out = self.positions
+        elif sql == dbpgfollow.STREAMING_SQL:
+            out = self.streaming
         elif sql == dbpgfollow.TIMELINE_SQL:
             out = self.timeline + "\n"
         elif "pg_is_in_recovery()" in sql:
@@ -188,7 +192,7 @@ class FollowTestCase(Pair):
                                self.said[claim].append)
 
     def follow(self, index: int, server: Server, confirmed: bool = False,
-               wait: float = 0.0) -> dbfollow.Followed:
+               wait: float = 0.0, alone: bool = False) -> dbfollow.Followed:
         here = self.all[index]
         found = dbfollow.Followed()
         with mock.patch("keel.inspect.constants.ROOT_DEFAULT", here.root), \
@@ -205,7 +209,7 @@ class FollowTestCase(Pair):
                                   wraps=self.all[index].node.overlay):
             dbfollow.follow(here.root, here.node.path, confirmed, found,
                             runner=server, output=self.nets[index].output,
-                            wait=wait, sleep=self.sleep)
+                            wait=wait, sleep=self.sleep, alone=alone)
         return found
 
     def role_file(self, index: int) -> str:
@@ -268,6 +272,76 @@ class TestThePrimary(FollowTestCase):
         self.assertIsNone(found.problem, found.lines)
         self.assertTrue(any("pg_create_physical_replication_slot" in one
                             for one in server.sent))
+
+    def pair_dropin(self, index: int, text: str | None = None) -> str:
+        path = os.path.join(self.all[index].root, PAIR_DROPIN)
+        if text is not None:
+            with open(path, "w") as fob:
+                fob.write(text)
+        with open(path) as fob:
+            return fob.read()
+
+    def test_the_old_primary_gone_the_new_primary_commits_alone(self):
+        """0054's one exception: keel database promote
+        --old-primary-gone says the old primary is gone, so with no
+        standby streaming the holder commits alone, reloaded, never
+        restarted"""
+        self.pair_nodes()
+        self.pair_dropin(0, dbpostgres.pair_dropin_text())
+        receiver = f"user=repl host={address(1)} port=5432 " \
+                   "password=******** sslmode=verify-full\n"
+        server = Server(in_recovery=True, receiver=receiver,
+                        streaming="0\n")
+        found = self.follow(0, server, alone=True)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertIn(dbpgfollow.ALONE_SAID, found.lines)
+        text = self.pair_dropin(0)
+        self.assertTrue(dbpostgres.commits_alone(text), text)
+        self.assertNotIn(dbpostgres.SYNC_LINE, text)
+        self.assertTrue(self.ran(server, "SELECT pg_reload_conf()"))
+        self.assertFalse(any(one[:2] == ["systemctl", "restart"]
+                             for one in server.argv))
+
+    def test_the_operator_s_mark_reaches_the_follow_of_the_claim(self):
+        """keel database promote --old-primary-gone marks the statement
+        before it moves the VIP, so the follow that the claim starts
+        commits alone at once; the mark is used once"""
+        self.pair_nodes()
+        self.pair_dropin(0, dbpostgres.pair_dropin_text())
+        dbpgfollow.mark_alone(self.all[0].root)
+        receiver = f"user=repl host={address(1)} port=5432 " \
+                   "password=******** sslmode=verify-full\n"
+        server = Server(in_recovery=True, receiver=receiver,
+                        streaming="0\n")
+        found = self.follow(0, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertIn(dbpgfollow.ALONE_SAID, found.lines)
+        self.assertFalse(os.path.exists(os.path.join(
+            self.all[0].root, dbpgfollow.ALONE_MARK)))
+
+    def test_without_the_flag_the_new_primary_keeps_waiting(self):
+        """A planned promote, or the follow of the VIP: no exception"""
+        self.pair_nodes()
+        self.pair_dropin(0, dbpostgres.pair_dropin_text())
+        receiver = f"user=repl host={address(1)} port=5432 " \
+                   "password=******** sslmode=verify-full\n"
+        server = Server(in_recovery=True, receiver=receiver,
+                        streaming="0\n")
+        found = self.follow(0, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertIn(dbpostgres.SYNC_LINE, self.pair_dropin(0))
+        self.assertFalse(self.ran(server, "SELECT pg_reload_conf()"))
+
+    def test_a_standby_that_streams_brings_the_synchronous_line_back(self):
+        self.pair_nodes()
+        self.pair_dropin(0, dbpostgres.alone_text(
+            dbpostgres.pair_dropin_text()))
+        server = Server(streaming="1\n")
+        found = self.follow(0, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertIn(dbpgfollow.SYNCHRONOUS_SAID, found.lines)
+        self.assertEqual(self.pair_dropin(0), dbpostgres.pair_dropin_text())
+        self.assertTrue(self.ran(server, "SELECT pg_reload_conf()"))
 
     def test_an_unproven_primary_is_stopped(self):
         """keel#104, the PostgreSQL row: pg cannot be read only while
@@ -477,6 +551,15 @@ class TestTheRecord(unittest.TestCase):
 class TestPromotion(unittest.TestCase):
     """On a pair the VIP decides the role for PostgreSQL too (the
     CONVERGED gate widened with 0054)"""
+
+    def test_old_primary_gone_reaches_the_follow(self):
+        plan = plan_promote(DOC, state(pair=CLAIMED), alone=True)
+        followed = [one for step in plan for one in step.actions
+                    if isinstance(one, FollowVip)]
+        self.assertTrue(followed[0].alone)
+        plain = plan_promote(DOC, state(pair=CLAIMED))
+        self.assertFalse(next(one for step in plain for one in step.actions
+                              if isinstance(one, FollowVip)).alone)
 
     def test_the_vip_decides_the_role_for_postgresql_too(self):
         plan = plan_promote(DOC, state(pair=CLAIMED))

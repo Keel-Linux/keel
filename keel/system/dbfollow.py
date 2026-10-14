@@ -121,25 +121,30 @@ class Followed:
 
 
 def followed(root: str, spec: str, confirmed: bool = False,
-             out: Callable[[str], None] | None = None) -> str | None:
-    """Carry out a FollowVip; None on success, else what went wrong"""
+             out: Callable[[str], None] | None = None,
+             alone: bool = False) -> str | None:
+    """Carry out a FollowVip; None on success, else what went wrong.
+    `alone` is keel database promote --old-primary-gone (PostgreSQL)"""
     found = Followed(out or (lambda line: print(
         f"database.server.role: {line}", file=sys.stderr)))
-    follow(root, spec, confirmed, found)
+    follow(root, spec, confirmed, found, alone=alone)
     return found.problem
 
 
 def follow(root: str, spec: str, confirmed: bool, found: Followed,
            runner=subprocess.run, output=live.output,
-           wait: float = PROOF_WAIT, sleep=time.sleep) -> None:
+           wait: float = PROOF_WAIT, sleep=time.sleep,
+           alone: bool = False) -> None:
     """One run at a time: keel-database-follow.service and keel database
     watch never interleave between the proof and SET read_only OFF"""
     with dbreadonly.replication_locked(root):
-        _follow(root, spec, confirmed, found, runner, output, wait, sleep)
+        _follow(root, spec, confirmed, found, runner, output, wait, sleep,
+                alone)
 
 
 def _follow(root: str, spec: str, confirmed: bool, found: Followed,
-            runner, output, wait: float, sleep) -> None:
+            runner, output, wait: float, sleep,
+            alone: bool = False) -> None:
     try:
         doc = Node(root, spec).document()
     except (NodeError, ValueError) as e:
@@ -171,7 +176,8 @@ def _follow(root: str, spec: str, confirmed: bool, found: Followed,
         from keel.system import dbpgfollow
         record_role = dbpgfollow.follow(
             root, state, server, role, confirmed, found, runner,
-            proven=lambda: _proven(root, doc, output, wait, sleep))
+            proven=lambda: _proven(root, doc, output, wait, sleep),
+            alone=alone)
     elif role == PRIMARY and not _proven(root, doc, output, wait, sleep):
         # a paired node (it has a pair record: the other member is known)
         # with no claim at all is not proven either: its state file may have
