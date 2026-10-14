@@ -30,6 +30,12 @@ keel (0.23.18) unstable; urgency=medium
     divergence: the record names it, and a fenced node takes no write
     since. keel diff and keel database status show the two timelines
     of a PostgreSQL divergence, where they said "unknown".
+  * keel database watch alerts while a PostgreSQL primary's commits
+    wait for the standby, as 0054 asks: when no standby streams from
+    it, or when a commit waited more than 10 s. It alerts once, and
+    once more when the standby acknowledges again. Before, the watch
+    said nothing for PostgreSQL, and a cut standby stopped every write
+    without a word.
 
 keel (0.23.17) unstable; urgency=medium
 
