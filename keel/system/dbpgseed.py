@@ -50,6 +50,8 @@ PROBE_SQL = (
 )
 STREAMING_QUESTION = "SELECT status FROM pg_stat_wal_receiver"
 CONNECT_TIMEOUT = "connect_timeout=10"
+# the base backup compressed on the primary, unpacked here (PG 15+)
+COMPRESSION = "server-zstd"
 PGPASS = "pgpass"
 ASIDE_SUFFIX = ".keel-aside"
 FRESH_SUFFIX = ".keel-fresh"
@@ -245,10 +247,20 @@ def _room(datadir: str, size: int, action) -> str:
 
 
 def _basebackup(fresh: str, pgpass: str, action, runner) -> str:
-    """The copy, streamed into a sibling of the data directory"""
+    """The copy, streamed into a sibling of the data directory
+
+    Compressed by the primary (zstd, which the plain format unpacks on
+    this side): a data directory is mostly empty pages, and the design
+    case's link (250 ms, 2 % loss, decision 0050) carries about 50 kB/s
+    of one TCP stream. A fresh cluster with one small database is about
+    40 MB raw and under 3 MB compressed (measured on PostgreSQL 17),
+    so the copy takes seconds instead of minutes (found by the pair's
+    network-namespace test: in case (a), B's apply and its seed took
+    about 12 minutes)."""
     argv = dbpostgres.AS_POSTGRES + (
         "pg_basebackup", f"--pgdata={fresh}", "--format=plain",
         "--wal-method=stream", "--checkpoint=fast",
+        f"--compress={COMPRESSION}",
         "--dbname", conninfo(action.host, action.port, pgpass,
                              getattr(action, "tls", "")),
     )

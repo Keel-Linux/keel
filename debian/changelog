@@ -36,6 +36,12 @@ keel (0.23.18) unstable; urgency=medium
     once more when the standby acknowledges again. Before, the watch
     said nothing for PostgreSQL, and a cut standby stopped every write
     without a word.
+  * The seed of a PostgreSQL standby copies less: the primary
+    compresses the base backup (zstd), and pg_basebackup unpacks it.
+    A fresh cluster is about 40 MB raw and under 3 MB compressed, and
+    the design case's link carries about 50 kB/s on one connection. In
+    the pair's network-namespace test, B's first seed took about 12
+    minutes.
 
 keel (0.23.17) unstable; urgency=medium
 
