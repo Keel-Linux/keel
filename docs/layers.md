@@ -165,6 +165,29 @@ of brief section 5.4 is not implemented yet, and exits accordingly.
 - An absent layers directory is not an error: the appliance has no
   layers, `verify` says so on stderr, checks nothing and moves on.
 
+### Which key signs what (decision 0055)
+
+Decision 0055 gives each signing purpose its own certificate. The images
+key (`E71DB9C3CA6AC18075395CC3ED3A709C4F3E2F3C`) is for the layer `.hash`
+files, the release `MANIFEST` and the Proxmox `aplinfo.dat.asc`.
+`keel-archive-keyring` 0.3.0 installs it as
+`/usr/share/keyrings/keel-images-keyring.gpg`. This table gives the state
+on 2026-10-14:
+
+| Artifact | Signed today by | Verified by |
+|---|---|---|
+| layer `<tarball>.hash` | nobody: `keel-release` clears `BT_GPGKEY`, and a release publishes `.sha256` files, not `.hash` files | `keel verify` reads the digest and reports a signature as not verified |
+| release `MANIFEST.asc` | the main key (`AD0964BE3F09DED469A3B6B2148E951314703180`) | no keel command; `keel-release` checks its own signature with the key that it signs with |
+| template `.sha512.asc` | the main key | no keel command; keel-pve checks the sha512 from the signed index |
+| Proxmox `aplinfo.dat.asc` | the main key | keel-pve, with the main keyring, and with the images keyring when it is there (Keel-Linux/keel-pve#4); `keel-release`, before it merges onto the live index, with the main keyring or the images keyring (Keel-Linux/apt#28) |
+| channel pointer (`layers/stable`, `layers/testing`) | the channel key, which is the staging key of decision 0011 | `keel pull --channel`, with the channel keyring |
+
+So no `keel` command verifies an artifact of the images role today.
+Decision 0055 does not change the channel key, so the channel keyring
+does not get the images key. A verifier of the `.hash` signature or of the
+`MANIFEST` comes later, and it must accept the main key and the images
+key, each from its own keyring file.
+
 ## Output
 
 One line per layer on stdout, `name: status[: detail; detail]`, then a
