@@ -158,7 +158,7 @@ def _seed(
     found, problem = _probe(pgpass, action.host, action.port, runner)
     if problem:
         return f"{problem}; {KEPT}"
-    _, dropdir, datadir, _ = dbpostgres.cluster_paths(root)
+    _, _, dropdir, datadir = dbpostgres.cluster_paths(root)
     problem = _room(datadir, found["size"], action)
     if problem:
         return f"{problem}; {KEPT}"
@@ -264,7 +264,8 @@ def _standby_in_place(dropdir: str, datadir: str, fresh: str,
                      | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, "w") as fob:
             fob.write(dbpostgres.follow_dropin_text(
-                action.host, action.port, action.password, action.tls))
+                action.host, action.port, action.password, action.tls,
+                slot=str(getattr(action, "slot", "") or "")))
         _as_postgres(follow)
     except OSError as e:
         return f"cannot write the standby files: {e.strerror or e}"

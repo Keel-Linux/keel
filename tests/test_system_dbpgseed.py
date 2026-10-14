@@ -150,6 +150,18 @@ class TestSeed(unittest.TestCase):
         self.assertNotIn(PASSWORD, " ".join(
             " ".join(str(a) for a in argv) for argv in self.ran))
 
+    def test_the_pair_streams_from_its_slot(self):
+        action = SeedAction()
+        action.slot = "keel"
+        self.assertIsNone(dbpgseed.seed(self.root, action,
+                                        runner=self.runner,
+                                        clock=self.clock))
+        follow = os.path.join(
+            self.root, "etc/postgresql/17/main/conf.d",
+            dbpostgres.FOLLOW_DROPIN_NAME)
+        with open(follow) as fob:
+            self.assertIn("primary_slot_name = 'keel'\n", fob.read())
+
     def test_an_unreachable_primary_stops_before_anything_moves(self):
         def runner(argv, **kwargs):
             return answer("", 1, "no route")

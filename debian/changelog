@@ -1,3 +1,63 @@
+keel (0.23.17) unstable; urgency=medium
+
+  * the pair's replication line asked scram-sha-256 for the
+    certificate's map: pg refuses map= with a password method and
+    the server dies loading the file (found by the pair's
+    network-namespace test of this release). The pair's line is now
+    the cert method — the certificate's CN mapped through
+    pg_ident pins the peer, the password stays on the standalone
+    lines; and clientcert=verify-full came out of that line: it
+    asks the client host's name of a DNS the mesh has not, and
+    certificate authentication failed for the pair's role (found
+    by the pair's network-namespace test of this release). The
+    map is the pinning, the twin of MariaDB's REQUIRE SUBJECT.
+  * the pair's hba gave the replication role no database to ask:
+    the reach and seed probes connect as the replication role to
+    the server's own postgres database (does it answer, does the
+    role authenticate, is it a standby), the file carried the role
+    only for the replication pseudo-database, the seed was refused
+    and the pair never formed (found by the pair's
+    network-namespace test of this release). Each origin now
+    carries one postgres-database line for the role, scram-sha-256
+    over TLS; user data stays unreachable.
+  * the pair's slot and role statements committed WAL under the
+    pair's synchronous commit policy: PG 17 writes the slot's
+    creation to WAL, so the statement's commit waited for the
+    synchronous standby that did not exist yet — the first apply of a
+    pair never finished (found by the pair's network-namespace test of
+    this release). The statements now set synchronous_commit = local
+    first, the way a bootstrap that lets the standby connect must.
+  * the pair's pg_hba.conf carried the other member's address bare:
+    pg_hba.conf reads a bare token as a hostname, the method lands in
+    the mask's place, and the server dies loading the file (found by
+    the pair's network-namespace test of this release). An origin that
+    is an IP address now takes the host mask (/128 or /32).
+  * the pair's PostgreSQL drop-in named the TLS files unquoted:
+    postgresql.conf rejects a value that starts with /, the server
+    dies at boot reading its configuration (found by the pair's
+    network-namespace test of this release), so the ssl file lines
+    quote the paths, the way hba_file and ident_file already do.
+  * the pair's hba and ident files were drop-ins in the cluster's
+    conf.d: Debian's postgresql.conf includes that directory, every
+    *.conf there is read as GUC, neither file is GUC, and the server
+    dies at boot (found by the pair's network-namespace test of this
+    release). They now live in the cluster's configuration directory,
+    the way Debian keeps pg_hba.conf; only GUC drop-ins stay in
+    conf.d.
+  * A database pair of PostgreSQL (handbook decision 0054): the pair
+    converge, the follow of the VIP, the network-namespace gate.
+    This change is the TLS layer: the database leaf of the mesh root
+    is parameterized by engine, not forked — the directory (etc/
+    postgresql/keel-tls), the file group postgres, the certificate
+    subject <member> postgresql and the libpq option names differ;
+    the PKI flow is the same, and the request carries the engine word,
+    which the root's holder validates. keel.system.dbpostgres gains
+    the pair's pure functions: the pair drop-in (synchronous
+    standby of application_name keel, no timeout; wal_log_hints for
+    the pg_rewind revisit), the idempotent replication slot keel, the
+    hba clientcert=verify-full lines with the keel map of a written
+    pg_ident.conf, and the slot in the follow drop-in.
+
 keel (0.23.16) unstable; urgency=medium
 
   * After the upgrade to 0.23.13, wg0.conf had MTU = 1280 and the live

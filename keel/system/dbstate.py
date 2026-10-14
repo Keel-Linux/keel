@@ -289,12 +289,14 @@ def _database_files(name: str, tree: Tree) -> tuple[File, File]:
     if name != "postgresql":
         return tree.read(DROPIN), File("")
     try:
-        _, dropdir, _, hba = dbpostgres.cluster_paths(tree.root)
+        _, conf, dropdir, _ = dbpostgres.cluster_paths(tree.root)
     except FileNotFoundError as e:
         return File("", problem=str(e)), File("", problem=str(e))
     dropin = dbpostgres.rel(
         os.path.join(dropdir, dbpostgres.DROPIN_NAME), tree.root)
-    return _read_as(tree, dropin), _read_as(tree, dbpostgres.rel(hba, tree.root))
+    hba = dbpostgres.rel(
+        os.path.join(conf, dbpostgres.HBA_NAME), tree.root)
+    return _read_as(tree, dropin), _read_as(tree, hba)
 
 
 def _read_as(tree: Tree, relative: str) -> File:

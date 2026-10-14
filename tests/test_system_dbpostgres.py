@@ -26,23 +26,38 @@ class TestClusterPaths(unittest.TestCase):
 
     def test_the_installed_versions_paths_are_found(self):
         self.make("17")
-        version, dropdir, datadir, hba = dbpostgres.cluster_paths(self.root)
+        version, conf, dropdir, datadir = dbpostgres.cluster_paths(
+            self.root)
         self.assertEqual(version, "17")
+        self.assertTrue(conf.endswith("etc/postgresql/17/main"))
         self.assertTrue(dropdir.endswith("etc/postgresql/17/main/conf.d"))
         self.assertTrue(datadir.endswith("var/lib/postgresql/17/main"))
-        self.assertTrue(hba.endswith(
-            "etc/postgresql/17/main/conf.d/99-keel-pg_hba.conf"))
+
+    def test_the_pair_files_live_beside_the_configuration_not_in_conf_d(
+            self):
+        """Debian's postgresql.conf includes conf.d, and every *.conf
+        there is read as GUC: the hba and ident formats are not GUC, the
+        server dies reading them (found by the pair's network-namespace
+        test of this release). They live in the cluster's configuration
+        directory, the way Debian keeps pg_hba.conf"""
+        self.make("17")
+        _, conf, dropdir, _ = dbpostgres.cluster_paths(self.root)
+        for name in (dbpostgres.HBA_NAME, dbpostgres.IDENT_NAME):
+            self.assertEqual(os.path.dirname(os.path.join(conf, name)),
+                             conf)
+            self.assertNotIn("conf.d", os.path.join(conf, name))
+        self.assertTrue(dropdir.endswith("conf.d"))
 
     def test_the_highest_version_wins_when_two_are_installed(self):
         self.make("15")
         self.make("17")
-        version, dropdir, _, _ = dbpostgres.cluster_paths(self.root)
+        version, _, dropdir, _ = dbpostgres.cluster_paths(self.root)
         self.assertEqual(version, "17")
         self.assertTrue(dropdir.endswith("etc/postgresql/17/main/conf.d"))
 
     def test_the_data_directory_falls_back_to_the_versions_default(self):
         self.make("17", with_datadir=False)
-        _, _, datadir, _ = dbpostgres.cluster_paths(self.root)
+        _, _, _, datadir = dbpostgres.cluster_paths(self.root)
         self.assertTrue(datadir.endswith("var/lib/postgresql/17/main"))
 
     def test_no_cluster_installed_is_an_error_the_planner_never_reaches(self):
@@ -99,9 +114,125 @@ class TestHbaText(unittest.TestCase):
             "hostssl replication repl db.example.org scram-sha-256\n",
             text)
 
+    def test_each_origin_also_gets_the_postgres_database_line(self):
+        """the reach and seed probes connect as the replication role to
+        the server's own postgres database (does it answer, does the
+        role authenticate, is it a standby): without this line the seed
+        is refused and the pair never forms (found by the pair's
+        network-namespace test of this release). The method is the
+        password in both modes: the probe presents no certificate, and
+        user data stays unreachable — the database is `postgres`"""
+        text = dbpostgres.hba_text(["fd1a:bb4c:b407::/64"], "secret")
+        self.assertEqual(text.count("hostssl postgres repl "), 1)
+        self.assertIn(
+            "hostssl postgres repl fd1a:bb4c:b407::/64"
+            " scram-sha-256\n", text)
+        in_verify = dbpostgres.hba_text(
+            ["fd1a:bb4c:b407::/64"], "secret", verify=True)
+        self.assertIn(
+            "hostssl postgres repl fd1a:bb4c:b407::/64"
+            " scram-sha-256\n", in_verify)
+        self.assertNotIn("hostssl postgres repl all", text)
+
     def test_the_password_is_not_in_the_file(self):
         text = dbpostgres.hba_text(["fd1a::/64"], "s3cret value")
         self.assertNotIn("s3cret", text)
+
+    def test_a_bare_address_takes_the_host_mask(self):
+        """The other member's address comes bare (dbpair.allowed_hosts);
+        pg_hba.conf reads a bare token as a hostname, and a host token
+        with no IP mask kills the server at hba load (found by the
+        pair's network-namespace test of this release)"""
+        text = dbpostgres.hba_text(["fd1a:bb4c:b407::2"], "secret")
+        self.assertIn(
+            "hostssl replication repl fd1a:bb4c:b407::2/128"
+            " scram-sha-256\n", text)
+        text = dbpostgres.hba_text(["192.0.2.10"], "secret")
+        self.assertIn("hostssl replication repl 192.0.2.10/32"
+                      " scram-sha-256\n", text)
+
+
+class TestHbaVerify(unittest.TestCase):
+    def test_the_pair_pins_the_peer_certificate_through_the_map(self):
+        """pg refuses map= with a password method (the server dies
+        loading the file; found by the pair's network-namespace test of
+        this release): the pair's line is the cert method, which maps
+        the certificate's CN through pg_ident, with the password left
+        to the standalone lines. clientcert=verify-full is deliberately
+        absent: it asks the client host's name of a DNS the mesh has
+        not, and certificate authentication failed (found by the pair's
+        network-namespace test of this release) — the map is the pin,
+        the twin of MariaDB's REQUIRE SUBJECT"""
+        text = dbpostgres.hba_text(["fd1a:bb4c:b407::/64"], "secret",
+                                   verify=True)
+        self.assertIn(
+            "hostssl replication repl fd1a:bb4c:b407::/64"
+            " cert map=keel\n", text)
+        self.assertNotIn("clientcert", text)
+
+    def test_without_verify_the_line_is_the_single_node_one(self):
+        text = dbpostgres.hba_text(["fd1a:bb4c:b407::/64"], "secret")
+        self.assertIn(" scram-sha-256\n", text)
+        self.assertNotIn("clientcert", text)
+        self.assertNotIn("map=", text)
+
+
+class TestIdentText(unittest.TestCase):
+    def test_each_cn_maps_to_the_replication_role(self):
+        text = dbpostgres.ident_text(["keel-2001-db8-1-0-10 postgresql",
+                                      "keel-2001-db8-1-0-20 postgresql"])
+        self.assertEqual(len([one for one in text.splitlines()
+                              if one.startswith('keel "')]), 2)
+        self.assertIn('keel "keel-2001-db8-1-0-10 postgresql" repl\n',
+                      text)
+        self.assertIn('keel "keel-2001-db8-1-0-20 postgresql" repl\n',
+                      text)
+
+    def test_a_quote_in_a_cn_is_doubled(self):
+        text = dbpostgres.ident_text(['a "quoted" cn'])
+        self.assertIn('keel "a ""quoted"" cn" repl\n', text)
+
+
+class TestPairDropinText(unittest.TestCase):
+    def test_both_nodes_carry_the_synchronous_policy(self):
+        text = dbpostgres.pair_dropin_text()
+        self.assertIn("synchronous_standby_names = 'FIRST 1 (keel)'\n",
+                      text)
+        self.assertIn("synchronous_commit = on\n", text)
+        self.assertIn("wal_log_hints = on\n", text)
+
+    def test_the_ident_file_is_named_only_when_the_pair_sets_it(self):
+        self.assertNotIn("ident_file", dbpostgres.pair_dropin_text())
+        self.assertIn("ident_file = '/etc/p/keel_ident'\n",
+                      dbpostgres.pair_dropin_text("/etc/p/keel_ident"))
+
+
+class TestSlotStatements(unittest.TestCase):
+    def test_the_slot_is_made_idempotently_on_a_primary_only(self):
+        made = dbpostgres.slot_statements()
+        self.assertIn("pg_create_physical_replication_slot('keel')",
+                      made.text)
+        self.assertIn("WHERE NOT pg_is_in_recovery()", made.text)
+        self.assertIn("NOT EXISTS (SELECT 1 FROM pg_replication_slots"
+                      " WHERE slot_name = 'keel')", made.text)
+        self.assertIn("replication slot", made.summary)
+
+    def test_the_slot_statement_commits_without_the_standby(self):
+        """PG 17 writes the slot's creation to WAL, so the statement's
+        commit waits under the pair's synchronous commit policy — for
+        the standby that does not exist yet; this statement is what
+        lets it exist (found by the pair's network-namespace test of
+        this release): it comes first with synchronous_commit local"""
+        made = dbpostgres.slot_statements()
+        self.assertTrue(made.text.startswith(
+            "SET synchronous_commit = local;\n"), made.text)
+
+
+class TestSysctlText(unittest.TestCase):
+    def test_the_pair_binds_the_vip_on_both_nodes(self):
+        text = dbpostgres.sysctl_text()
+        self.assertIn("net.ipv6.ip_nonlocal_bind = 1\n", text)
+        self.assertIn("both nodes bind the pair's VIP", text)
 
 
 class TestFollowDropinText(unittest.TestCase):
@@ -111,6 +242,16 @@ class TestFollowDropinText(unittest.TestCase):
         self.assertIn(
             "primary_conninfo = 'host=fd1a:bb4c:b407::1 port=5432"
             " user=repl password=secret application_name=keel'\n", text)
+
+    def test_the_pair_streams_from_its_slot(self):
+        text = dbpostgres.follow_dropin_text("fd1a:bb4c:b407::1", 5432,
+                                             "secret", slot="keel")
+        self.assertIn("primary_slot_name = 'keel'\n", text)
+        # the single node's follow names no slot
+        self.assertNotIn(
+            "primary_slot_name",
+            dbpostgres.follow_dropin_text("fd1a:bb4c:b407::1", 5432,
+                                          "secret"))
 
     def test_a_password_quote_survives_both_parsers(self):
         # Arrange: a password with a quote, the awkward character for
@@ -186,6 +327,16 @@ class TestRoleStatements(unittest.TestCase):
     def test_the_block_uses_a_dollar_quoted_label(self):
         found = dbpostgres.role_statements("x")
         self.assertIn("$keel$", found.text)
+
+    def test_the_role_block_commits_without_the_standby(self):
+        """the block writes WAL (CREATE/ALTER ROLE), so under the
+        pair's no-timeout synchronous commit it would wait for the
+        standby that does not exist yet (found by the pair's
+        network-namespace test of this release): it comes first with
+        synchronous_commit local, the way slot_statements has it"""
+        found = dbpostgres.role_statements("x")
+        self.assertTrue(found.text.startswith(
+            "SET synchronous_commit = local;\n"), found.text)
 
 
 class TestQuestions(unittest.TestCase):

@@ -365,6 +365,70 @@ class TestTheDatabaseLeaf(Pair):
         self.assertEqual(answer.status, 400)
         self.assertIn(b"no request", answer.body)
 
+    def test_the_leaf_is_named_for_the_engine(self):
+        """0054: one engine's certificate never names another's identity:
+        the CN carries the engine word, the files live in the engine's
+        directory, the drop-in and the options are the engine's"""
+        self.nodes(mode="cloud_simple")
+        a = self.member(0)
+        etcd.created(a)
+        said = dbtls.ensure(a, address(0), VIP, address(1), KEYS[0],
+                            owner=lambda d, k: None, engine="postgresql")
+        self.assertIn("signed by the mesh's root", said)
+        lay = dbtls.layout("postgresql")
+        self.assertTrue(dbtls.present(a.root, "postgresql"))
+        self.assertEqual(lay.directory, "etc/postgresql/keel-tls")
+        self.assertEqual(lay.group, "postgres")
+        leaf = etcdpki.blocks(etcdstate.read(a.root, lay.cert))[0]
+        self.assertEqual(etcdpki.subject(leaf),
+                         f"{etcdstate.name(address(0))} postgresql")
+        self.assertNotEqual(etcdstate.database_name(address(0)),
+                            etcdstate.database_name(
+                                address(0), "postgresql"))
+        self.assertTrue(os.path.exists(os.path.join(a.root, lay.key)))
+        # the mariadb layout of the same root holds no such file
+        self.assertFalse(os.path.exists(os.path.join(a.root, dbtls.KEY)))
+        self.assertIn("ssl_key_file = ", dbtls.dropin_lines(
+            a.root, "postgresql"))
+        self.assertIn("sslmode=verify-full", dbtls.options_lines(
+            a.root, "postgresql"))
+        self.assertEqual(dbtls.files(a.root, "postgresql")["ca"],
+                         "/" + lay.ca)
+        self.assertEqual(dbtls.peer_subject(address(1), "postgresql"),
+                         f"/CN={etcdstate.name(address(1))} postgresql")
+        # not due again, for the engine's files
+        self.assertIsNone(dbtls.ensure(a, address(0), VIP, address(1),
+                                       KEYS[0], engine="postgresql"))
+
+    def test_the_postgresql_dropin_quotes_the_paths(self):
+        """postgresql.conf rejects an unquoted value that starts with
+        / (a syntax error at the token, FATAL at boot; found by the
+        pair's network-namespace test of this release): the file lines
+        quote the paths the way hba_file and ident_file already do"""
+        lines = dbtls.dropin_lines("/nonexistent-root", "postgresql")
+        for line in lines.splitlines():
+            if line.startswith("ssl_"):
+                self.assertIn(" = '", line, line)
+                self.assertTrue(line.endswith("'"), line)
+
+    def test_declared_engine_defaults_to_mariadb_and_reads_the_spec(self):
+        member = mock.Mock()
+        member.node.document.return_value = {
+            "database": {"server": {"engine": "postgresql"}}}
+        self.assertEqual(dbtls.declared_engine(member), "postgresql")
+        member.node.document.return_value = {"version": 1}
+        self.assertEqual(dbtls.declared_engine(member), "mariadb")
+
+    def test_an_unknown_engine_is_refused(self):
+        self.nodes()
+        a, c = self.member(0), self.member(2)
+        etcd.created(a)
+        csr = etcdpki.request(etcdstate.key(c.root, dbtls.KEY))
+        with self.assertRaisesRegex(StateError, "did not sign"):
+            dbtls._asked(c, csr, address(2), None, KEYS[2], address(0),
+                         engine="oracle")
+        self.assertIn("unknown database engine", self.text(0))
+
 
 MACHINE_ID = "0123456789abcdef0123456789abcdef\n"
 DOC = {
