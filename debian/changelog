@@ -1,4 +1,4 @@
-keel (0.23.15) unstable; urgency=medium
+keel (0.23.16) unstable; urgency=medium
 
   * After the upgrade to 0.23.13, wg0.conf had MTU = 1280 and the live
     wg0 kept 1420 until a reboot (keel#139): only wg-quick up reads the
@@ -14,6 +14,28 @@ keel (0.23.15) unstable; urgency=medium
     minutes while packets flow. The drift says the member does not
     answer and is unreachable, and no longer tells the operator to run
     keel mesh sync on it.
+  * The PostgreSQL converge begins (handbook decision 0054, the second
+    engine after MariaDB under 0013's one-at-a-time rule):
+    keel.system.dbpostgres is the pure twin of keel.system.dbmariadb:
+    the versioned cluster paths resolved from the root, the drop-in
+    text (hba_file moves the whole authorization surface into keel's
+    file, a primary carries wal_level and the sender and slot limits),
+    the pg_hba text per declared origin, the primary_conninfo follow
+    drop-in with its two-layer password escaping, the pg_promote()
+    statement, and the literal escaping. The dispatch lands on it:
+    database.server of engine postgresql converges standalone, primary
+    and replica the way MariaDB does, with the engine's own pieces: the
+    drop-in and the hba file written by one step (a changed hba alone is
+    reloaded, a changed drop-in restarts), the idempotent replication
+    role statement when the authorized origins drift, the base-backup
+    seed (keel.system.dbpgseed: pg_basebackup into a fresh directory,
+    standby.signal and the follow drop-in beside it, the old data
+    directory swapped back on any failure before the server starts) and
+    the drain-then-pg_promote() promotion (keel.system.dbpgpromote: the
+    replayed WAL position must reach the received one, compared as
+    numbers, and a standby that receives nothing is refused). A standby
+    refuses writes while it recovers, so there is no read_only lock step
+    and no unlock on promotion.
 
  -- Marcos Méndez <mendez.foto@gmail.com>  Sat, 10 Oct 2026 10:00:00 +0000
 

@@ -1,0 +1,312 @@
+# Copyright (c) 2026 KeelLinux maintainers
+"""Seed a new PostgreSQL standby with a base backup of its primary
+
+The PostgreSQL twin of keel.system.dbseed (handbook decision 0054). Where
+MariaDB seeds from a logical dump and aligns the accounts after it, a
+PostgreSQL standby is a physical copy: pg_basebackup streams the primary's
+whole data directory with the replication protocol, roles included, so
+there is no account step at all and the copy is consistent on its own
+(the backup's WAL is replayed on the first start).
+
+The order is what makes it safe to run against a machine holding data:
+
+1. ask the primary, as the replication role, what it is, which proves it
+   answers and that the copy can be taken (a standby refuses: one copies
+   only from a primary);
+2. measure the room for the copy where the server keeps its data;
+3. take the base backup into a sibling of the data directory, on the same
+   file system, while this server keeps running;
+4. only then stop this server, move its data directory aside, move the
+   copy in, and write standby.signal and the follow drop-in beside it, so
+   the copy can never survive as a writable primary: the signal is what
+   makes it a standby, and it is written before the old copy is removed;
+5. remove the old copy, start the server, and wait for the walreceiver to
+   stream.
+
+A failure before step 4 leaves the machine as it was, the server still
+running. A failure in step 4 puts the old data directory back and starts
+the server: the undo runs before the step's problem is returned. The
+password reaches the clients in a pgpass file of mode 0600, created
+exclusively and removed with its directory whatever happens, never in an
+argument vector (the libpq passfile keyword points the clients at it),
+and no message here quotes it. keel.system.effects is the only caller of
+`seed`, and keel.system.dbstate the only caller of `reach`.
+"""
+
+import os
+import pwd
+import shutil
+import subprocess
+import time
+from contextlib import contextmanager
+
+from keel.system import dbpostgres
+from keel.system.dbseed import DISK_MARGIN, KEPT, Reach, _run, spool
+
+PROBE_SQL = (
+    "SELECT pg_is_in_recovery(), count(*),"
+    " COALESCE(sum(pg_database_size(oid)), 0) FROM pg_database"
+    " WHERE datname NOT IN ('template0', 'template1')"
+)
+STREAMING_QUESTION = "SELECT status FROM pg_stat_wal_receiver"
+CONNECT_TIMEOUT = "connect_timeout=10"
+PGPASS = "pgpass"
+ASIDE_SUFFIX = ".keel-aside"
+FRESH_SUFFIX = ".keel-fresh"
+# how long a freshly seeded standby may take to connect to its primary
+STREAMING_TIMEOUT = 60
+POLL_SECONDS = 1.0
+UNREACHABLE = (
+    "cannot ask [{host}]:{port} as {user}: {detail}"
+)
+IS_STANDBY = (
+    "[{host}]:{port} is itself a standby: a copy is taken from a primary"
+)
+NO_ROOM = (
+    "the copy of [{host}]:{port} needs {need} bytes free where {datadir}"
+    " keeps its data, and {free} are"
+)
+BASEBACKUP_FAILED = "pg_basebackup of [{host}]:{port} failed: {detail}"
+START_FAILED = (
+    "the copy of [{host}]:{port} is in place and the server did not start"
+    " ({detail})"
+)
+NOT_STREAMING = (
+    "the copy of [{host}]:{port} is in place and its walreceiver does not"
+    " stream after {timeout} s"
+)
+
+
+def reach(
+    root: str, host: str, port: int, password: str, runner=subprocess.run,
+) -> Reach:
+    """Why the primary cannot be copied from; the accounts are not asked
+
+    The twin of keel.system.dbseed.reach. A base backup copies the whole
+    cluster, roles included, so there is nothing to align and `shared` is
+    always empty: only the primary is asked, and only that it answers,
+    authenticates the pair's role, and is not itself a standby.
+    """
+    try:
+        with spool(root) as directory:
+            pgpass = write_pgpass(directory, host, port, password)
+            _, problem = _probe(pgpass, host, port, runner)
+            return Reach(problem)
+    except OSError as e:
+        return Reach(f"cannot ask [{host}]:{port}: {e.strerror or e}")
+
+
+def seed(root: str, action, runner=subprocess.run,
+         clock=time.monotonic, sleep=time.sleep) -> str | None:
+    """Carry out a SeedReplica of engine postgresql; None, or why not"""
+    try:
+        with spool(root) as directory:
+            pgpass = write_pgpass(directory, action.host, action.port,
+                                  action.password)
+            return _seed(root, pgpass, action, runner, clock, sleep)
+    except OSError as e:
+        # not KEPT: the error may come after the data directory moved
+        return f"cannot seed from [{action.host}]:{action.port}:" \
+            f" {e.strerror or e}"
+
+
+def write_pgpass(directory: str, host: str, port: int, password: str) -> str:
+    """The pgpass file, created exclusively at mode 0600; its path
+
+    libpq ignores a pgpass file any easier to read, so the mode is what
+    makes it usable, not only what makes it safe.
+    """
+    path = os.path.join(directory, PGPASS)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                 0o600)
+    with os.fdopen(fd, "w") as fob:
+        fob.write(pgpass_line(host, port, password))
+    return path
+
+
+def pgpass_line(host: str, port: int, password: str) -> str:
+    """One pgpass line for the replication role against the primary
+
+    The file's fields are colon separated, so every colon and backslash
+    in a field is backslash-escaped; a password holding a newline never
+    gets here, the credential gate refuses it before the plan is built
+    (keel.system.dbstate.credential).
+    """
+    return (f"{pgpass_value(host)}:{port}:postgres:"
+            f"{dbpostgres.REPLICATION_USER}:{pgpass_value(password)}\n")
+
+
+def pgpass_value(value: str) -> str:
+    """One field of a pgpass line, with the two characters it escapes"""
+    return str(value).replace("\\", "\\\\").replace(":", "\\:")
+
+
+def conninfo(host: str, port: int, pgpass: str) -> str:
+    """The connection string the clients take, the password by file only"""
+    return (
+        f"host={dbpostgres.conninfo_value(host)} port={int(port)}"
+        f" user={dbpostgres.REPLICATION_USER} dbname=postgres"
+        f" passfile={dbpostgres.conninfo_value(pgpass)}"
+        f" application_name=keel {CONNECT_TIMEOUT}"
+    )
+
+
+def _seed(
+    root: str, pgpass: str, action, runner, clock, sleep,
+) -> str | None:
+    where = {"host": action.host, "port": action.port}
+    found, problem = _probe(pgpass, action.host, action.port, runner)
+    if problem:
+        return f"{problem}; {KEPT}"
+    _, dropdir, datadir, _ = dbpostgres.cluster_paths(root)
+    problem = _room(datadir, found["size"], action)
+    if problem:
+        return f"{problem}; {KEPT}"
+    aside = datadir + ASIDE_SUFFIX
+    fresh = datadir + FRESH_SUFFIX
+    problem = _basebackup(fresh, pgpass, action, runner)
+    if problem:
+        return BASEBACKUP_FAILED.format(detail=problem, **where) \
+            + f"; {KEPT}"
+    problem = _run(runner, ("systemctl", "stop", dbpostgres.service()))
+    if problem:
+        return f"cannot stop {dbpostgres.service()}: {problem}; {KEPT}"
+    problem = _swap(dropdir, datadir, aside, fresh, action, runner)
+    if problem:
+        return problem
+    problem = _run(runner, ("systemctl", "start", dbpostgres.service()))
+    if problem:
+        return START_FAILED.format(detail=problem, **where)
+    problem = _streaming(runner, clock, sleep)
+    if problem:
+        return NOT_STREAMING.format(timeout=STREAMING_TIMEOUT, **where)
+    return None
+
+
+def _probe(pgpass: str, host: str, port: int, runner) -> tuple[dict, str]:
+    """Ask the primary what it is; the reason it cannot be copied"""
+    out = {}
+    argv = dbpostgres.CLIENT + (conninfo(host, port, pgpass),
+                                "--command", PROBE_SQL)
+    problem = _run(runner, argv, output=out)
+    where = {"host": host, "port": port,
+             "user": dbpostgres.REPLICATION_USER}
+    if problem:
+        return {}, UNREACHABLE.format(detail=problem, **where)
+    columns = (out["stdout"].strip().split("\t") + ["", "0"])[:3]
+    if columns[0] == "t":
+        return {}, IS_STANDBY.format(**where)
+    try:
+        size = int(columns[2] or 0)
+    except ValueError:
+        size = 0
+    return {"size": size}, ""
+
+
+def _room(datadir: str, size: int, action) -> str:
+    """Why the copy may not fit where the server keeps its data, if so
+
+    Checked before anything is stopped: the peak is the old directory
+    and the copy beside it at once, about twice the primary's size.
+    """
+    try:
+        found = os.statvfs(datadir)
+    except OSError as e:
+        return f"cannot measure the free space of {datadir}: {e.strerror}"
+    free = found.f_bavail * found.f_frsize
+    need = size * DISK_MARGIN
+    if free < need:
+        return NO_ROOM.format(datadir=datadir, free=free, need=need,
+                              host=action.host, port=action.port)
+    return ""
+
+
+def _basebackup(fresh: str, pgpass: str, action, runner) -> str:
+    """The copy, streamed into a sibling of the data directory"""
+    argv = dbpostgres.AS_POSTGRES + (
+        "pg_basebackup", f"--pgdata={fresh}", "--format=plain",
+        "--wal-method=stream", "--checkpoint=fast",
+        "--dbname", conninfo(action.host, action.port, pgpass),
+    )
+    return _run(runner, argv)
+
+
+def _swap(dropdir: str, datadir: str, aside: str, fresh: str,
+          action, runner) -> str:
+    """Move the copy in; undo every failure before the old copy goes"""
+    os.rename(datadir, aside)
+    problem = _standby_in_place(dropdir, datadir, fresh, action)
+    if problem:
+        return _undo(runner, datadir, aside, problem)
+    shutil.rmtree(aside)
+    return ""
+
+
+def _standby_in_place(dropdir: str, datadir: str, fresh: str,
+                      action) -> str:
+    """The copy where the data directory was, made a standby; the reason
+
+    The move is first and the standby files next, so a crash between them
+    leaves a copy that cannot take writes: standby.signal is what turns
+    the start into recovery, and it exists only after this returns "".
+    """
+    os.rename(fresh, datadir)
+    try:
+        signal = os.path.join(datadir, dbpostgres.STANDBY_SIGNAL)
+        fd = os.open(signal, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        os.close(fd)
+        _as_postgres(signal)
+        os.makedirs(dropdir, exist_ok=True)
+        follow = os.path.join(dropdir, dbpostgres.FOLLOW_DROPIN_NAME)
+        # 0600 while it holds the password: the chown to postgres below
+        # is what opens it to the server, never the other way round
+        fd = os.open(follow, os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+                     | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w") as fob:
+            fob.write(dbpostgres.follow_dropin_text(
+                action.host, action.port, action.password, action.tls))
+        _as_postgres(follow)
+    except OSError as e:
+        return f"cannot write the standby files: {e.strerror or e}"
+    return ""
+
+
+def _undo(runner, datadir: str, aside: str, problem: str) -> str:
+    """Put the old data directory back and start the server; the error"""
+    shutil.rmtree(datadir, ignore_errors=True)
+    try:
+        os.rename(aside, datadir)
+    except OSError:
+        problem += f"; the old data directory is at {aside}"
+    _run(runner, ("systemctl", "start", dbpostgres.service()))
+    return problem + "; the server is as it was"
+
+
+def _as_postgres(path: str) -> None:
+    """The file owned by the server user; a dev host without the user
+    keeps a root-owned file, which the server reads all the same"""
+    try:
+        uid = pwd.getpwnam("postgres").pw_uid
+        os.chown(path, uid, -1)
+    except (KeyError, OSError):
+        pass
+
+
+def _streaming(runner, clock, sleep) -> str:
+    """Why the walreceiver is not streaming yet, or an empty string
+
+    The server was just started: the socket may refuse the first asks,
+    and the connection to the primary takes a moment on a poor network
+    (250 ms RTT is the design case, decision 0050), so the answer is
+    polled until STREAMING_TIMEOUT.
+    """
+    deadline = clock() + STREAMING_TIMEOUT
+    while True:
+        out = {}
+        problem = _run(runner, dbpostgres.CLIENT
+                       + ("--command", STREAMING_QUESTION), output=out)
+        if not problem and out["stdout"].strip() == "streaming":
+            return ""
+        if clock() >= deadline:
+            return problem or "the walreceiver names no status"
+        sleep(POLL_SECONDS)
