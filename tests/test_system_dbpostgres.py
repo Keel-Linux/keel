@@ -355,6 +355,27 @@ class TestRoleStatements(unittest.TestCase):
         self.assertTrue(found.text.startswith(
             "SET synchronous_commit = local;\n"), found.text)
 
+    def test_on_a_standby_the_role_block_does_nothing(self):
+        """The role arrives with the primary's copy, and a standby
+        refuses ALTER ROLE: the block returns before it on a standby,
+        or every apply on a standby fails once the client stops at an
+        error"""
+        text = dbpostgres.role_statements("x").text
+        guard = text.index("IF pg_is_in_recovery() THEN")
+        self.assertLess(guard, text.index("CREATE ROLE"))
+        self.assertIn("RETURN;", text[guard:text.index("CREATE ROLE")])
+
+
+class TestTheClient(unittest.TestCase):
+    def test_a_failed_statement_fails_the_client(self):
+        """Without ON_ERROR_STOP psql goes on after an error on standard
+        input and exits 0: a refused pg_promote() read as done"""
+        self.assertIn("--set=ON_ERROR_STOP=1", dbpostgres.CLIENT)
+
+    def test_the_answers_have_one_tab_between_the_columns(self):
+        self.assertIn("--no-align", dbpostgres.CLIENT)
+        self.assertIn("--field-separator=\t", dbpostgres.CLIENT)
+
 
 class TestQuestions(unittest.TestCase):
     def test_the_schemas_question_lists_databases_as_the_postgres_user(self):

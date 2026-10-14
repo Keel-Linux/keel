@@ -12,6 +12,16 @@ appliance.vip:
   the state between runs is /var/lib/keel/database/semi-sync, so a
   lasting fallback is one alert, not one every 30 s. keel diff reports
   the same as drift (docs/diff.md);
+- **the synchronous commit's wait, and the primary that commits
+  alone**, on a PostgreSQL primary (0054). After keel database promote
+  --old-primary-gone the primary commits alone; the watch alerts at
+  each run while it does, and writes the pair's synchronous line back
+  once a standby streams again. Otherwise:
+  the pair's synchronous commit has no timeout and no fallback, so when
+  no standby streams from the primary, or a commit waited for it longer
+  than SYNC_WAIT_ALERT_S, writes do not finish. Alerted once, and once
+  more when the standby acknowledges again; the state between runs is
+  the same file, its key `sync_commit`;
 - **the database certificate**, renewed with a third of its life left
   (keel.system.dbtls), through the members' channel; a renewal that
   cannot be had is alerted;
@@ -28,6 +38,7 @@ when it finds it (keel.system.dbfollow); watch repeats nothing.
 
 import json
 import os
+import subprocess
 import sys
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -60,6 +71,49 @@ FELL_BACK_TEXT = (
 BACK_TEXT = ("{host}, the primary of {vip}: the replica acknowledges again;"
              " commits wait for it (Rpl_semi_sync_master_status ON).")
 TLS_TITLE = "the database certificate could not be renewed"
+SYNC_CHECK = "database-sync-commit"
+# a commit waits one round trip for the standby (0.3 s at the design
+# case's 250 ms); a wait this long is the standby away, not the link:
+# the twin of MariaDB's 10 s semi-synchronous timeout
+SYNC_WAIT_ALERT_S = 10
+# one constant text, nothing spliced in: the standby's name is
+# dbpostgres.SLOT and the wait SYNC_WAIT_ALERT_S (a unit test keeps
+# them in step)
+SYNC_SQL = (
+    "SELECT (SELECT count(*) FROM pg_stat_replication"
+    " WHERE application_name = 'keel'"
+    " AND sync_state IN ('sync', 'quorum')),"
+    " (SELECT count(*) FROM pg_stat_activity WHERE wait_event = 'SyncRep'"
+    " AND now() - query_start > interval '10 seconds'),"
+    " (SELECT count(*) FROM pg_settings WHERE name ="
+    " 'synchronous_standby_names' AND setting = ''),"
+    " (SELECT count(*) FROM pg_stat_replication"
+    " WHERE application_name = 'keel' AND state = 'streaming')"
+)
+SYNC_WAITS = "the primary's commits wait for the standby"
+SYNC_BACK = "the standby acknowledges the primary's commits again"
+SYNC_ALONE = "the primary commits alone, with no standby"
+SYNC_ALONE_TEXT = (
+    "{host}, the primary of {vip}: it commits alone. keel database promote"
+    " --old-primary-gone said the old primary is gone, so this primary"
+    " takes commits with no standby (decision 0054's one exception to its"
+    " no-fallback rule): a commit is on this node only until a standby"
+    " streams again. Reseed the other node with `keel spec apply"
+    " --system-only --destroy-local-database` there; keel then makes each"
+    " commit wait for it again. This alert repeats at each watch while"
+    " the primary commits alone."
+)
+SYNC_WAITS_TEXT = (
+    "{host}, the primary of {vip}: {why}. The pair's synchronous commit"
+    " has no timeout and no fallback (decision 0054): a commit finishes"
+    " only once the standby received and flushed it, so writes wait."
+    " They finish by themselves once the standby streams again: heal its"
+    " link, or reseed the other node with `keel spec apply --system-only"
+    " --destroy-local-database` there. keel database status on both"
+    " nodes says what the standby does."
+)
+SYNC_BACK_TEXT = ("{host}, the primary of {vip}: the standby acknowledges"
+                  " again; commits finish.")
 
 
 def watch(root: str, spec: str, out: Callable[[str], None],
@@ -118,7 +172,8 @@ def needs_follow(root: str, pair: dbpair.PairState, reading,
                           output) is False
 
 
-def semi_sync(root: str, pair: dbpair.PairState, out, err):
+def semi_sync(root: str, pair: dbpair.PairState, out, err,
+              runner=subprocess.run):
     """The fallback alerted on its change, on the primary; the server's
     reading, or None
 
@@ -140,6 +195,69 @@ def semi_sync(root: str, pair: dbpair.PairState, out, err):
     if "mariadb" in readings:
         out("database watch: semi-synchronous status not readable"
             f" ({reading.semi_sync.problem})")
+        return reading
+    return _sync_postgresql(root, pair, reading, out, err, runner)
+
+
+def _sync_postgresql(root: str, pair: dbpair.PairState, reading, out, err,
+                     runner):
+    """The synchronous commit's wait, alerted on its change, on the
+    primary: no standby streams, or a commit waited SYNC_WAIT_ALERT_S"""
+    if pair.role != dbpair.PRIMARY or reading.role.value == "replica":
+        return reading
+    try:
+        done = runner(list(dbpostgres.CLIENT + ("--command", SYNC_SQL)),
+                      capture_output=True, text=True, check=False)
+    except OSError as e:
+        out(f"database watch: the synchronous commit is not readable ({e})")
+        return reading
+    columns = (done.stdout or "").strip().split("\t")
+    if done.returncode != 0 or len(columns) != 4 or \
+            not all(one.isdigit() for one in columns):
+        out("database watch: the synchronous commit is not readable"
+            f" ({(done.stderr or '').strip()[-200:] or 'no answer'})")
+        return reading
+    standbys, waiting, alone, streaming = (int(one) for one in columns)
+    host = os.uname().nodename
+    before = _read_state(root)
+    if alone and streaming:
+        from keel.system import dbpgfollow
+        problem, _ = dbpgfollow.synchronous_again(root, runner)
+        out("database watch: a standby streams again; "
+            + (f"the pair's synchronous line could not come back ({problem})"
+               if problem else dbpgfollow.SYNCHRONOUS_SAID))
+        alone = 1 if problem else 0
+        standbys = 0 if problem else 1
+    if alone:
+        out("database watch: role primary, synchronous commit alone"
+            f" (was {before.get('sync_commit') or 'unknown'})")
+        alerting.alert(root, err, SYNC_ALONE, SYNC_ALONE_TEXT.format(
+            host=host, vip=pair.vip), SYNC_CHECK)
+        _write_state(root, {"sync_commit": "alone", "role": pair.role,
+                            "at": datetime.now(timezone.utc).strftime(
+                                "%Y-%m-%dT%H:%M:%SZ")})
+        return reading
+    if not standbys:
+        why = "no standby streams from it"
+    elif waiting:
+        why = (f"{waiting} commit(s) waited more than {SYNC_WAIT_ALERT_S} s"
+               " for the standby")
+    else:
+        why = ""
+    now = "waiting" if why else "flowing"
+    out(f"database watch: role primary, synchronous commit {now}"
+        f" (was {before.get('sync_commit') or 'unknown'})"
+        + (f": {why}" if why else ""))
+    if now != before.get("sync_commit"):
+        if now == "waiting":
+            alerting.alert(root, err, SYNC_WAITS, SYNC_WAITS_TEXT.format(
+                host=host, vip=pair.vip, why=why), SYNC_CHECK)
+        elif before.get("sync_commit") in ("waiting", "alone"):
+            alerting.alert(root, err, SYNC_BACK, SYNC_BACK_TEXT.format(
+                host=host, vip=pair.vip), SYNC_CHECK, "recovery")
+    _write_state(root, {"sync_commit": now, "role": pair.role,
+                        "at": datetime.now(timezone.utc).strftime(
+                            "%Y-%m-%dT%H:%M:%SZ")})
     return reading
 
 

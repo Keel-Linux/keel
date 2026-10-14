@@ -292,7 +292,7 @@ AFTER_PG = (
 
 
 def plan_promote(doc: dict, state: DatabaseState | None,
-                 spec: str | None = None) -> list[Step]:
+                 spec: str | None = None, alone: bool = False) -> list[Step]:
     """Make this replica a primary, which apply is never allowed to do
 
     Its own operation because it is its own decision. Replication in Keel
@@ -315,7 +315,7 @@ def plan_promote(doc: dict, state: DatabaseState | None,
         return [Step(PROMOTE_FIELD, (
             Note(f"the VIP {state.pair.vip} decides the role; the database"
                  " follows it"),
-            FollowVip(spec or "/etc/keel/instance.yaml"),
+            FollowVip(spec or "/etc/keel/instance.yaml", alone=alone),
             Note(AFTER_PAIR)))]
     refusal = _cannot_act(state, REPLICA)
     if refusal:

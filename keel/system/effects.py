@@ -103,7 +103,7 @@ class Effects:
             if isinstance(action, FollowVip):
                 from keel.system import dbfollow
                 return dbfollow.followed(self.tree.root, action.spec,
-                                         action.confirmed)
+                                         action.confirmed, alone=action.alone)
             return self.symlink(action)
         except OSError as e:
             return f"{e.strerror or e}"

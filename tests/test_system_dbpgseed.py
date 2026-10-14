@@ -193,6 +193,30 @@ class TestSeed(unittest.TestCase):
         self.assertNotIn(PASSWORD, " ".join(
             " ".join(str(a) for a in argv) for argv in self.ran))
 
+    def test_the_copy_is_compressed_by_the_primary(self):
+        """The design case's link carries about 50 kB/s: a 40 MB raw
+        copy took minutes, under 3 MB compressed takes seconds (found
+        by the pair's network-namespace test of this release)"""
+        self.assertIsNone(dbpgseed.seed(self.root, SeedAction(),
+                                        runner=self.runner,
+                                        clock=self.clock))
+        copy = next(argv for argv in self.ran if "pg_basebackup" in argv)
+        self.assertIn("--compress=server-zstd", copy)
+        self.assertIn("--format=plain", copy)
+
+    def test_the_copy_is_never_the_pair_s_synchronous_standby(self):
+        """The base backup's WAL stream reports what it flushed: under
+        the standby's name `keel` the primary acknowledged commits that
+        only the half-made copy held (found by the pair's
+        network-namespace test, case (d))"""
+        self.assertIsNone(dbpgseed.seed(self.root, SeedAction(),
+                                        runner=self.runner,
+                                        clock=self.clock))
+        copy = " ".join(next(argv for argv in self.ran
+                             if "pg_basebackup" in argv))
+        self.assertIn("application_name=keel-seed", copy)
+        self.assertNotIn(f"application_name={dbpostgres.SLOT} ", copy)
+
     def test_the_pair_streams_from_its_slot(self):
         action = SeedAction()
         action.slot = "keel"

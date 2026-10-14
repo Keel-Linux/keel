@@ -138,8 +138,12 @@ def _configuration(server: dict, state: DatabaseState,
     ident_wanted = dbpostgres.ident_text(cns)
     dropin_kept = state.dropin.readable and \
         state.dropin.text == dropin_wanted
+    # a primary that commits alone after keel database promote
+    # --old-primary-gone is follow's runtime state, not drift: follow
+    # writes the synchronous line back once a standby streams (0054)
     pair_kept = state.pair_dropin.readable and \
-        state.pair_dropin.text == pair_wanted
+        state.pair_dropin.text in (pair_wanted,
+                                   dbpostgres.alone_text(pair_wanted))
     hba_kept = state.hba.readable and state.hba.text == hba_wanted
     ident_kept = state.ident.readable and \
         state.ident.text == ident_wanted

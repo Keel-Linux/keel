@@ -83,10 +83,10 @@ def lines(root: str, spec: str) -> list[str]:
         else leaf.get("problem") or "none"))
     diverged = dbfollow.diverged(root)
     if diverged:
-        errant = ", ".join(str(one) for one in diverged.get("errant") or [])
-        found.append(f"  diverged: holds {errant} which the holder at"
-                     f" {diverged.get('holder')} lacks (since"
-                     f" {diverged.get('at')}); read only, not connected")
+        found.append(f"  diverged from the holder at"
+                     f" {diverged.get('holder')}: {dbfollow.described(diverged)}"
+                     f" (since {diverged.get('at')}); read only, not"
+                     " connected")
     return found + vip_lines(root, spec)
 
 

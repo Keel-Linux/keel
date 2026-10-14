@@ -454,12 +454,23 @@ def database_promote(args) -> int:
         if refusal:
             error(refusal)
             return exits.APPLY_NEEDS_ROOT
+    gone = getattr(args, "old_primary_gone", False)
+    engine = (((doc.get("database") or {}).get("server") or {})
+              .get("engine"))
+    if gone and not dry_run and engine == "postgresql":
+        # the operator's statement, for the follow the claim starts
+        # (keel.system.dbpgfollow.ALONE_MARK, 0054's one exception)
+        from keel.system import dbpgfollow
+        dbpgfollow.mark_alone(root)
     code = promote_vip(args, doc, root, dry_run)
     if code != exits.OK:
+        if gone and not dry_run and engine == "postgresql":
+            dbpgfollow.unmark_alone(root)
         return code
     state = system.observe(root, doc, start=not dry_run, spec=args.spec)
-    plan = system.Plan(tuple(system.plan_promote(doc, state.database,
-                                                 args.spec)))
+    plan = system.Plan(tuple(system.plan_promote(
+        doc, state.database, args.spec,
+        getattr(args, "old_primary_gone", False))))
     outcome = system.execute(
         plan, system.Effects(root), dry_run, "database promote"
     )

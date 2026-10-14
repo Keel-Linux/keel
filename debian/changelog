@@ -1,3 +1,74 @@
+keel (0.23.18) unstable; urgency=medium
+
+  * keel's PostgreSQL client asked psql for its aligned output. psql
+    pads the columns with spaces and a bar, and keel's readers split a
+    row on the tab, so no answer split into its columns: every keel
+    database promote read "not in recovery", the seed's probe could not
+    see a standby, and the holder's timeline was never read (found
+    when the pair's network-namespace test's cases (b) to (e) were
+    built; case (a) never asked these questions). The client
+    now asks for unaligned output with a tab between the columns, the
+    way inspect asks. It also stops at the first failed statement on
+    its standard input: psql went on and exited 0, so a refused
+    pg_promote() or role statement read as done. The replication
+    role's statement does nothing on a standby now, where the role
+    arrives with the copy and ALTER ROLE is refused.
+  * A promoted standby had no replication slot: pg_basebackup copies
+    no slot, and nothing made the pair's slot on the new primary. The
+    reseed of the old primary names that slot, so it never streamed.
+    keel database follow now makes the slot on the holder (the
+    statement does nothing when the slot is there, and commits without
+    the standby).
+  * An old PostgreSQL primary that came back holding data stayed a
+    writable primary: keel recorded its divergence and said "read
+    only", and the next follow started the server that the unproven
+    claim had stopped. keel database follow now fences it first: the
+    server becomes a standby that follows nobody (standby.signal, no
+    follow drop-in, a restart), so it refuses every write until the
+    confirmed reseed. Its timeline is read in recovery too, as a
+    number like the holder's, and the dump is taken once per
+    divergence: the record names it, and a fenced node takes no write
+    since. keel diff and keel database status show the two timelines
+    of a PostgreSQL divergence, where they said "unknown".
+  * keel database watch alerts while a PostgreSQL primary's commits
+    wait for the standby, as 0054 asks: when no standby streams from
+    it, or when a commit waited more than 10 s. It alerts once, and
+    once more when the standby acknowledges again. Before, the watch
+    said nothing for PostgreSQL, and a cut standby stopped every write
+    without a word.
+  * The seed of a PostgreSQL standby copies less: the primary
+    compresses the base backup (zstd), and pg_basebackup unpacks it.
+    A fresh cluster is about 40 MB raw and under 3 MB compressed, and
+    the design case's link carries about 50 kB/s on one connection. In
+    the pair's network-namespace test, B's first seed took about 12
+    minutes.
+  * The seed's copy took the standby's application name, keel. The
+    WAL stream of pg_basebackup reports what it flushed, so the primary
+    took the half-made copy for the pair's synchronous standby: during
+    the reseed of an old primary, the new primary acknowledged commits
+    that only the copy held (found by the pair's network-namespace
+    test, case (d)). keel's own replication connections are named
+    keel-seed now; only the standby is keel.
+  * keel database promote --old-primary-gone on a PostgreSQL standby
+    lets the new primary commit alone: the one exception to 0054's
+    no-fallback rule. The operator's flag says the old primary is
+    gone, so a commit has no second node to wait for, and without the
+    exception every write waited until the old primary was reseeded
+    (216 s in the pair's network-namespace test, case (c)). keel
+    empties synchronous_standby_names in the pair drop-in and reloads
+    the server (no restart); the watch alerts at each run while the
+    primary commits alone; and once a standby streams again, keel
+    writes FIRST 1 (keel) back. Without the flag nothing changes: a
+    planned promote and a cut replica keep the synchronous wait.
+  * The PostgreSQL pair's end to end test runs cases (b) to (e) of
+    docs/replication-postgresql.md under the design case (0050), in
+    the CI job "postgres / trixie": the replica cut off (a commit
+    waits, the watch alerts, the commit finishes after the heal), the
+    primary cut off and killed while the application writes (the
+    operator's promote, no acknowledged row lost, the downtime), the
+    old primary back (it acknowledges no write, it is fenced, dumped,
+    recorded and alerted once) and its confirmed reseed.
+
 keel (0.23.17) unstable; urgency=medium
 
   * keel's PostgreSQL client carried MariaDB's --batch, which psql has
