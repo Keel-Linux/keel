@@ -47,7 +47,7 @@ DRAIN_TIMEOUT = (
 
 def promote(
     root: str, action, runner=subprocess.run, clock=time.monotonic,
-    sleep=time.sleep,
+    sleep=time.sleep, drain: bool = True,
 ) -> str | None:
     """Carry out a PromoteReplica of engine postgresql; None, or why not
 
@@ -55,6 +55,11 @@ def promote(
     one, for at most `action.timeout` seconds, and only then does
     pg_promote() run. A failure leaves the standby as it was: still in
     recovery, still following the old primary.
+
+    Without `drain`, a standby that follows nobody (a fenced one,
+    keel#152) is promoted where its replay stands: it receives nothing,
+    so there is nothing to drain. keel.system.dbpgfollow decides when
+    that loses nothing of the pair.
     """
     deadline = clock() + action.timeout
     while True:
@@ -64,6 +69,8 @@ def promote(
                 " Nothing was changed"
         if not in_recovery:
             return NOT_STANDBY
+        if not drain:
+            break
         if received is None:
             return NOT_RECEIVING
         if replayed is not None and replayed >= received:

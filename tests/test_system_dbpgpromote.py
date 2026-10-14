@@ -106,6 +106,24 @@ class TestPromote(unittest.TestCase):
         self.assertIn("receives nothing", problem)
         self.assertIn("Nothing was changed", problem)
 
+    def test_a_fenced_standby_is_promoted_without_a_drain(self):
+        """keel#152: a standby that follows nobody receives nothing and
+        has nothing to drain; the caller decided that it may take
+        writes (keel.system.dbpgfollow)"""
+        problem = dbpgpromote.promote(
+            "/", PromoteAction(),
+            runner=self.runner(["t\t0/1000\t\n"]),
+            clock=self.clock, sleep=self.sleep, drain=False)
+        self.assertIsNone(problem)
+        self.assertEqual(self.ran[-1], list(dbpostgres.CLIENT))
+
+    def test_without_a_drain_a_primary_is_still_refused(self):
+        problem = dbpgpromote.promote(
+            "/", PromoteAction(),
+            runner=self.runner(["f\t\t\n"]),
+            clock=self.clock, sleep=self.sleep, drain=False)
+        self.assertIn("not in recovery", problem)
+
     def test_a_standby_not_in_recovery_is_refused(self):
         problem = dbpgpromote.promote(
             "/", PromoteAction(),

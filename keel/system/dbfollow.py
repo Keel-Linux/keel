@@ -91,6 +91,8 @@ PROOF_WAIT = 15.0
 PROOF_POLL = 0.2
 NO_PAIR = ("this node declares no appliance.vip: there is no VIP for the"
            " database to follow (keel spec apply converges a declared role)")
+NO_SERVER = ("this node declares no database.server: there is no server to"
+             " follow the VIP")
 DIVERGED_TITLE = "the old primary diverged and stays read only"
 DIVERGED_TEXT = (
     "{host}: this node was the primary of {vip} and came back holding"
@@ -151,7 +153,11 @@ def _follow(root: str, spec: str, confirmed: bool, found: Followed,
         found.fail(str(e))
         return
     state = observe_database(root, doc, start=True, spec=spec)
-    if state is None or state.pair is None:
+    if state is None:
+        declared = (doc.get("appliance") or {}).get("vip")
+        found.fail(NO_SERVER if declared else NO_PAIR)
+        return
+    if state.pair is None:
         found.fail(NO_PAIR)
         return
     pair = state.pair
