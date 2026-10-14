@@ -325,7 +325,40 @@ class TestPostgreSQLIsStartedBeforeItIsAsked(unittest.TestCase):
         )
         doc = {"database": {"server": {"engine": "postgresql",
                                        "role": "replica"}}}
+        self.enterContext(mock.patch.dict(os.environ))
+        os.environ.pop(dbpostgres.SERVICE_ENV, None)
         return root, doc
+
+    def test_whether_it_starts_at_boot_is_asked_of_the_umbrella(self):
+        """postgresql-common's generator wires the cluster into the
+        umbrella postgresql.service, which is the unit that is enabled"""
+        root, doc = self.live()
+        with mock.patch.object(dbready, "ready", return_value=""), \
+                mock.patch.object(dbready, "enabled",
+                                  return_value="enabled") as enabled, \
+                mock.patch.object(subprocess, "run",
+                                  return_value=answer("")):
+            observe_database(root, doc, start=True)
+        enabled.assert_called_once_with("postgresql")
+
+    def test_the_start_waits_for_a_seed_that_runs(self):
+        """A start that takes no lock started the old server again in the
+        middle of the watch's reseed (keel#153): the start holds the
+        lock that the seed and the follow hold"""
+        from keel.system import dbreadonly
+        root, doc = self.live()
+        held = []
+
+        def ready(*args):
+            held.append(dbreadonly.holds_replication_lock(root))
+            return ""
+
+        with mock.patch.object(dbready, "ready", side_effect=ready), \
+                mock.patch.object(subprocess, "run",
+                                  return_value=answer("")):
+            observe_database(root, doc, start=True)
+            observe_database(root, doc, start=False)
+        self.assertEqual(held, [True, False])
 
     def test_a_server_that_does_not_come_up_is_asked_nothing_else(self):
         root, doc = self.live()
@@ -333,8 +366,11 @@ class TestPostgreSQLIsStartedBeforeItIsAsked(unittest.TestCase):
                                return_value="postgresql is failed") as ready, \
                 mock.patch.object(subprocess, "run") as run:
             found = observe_database(root, doc, start=True)
+        # the cluster's own unit: the umbrella postgresql is active while
+        # the cluster is down, and starting it starts nothing (keel#153)
         ready.assert_called_once_with(
-            "postgresql", ("pg_isready",), True, dbready.READY_TIMEOUT
+            "postgresql@17-main", ("pg_isready",), True,
+            dbready.READY_TIMEOUT
         )
         run.assert_not_called()
         self.assertEqual(found.down, "postgresql is failed")

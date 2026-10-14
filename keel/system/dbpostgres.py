@@ -102,9 +102,12 @@ QUIET_CLIENT = CLIENT
 # (keel.system.dbready): no credential, only the socket.
 PING = ("pg_isready",)
 SERVICE_DEFAULT = "postgresql"
-# the unit's name: postgresql, or what KEEL_POSTGRES_SERVICE says (the
-# tests run a cluster per node in one container, each its own unit)
+# what KEEL_POSTGRES_SERVICE says replaces both unit names (the tests
+# run a cluster per node in one container, each its own unit)
 SERVICE_ENV = "KEEL_POSTGRES_SERVICE"
+# the cluster the appliance ships, as postgresql-common names its unit
+# (postgresql@<version>-<cluster>.service)
+CLUSTER = "main"
 # The role both ends of a pair name, a constant for the reason
 # keel.system.dbmariadb gives (0013: every screen stays on its own
 # machine; a field each operator could set differently is how two
@@ -195,8 +198,35 @@ class Statements:
     summary: str
 
 
-def service() -> str:
-    """The server's unit"""
+def service(root: str = "/") -> str:
+    """The cluster's own unit, which every stop and start names
+
+    On Debian, postgresql@17-main.service is PartOf= and Before= the
+    umbrella postgresql.service, a oneshot that stays active. A stop of
+    the umbrella returns before the cluster stops, and a start of the
+    active umbrella starts nothing (keel#153: a reseed moved the copy in
+    under the running server, and the old server's shutdown wrote its
+    pg_control into the copy). The umbrella is named only when no
+    cluster is found.
+    """
+    named = os.environ.get(SERVICE_ENV)
+    if named:
+        return named
+    try:
+        version = cluster_paths(root)[0]
+    except FileNotFoundError:
+        return SERVICE_DEFAULT
+    return f"postgresql@{version}-{CLUSTER}"
+
+
+def boot_unit() -> str:
+    """The unit that is enabled, restarted and reloaded: the umbrella
+
+    postgresql-common's generator makes the umbrella want each cluster,
+    so the umbrella is what starts at boot. A restart and a reload of
+    the umbrella reach the cluster (PartOf=, ReloadPropagatedFrom=), and
+    a restart returns after the cluster started again (Before=).
+    """
     return os.environ.get(SERVICE_ENV) or SERVICE_DEFAULT
 
 

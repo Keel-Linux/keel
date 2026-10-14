@@ -36,6 +36,9 @@ PAIR_DROPIN = "etc/postgresql/17/main/conf.d/" + dbpostgres.PAIR_DROPIN_NAME
 STANDBY_SIGNAL = DATADIR + "/" + dbpostgres.STANDBY_SIGNAL
 SYSTEM_DATABASES = "postgres\ntemplate0\ntemplate1\n"
 IDENTIFY_SYSTEM_ANSWER = "72377\t2\t0/4000098\n"
+# the cluster's own unit: a stop of the umbrella postgresql returns
+# before the cluster stops (keel#153)
+UNIT = "postgresql@17-main"
 
 
 class Server:
@@ -145,6 +148,10 @@ class Server:
 class FollowTestCase(Pair):
     def setUp(self):
         super().setUp()
+        env = mock.patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop(dbpostgres.SERVICE_ENV, None)
         patcher = mock.patch("keel.system.dbpair.wgkeys.public",
                              side_effect=self.keyed)
         patcher.start()
@@ -352,7 +359,7 @@ class TestThePrimary(FollowTestCase):
         server = Server()
         found = self.follow(0, server)
         self.assertIsNone(found.problem, found.lines)
-        self.assertIn(["systemctl", "stop", dbpostgres.service()],
+        self.assertIn(["systemctl", "stop", UNIT],
                       server.argv)
         self.assertIn("stopped", " ".join(found.lines))
         self.assertNotIn("role=primary", self.role_file(0))
@@ -426,7 +433,7 @@ class TestTheReplica(FollowTestCase):
         self.assertTrue(os.path.exists(os.path.join(root, STANDBY_SIGNAL)))
         self.assertFalse(os.path.exists(os.path.join(root, FOLLOW_DROPIN)))
         restart = server.argv.index(["systemctl", "restart",
-                                     dbpostgres.service()])
+                                     UNIT])
         dumped = next(n for n, argv in enumerate(server.argv)
                       if "pg_dumpall" in argv)
         self.assertLess(restart, dumped)
@@ -451,7 +458,7 @@ class TestTheReplica(FollowTestCase):
         self.assertEqual(sum("pg_dumpall" in argv for argv in server.argv),
                          1)
         self.assertEqual(server.argv.count(
-            ["systemctl", "restart", dbpostgres.service()]), 1)
+            ["systemctl", "restart", UNIT]), 1)
         self.assertEqual(len(os.listdir(os.path.join(
             root, dbpgfollow.BACKUPS))), 1)
         self.assertTrue(dbfollow.diverged(root)["dump"].endswith(".zst"))
@@ -463,7 +470,7 @@ class TestTheReplica(FollowTestCase):
         with mock.patch("keel.monitor.alerting.alert", return_value=True):
             found = self.follow(1, server)
         self.assertIn("timeline 1 against the holder's 2", found.problem)
-        self.assertNotIn(["systemctl", "restart", dbpostgres.service()],
+        self.assertNotIn(["systemctl", "restart", UNIT],
                          server.argv)
         self.assertNotIn("fenced", " ".join(found.lines))
 
@@ -495,7 +502,7 @@ class TestTheReplica(FollowTestCase):
         self.assertIn("nothing else was changed", found.problem)
         # the fence comes first all the same: it holds data and is not
         # the holder
-        self.assertIn(["systemctl", "restart", dbpostgres.service()],
+        self.assertIn(["systemctl", "restart", UNIT],
                       server.argv)
         self.assertFalse(self.ran(server, "pg_dumpall"))
         self.assertFalse(self.ran(server, "pg_basebackup"))

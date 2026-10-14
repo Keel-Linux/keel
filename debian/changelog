@@ -1,3 +1,29 @@
+keel (0.23.19) unstable; urgency=medium
+
+  * The reseed of a PostgreSQL standby stopped the umbrella unit
+    postgresql. On Debian, postgresql@17-main is PartOf= and Before=
+    that unit, so the stop returned before the cluster stopped. keel
+    then moved the copy in, and the old server wrote its pg_control
+    into the copy: the copy did not start (keel#153, 3 times in 3 tries
+    on real nodes). Each stop and start of keel now names the cluster's
+    own unit, postgresql@<version>-main. Enable, restart and reload
+    still name the umbrella, which reaches the cluster.
+  * The reseed now waits until the postmaster of the old data
+    directory is gone before it moves the directory. If the
+    postmaster runs 60 s after the stop, the reseed moves nothing and
+    removes its copy.
+  * The copy gets standby.signal before it moves into place, so a
+    server that starts at any time after the move is a standby. A
+    refusal after the copy removes the copy, and a copy that an
+    earlier run left behind is removed first: pg_basebackup refuses a
+    target that is not empty.
+  * keel starts a PostgreSQL server under the lock that the seed and
+    the follow hold. A start by spec apply ran during the reseed of
+    the watch's follow. The lock is reentrant in one thread, because
+    the follow starts the server while it holds the lock.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Thu, 15 Oct 2026 09:00:00 +0000
+
 keel (0.23.18) unstable; urgency=medium
 
   * keel's PostgreSQL client asked psql for its aligned output. psql
@@ -68,6 +94,8 @@ keel (0.23.18) unstable; urgency=medium
     operator's promote, no acknowledged row lost, the downtime), the
     old primary back (it acknowledges no write, it is fenced, dumped,
     recorded and alerted once) and its confirmed reseed.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Wed, 14 Oct 2026 20:00:00 +0000
 
 keel (0.23.17) unstable; urgency=medium
 
@@ -167,6 +195,8 @@ keel (0.23.17) unstable; urgency=medium
     recovery, the other member's database leaf taken and its etcd leaf
     refused, keel diff clean on both. The failover, the rejoin and the
     diverged old primary are the follow-up pull request's.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Wed, 14 Oct 2026 12:00:00 +0000
 
 keel (0.23.16) unstable; urgency=medium
 

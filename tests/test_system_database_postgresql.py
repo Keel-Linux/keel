@@ -170,7 +170,7 @@ class TestConfiguration(unittest.TestCase):
             None, "standalone", os.path.join("/", PG_HBA)))
         self.assertEqual(files[PG_HBA], dbpostgres.hba_text([], PASSWORD))
         commands = [one.argv for one in only(plan["database.server"], Run)]
-        self.assertIn(("systemctl", "restart", dbpostgres.service()),
+        self.assertIn(("systemctl", "restart", dbpostgres.boot_unit()),
                       commands)
 
     def test_a_primary_holds_one_replication_line_per_origin(self):
@@ -214,9 +214,9 @@ class TestConfiguration(unittest.TestCase):
         self.assertNotIn(PG_DROPIN, files)
         self.assertIn(PG_HBA, files)
         commands = [one.argv for one in only(plan["database.server"], Run)]
-        self.assertIn(("systemctl", "reload", dbpostgres.service()),
+        self.assertIn(("systemctl", "reload", dbpostgres.boot_unit()),
                       commands)
-        self.assertNotIn(("systemctl", "restart", dbpostgres.service()),
+        self.assertNotIn(("systemctl", "restart", dbpostgres.boot_unit()),
                          commands)
 
     def test_a_changed_drop_in_restarts_the_server(self):
@@ -229,14 +229,14 @@ class TestConfiguration(unittest.TestCase):
         plan = steps(declaring(role="standalone"), observed)
         self.assertIn(PG_DROPIN, writes(plan["database.server"]))
         commands = [one.argv for one in only(plan["database.server"], Run)]
-        self.assertIn(("systemctl", "restart", dbpostgres.service()),
+        self.assertIn(("systemctl", "restart", dbpostgres.boot_unit()),
                       commands)
 
     def test_a_disabled_unit_is_enabled(self):
         plan = steps(declaring(role="standalone"),
                      state(enabled="disabled"))
         commands = [one.argv for one in only(plan["database.server"], Run)]
-        self.assertIn(("systemctl", "enable", dbpostgres.service()),
+        self.assertIn(("systemctl", "enable", dbpostgres.boot_unit()),
                       commands)
 
 

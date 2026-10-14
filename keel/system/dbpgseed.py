@@ -16,16 +16,25 @@ The order is what makes it safe to run against a machine holding data:
 2. measure the room for the copy where the server keeps its data;
 3. take the base backup into a sibling of the data directory, on the same
    file system, while this server keeps running;
-4. only then stop this server, move its data directory aside, move the
-   copy in, and write standby.signal and the follow drop-in beside it, so
-   the copy can never survive as a writable primary: the signal is what
-   makes it a standby, and it is written before the old copy is removed;
+4. only then stop this server's own cluster unit, wait until its
+   postmaster is gone, write standby.signal into the copy, move the data
+   directory aside, move the copy in and write the follow drop-in, so
+   the copy can never start as a writable primary: the signal is what
+   makes it a standby, and it is in the copy before the copy moves;
 5. remove the old copy, start the server, and wait for the walreceiver to
    stream.
 
+The stop names the cluster's unit, postgresql@17-main, never the umbrella
+postgresql: the umbrella's stop returns before the cluster stops, and the
+old server's shutdown then wrote its pg_control into the copy (keel#153).
+A returned systemctl stop is not proof either, so the postmaster of the
+data directory's postmaster.pid must be gone before anything moves.
+
 A failure before step 4 leaves the machine as it was, the server still
-running. A failure in step 4 puts the old data directory back and starts
-the server: the undo runs before the step's problem is returned. The
+running, and removes the copy: a copy left behind made the next
+pg_basebackup fail. A failure in step 4 puts the old data directory back
+and starts the server: the undo runs before the step's problem is
+returned. The
 password reaches the clients in a pgpass file of mode 0600, created
 exclusively and removed with its directory whatever happens, never in an
 argument vector (the libpq passfile keyword points the clients at it),
@@ -62,6 +71,14 @@ FRESH_SUFFIX = ".keel-fresh"
 # how long a freshly seeded standby may take to connect to its primary
 STREAMING_TIMEOUT = 60
 POLL_SECONDS = 1.0
+# how long the old server's postmaster may live after systemctl stop of
+# its unit returned, before the seed gives up and moves nothing
+STOP_TIMEOUT = 60
+PIDFILE = "postmaster.pid"
+STILL_RUNS = (
+    "the server of {datadir} still runs (postmaster {pid}) {timeout} s"
+    " after systemctl stop {unit}"
+)
 UNREACHABLE = (
     "cannot ask [{host}]:{port} as {user}: {detail}"
 )
@@ -103,13 +120,17 @@ def reach(
 
 
 def seed(root: str, action, runner=subprocess.run,
-         clock=time.monotonic, sleep=time.sleep) -> str | None:
-    """Carry out a SeedReplica of engine postgresql; None, or why not"""
+         clock=time.monotonic, sleep=time.sleep,
+         alive=None) -> str | None:
+    """Carry out a SeedReplica of engine postgresql; None, or why not
+
+    `alive` says whether a process id still runs (the tests' seam)."""
     try:
         with spool(root) as directory:
             pgpass = write_pgpass(directory, action.host, action.port,
                                   action.password)
-            return _seed(root, pgpass, action, runner, clock, sleep)
+            return _seed(root, pgpass, action, runner, clock, sleep,
+                         alive or _alive)
     except OSError as e:
         # not KEPT: the error may come after the data directory moved
         return f"cannot seed from [{action.host}]:{action.port}:" \
@@ -187,7 +208,7 @@ def conninfo(host: str, port: int, pgpass: str, tls: str = "") -> str:
 
 
 def _seed(
-    root: str, pgpass: str, action, runner, clock, sleep,
+    root: str, pgpass: str, action, runner, clock, sleep, alive,
 ) -> str | None:
     where = {"host": action.host, "port": action.port}
     found, problem = _probe(pgpass, action.host, action.port, runner,
@@ -200,23 +221,89 @@ def _seed(
         return f"{problem}; {KEPT}"
     aside = datadir + ASIDE_SUFFIX
     fresh = datadir + FRESH_SUFFIX
+    # a copy that an earlier run left behind: pg_basebackup refuses a
+    # target that is not empty
+    shutil.rmtree(fresh, ignore_errors=True)
     problem = _basebackup(fresh, pgpass, action, runner)
     if problem:
+        shutil.rmtree(fresh, ignore_errors=True)
         return BASEBACKUP_FAILED.format(detail=problem, **where) \
             + f"; {KEPT}"
-    problem = _run(runner, ("systemctl", "stop", dbpostgres.service()))
+    unit = dbpostgres.service(root)
+    problem = _stopped(runner, unit, datadir, clock, sleep, alive)
+    if not problem:
+        problem = _signal(fresh)
     if problem:
-        return f"cannot stop {dbpostgres.service()}: {problem}; {KEPT}"
-    problem = _swap(dropdir, datadir, aside, fresh, action, runner)
+        shutil.rmtree(fresh, ignore_errors=True)
+        return f"{problem}; {KEPT}"
+    problem = _swap(dropdir, datadir, aside, fresh, action, runner, unit)
     if problem:
         return problem
-    problem = _run(runner, ("systemctl", "start", dbpostgres.service()))
+    problem = _run(runner, ("systemctl", "start", unit))
     if problem:
         return START_FAILED.format(detail=problem, **where)
     problem = _streaming(runner, clock, sleep)
     if problem:
         return NOT_STREAMING.format(timeout=STREAMING_TIMEOUT, **where)
     return None
+
+
+def _stopped(runner, unit: str, datadir: str, clock, sleep,
+             alive) -> str:
+    """The cluster's unit stopped and its postmaster gone; why not
+
+    The pid is the first line of the data directory's postmaster.pid,
+    which the postmaster removes when it exits. The server holds the
+    data directory until then, and its last write is pg_control."""
+    problem = _run(runner, ("systemctl", "stop", unit))
+    if problem:
+        return f"cannot stop {unit}: {problem}"
+    deadline = clock() + STOP_TIMEOUT
+    while True:
+        pid = _postmaster(datadir)
+        if pid is None or not alive(pid):
+            return ""
+        if clock() >= deadline:
+            return STILL_RUNS.format(datadir=datadir, pid=pid,
+                                     timeout=STOP_TIMEOUT, unit=unit)
+        sleep(POLL_SECONDS)
+
+
+def _postmaster(datadir: str) -> int | None:
+    """The postmaster's pid from postmaster.pid, or None without one"""
+    try:
+        with open(os.path.join(datadir, PIDFILE)) as fob:
+            first = fob.readline().strip()
+    except OSError:
+        return None
+    return int(first) if first.isdigit() else None
+
+
+def _alive(pid: int) -> bool:
+    """Whether the process runs and is a PostgreSQL server: a pid that
+    a stale postmaster.pid names may be another process's by now"""
+    try:
+        with open(f"/proc/{pid}/comm") as fob:
+            return fob.read().strip().startswith("postgres")
+    except OSError:
+        return False
+
+
+def _signal(fresh: str) -> str:
+    """standby.signal in the copy before the copy moves; why not
+
+    A server started between the move and the signal would take
+    writes on the copy (keel#153: a start that takes no lock ran in the
+    middle of a reseed)."""
+    try:
+        signal = os.path.join(fresh, dbpostgres.STANDBY_SIGNAL)
+        fd = os.open(signal, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        os.close(fd)
+        _as_postgres(signal)
+    except OSError as e:
+        return f"cannot write standby.signal into the copy:" \
+            f" {e.strerror or e}"
+    return ""
 
 
 def _probe(pgpass: str, host: str, port: int, runner,
@@ -280,30 +367,28 @@ def _basebackup(fresh: str, pgpass: str, action, runner) -> str:
 
 
 def _swap(dropdir: str, datadir: str, aside: str, fresh: str,
-          action, runner) -> str:
+          action, runner, unit: str) -> str:
     """Move the copy in; undo every failure before the old copy goes"""
     os.rename(datadir, aside)
     problem = _standby_in_place(dropdir, datadir, fresh, action)
     if problem:
-        return _undo(runner, datadir, aside, problem)
+        return _undo(runner, datadir, aside, problem, unit)
     shutil.rmtree(aside)
     return ""
 
 
 def _standby_in_place(dropdir: str, datadir: str, fresh: str,
                       action) -> str:
-    """The copy where the data directory was, made a standby; the reason
+    """The copy where the data directory was, with the follow drop-in;
+    the reason
 
-    The move is first and the standby files next, so a crash between them
-    leaves a copy that cannot take writes: standby.signal is what turns
-    the start into recovery, and it exists only after this returns "".
+    The copy holds standby.signal before it moves (_signal), so a start
+    at any point after the move is a recovery: the copy cannot take
+    writes. The follow drop-in comes next, and gives the standby its
+    primary.
     """
     os.rename(fresh, datadir)
     try:
-        signal = os.path.join(datadir, dbpostgres.STANDBY_SIGNAL)
-        fd = os.open(signal, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-        os.close(fd)
-        _as_postgres(signal)
         os.makedirs(dropdir, exist_ok=True)
         follow = os.path.join(dropdir, dbpostgres.FOLLOW_DROPIN_NAME)
         # 0600 while it holds the password: the chown to postgres below
@@ -320,14 +405,15 @@ def _standby_in_place(dropdir: str, datadir: str, fresh: str,
     return ""
 
 
-def _undo(runner, datadir: str, aside: str, problem: str) -> str:
+def _undo(runner, datadir: str, aside: str, problem: str,
+          unit: str) -> str:
     """Put the old data directory back and start the server; the error"""
     shutil.rmtree(datadir, ignore_errors=True)
     try:
         os.rename(aside, datadir)
     except OSError:
         problem += f"; the old data directory is at {aside}"
-    _run(runner, ("systemctl", "start", dbpostgres.service()))
+    _run(runner, ("systemctl", "start", unit))
     return problem + "; the server is as it was"
 
 
