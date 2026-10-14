@@ -129,7 +129,23 @@ def _primary(root: str, state: DatabaseState, found, runner) -> None:
                   " and takes writes")
     else:
         found.say("unchanged (the primary, writable)")
+    _ensure_slot(found, runner)
     _forget_divergence(root)
+
+
+def _ensure_slot(found, runner) -> None:
+    """The pair's slot on the holder, made when it is not there
+
+    A base backup copies no replication slot (pg_basebackup leaves
+    pg_replslot out), so a standby promoted to the holder has none, and
+    the reseed of the old primary, whose follow drop-in names the slot,
+    would never stream (found when the pair's cases (b) to (e) were
+    built, on PostgreSQL 17). The statement is idempotent and commits without the
+    standby (keel.system.dbpostgres.slot_statements)."""
+    statements = dbpostgres.slot_statements()
+    problem = _run(runner, dbpostgres.CLIENT, text=statements.text)
+    if problem:
+        found.fail(f"{statements.summary} failed: {problem}")
 
 
 def _replica(root: str, server: dict, state: DatabaseState,

@@ -13,6 +13,12 @@ keel (0.23.18) unstable; urgency=medium
     pg_promote() or role statement read as done. The replication
     role's statement does nothing on a standby now, where the role
     arrives with the copy and ALTER ROLE is refused.
+  * A promoted standby had no replication slot: pg_basebackup copies
+    no slot, and nothing made the pair's slot on the new primary. The
+    reseed of the old primary names that slot, so it never streamed.
+    keel database follow now makes the slot on the holder (the
+    statement does nothing when the slot is there, and commits without
+    the standby).
 
 keel (0.23.17) unstable; urgency=medium
 

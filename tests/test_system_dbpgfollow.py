@@ -238,6 +238,32 @@ class TestThePrimary(FollowTestCase):
         self.assertTrue(any("pg_promote()" in one for one in server.sent))
         self.assertIn("role=primary", self.role_file(0))
 
+    def test_a_promoted_standby_makes_the_pair_s_slot(self):
+        """A base backup copies no slot: the new holder makes the
+        pair's slot after pg_promote(), or the reseed of the old
+        primary never streams (found when the pair's cases (b) to (e)
+        were built)"""
+        self.pair_nodes()
+        receiver = f"user=repl host={address(1)} port=5432 " \
+                   "password=******** sslmode=verify-full\n"
+        server = Server(in_recovery=True, receiver=receiver)
+        found = self.follow(0, server)
+        self.assertIsNone(found.problem, found.lines)
+        promoted = next(n for n, one in enumerate(server.sent)
+                        if "pg_promote()" in one)
+        slot = next(n for n, one in enumerate(server.sent)
+                    if "pg_create_physical_replication_slot" in one)
+        self.assertGreater(slot, promoted)
+        self.assertIn("SET synchronous_commit = local", server.sent[slot])
+
+    def test_the_holder_keeps_the_pair_s_slot_on_each_follow(self):
+        self.pair_nodes()
+        server = Server()
+        found = self.follow(0, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertTrue(any("pg_create_physical_replication_slot" in one
+                            for one in server.sent))
+
     def test_an_unproven_primary_is_stopped(self):
         """keel#104, the PostgreSQL row: pg cannot be read only while
         it runs, so an unproven claim is enforced by stopping the
