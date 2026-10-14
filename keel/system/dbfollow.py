@@ -5,7 +5,11 @@ Everything that depends on the role follows the elected role (0020), and
 on a pair the role is the VIP's (0049): the holder is the primary. This
 is the one place that acts on it, run by apply's FollowVip action, by
 keel database promote once the VIP moved, and by
-keel-database-follow.service when the VIP's state changes or at boot:
+keel-database-follow.service when the VIP's state changes or at boot.
+The rows below are MariaDB's; a PostgreSQL standby refuses writes in
+recovery on its own, so the engine's rows are keel.system.dbpgfollow's
+(0054) and read_only, the role drop-in, the root lock and GTID errancy
+have no twin there:
 
 | the VIP here | what is done |
 | --- | --- |
@@ -159,13 +163,22 @@ def _follow(root: str, spec: str, confirmed: bool, found: Followed,
         return
     server = declared_server(doc)
     role = dbpair.role_of(pair, str(server.get("role") or ""))
-    # a paired node (it has a pair record: the other member is known)
-    # with no claim at all is not proven either: its state file may have
-    # been removed (keel#104)
-    if role == PRIMARY and not _proven(root, doc, output, wait, sleep):
+    record_role = True
+    if state.engine == "postgresql":
+        # the engine's rows (0054): read_only, the role drop-in, the
+        # root lock and GTID errancy are MariaDB's; a standby's
+        # read-only-ness is recovery-inherent for PostgreSQL
+        from keel.system import dbpgfollow
+        record_role = dbpgfollow.follow(
+            root, state, server, role, confirmed, found, runner,
+            proven=lambda: _proven(root, doc, output, wait, sleep))
+    elif role == PRIMARY and not _proven(root, doc, output, wait, sleep):
+        # a paired node (it has a pair record: the other member is known)
+        # with no claim at all is not proven either: its state file may have
+        # been removed (keel#104)
         _unproven(root, state, found, runner)
         return
-    if role == PRIMARY:
+    elif role == PRIMARY:
         _primary(root, state, found, runner)
     elif role == REPLICA:
         _replica(root, doc, server, state, confirmed, found, runner)
@@ -173,7 +186,7 @@ def _follow(root: str, spec: str, confirmed: bool, found: Followed,
         found.fail(f"no role to follow: the VIP has no claim and the spec"
                    f" declares {role or 'none'}")
         return
-    if found.problem is None:
+    if record_role and found.problem is None:
         _write(root, dbpair.ROLE_FILE, dbpair.role_text(role, pair.vip),
                0o644)
 

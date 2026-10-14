@@ -307,7 +307,7 @@ def plan_promote(doc: dict, state: DatabaseState | None,
     """
     if state is None:
         return [Step(PROMOTE_FIELD, (Refuse(NO_SERVER),))]
-    if state.pair is not None and state.engine == mariadb_name():
+    if state.pair is not None and state.engine in CONVERGED:
         from keel.system.actions import FollowVip
         refusal = _cannot_act(state, REPLICA)
         if refusal:
