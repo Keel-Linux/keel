@@ -1126,9 +1126,27 @@ def crashed(report: dict, pids: list[int], roots: list[str]) -> None:
     report["e_alerts"] = [one.get("text", "")[:200] for one in
                           alerted("A", dbpgfollow.DIVERGED_TITLE, since)]
     report["e_follow_log"] = agent_send("A", "followlog")
-    # (d) the rejoin: the operator confirms the reseed on A
+    # (d) the rejoin: the operator confirms the reseed on A; when A's
+    # walreceiver first streams is sampled from the driver, since the
+    # seed waits for it inside the apply
+    streaming: dict = {}
+    stop = threading.Event()
+
+    def sample() -> None:
+        while not stop.is_set() and "at" not in streaming:
+            if pg_ask(a_root, "SELECT status FROM pg_stat_wal_receiver",
+                      timeout=5) == "streaming":
+                streaming["at"] = time.time()
+            stop.wait(0.2)
+    sampler = threading.Thread(target=sample, daemon=True)
+    sampler.start()
     report["d_apply"] = apply_with_cert_ask_retry("A", 900, destroy=True)
     reseeded_at = time.time()
+    # one ask can miss while A's server restarts: the sampler goes on a
+    # while after the apply, until it saw A stream
+    wait_until(lambda: "at" in streaming, 60, 0.5)
+    stop.set()
+    sampler.join()
     mark(report, "case_d_reseeded")
     report["d_streaming_s"] = wait_until(
         lambda: agent_send("A", "wstatus").get("status") == "streaming",
@@ -1145,6 +1163,15 @@ def crashed(report: dict, pids: list[int], roots: list[str]) -> None:
     watched.stop()
     report["c_downtime"] = downtime(writer, watched, cut_at, promote_at,
                                     promoted_at, reseeded_at)
+    # B acknowledged nothing between its promotion and A's first stream:
+    # its only standby is A, and the copy is never taken for it
+    a_streaming_at = streaming.get("at")
+    report["d_a_streaming_s"] = None if a_streaming_at is None \
+        else round(a_streaming_at - cut_at, 2)
+    report["d_acked_before_a_streamed"] = [
+        {"n": one["n"], "end_s": round(one["end"] - cut_at, 2)}
+        for one in writer.done if one["ok"] and one["t"] > killed_at
+        and (a_streaming_at is None or one["end"] < a_streaming_at - 1.0)]
     acked = {f"crash-{one['n']}" for one in writer.done if one["ok"]}
     on_b = held_values(b_root, "crash-%")
     report["c_acked_missing"] = sorted(acked - (on_b or set()))[:20] \

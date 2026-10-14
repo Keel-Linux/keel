@@ -204,6 +204,19 @@ class TestSeed(unittest.TestCase):
         self.assertIn("--compress=server-zstd", copy)
         self.assertIn("--format=plain", copy)
 
+    def test_the_copy_is_never_the_pair_s_synchronous_standby(self):
+        """The base backup's WAL stream reports what it flushed: under
+        the standby's name `keel` the primary acknowledged commits that
+        only the half-made copy held (found by the pair's
+        network-namespace test, case (d))"""
+        self.assertIsNone(dbpgseed.seed(self.root, SeedAction(),
+                                        runner=self.runner,
+                                        clock=self.clock))
+        copy = " ".join(next(argv for argv in self.ran
+                             if "pg_basebackup" in argv))
+        self.assertIn("application_name=keel-seed", copy)
+        self.assertNotIn(f"application_name={dbpostgres.SLOT} ", copy)
+
     def test_the_pair_streams_from_its_slot(self):
         action = SeedAction()
         action.slot = "keel"

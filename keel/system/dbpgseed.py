@@ -50,6 +50,10 @@ PROBE_SQL = (
 )
 STREAMING_QUESTION = "SELECT status FROM pg_stat_wal_receiver"
 CONNECT_TIMEOUT = "connect_timeout=10"
+# the name of keel's own replication connections (the copy, the
+# probes): never the standby's application_name, which the pair's
+# synchronous_standby_names counts (keel.system.dbpostgres.SLOT)
+SEED_NAME = "keel-seed"
 # the base backup compressed on the primary, unpacked here (PG 15+)
 COMPRESSION = "server-zstd"
 PGPASS = "pgpass"
@@ -164,12 +168,20 @@ def conninfo(host: str, port: int, pgpass: str, tls: str = "") -> str:
     refuses it — pg_basebackup answers "connection requires a valid
     client certificate", falls back to no TLS, and finds no line at all
     (found by the pair's network-namespace test of this release)
+
+    The application name is SEED_NAME, not the standby's `keel`: the
+    WAL stream of pg_basebackup reports what it flushed, so under the
+    name `keel` the primary took the half-made copy for the pair's
+    synchronous standby and acknowledged commits that only the copy
+    held (found by the pair's network-namespace test, case (d): writes
+    on the new primary were acknowledged during the reseed, before the
+    old primary streamed)
     """
     return (
         f"host={dbpostgres.conninfo_value(host)} port={int(port)}"
         f" user={dbpostgres.REPLICATION_USER} dbname=postgres"
         f" passfile={dbpostgres.conninfo_value(pgpass)}"
-        f" application_name=keel {CONNECT_TIMEOUT}"
+        f" application_name={SEED_NAME} {CONNECT_TIMEOUT}"
         + (f" {tls.strip()}" if tls else "")
     )
 

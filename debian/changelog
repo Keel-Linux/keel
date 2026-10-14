@@ -42,6 +42,13 @@ keel (0.23.18) unstable; urgency=medium
     the design case's link carries about 50 kB/s on one connection. In
     the pair's network-namespace test, B's first seed took about 12
     minutes.
+  * The seed's copy took the standby's application name, keel. The
+    WAL stream of pg_basebackup reports what it flushed, so the primary
+    took the half-made copy for the pair's synchronous standby: during
+    the reseed of an old primary, the new primary acknowledged commits
+    that only the copy held (found by the pair's network-namespace
+    test, case (d)). keel's own replication connections are named
+    keel-seed now; only the standby is keel.
   * The PostgreSQL pair's end to end test runs cases (b) to (e) of
     docs/replication-postgresql.md under the design case (0050), in
     the CI job "postgres / trixie": the replica cut off (a commit

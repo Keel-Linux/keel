@@ -215,9 +215,13 @@ class TestAPostgresqlPairOnAPoorNetwork(unittest.TestCase):
         self.assertIn("keel", found["c_b_slot"], found)
         # the new primary has no standby, so its commits wait, alerted
         self.assertIsNotNone(found["c_b_waits_alerted_s"], found["alerts"])
-        # writes are acknowledged again once the old primary streams
+        # writes are acknowledged again once the old primary streams,
+        # and not before: the reseed's copy is not the pair's standby
+        # (found by this test: the copy acknowledged commits)
         self.assertIsNotNone(downtime["first_ok_after_s"], downtime)
         self.assertLess(downtime["first_ok_after_reseed_s"], 30, downtime)
+        self.assertIsNotNone(found["d_a_streaming_s"], found)
+        self.assertEqual(found["d_acked_before_a_streamed"], [], downtime)
 
     def test_c_the_writes_resume_within_5_s_after_the_vip_lands(self):
         """The maintainer's client-side bound (keel#148): the writes
