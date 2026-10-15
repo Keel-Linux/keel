@@ -13,7 +13,7 @@ from unittest import mock
 from vip_helpers import KEYS, NOW, VIP, Pair, address
 
 from keel import exits
-from keel.mesh import etcdstate, vipetcd, vipmsg, vipnode, vippromote
+from keel.mesh import etcdstate, vipetcd, vipmsg, vipnet, vipnode, vippromote
 from keel.mesh import vip as vipstate
 from keel.mesh.etcdstate import Cluster, Member
 from keel.mesh.vipnode import VipError
@@ -416,6 +416,32 @@ class TestTheController(WithEtcd):
         self.sleep(vipetcd.RENEW)
         self.turn(0)
         self.assertTrue(self.carried(0))
+
+    def test_the_holder_rides_out_a_re_election_under_loss(self):
+        """keel#167: a cut of the site of etcd's leader made the holder
+        drop the VIP 2 to 4 s: the new leader came 7.4 s after the cut,
+        and the kernel ended the address about 8 s after the last
+        confirmed renewal. With no renewal for 11 s, a re-election of
+        5 to 10 s and a renewal, the holder still carries it, and the
+        kernel's lifetime after a renewal covers that time"""
+        self.promote(0)
+        self.run_for(5)
+        self.kv.refuse = "keepalive"
+        for _ in range(11):
+            self.sleep(1.0)
+            self.turn(0)
+            self.assertTrue(self.carried(0))
+        self.kv.refuse = None
+        self.sleep(vipetcd.RENEW)
+        self.turn(0)
+        self.assertTrue(self.carried(0))
+        self.assertGreaterEqual(vipnet.lifetime(0.5), 12)
+
+    def test_the_release_stays_well_inside_the_ttl(self):
+        """The holder's address ends before etcd can expire the lease:
+        the release time, counted from the renewal's send, is at least
+        5 s inside the TTL, counted from etcd's receipt (0049)"""
+        self.assertLessEqual(vipetcd.RELEASE_AFTER + 5, vipetcd.TTL)
 
     def test_a_renewal_the_majority_does_not_confirm_is_none(self):
         """etcd's leader cut off renews leases by itself; the read that

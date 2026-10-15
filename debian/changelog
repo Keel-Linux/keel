@@ -1,3 +1,19 @@
+keel (0.23.26) unstable; urgency=medium
+
+  * The holder of a VIP with etcd now carries it for 15 s after its last
+    renewal that the majority confirmed, not 10 s (keel#167). A cut of
+    the site of etcd's leader took 7.4 s to a new leader on real nodes,
+    and the kernel ended the address about 8 s after the last renewal.
+    So the holder dropped the VIP for 2 to 4 s, and its database
+    stopped. The release stays 5 s inside the lease's TTL of 20 s.
+  * keel database watch now runs keel database follow on the holder
+    when its server does not answer (keel#168). The server was stopped
+    while the VIP was off wg0, and it stayed stopped after the VIP came
+    back, until keel database follow ran by hand. Follow starts it once
+    the VIP is on wg0.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Thu, 15 Oct 2026 14:30:00 +0000
+
 keel (0.23.25) unstable; urgency=medium
 
   * With etcd, keel-database-follow.path started keel database follow

@@ -59,9 +59,13 @@ VIP_RANGE_BITS = 112
 PRIMARY, REPLICA = "primary", "replica"
 # the etcd lease of a holder's claim, and how long after the last
 # renewal the majority confirmed the holder still carries the VIP
-# (decision 0049, third round; keel.mesh.vipetcd says why)
+# (decision 0049, third round; keel.mesh.vipetcd says why). 15 s, not
+# 10: a cut of the site of etcd's leader took 7.4 s to a new leader, and
+# the kernel ended the address about 8 s after the last renewal, so the
+# holder dropped the VIP for 2 to 4 s (keel#167). The release stays 5 s
+# inside the TTL, which etcd counts from its receipt of the renewal
 TTL = 20
-RELEASE_AFTER = 10.0
+RELEASE_AFTER = 15.0
 
 
 @dataclass(frozen=True)

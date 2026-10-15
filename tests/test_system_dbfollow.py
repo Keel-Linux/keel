@@ -752,6 +752,28 @@ class TestWatch(FollowTestCase):
         self.assertFalse(dbwatch.needs_follow(
             root, dbpair.PairState(VIP, KEYS[0]), standalone, {}))
 
+    def test_needs_follow_on_a_stopped_server_that_carries_the_vip(self):
+        """keel#168: the holder's server was stopped while the VIP was
+        off wg0, and stayed stopped after the VIP came back: the watch
+        followed only a server that answered"""
+        from keel.inspect.dbreading import Reading, Value
+        root = self.enterContext(__import__("tempfile").TemporaryDirectory())
+        os.makedirs(os.path.join(root, "var/lib/keel"))
+        with open(os.path.join(root, dbpair.ROLE_FILE), "w") as fob:
+            fob.write(dbpair.role_text("primary", VIP))
+        primary = dbpair.PairState(VIP, KEYS[0], KEYS[1], address(1),
+                                   "primary", address(0))
+        stopped = Reading(role=Value(problem="no socket"))
+        writable = Reading(role=Value("primary"), read_only=Value(False))
+        doc = {"network": {"overlay": {"wireguard": {}}}}
+
+        def carried(argv):
+            return f"5: wg0    inet6 {VIP}/128 scope global\n"
+        self.assertTrue(dbwatch.needs_follow(root, primary, stopped, doc,
+                                             output=carried))
+        self.assertFalse(dbwatch.needs_follow(root, primary, writable, doc,
+                                              output=carried))
+
     def test_needs_follow_on_a_fenced_postgresql_standby(self):
         """keel#166: a fenced replica that streams is followed again, so
         follow clears the fence once it caught up; a MariaDB replica, or

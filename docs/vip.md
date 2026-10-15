@@ -322,11 +322,11 @@ cluster, split as keel#75 splits an invite:
     the 2 s a call may take. A call that fails or prints anything but
     etcd's JSON is no renewal;
   - **the holder renews its lease every 2 s, and carries the address
-    only while the last renewal the majority confirmed is under 10 s
+    only while the last renewal the majority confirmed is under 15 s
     old**, counted from the renewal's send on CLOCK_BOOTTIME (suspend
     counts), kept in the controller's memory, and **enforced by the
     kernel**: each confirmed renewal gives the address the rest of the
-    10 s as its lifetime, so it is gone by then whatever becomes of the
+    15 s as its lifetime, so it is gone by then whatever becomes of the
     controller, stopped, restarting, crashed or frozen. A controller
     that starts after a restart leaves an address a previous one gave a
     lifetime to the kernel and extends it only once it renewed the same
@@ -358,21 +358,26 @@ time unless the next controller renews the lease. A `systemctl stop`, the
 overlay disabled by `keel spec apply`, or a shutdown drops it at once.
 The unit has no start limit, so it is never left stopped for good.
 
-**The TTL is 20 s, the release 10 s.** etcd cannot expire a lease before
+**The TTL is 20 s, the release 15 s.** etcd cannot expire a lease before
 TTL seconds after the last renewal it answered, so a holder cut off from
-the majority has dropped the VIP 10 s before any other node can win it.
+the majority has dropped the VIP at least 5 s before any other node can
+win it.
 Against etcd's 5 s election timeout ([docs/mesh.md](mesh.md),
 "Timeouts"): a re-election in the majority takes 5 to 10 s, during which
 renewals fail, but etcd gives every lease its full TTL again on a leader
-change, so 10 s rides out one re-election without a move. etcd's leader
+change, so 15 s rides out one re-election without a move. The release
+was 10 s before keel#167: the kernel then ended the address about 8 s
+after the last confirmed renewal, and a cut of the site of etcd's
+leader took 7.4 s to a new leader on real nodes. The holder dropped the
+VIP for 2 to 4 s, and its database stopped. etcd's leader
 renews a lease by itself, without the majority, so a leader cut off
 would answer renewals until it steps down, up to two election timeouts;
 it cannot answer the linearizable read. The cut off holder so drops the
-VIP at most 14 s after the last renewal the majority confirmed (one
+VIP at most 19 s after the last renewal the majority confirmed (one
 renewal period and a call's timeout late), and the lease expires no
 sooner than 20 s after it (25 s when the majority elects a new leader,
 which gives the lease an election timeout more). The address's lifetime
-makes the kernel drop it sooner still, by 10 s after that renewal, also
+makes the kernel drop it sooner, by 14 s after that renewal, also
 for a frozen process (a stopped container), which no controller can
 cover: `tests/test_vip_upgrade_netns.py` (d).
 
@@ -397,19 +402,19 @@ the majority confirmed:
 
 | Event | When, at the latest or at the earliest |
 | --- | --- |
-| the holder's controller drops the address | s + 10 s + one turn (0.2 s) + one call to the helper |
-| the kernel removes the address | s + 10 s at the latest: the lifetime is int(10 - age) - 1 s, and the kernel can be 0.25 s late (EXPIRY_SLACK, 1 s, covers that and a busy work queue) |
+| the holder's controller drops the address | s + 15 s + one turn (0.2 s) + one call to the helper |
+| the kernel removes the address | s + 15 s at the latest: the lifetime is int(15 - age) - 1 s, and the kernel can be 0.25 s late (EXPIRY_SLACK, 1 s, covers that and a busy work queue) |
 | etcd's leader gets that renewal | r, not before s |
 | the lease expires | r + 20 s, not before s + 20 s (an election in the majority adds an election timeout) |
 | the other node claims | when etcd shows -1: not before the expiry |
 
-The old holder's address is gone at s + 10 s. A claim is possible at
-s + 20 s at the earliest. The margin is 10 s or more.
+The old holder's address is gone at s + 15 s. A claim is possible at
+s + 20 s at the earliest. The margin is 5 s or more.
 
 On the design case (250 ms ±25 ms, 2% loss on each leg), a renewal gets
 to the leader at about s + 0.16 s (half a round trip and the start of
 etcdctl). The lease thus expires at about s + 20.16 s, and the margin is
-about 10.2 s. Delay and loss move r later, or make the renewal fail,
+about 5.2 s. Delay and loss move r later, or make the renewal fail,
 which is no renewal: they make the margin larger, never smaller. This
 is also true on a loaded runner (a round trip of 2.1 s was seen). The
 two hosts' clocks measure intervals only; a rate error of 100 ppm is 2
