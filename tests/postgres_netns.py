@@ -129,28 +129,23 @@ class Follower:
         self.thread = threading.Thread(target=self.run, daemon=True)
         self.thread.start()
 
-    def stamp(self) -> float:
-        found = 0.0
-        directory = os.path.join(self.root, "var/lib/keel/vip")
-        try:
-            for name in os.listdir(directory):
-                found = max(found, os.stat(os.path.join(directory,
-                                                        name)).st_mtime)
-        except OSError:
-            pass
-        return found
-
     def run(self) -> None:
-        last = self.stamp()
+        """keel-database-follow.path is PathChanged=/var/lib/keel/vip:
+        systemd's inotify mask, so an open for writing that writes
+        nothing starts follow as on a machine (keel#164; the mtime that
+        this loop read before missed it)"""
+        from pathwatch import PathChanged
+        directory = os.path.join(self.root, "var/lib/keel/vip")
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        watch = PathChanged(directory)
         watched = time.monotonic()
-        while not self.stop.wait(0.5):
-            now = self.stamp()
-            if now != last and now:
-                last = now
+        while not self.stop.is_set():
+            if watch.events(0.5):
                 self.follow("the VIP's state changed")
             if time.monotonic() - watched >= WATCH_EVERY:
                 watched = time.monotonic()
                 self.watch()
+        watch.close()
 
     def follow(self, why: str) -> dict:
         from keel.system import dbfollow
@@ -759,6 +754,14 @@ def play(report: dict, pids: list[int], pairs, roots: list[str],
         lambda: agent_send("B", "wstatus").get("status") == "streaming",
         120, 1)
     mark(report, "case_a")
+    # a steady pair starts no follow by keel-database-follow.path
+    # (keel#164: with etcd, every 1 to 2 s until the start limit)
+    before = {name: agent_send(name, "followlog").get("runs")
+              for name in ("A", "B")}
+    time.sleep(20)
+    report["a_quiet_follow_runs"] = {
+        name: (agent_send(name, "followlog").get("runs") or 0)
+        - (before[name] or 0) for name in ("A", "B")}
     replica_cut(report, pids, roots)
     mark(report, "case_b")
     crashed(report, pids, roots)

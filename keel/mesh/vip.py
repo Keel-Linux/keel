@@ -171,9 +171,14 @@ def ensure(root: str) -> None:
 @contextlib.contextmanager
 def locked(root: str) -> Iterator[None]:
     """One writer at a time: the members' channel, the controller, a
-    promote and the check all change these files"""
+    promote and the check all change these files. The lock file is
+    opened read only: flock needs no write access, and the close of a
+    file opened for writing is an event for keel-database-follow.path
+    (PathChanged=/var/lib/keel/vip), which then started keel database
+    follow at each turn of the controller (keel#164). The path stays
+    the same, so a helper of the older version shares the lock"""
     ensure(root)
-    fd = os.open(path(root, LOCK), os.O_RDWR | os.O_CREAT, FILE_MODE)
+    fd = os.open(path(root, LOCK), os.O_RDONLY | os.O_CREAT, FILE_MODE)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield

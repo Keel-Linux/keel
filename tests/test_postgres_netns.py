@@ -198,6 +198,13 @@ class TestAPostgresqlPairOnAPoorNetwork(unittest.TestCase):
         self.assertIsNotNone(found["b_back_alerted_s"], found["b_alerts"])
         self.assertEqual(found["b_row_on_b"], "1", found)
 
+    def test_a_steady_pair_starts_no_follow_by_the_path(self):
+        """keel#164: the path, PathChanged=/var/lib/keel/vip, started
+        follow every 1 to 2 s with etcd; in 20 s of a steady pair, at
+        most one run (a renewal that carries the VIP again)"""
+        runs = self.found["a_quiet_follow_runs"]
+        self.assertLessEqual(max(runs.values()), 1, runs)
+
     def test_c_the_unplanned_failover_loses_no_acknowledged_row(self):
         """The primary cut off and killed while the application writes;
         B's VIP controller claims once the lease of A's claim expired,

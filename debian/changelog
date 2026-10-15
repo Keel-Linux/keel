@@ -1,3 +1,17 @@
+keel (0.23.25) unstable; urgency=medium
+
+  * With etcd, keel-database-follow.path started keel database follow
+    every 1 to 2 s, and on the replica it failed with
+    unit-start-limit-hit in a few seconds (keel#164). The VIP
+    controller takes the lock of the VIP's state at each turn, and the
+    lock file was opened for writing inside /var/lib/keel/vip. The
+    close of such a file is an event for PathChanged=, even when
+    nothing was written. The lock file is now opened read only. Its
+    path does not change, so a helper of the older version shares it
+    during the upgrade.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Thu, 15 Oct 2026 14:00:00 +0000
+
 keel (0.23.24) unstable; urgency=medium
 
   * After the confirmed reseed, a PostgreSQL standby can take the VIP
