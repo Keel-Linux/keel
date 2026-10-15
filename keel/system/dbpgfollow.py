@@ -255,32 +255,42 @@ def mark_alone(root: str) -> None:
 
 
 def gone_said(root: str) -> bool:
-    """Whether the statement that the old primary is gone stands for
-    this node's newest claim: the operator's, with no epoch, or the VIP
-    controller's for the epoch of that claim (keel#165). A statement for
-    another epoch is stale, and it is removed unused"""
+    """Whether a statement that the old primary is gone stands for this
+    node's newest claim: the operator's (ALONE_MARK, no epoch), or the
+    VIP controller's for the epoch of that claim (vip.GONE_NOTE,
+    keel#165). A statement for another epoch is stale, and it is
+    removed unused"""
+    said = False
+    for relative in (ALONE_MARK, vipstate.GONE_NOTE):
+        try:
+            with open(os.path.join(root, relative)) as fob:
+                text = fob.read()
+        except OSError:
+            continue
+        epoch = vipstate.gone_epoch(text)
+        if epoch is None or epoch == _newest_epoch(root):
+            said = True
+            continue
+        _remove(root, relative)
+    return said
+
+
+def _newest_epoch(root: str) -> int:
     try:
-        with open(os.path.join(root, ALONE_MARK)) as fob:
-            text = fob.read()
-    except OSError:
-        return False
-    epoch = vipstate.gone_epoch(text)
-    if epoch is None:
-        return True
-    try:
-        newest = max((one.epoch for one in vipstate.held_all(root)),
-                     default=0)
+        return max((one.epoch for one in vipstate.held_all(root)),
+                   default=0)
     except (OSError, ValueError):
-        newest = 0
-    if epoch == newest:
-        return True
-    unmark_alone(root)
-    return False
+        return 0
 
 
 def unmark_alone(root: str) -> None:
+    for relative in (ALONE_MARK, vipstate.GONE_NOTE):
+        _remove(root, relative)
+
+
+def _remove(root: str, relative: str) -> None:
     try:
-        os.remove(os.path.join(root, ALONE_MARK))
+        os.remove(os.path.join(root, relative))
     except FileNotFoundError:
         pass
 

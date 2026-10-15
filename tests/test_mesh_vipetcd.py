@@ -831,7 +831,7 @@ class TestTheOldPrimaryGone(WithEtcd):
     def gone_mark(self, index: int) -> str | None:
         try:
             with open(os.path.join(self.all[index].root,
-                                   vipstate.GONE_MARK)) as fob:
+                                   vipstate.GONE_NOTE)) as fob:
                 return fob.read()
         except FileNotFoundError:
             return None
@@ -895,6 +895,51 @@ class TestTheOldPrimaryGone(WithEtcd):
         self.assertEqual(self.holds(), [0])
         self.assertEqual(vipnode.current(self.all[0], VIP).epoch, 2)
         self.assertIsNone(self.gone_mark(0))
+
+    def test_the_statement_lives_in_the_vip_s_state_directory(self):
+        """keel#178: keel-vip.service writes only under /var/lib/keel/vip
+        and /etc/wireguard (ProtectSystem=strict); a statement elsewhere
+        failed with a read-only file system"""
+        self.assertTrue(vipstate.GONE_NOTE.startswith(vipstate.DIR + "/"))
+        self.assertFalse(vipstate.GONE_NOTE.endswith(vipstate.SUFFIX))
+
+    def test_a_statement_that_cannot_be_written_never_stops_the_claim(self):
+        """keel#178: the write failed, Ops.hold raised before it recorded
+        the claim, and no node carried the VIP"""
+        self.promote(0)
+        self.run_for(10)
+        self.controllers[0].stop.set()
+        self.nets[0].addresses.clear()
+        with mock.patch.object(vipstate, "state_gone",
+                               side_effect=OSError(30, "Read-only file"
+                                                   " system")):
+            for _ in range(60):
+                self.sleep(1.0)
+                self.turn(1, 2)
+                if self.carried(1):
+                    break
+        self.assertTrue(self.carried(1), self.text(1))
+        held = vipnode.current(self.all[1], VIP)
+        self.assertEqual(held.epoch, 2)
+        self.assertIsNotNone(held.lease)
+        self.assertIn("Read-only file system", self.text(1))
+
+    def test_its_own_claim_taken_from_the_counter_keeps_its_lease(self):
+        """keel#178: a claim this node made, that etcd holds but its
+        state missed, is taken with its lease, so it is renewed and
+        carried"""
+        self.promote(0)
+        self.run_for(5)
+        made = vipetcd.claim(
+            self.kv, MESH_HEX, VIP, vipetcd.seen(self.kv, MESH_HEX)[VIP], 1,
+            lambda vip, epoch, lease: vipnode.signed_claim(
+                self.all[1], vip, epoch, lease), self.monotonic)
+        self.assertIsNotNone(made)
+        self.run_for(5, 1, 2)
+        held = vipnode.current(self.all[1], VIP)
+        self.assertEqual(held.epoch, 2)
+        self.assertEqual(held.lease, made[1])
+        self.assertTrue(self.carried(1), self.text(1))
 
     def test_the_root_half_over_the_bridge_carries_the_statement(self):
         from keel.mesh import vipbridge

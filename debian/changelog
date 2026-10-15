@@ -1,3 +1,20 @@
+keel (0.23.29) unstable; urgency=medium
+
+  * With etcd, the automatic failover of a PostgreSQL pair left the VIP
+    on no node on real nodes (keel#178). The VIP controller wrote the
+    statement of keel#165 under /var/lib/keel/database, which the
+    sandbox of keel-vip.service makes read only. The write failed
+    before the claim was recorded, and the controller carries only a
+    claim with its lease. The statement now lives in
+    /var/lib/keel/vip/old-primary-gone. A statement that cannot be
+    written is said, and the claim stands all the same.
+  * A node that takes its own claim from etcd keeps the lease that is
+    signed into it, so the controller renews it and carries the VIP.
+  * The netns tests run the VIP helper with the write paths of
+    keel-vip.service.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Thu, 15 Oct 2026 19:05:00 +0000
+
 keel (0.23.28) unstable; urgency=medium
 
   * keel verify checks the signature of a layer .hash file against the

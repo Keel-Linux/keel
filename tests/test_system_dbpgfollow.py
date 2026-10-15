@@ -441,7 +441,7 @@ class TestThePrimary(FollowTestCase):
             self.all[0].root, dbpgfollow.ALONE_MARK)))
 
     def gone_by_the_controller(self, index: int, epoch: int) -> None:
-        target = os.path.join(self.all[index].root, vipstate.GONE_MARK)
+        target = os.path.join(self.all[index].root, vipstate.GONE_NOTE)
         os.makedirs(os.path.dirname(target), exist_ok=True)
         with open(target, "w") as fob:
             fob.write(vipstate.gone_text(epoch - 1, epoch))
@@ -462,7 +462,7 @@ class TestThePrimary(FollowTestCase):
         self.assertIn(dbpgfollow.ALONE_SAID, found.lines)
         self.assertTrue(dbpostgres.commits_alone(self.pair_dropin(0)))
         self.assertFalse(os.path.exists(os.path.join(
-            self.all[0].root, dbpgfollow.ALONE_MARK)))
+            self.all[0].root, vipstate.GONE_NOTE)))
 
     def test_a_statement_for_another_claim_is_stale(self):
         """A statement left from an earlier claim never makes a later
@@ -480,7 +480,7 @@ class TestThePrimary(FollowTestCase):
         self.assertNotIn(dbpgfollow.ALONE_SAID, found.lines)
         self.assertIn(dbpostgres.SYNC_LINE, self.pair_dropin(0))
         self.assertFalse(os.path.exists(os.path.join(
-            self.all[0].root, dbpgfollow.ALONE_MARK)))
+            self.all[0].root, vipstate.GONE_NOTE)))
 
     def test_without_the_flag_the_new_primary_keeps_waiting(self):
         """A planned promote, or the follow of the VIP: no exception"""

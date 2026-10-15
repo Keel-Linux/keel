@@ -292,12 +292,24 @@ class Ops:
         if problem:
             raise VipError(problem)
         if expired:
-            before = vipnode.current(self.here, found.vip)
-            if found.epoch > before.epoch and before.claim is not None \
-                    and not same_key(before.claim.holder, found.holder):
-                vipstate.state_gone(self.here.root, before.epoch,
-                                    found.epoch)
+            self.state_gone(found)
         vipnode.hold(self.here, found, False, lease)
+
+    def state_gone(self, found: Claim) -> None:
+        """The statement of keel#165, when the claim is above the epoch
+        held and the previous holder another node; one that cannot be
+        written is said, and the claim stands all the same (keel#178)"""
+        before = vipnode.current(self.here, found.vip)
+        if found.epoch <= before.epoch or before.claim is None or \
+                same_key(before.claim.holder, found.holder):
+            return
+        try:
+            vipstate.state_gone(self.here.root, before.epoch, found.epoch)
+        except OSError as e:
+            self.here.err(f"vip {found.vip}: the statement that the old"
+                          f" primary is gone could not be written ({e});"
+                          " the claim stands, and its commits wait for a"
+                          " standby or for the operator")
 
     def carry(self, vip: str, age: float) -> bool:
         return vipnode.carry_held(self.here, vip, age)
