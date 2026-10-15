@@ -34,6 +34,17 @@ PROOF_WAIT for it, since a promote records its claim before it carries
 the VIP; keel.mesh.vipnode.carry_held writes the VIP's state again when
 it carries the address, so follow runs again then.
 
+Without etcd, nothing else ran keel vip check: keel-vip-check.timer is
+part of keel-vip.service, which needs etcd (keel#154: a returned old
+primary never learned the newer claim). So follow asks the other members
+first, the way keel vip check does, when this node's newest claim is
+its own and the VIP is not on wg0: a newer claim is taken, and the node
+follows the holder in the same run. When a peer answers and none knows
+a newer claim, the holder carries the VIP again. With etcd, the
+controller tells, and follow asks nobody. A PostgreSQL server of a claim
+that stays unproven is not started: follow would stop it again (a
+primary takes writes until the stop).
+
 The rejoin (0049, "The old primary coming back", MariaDB): the node's
 `@@gtid_binlog_state` against the holder's, read over the overlay as the
 replication account under TLS (keel.system.dbgtid). None errant: a dump
@@ -152,7 +163,10 @@ def _follow(root: str, spec: str, confirmed: bool, found: Followed,
     except (NodeError, ValueError) as e:
         found.fail(str(e))
         return
-    state = observe_database(root, doc, start=True, spec=spec)
+    _learn(root, spec, doc, found, output)
+    proof = _early_proof(root, doc, output, wait, sleep)
+    state = observe_database(root, doc, start=proof is not False,
+                             spec=spec)
     if state is None:
         declared = (doc.get("appliance") or {}).get("vip")
         found.fail(NO_SERVER if declared else NO_PAIR)
@@ -161,6 +175,11 @@ def _follow(root: str, spec: str, confirmed: bool, found: Followed,
         found.fail(NO_PAIR)
         return
     pair = state.pair
+    if state.down and proof is False:
+        found.say(f"not started: this node's claim of {pair.vip} is not"
+                  " proven (the VIP is not on wg0), so its server stays"
+                  " stopped until the VIP decides")
+        return
     if state.down:
         found.fail(f"the server is not answering ({state.down})")
         return
@@ -182,7 +201,8 @@ def _follow(root: str, spec: str, confirmed: bool, found: Followed,
         from keel.system import dbpgfollow
         record_role = dbpgfollow.follow(
             root, state, server, role, confirmed, found, runner,
-            proven=lambda: _proven(root, doc, output, wait, sleep),
+            proven=lambda: proof if proof is not None else _proven(
+                root, doc, output, wait, sleep),
             alone=alone)
     elif role == PRIMARY and not _proven(root, doc, output, wait, sleep):
         # a paired node (it has a pair record: the other member is known)
@@ -201,6 +221,59 @@ def _follow(root: str, spec: str, confirmed: bool, found: Followed,
     if record_role and found.problem is None:
         _write(root, dbpair.ROLE_FILE, dbpair.role_text(role, pair.vip),
                0o644)
+
+
+def _here(root: str, spec: str):
+    """This node on the members' channel (keel.mesh.vipnode.Here)"""
+    from keel.mesh.vipnode import Here
+    return Here(Node(root, spec), lambda: datetime.now(timezone.utc),
+                lambda line: print(line, file=sys.stderr))
+
+
+def _learn(root: str, spec: str, doc: dict, found: Followed,
+           output) -> None:
+    """keel vip check for the pair's VIP, without etcd, when this node's
+    newest claim is its own and the VIP is not on wg0 (keel#154)
+
+    Each peer that does not answer costs the channel's timeout, so the
+    other members are asked only then: a holder that carries the VIP,
+    and a node that knows another node's claim, ask nobody."""
+    pair = dbpair.observe_pair(root, doc)
+    if pair is None or pair.role != PRIMARY:
+        return
+    overlay = ((doc.get("network") or {}).get("overlay") or {}).get(
+        "wireguard") or {}
+    if vipnet.carried(wireguard.interface(overlay), pair.vip,
+                      output) is not False:
+        return
+    from keel.mesh import vippromote
+    from keel.mesh.vipnode import VipError
+    try:
+        here = _here(root, spec)
+        if vippromote.with_etcd(here):
+            return
+        vippromote.checked(here, pair.vip, False, found.say)
+    except (VipError, NodeError, ValueError, OSError) as e:
+        found.say(f"the other members could not be asked for a newer"
+                  f" claim of {pair.vip}: {e}")
+
+
+def _early_proof(root: str, doc: dict, output, wait: float,
+                 sleep) -> bool | None:
+    """For a PostgreSQL primary, whether its claim is proven, asked
+    before the server is started; None for every other node
+
+    A PostgreSQL server cannot be read only while it runs, so the follow
+    of an unproven claim stops it. A start before that stop let it take
+    writes for the time between (keel#154: each watch run did it)."""
+    server = declared_server(doc)
+    if str(server.get("engine") or "") != "postgresql":
+        return None
+    pair = dbpair.observe_pair(root, doc)
+    if pair is None or \
+            dbpair.role_of(pair, str(server.get("role") or "")) != PRIMARY:
+        return None
+    return _proven(root, doc, output, wait, sleep)
 
 
 def _proven(root: str, doc: dict, output, wait: float, sleep) -> bool:

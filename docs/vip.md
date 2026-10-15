@@ -225,6 +225,16 @@ and rejoins as a replica is the database's part of 0049:
 `keel-database-follow.path` runs `keel database follow` when the VIP's
 state changes ([docs/replication.md](replication.md)).
 
+`keel-vip-check.timer` is part of `keel-vip.service`, which needs etcd.
+So on a pair without etcd, nothing ran `keel vip check` (keel#154). On a
+node that declares `database.server`, `keel database follow` does the
+check of the pair's VIP now: at boot, at each VIP change and at each
+watch run. It asks the other members only when its newest claim is its
+own and the VIP is not on `wg0`. A newer claim is taken, and the server
+follows the holder in the same run. If a peer answers and none knows a
+newer claim, the holder carries the VIP again. A node without
+`database.server` still learns only from `keel vip check`.
+
 ## With etcd: the lease is the fence
 
 A claim with etcd carries, signed into it, the ID of the lease that

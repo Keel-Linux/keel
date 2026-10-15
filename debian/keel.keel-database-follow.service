@@ -4,10 +4,11 @@
 # the holder lacks, else left read only and reported. Run by
 # keel-database-follow.path when the VIP's state changes, and at boot,
 # so a server restarted comes to its role; a node with no VIP state has
-# nothing to follow.
+# nothing to follow. Without etcd it asks the other members for a newer
+# claim over wg0 first (keel#154), so it runs after wg0 is up.
 [Unit]
 Description=keel database: the server follows the pair's VIP
-After=network-online.target mariadb.service keel-vip.service
+After=network-online.target wg-quick@wg0.service mariadb.service keel-vip.service
 Wants=network-online.target
 ConditionPathExists=/var/lib/keel/vip
 

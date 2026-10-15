@@ -27,6 +27,9 @@ REPLICA_SPEC = {"engine": "mariadb", "role": "replica",
                 "listen": [address(1), "::1"]}
 
 
+REAL_RUN = subprocess.run
+
+
 class Server:
     """subprocess.run as one MariaDB server answers it: a status, GTID
     positions, what it holds, and what it was sent"""
@@ -66,6 +69,11 @@ class Server:
 
     def __call__(self, argv, **kwargs):
         argv = list(argv)
+        if argv[:1] == ["openssl"]:
+            # the members' channel signs with openssl: follow asks the
+            # other members (keel#154), and this fake is subprocess.run
+            # for the whole process
+            return REAL_RUN(argv, **kwargs)
         self.argv.append(argv)
         stdin = kwargs.get("input")
         if isinstance(stdin, bytes):
@@ -187,7 +195,10 @@ class FollowTestCase(Pair):
                 mock.patch("keel.system.dbseed.subprocess.run", server), \
                 mock.patch("keel.system.dbreadonly.subprocess.run", server), \
                 mock.patch.object(self.all[index].node, "overlay",
-                                  wraps=self.all[index].node.overlay):
+                                  wraps=self.all[index].node.overlay), \
+                mock.patch.object(dbfollow, "_here", return_value=here):
+            # _here: this node on the fixture's members' channel, never
+            # the real network (keel#154: follow asks the other members)
             dbfollow.follow(here.root, here.node.path, confirmed, found,
                             runner=server, output=self.nets[index].output,
                             wait=wait, sleep=self.sleep)
@@ -414,6 +425,9 @@ class TestTheOldPrimaryAtBoot(FollowTestCase):
         # A boots: its file still says it holds epoch 1, unfenced
         self.down.discard(address(0))
         self.booted(0)
+        # no other member answers yet: follow asks them first without
+        # etcd (keel#154), and an answer with no newer claim proves it
+        self.down.update({address(1), address(2)})
         self.assertEqual(dbpair.observe_pair(a.root, a.node.document()).role,
                          dbpair.PRIMARY)
         server = Server(read_only="ON")
@@ -429,6 +443,7 @@ class TestTheOldPrimaryAtBoot(FollowTestCase):
         # it waited for a proof, polling, and none came
         self.assertGreaterEqual(self.monotonic(), 1003.0)
         # keel vip check learns epoch 2: A is fenced, then a replica of B
+        self.down.clear()
         vippromote.check(a, lambda line: None)
         self.assertFalse(self.carried(0))
         server = Server(read_only="ON", binlog_state="0-1-10",
@@ -441,9 +456,32 @@ class TestTheOldPrimaryAtBoot(FollowTestCase):
                       f" [{address(1)}]:3306", joined)
         self.assertIn("role=replica", self.role_file(0))
 
+    def test_without_etcd_follow_learns_the_newer_claim_by_itself(self):
+        """keel#154: without etcd nothing ran keel vip check, so the old
+        primary never learned the newer claim. Follow asks the other
+        members first and rejoins in the same run"""
+        self.pair_nodes(mode="cloud_simple")
+        self.down.add(address(0))
+        self.assertEqual(vippromote.promote(self.all[1], True,
+                                            lambda line: None), 0)
+        self.down.discard(address(0))
+        self.booted(0)
+        server = Server(read_only="ON", binlog_state="0-1-10",
+                        binlog_pos="0-1-10", holder_state="0-1-10,0-2-20")
+        found = self.follow(0, server, wait=3.0)
+        self.assertIsNone(found.problem, found.lines)
+        self.no_write_taken(server)
+        joined = "\n".join(found.lines)
+        self.assertIn("took epoch 2", joined)
+        self.assertNotIn("not proven", joined)
+        self.assertIn("role=replica", self.role_file(0))
+
     def test_a_server_found_writable_without_a_proof_is_made_read_only(self):
         self.pair_nodes(mode="cloud_simple")
         self.booted(0)
+        # no other member answers yet: follow asks them first without
+        # etcd (keel#154), and an answer with no newer claim proves it
+        self.down.update({address(1), address(2)})
         server = Server(read_only="OFF")
         found = self.follow(0, server)
         self.assertIsNone(found.problem, found.lines)
@@ -453,11 +491,15 @@ class TestTheOldPrimaryAtBoot(FollowTestCase):
     def test_the_holder_proven_again_after_its_boot_takes_writes(self):
         self.pair_nodes(mode="cloud_simple")
         self.booted(0)
+        # no other member answers yet: follow asks them first without
+        # etcd (keel#154), and an answer with no newer claim proves it
+        self.down.update({address(1), address(2)})
         server = Server(read_only="ON")
         self.follow(0, server)
         self.no_write_taken(server)
         # nobody promoted: a peer answers, none knows a newer claim, and
         # keel vip check carries the VIP again
+        self.down.clear()
         vippromote.check(self.all[0], lambda line: None)
         self.assertTrue(self.carried(0))
         server = Server(read_only="ON")
@@ -588,6 +630,9 @@ class TestNoClaimAndNoAddress(FollowTestCase):
         self.nets[0].addresses.clear()
         self.assertTrue(dbwatch.needs_follow(a.root, pair, writable, doc,
                                              self.nets[0].output))
+        # no other member answers yet: follow asks them first without
+        # etcd (keel#154), and an answer with no newer claim proves it
+        self.down.update({address(1), address(2)})
         server = Server(read_only="OFF")
         self.follow(0, server)
         self.assertIn("SET GLOBAL read_only = ON;\n", server.sent)

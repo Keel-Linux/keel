@@ -303,8 +303,9 @@ So in cloud advanced the controller's failover promotes the database on
 the new holder within seconds of the claim, and the old primary turns
 read only the moment it drops the address (its lease's release, 10 s);
 in cloud simple a promote by hand on the replica does the first, and the
-old primary does the second at its next `keel vip check` (boot, then
-every minute) once it hears the newer claim. The path unit is the seam
+old primary does the second once it hears the newer claim: without
+etcd, its `keel database follow` asks the other members at boot and at
+each watch run (keel#154, [docs/vip.md](vip.md)). The path unit is the seam
 between the VIP's helper, which holds `CAP_NET_ADMIN` alone and cannot
 run `runuser`, and the database, which needs root.
 
