@@ -758,6 +758,43 @@ class TestAMemberOutsideThePair(WithEtcd):
                                 vipetcd.GRACE)
 
 
+class TestTheFollowPath(WithEtcd):
+    """keel#164: keel-database-follow.path (PathChanged=/var/lib/keel/
+    vip) started keel database follow every 1 to 2 s with etcd, until
+    the start limit: the controller took the state's lock at each turn,
+    and the lock was opened for writing in the watched directory, so
+    its close was an event. A steady pair makes no event there"""
+
+    def test_a_steady_pair_makes_no_event_for_the_path(self):
+        from pathwatch import PathChanged
+        self.promote(0)
+        self.run_for(5)
+        self.assertEqual(self.holds(), [0])
+        watches = [PathChanged(os.path.join(one.root, vipstate.DIR))
+                   for one in self.all[:2]]
+        try:
+            self.run_for(10)
+            events = [watch.events() for watch in watches]
+        finally:
+            for watch in watches:
+                watch.close()
+        self.assertEqual(self.holds(), [0])
+        self.assertEqual(events, [[], []])
+
+    def test_a_move_still_makes_an_event(self):
+        from pathwatch import PathChanged
+        self.promote(0)
+        self.run_for(5)
+        watch = PathChanged(os.path.join(self.all[1].root, vipstate.DIR))
+        try:
+            self.promote(1)
+            self.run_for(3)
+            events = watch.events()
+        finally:
+            watch.close()
+        self.assertTrue(events)
+
+
 class TestTheOldPrimaryGone(WithEtcd):
     """keel#165, the 0054 amendment of 2026-10-15: a claim of the
     controller because the lease of the newest claim expired states that
