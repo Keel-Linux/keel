@@ -99,6 +99,8 @@ EARLY = 2.0
 # confirmed renewal (RELEASE_AFTER), a renewal period and a call late
 GRACE = RELEASE_AFTER + RENEW + CALL_TIMEOUT
 EPOCH, HOLDER = "epoch", "holder"
+EXPIRED_SAID = (" (expired at its due time: the old primary is gone, so a"
+                " PostgreSQL primary commits alone, decision 0054)")
 # what a turn of the controller survives, said: a spec being edited, a
 # damaged state file, a key not readable for a moment, the root half
 # gone a moment
@@ -273,14 +275,27 @@ class Ops:
             raise VipError(f"epoch {epoch} is not above {held.epoch}")
         return vipnode.signed_claim(self.here, vip, epoch, lease)
 
-    def hold(self, raw: bytes, lease: str) -> None:
-        """This node's own claim, as etcd took it, recorded with its lease"""
+    def hold(self, raw: bytes, lease: str, expired: bool = False) -> None:
+        """This node's own claim, as etcd took it, recorded with its
+        lease. `expired` is the controller's word that it claimed because
+        the lease of the newest claim expired (keel#165): the statement
+        that the old primary is gone is written first, so the follow that
+        the claim starts reads it. The root half cannot ask etcd again,
+        so it trusts the word of its own helper for this one statement,
+        and checks the claim: verified, this node's own, the epoch above
+        the one it held (decision 0054, amendment of 2026-10-15)"""
         found = vipmsg.claim_of(raw)
         if not same_key(found.holder, self.here.own_key()):
             raise VipError("not this node's claim")
         problem = vipnode.verified(self.here, found)
         if problem:
             raise VipError(problem)
+        if expired:
+            before = vipnode.current(self.here, found.vip)
+            if found.epoch > before.epoch and before.claim is not None \
+                    and not same_key(before.claim.holder, found.holder):
+                vipstate.state_gone(self.here.root, before.epoch,
+                                    found.epoch)
         vipnode.hold(self.here, found, False, lease)
 
     def carry(self, vip: str, age: float) -> bool:
@@ -454,11 +469,12 @@ class Controller:
             self.alive[lease] = moment + ttl
             return
         expected = self.alive.get(lease)
-        if expected is None or moment < expected - EARLY:
+        expired = expected is not None and moment >= expected - EARLY
+        if not expired:
             first = self.gone.setdefault(lease, moment)
             if moment - first < GRACE:
                 return
-        self.claimed(facts, client, now, held)
+        self.claimed(facts, client, now, held, expired)
 
     def claim_again(self, facts: Facts, client: Client,
                     keys: dict[str, Seen]) -> None:
@@ -480,7 +496,11 @@ class Controller:
                 self.reclaim.discard(vip)
 
     def claimed(self, facts: Facts, client: Client, now: Seen,
-                held: Held) -> bool:
+                held: Held, expired: bool = False) -> bool:
+        """A claim at the next epoch; `expired` when the lease of `held`
+        ran out at its due time, seen alive before: that states the old
+        primary gone (keel#165), never a revoked lease or one of an
+        unknown end"""
         vip = held.vip
         try:
             made = claim(client, facts.mesh_id, vip, now, held.epoch,
@@ -490,11 +510,12 @@ class Controller:
             return False
         if made is None:
             return False
-        self.ops.hold(made[0].raw, made[1])
+        self.ops.hold(made[0].raw, made[1], expired)
         self.renewed[vip] = made[2]
         self.tried[vip] = made[2]
         self.err(f"vip {vip}: claimed at epoch {made[0].epoch}: the"
-                 f" lease of epoch {held.epoch} is gone")
+                 f" lease of epoch {held.epoch} is gone"
+                 f"{EXPIRED_SAID if expired else ''}")
         threading.Thread(target=self.announce, args=(facts, made[0]),
                          daemon=True).start()
         return True

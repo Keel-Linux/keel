@@ -1,3 +1,19 @@
+keel (0.23.22) unstable; urgency=medium
+
+  * With etcd, an automatic failover of a PostgreSQL pair now gives a
+    writable primary with no operator (keel#165). The maintainer decided
+    it on 2026-10-15 (handbook 0054, amendment of 2026-10-15). When the
+    VIP controller claims because the lease of the old primary's claim
+    expired at its due time, it states that the old primary is gone,
+    the same as keel database promote --old-primary-gone. The new
+    primary then commits alone until a standby streams again. A revoked
+    lease, or a lease that the controller never saw alive, states
+    nothing, and the commits wait as before.
+  * The statement carries the epoch of its claim. keel database follow
+    removes a statement of another epoch unused.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Thu, 15 Oct 2026 12:30:00 +0000
+
 keel (0.23.21) unstable; urgency=medium
 
   * In a VIP pair without etcd, nothing ran keel vip check (keel#154).

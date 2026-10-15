@@ -5,6 +5,7 @@ failover through the root half, a member outside the pair writing,
 deleting and revoking, and promote through etcd (decision 0049, third
 round), on a fake etcd with a clock (tests/vip_helpers.py)"""
 
+import os
 import threading
 import unittest
 from unittest import mock
@@ -715,6 +716,98 @@ class TestAMemberOutsideThePair(WithEtcd):
         self.assertEqual(self.both, [])
         self.assertGreaterEqual(self.monotonic() - revoked_at,
                                 vipetcd.GRACE)
+
+
+class TestTheOldPrimaryGone(WithEtcd):
+    """keel#165, the 0054 amendment of 2026-10-15: a claim of the
+    controller because the lease of the newest claim expired states that
+    the old primary is gone, the way keel database promote
+    --old-primary-gone does; a revoked lease, or one this controller
+    never saw alive, states nothing"""
+
+    def gone_mark(self, index: int) -> str | None:
+        try:
+            with open(os.path.join(self.all[index].root,
+                                   vipstate.GONE_MARK)) as fob:
+                return fob.read()
+        except FileNotFoundError:
+            return None
+
+    def test_an_expired_lease_states_the_old_primary_gone(self):
+        self.promote(0)
+        self.run_for(10)
+        self.controllers[0].stop.set()
+        self.nets[0].addresses.clear()
+        for _ in range(60):
+            self.sleep(1.0)
+            self.turn(1, 2)
+            if self.carried(1):
+                break
+        self.assertTrue(self.carried(1))
+        said = self.gone_mark(1)
+        self.assertIsNotNone(said)
+        self.assertEqual(vipstate.gone_epoch(said), 2)
+        self.assertEqual(vipnode.current(self.all[1], VIP).epoch, 2)
+        self.assertIn("expired", self.text(1))
+        self.assertIsNone(self.gone_mark(2))
+
+    def test_a_lease_never_seen_alive_states_nothing(self):
+        """B's controller started after A died: the lease is gone when B
+        first asks, expired or revoked, B cannot tell"""
+        self.promote(0)
+        self.run_for(10)
+        self.controllers[0].stop.set()
+        self.nets[0].addresses.clear()
+        self.sleep(vipetcd.TTL + 1)
+        self.controllers[1] = self.controller(1)
+        for _ in range(int(vipetcd.GRACE) + 10):
+            self.sleep(1.0)
+            self.turn(1, 2)
+            if self.carried(1):
+                break
+        self.assertTrue(self.carried(1))
+        self.assertIsNone(self.gone_mark(1))
+
+    def test_a_revoked_lease_states_nothing(self):
+        self.promote(0)
+        self.run_for(5)
+        self.kv.keepalive = lambda lease: (_ for _ in ()).throw(
+            vipetcd.EtcdError("cut off"))
+        self.kv.revoke(self.lease())
+        for _ in range(int(vipetcd.GRACE) + 10):
+            self.sleep(1.0)
+            self.turn()
+            if self.carried(1):
+                break
+        self.assertTrue(self.carried(1))
+        self.assertIsNone(self.gone_mark(1))
+
+    def test_the_holder_that_claims_again_states_nothing(self):
+        self.promote(0)
+        self.run_for(5)
+        self.kv.revoke(self.lease())
+        for _ in range(int(vipetcd.TTL)):
+            self.sleep(1.0)
+            self.turn()
+        self.assertEqual(self.holds(), [0])
+        self.assertEqual(vipnode.current(self.all[0], VIP).epoch, 2)
+        self.assertIsNone(self.gone_mark(0))
+
+    def test_the_root_half_over_the_bridge_carries_the_statement(self):
+        from keel.mesh import vipbridge
+        self.promote(0)
+        self.run_for(5)
+        made = vipetcd.claim(
+            self.kv, MESH_HEX, VIP, vipetcd.seen(self.kv, MESH_HEX)[VIP], 1,
+            lambda vip, epoch, lease: vipnode.signed_claim(
+                self.all[1], vip, epoch, lease), self.monotonic)
+        import base64
+        import json
+        answer = vipbridge.answered(vipetcd.Ops(self.all[1]), json.dumps({
+            "op": "hold", "raw": base64.b64encode(made[0].raw).decode(),
+            "lease": made[1], "expired": 1}).encode())
+        self.assertNotIn("error", answer)
+        self.assertEqual(vipstate.gone_epoch(self.gone_mark(1)), 2)
 
 
 class TestStatusWithEtcd(WithEtcd):

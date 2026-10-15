@@ -19,7 +19,8 @@ from unittest import mock
 from test_system_dbpgpairplan import CLAIMED, DOC, state
 from vip_helpers import KEYS, VIP, Pair, address
 
-from keel.mesh import vippromote
+from keel.mesh import vipnode, vippromote
+from keel.mesh import vip as vipstate
 from keel.system import dbfollow, dbpair, dbpgfollow, dbpostgres, dbsecret, \
     dbtls
 from keel.system.actions import FollowVip, PromoteReplica
@@ -436,6 +437,48 @@ class TestThePrimary(FollowTestCase):
         found = self.follow(0, server)
         self.assertIsNone(found.problem, found.lines)
         self.assertIn(dbpgfollow.ALONE_SAID, found.lines)
+        self.assertFalse(os.path.exists(os.path.join(
+            self.all[0].root, dbpgfollow.ALONE_MARK)))
+
+    def gone_by_the_controller(self, index: int, epoch: int) -> None:
+        target = os.path.join(self.all[index].root, vipstate.GONE_MARK)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "w") as fob:
+            fob.write(vipstate.gone_text(epoch - 1, epoch))
+
+    def test_the_controller_s_statement_of_this_claim_commits_alone(self):
+        """keel#165: the VIP controller claimed because the lease of the
+        old primary expired, which states it gone (0054, 2026-10-15)"""
+        self.pair_nodes()
+        self.pair_dropin(0, dbpostgres.pair_dropin_text())
+        self.gone_by_the_controller(
+            0, vipnode.current(self.all[0], VIP).epoch)
+        receiver = f"user=repl host={address(1)} port=5432 " \
+                   "password=******** sslmode=verify-full\n"
+        server = Server(in_recovery=True, receiver=receiver,
+                        streaming="0\n")
+        found = self.follow(0, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertIn(dbpgfollow.ALONE_SAID, found.lines)
+        self.assertTrue(dbpostgres.commits_alone(self.pair_dropin(0)))
+        self.assertFalse(os.path.exists(os.path.join(
+            self.all[0].root, dbpgfollow.ALONE_MARK)))
+
+    def test_a_statement_for_another_claim_is_stale(self):
+        """A statement left from an earlier claim never makes a later
+        holder commit alone: it is removed unused"""
+        self.pair_nodes()
+        self.pair_dropin(0, dbpostgres.pair_dropin_text())
+        self.gone_by_the_controller(
+            0, vipnode.current(self.all[0], VIP).epoch + 5)
+        receiver = f"user=repl host={address(1)} port=5432 " \
+                   "password=******** sslmode=verify-full\n"
+        server = Server(in_recovery=True, receiver=receiver,
+                        streaming="0\n")
+        found = self.follow(0, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertNotIn(dbpgfollow.ALONE_SAID, found.lines)
+        self.assertIn(dbpostgres.SYNC_LINE, self.pair_dropin(0))
         self.assertFalse(os.path.exists(os.path.join(
             self.all[0].root, dbpgfollow.ALONE_MARK)))
 

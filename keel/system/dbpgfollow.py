@@ -34,6 +34,7 @@ import subprocess
 import time
 from datetime import datetime, timezone
 
+from keel.mesh import vip as vipstate
 from keel.monitor import alerting
 from keel.spec.constants import DEFAULT_PORTS
 from keel.spec.origins import canonical
@@ -197,9 +198,9 @@ def _fenced_may_write(root: str, alone: bool) -> str | None:
     - no divergence record and no role file: this node never had a role
       in the pair.
     """
-    if alone or os.path.exists(os.path.join(root, ALONE_MARK)):
-        return ("keel database promote --old-primary-gone says the other"
-                " member is gone")
+    if alone or gone_said(root):
+        return ("keel database promote --old-primary-gone, or the expired"
+                " lease of the old primary, says the other member is gone")
     try:
         with open(os.path.join(root, DIVERGED)) as fob:
             recorded = json.load(fob)
@@ -245,12 +246,36 @@ SYNCHRONOUS_SAID = (
 # reads it too, so the new primary commits alone at its promotion, not
 # when the command's own follow comes round (seconds later: the
 # command's observation asks the gone primary first)
-ALONE_MARK = "var/lib/keel/database/old-primary-gone"
+ALONE_MARK = vipstate.GONE_MARK
 
 
 def mark_alone(root: str) -> None:
     _write(root, ALONE_MARK, "keel database promote --old-primary-gone\n",
            0o600)
+
+
+def gone_said(root: str) -> bool:
+    """Whether the statement that the old primary is gone stands for
+    this node's newest claim: the operator's, with no epoch, or the VIP
+    controller's for the epoch of that claim (keel#165). A statement for
+    another epoch is stale, and it is removed unused"""
+    try:
+        with open(os.path.join(root, ALONE_MARK)) as fob:
+            text = fob.read()
+    except OSError:
+        return False
+    epoch = vipstate.gone_epoch(text)
+    if epoch is None:
+        return True
+    try:
+        newest = max((one.epoch for one in vipstate.held_all(root)),
+                     default=0)
+    except (OSError, ValueError):
+        newest = 0
+    if epoch == newest:
+        return True
+    unmark_alone(root)
+    return False
 
 
 def unmark_alone(root: str) -> None:
@@ -264,7 +289,7 @@ def _alone(root: str, alone: bool, found, runner) -> None:
     """The one exception to the pair's no-fallback rule (0054): with
     --old-primary-gone and no standby streaming, the holder commits
     alone; once a standby streams, the synchronous line is back"""
-    alone = alone or os.path.exists(os.path.join(root, ALONE_MARK))
+    alone = alone or gone_said(root)
     streaming = standbys_streaming(runner)
     if streaming is None:
         return
