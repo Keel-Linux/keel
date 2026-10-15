@@ -58,6 +58,7 @@ import threading
 import time
 
 ROOT_PREFIX = "keel-vip-"
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WEBHOOK_PORT = 8099
 # the time between two watch runs in an agent (30 s on a machine)
 WATCH_EVERY = 10.0
@@ -508,6 +509,9 @@ Description=PostgreSQL of the test node {name}
 Type=simple
 User=postgres
 Group=postgres
+# keel's drop-in for postgresql@.service, as the package installs it
+# (keel#156): the start as a primary only on the proven holder
+ExecStartPre=+/usr/bin/env PYTHONPATH={REPO} KEEL_POSTGRES_SERVICE={unit} {sys.executable} -m keel database guard --root {root} --spec {root}/instance.yaml
 ExecStart={bindir}/postgres -D {datadir} -c config_file={conf}/postgresql.conf
 # the readiness production's Type=notify gives: apply runs its SQL the
 # moment a restart returns, so the restart must not return first
@@ -1092,7 +1096,16 @@ def crashed(report: dict, pids: list[int], roots: list[str]) -> None:
     # told it of B's newer claim
     vip_netns.heal(pids, 0)
     sh("systemctl", "reset-failed", service_of(a_root), check=False)
-    sh("systemctl", "start", service_of(a_root))
+    # keel database guard refuses the start: A's own claim is not proven
+    # (keel#156), so its server never takes a write as a primary
+    started = subprocess.run(["systemctl", "start", service_of(a_root)],
+                             capture_output=True, text=True, check=False)
+    report["e_boot_start"] = {
+        "code": started.returncode,
+        "guard": [line for line in sh(
+            "journalctl", "-u", service_of(a_root), "-o", "cat",
+            "--no-pager", check=False).splitlines()
+            if "keel database guard" in line][-3:]}
     boot = BootWrites(a_pid)
     boot.start()
     try:

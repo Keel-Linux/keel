@@ -1,2 +1,3 @@
 examples/instance.yaml                  /usr/share/doc/keel/examples
 firstboot.d/10keel-system                /usr/lib/inithooks/firstboot.d
+systemd/postgresql@.service.d/keel-guard.conf /usr/lib/systemd/system/postgresql@.service.d

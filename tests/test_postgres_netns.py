@@ -252,9 +252,16 @@ class TestAPostgresqlPairOnAPoorNetwork(unittest.TestCase):
         boot = found["e_follow_at_boot"]
         joined = " ".join(boot["lines"])
         if boot["problem"] is None:
-            self.assertIn("stopped", joined, boot)
+            self.assertTrue("stopped" in joined or "not started" in joined,
+                            boot)
         else:
             self.assertIn("diverged", boot["problem"], boot)
+        # keel#156: the start at boot is refused, so A never takes a
+        # write as a primary; it starts later, fenced, as a standby
+        start = found["e_boot_start"]
+        self.assertNotEqual(start["code"], 0, start)
+        self.assertTrue(any("not proven" in line for line in start["guard"]),
+                        start)
         self.assertIsNotNone(found["e_diverged_s"], found["e_follow_log"])
         self.assertTrue(found["e_boot_writes"], found)
         self.assertFalse(any(one["ok"] for one in found["e_boot_writes"]),

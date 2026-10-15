@@ -29,7 +29,7 @@ class TestTheCommands(unittest.TestCase):
             fob.write("version: 1\n")
 
     def test_follow_and_watch_need_root_on_the_live_system(self):
-        for action in ("follow", "watch"):
+        for action in ("follow", "watch", "guard"):
             with self.subTest(action=action), \
                     mock.patch("os.geteuid", return_value=1000):
                 code, _, err = run_cli("database", action, "--spec",
@@ -55,6 +55,18 @@ class TestTheCommands(unittest.TestCase):
             code, out, _ = run_cli("database", "follow", "--spec", self.spec,
                                    "--root", self.root)
         self.assertEqual(code, exits.OK, out)
+
+    def test_guard_reaches_its_flow_and_says_why(self):
+        from keel.system import dbpgguard
+
+        def refusing(root, spec, out):
+            out("refused: not proven")
+            return exits.APPLY_FAILED
+        with mock.patch.object(dbpgguard, "guard", side_effect=refusing):
+            code, _, err = run_cli("database", "guard", "--spec", self.spec,
+                                   "--root", self.root)
+        self.assertEqual(code, exits.APPLY_FAILED)
+        self.assertIn("keel database guard: refused: not proven", err)
 
     def test_watch_and_status_reach_their_flows(self):
         from keel.system import dbstatus, dbwatch

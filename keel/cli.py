@@ -194,6 +194,16 @@ def build_parser() -> argparse.ArgumentParser:
     add_common_options(watch_parser)
     add_root_option(watch_parser, "watch the database of")
     watch_parser.set_defaults(handler=commands.database_watch)
+    guard_parser = database_actions.add_parser(
+        "guard",
+        help="the ExecStartPre of the PostgreSQL unit on a pair (keel#156):"
+        " a start as a primary only on the node whose claim of the VIP is"
+        " proven, a start as a standby on the other member; exits non-zero"
+        " to refuse the start (root)",
+    )
+    add_common_options(guard_parser)
+    add_root_option(guard_parser, "guard the database of")
+    guard_parser.set_defaults(handler=commands.database_guard)
     status_parser = database_actions.add_parser(
         "status",
         help="the role from the VIP and from the server, semi-synchronous"

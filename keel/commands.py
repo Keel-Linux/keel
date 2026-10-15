@@ -501,6 +501,19 @@ def database_follow(args) -> int:
     return exits.APPLY_FAILED if found.problem else exits.OK
 
 
+def database_guard(args) -> int:
+    """The PostgreSQL unit's ExecStartPre on a pair (keel.system.dbpgguard)"""
+    from keel.system import dbpgguard
+    root = getattr(args, "root", inspection.ROOT_DEFAULT)
+    refusal = system.needs_root(root, "database guard")
+    if refusal:
+        error(refusal)
+        return exits.APPLY_NEEDS_ROOT
+    return dbpgguard.guard(os.path.abspath(root), args.spec,
+                           lambda line: print(f"keel database guard: {line}",
+                                              file=sys.stderr))
+
+
 def database_watch(args) -> int:
     from keel.system import dbwatch
     root = getattr(args, "root", inspection.ROOT_DEFAULT)
