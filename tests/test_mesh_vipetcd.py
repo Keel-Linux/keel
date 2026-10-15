@@ -252,6 +252,46 @@ class TestPromoteWithEtcd(WithEtcd):
         # the late asks were joined before the promote returned
         self.assertLess(time.monotonic() - started, 6.0)
 
+    def test_the_database_step_does_not_wait_for_the_late_ask(self):
+        """keel#169: keel database promote --old-primary-gone made the
+        database writable only after the late ask of the gone old
+        primary ended (the members' channel's 10 s connect timeout), 12 s
+        after the VIP. `then`, the database step, runs once the VIP is
+        carried; the promote still joins the ask before it returns"""
+        import time
+        self.promote(0)
+        self.turn()
+        self.slow_old_primary(3.0, answers=False)
+        self.kv.leases[self.lease()] = self.monotonic() + 5
+        ran: list[float] = []
+        said: list[str] = []
+        started = time.monotonic()
+
+        def then() -> int:
+            ran.append(time.monotonic() - started)
+            return exits.APPLY_FAILED
+        with mock.patch.object(vipnode, "GONE_BOUND", 0.2), \
+                mock.patch.object(vippromote, "carried_soon",
+                                  side_effect=self.carry_soon):
+            code = vippromote.promote(self.all[1], True, said.append,
+                                      then=then)
+        took = time.monotonic() - started
+        self.assertEqual(code, exits.APPLY_FAILED, said)
+        self.assertEqual(len(ran), 1, said)
+        self.assertLess(ran[0], 2.0, said)
+        self.assertGreaterEqual(took, 2.9)
+        self.assertTrue(self.carried(1))
+
+    def test_a_refused_promote_runs_no_database_step(self):
+        self.promote(0)
+        self.turn()
+        self.kv.refuse = "connect"
+        ran: list[int] = []
+        code = vippromote.promote(self.all[1], False, lambda line: None,
+                                  then=lambda: ran.append(1) or exits.OK)
+        self.assertNotEqual(code, exits.OK)
+        self.assertEqual(ran, [])
+
     def test_an_old_primary_that_answers_after_the_bound_still_drops_it(
             self):
         """The ask goes on after the bound, and the promote waits for it

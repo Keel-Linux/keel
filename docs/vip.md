@@ -210,8 +210,11 @@ steps 2 and 4 waits at most 1.5 s (`keel.mesh.vipnode.GONE_BOUND`) and
 does not hold up the other peers, the wait for its lease does not
 change, and the ask goes on after the bound: the promote waits for it
 before it returns, so a live old primary that is slow still gets the
-release and the claim. A dead node cost the members' channel's 10 s
-timeout each time, 30.5 s on a real pair (keel#108). **Without etcd**
+release and the claim. `keel database promote` makes the database
+follow the VIP before that wait, not after it: the wait for a dead node
+is the channel's 10 s connect timeout, and the writes came back 12 s
+after the VIP on a real pair (keel#169). A dead node cost the members'
+channel's 10 s timeout each time, 30.5 s on a real pair (keel#108). **Without etcd**
 nothing fences a live old primary, so every ask of it waits the
 channel's full timeout, as before. Without etcd, an old primary that is
 alive but cannot be reached keeps the VIP on its `wg0` and stays

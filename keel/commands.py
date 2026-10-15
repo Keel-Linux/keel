@@ -462,22 +462,28 @@ def database_promote(args) -> int:
         # (keel.system.dbpgfollow.ALONE_MARK, 0054's one exception)
         from keel.system import dbpgfollow
         dbpgfollow.mark_alone(root)
-    code = promote_vip(args, doc, root, dry_run)
-    if code != exits.OK:
-        if gone and not dry_run and engine == "postgresql":
-            dbpgfollow.unmark_alone(root)
-        return code
-    state = system.observe(root, doc, start=not dry_run, spec=args.spec)
-    plan = system.Plan(tuple(system.plan_promote(
-        doc, state.database, args.spec,
-        getattr(args, "old_primary_gone", False))))
-    outcome = system.execute(
-        plan, system.Effects(root), dry_run, "database promote"
-    )
-    for line in outcome.lines:
-        print(line)
-    print(outcome.summary())
-    return exits.APPLY_FAILED if outcome.failed else exits.OK
+    reached: list[bool] = []
+
+    def database_step() -> int:
+        # run by the VIP's promote once the VIP moved, before it joins
+        # the late asks of a gone old primary (keel#169)
+        reached.append(True)
+        state = system.observe(root, doc, start=not dry_run,
+                               spec=args.spec)
+        plan = system.Plan(tuple(system.plan_promote(
+            doc, state.database, args.spec, gone)))
+        outcome = system.execute(
+            plan, system.Effects(root), dry_run, "database promote"
+        )
+        for line in outcome.lines:
+            print(line)
+        print(outcome.summary())
+        return exits.APPLY_FAILED if outcome.failed else exits.OK
+
+    code = promote_vip(args, doc, root, dry_run, database_step)
+    if not reached and gone and not dry_run and engine == "postgresql":
+        dbpgfollow.unmark_alone(root)
+    return code
 
 
 def database_follow(args) -> int:
@@ -510,7 +516,8 @@ def database_status(args) -> int:
     return dbstatus.main(args)
 
 
-def promote_vip(args, doc: dict, root: str, dry_run: bool) -> int:
+def promote_vip(args, doc: dict, root: str, dry_run: bool,
+                then=lambda: exits.OK) -> int:
     """The pair's VIP first, when the spec declares one (decision 0049,
     third round): the old primary releases it before this node's
     database takes writes. With --old-primary-gone the release is not
@@ -523,14 +530,14 @@ def promote_vip(args, doc: dict, root: str, dry_run: bool) -> int:
     from keel.mesh import vipcli, vippromote
     appliance = doc.get("appliance")
     if not isinstance(appliance, dict) or not appliance.get("vip"):
-        return exits.OK
+        return then()
     if dry_run:
         print(f"would move the VIP {appliance['vip']} to this node first"
               " (keel vip promote)")
-        return exits.OK
+        return then()
     return vippromote.promote(vipcli.here_of(args),
                               getattr(args, "old_primary_gone", False),
-                              print)
+                              print, then)
 
 
 def manifest_validate(args) -> int:
