@@ -36,8 +36,9 @@ cases (b) to (e), the PostgreSQL wording of docs/replication.md's:
   waits (no timeout, no fallback: 0054), the primary's watch alerts,
   and after the heal the commit is acknowledged and the end alerted;
 - (c) the primary cut off and killed while the application writes:
-  `keel database promote --old-primary-gone` on B, the downtime, and
-  no acknowledged row lost;
+  B's VIP controller claims once the lease of A's claim expired, and
+  B commits alone with no operator (keel#165), the downtime, and no
+  acknowledged row lost;
 - (e) the old primary back from its crash: never acknowledging a write,
   fenced as a standby that follows nobody, dumped (the dump holds its
   own unacknowledged rows), the divergence recorded and alerted once;
@@ -972,22 +973,6 @@ def held_values(root: str, like: str) -> set[str] | None:
     return set(found.split())
 
 
-def promote_gone(agent_send) -> dict:
-    """keel database promote --old-primary-gone on B, as an operator runs
-    it: run again when etcd had no leader to answer (A, cut off, may
-    have been etcd's leader: the election takes up to 5 s), at most
-    three times; the attempts are kept"""
-    attempts = []
-    for _ in range(3):
-        found = agent_send("B", "dbpromote gone", 300)
-        attempts.append({"code": found.get("code"),
-                         "took_s": found.get("took_s")})
-        said = " ".join(found.get("out") or [])
-        if found.get("code") != 16 or "etcd did not answer" not in said:
-            break
-    return {**found, "attempts": attempts}
-
-
 def dumps_of(root: str) -> list[str]:
     from keel.system import dbpgfollow
     directory = os.path.join(root, dbpgfollow.BACKUPS)
@@ -1037,7 +1022,7 @@ class BootWrites:
 
 def crashed(report: dict, pids: list[int], roots: list[str]) -> None:
     """(c), (e), (d): the primary A cut off while the application
-    writes, then killed; B promoted by the operator with A gone; A back
+    writes, then killed; B promoted by itself once A's lease expired; A back
     from its crash, fenced, dumped, recorded and alerted; then reseeded
     once confirmed, the one rejoin path 0054 has"""
     import vip_netns
@@ -1067,16 +1052,25 @@ def crashed(report: dict, pids: list[int], roots: list[str]) -> None:
        check=False)
     sh("systemctl", "stop", f"keel-vip-test-{vip_netns.NAMES[0]}",
        check=False)
-    promote_at = time.time()
-    report["c_promote"] = promote_gone(agent_send)
-    promoted_at = time.time()
-    wait_until(lambda: watched.promoted_at is not None, 120, 0.2)
+    # no operator: B's VIP controller claims once the lease of A's
+    # claim expired, and that states A gone (keel#165, the 0054
+    # amendment of 2026-10-15), so B commits alone with no promote
+    promote_at = killed_at
+    report["c_automatic_s"] = wait_until(
+        lambda: watched.promoted_at is not None, 120, 0.2)
+    promoted_at = watched.promoted_at or time.time()
+    # the controller runs in a unit of its own, which the helper starts
+    from keel.mesh import vipbridge
+    report["c_b_vip_log"] = [line for line in sh(
+        "journalctl", "-u", vipbridge.unit_name(b_root), "-u",
+        f"keel-vip-test-{vip_netns.NAMES[1]}", "-o", "cat", "--no-pager",
+        check=False).splitlines() if "claimed at epoch" in line]
     mark(report, "case_c_promoted")
     report["c_b_slot"] = pg_ask(b_root, "SELECT slot_name FROM"
                                 " pg_replication_slots")
-    # the operator said the old primary is gone: the new primary commits
-    # alone (0054's one exception), reloaded, and its watch alerts at
-    # each run while it does
+    # the expired lease said the old primary is gone: the new primary
+    # commits alone (0054, amendment of 2026-10-15), reloaded, and its
+    # watch alerts at each run while it does
     report["c_b_sync_names"] = pg_ask(b_root,
                                       "SHOW synchronous_standby_names")
     report["c_b_alone_alerted_s"] = wait_until(

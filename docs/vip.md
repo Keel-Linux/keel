@@ -336,7 +336,13 @@ cluster, split as keel#75 splits an invite:
   - the other node of the pair claims as above: 0020's automatic
     failover, which etcd's three voters make possible. It announces the
     claim on the channel for the nodes that are not cloud advanced
-    (third round, point 4).
+    (third round, point 4). When the lease expired at its due time, and
+    the controller saw it alive before, the claim also states that the
+    old primary is gone (`/var/lib/keel/database/old-primary-gone`,
+    with the epoch of the claim). Then a PostgreSQL primary commits
+    alone, as after `--old-primary-gone` (keel#165,
+    `docs/replication-postgresql.md`). A revoked lease, or one that the
+    controller never saw alive, states nothing.
 
 `--stopped`, the unit's `ExecStopPost`, drops every VIP the node
 carries, **except while the unit restarts**: a restart job of the unit

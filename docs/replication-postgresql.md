@@ -33,7 +33,7 @@ In keel 0.23.18. The numbers under "Measured" come from the CI job
   away the primary waits; there is no asynchronous fallback to report
   as drift, the way the 10 s timeout of MariaDB's semi-synchronous
   replication is one (one exception: the new primary after
-  `--old-primary-gone`, below). `keel database watch` alerts instead, once,
+  `--old-primary-gone` or after the old primary's lease expired, below). `keel database watch` alerts instead, once,
   when no standby streams from the primary or a commit waited more
   than 10 s for it, and once more when the standby acknowledges
   again (the state file's key `sync_commit`).
@@ -66,7 +66,9 @@ In keel 0.23.18. The numbers under "Measured" come from the CI job
     because the image has a user database;
   - its divergence record shows 2 system identifiers: the 2 clusters
     never shared a history (2 `initdb` runs);
-  - the operator ran `keel database promote --old-primary-gone`.
+  - the operator ran `keel database promote --old-primary-gone`, or
+    the VIP controller claimed because the lease of the old primary
+    expired (keel#165).
 
   Else the holder stays fenced, and follow refuses with what to do.
   The divergence record holds the 2 system identifiers for this rule.
@@ -148,13 +150,13 @@ answers success with a warning that the commit is only local.
   watch alerts the end, and the row is on B.
 - **(c) The unplanned failover, the application writing.** A is cut
   off, so the write in flight on it waits for B and is in A's WAL
-  unacknowledged. Then A's server and its VIP helper are killed. The
-  operator runs `keel database promote --old-primary-gone` on B: with
-  etcd it waits for A's lease to end (0049), then B carries the VIP
-  and its follow drains, promotes, makes the pair's slot and commits
-  alone (the exception below). The writes resume within 5 s of the VIP
-  on B (keel#148), B's watch alerts at each run, and no row that the
-  application saw acknowledged is missing on B.
+  unacknowledged. Then A's server and its VIP helper are killed. No
+  operator acts. B's VIP controller claims when A's lease expired
+  (0049), so B carries the VIP, and its follow drains, promotes, makes
+  the pair's slot and commits alone (the exception below, keel#165).
+  The writes resume within 5 s of the VIP on B (keel#148), B's watch
+  alerts at each run, and no row that the application saw
+  acknowledged is missing on B.
 - **(e) The diverged old primary.** A boots: its server starts as a
   primary, and its boot follow, with its own old claim not proven,
   stops it. Its VIP helper starts and takes B's newer claim; follow
@@ -171,13 +173,23 @@ answers success with a warning that the commit is only local.
 Under 0054 every old primary that holds data diverges by its
 timeline, so (d) is the confirmed reseed of (e)'s node, one cycle.
 
-## The one exception: the new primary after --old-primary-gone
+## The one exception: the new primary after the old primary is gone
 
 0054 says the pair's synchronous commit has no timeout and no
 fallback. There is one exception (decided 2026-10-14 under the
-maintainer's delegation; the handbook records it under 0054). When
-`keel database promote --old-primary-gone` promotes a standby, the new
-primary commits alone:
+maintainer's delegation, and widened by the maintainer on 2026-10-15;
+the handbook records both under 0054). The new primary commits alone
+when one of these says that the old primary is gone:
+
+- the operator, with `keel database promote --old-primary-gone`;
+- with etcd, the VIP controller: it claims because the lease of the
+  old primary's claim expired at its due time, and it saw that lease
+  alive before (keel#165). A lease that ended early was revoked, and
+  a lease that the controller never saw alive (after a restart of the
+  controller) can be either: then nothing changes, and the commits
+  wait as before.
+
+The new primary then:
 
 - keel empties `synchronous_standby_names` in the pair drop-in and
   reloads the server. It does not restart it: the clients stay
@@ -190,7 +202,13 @@ primary commits alone:
   `keel spec apply` does not take the empty line for drift.
 
 The reason: the flag is the operator's statement that the old primary
-is gone. A commit then has no second node to wait for, and without the
+is gone. The expired lease is the same statement with etcd: the old
+primary dropped the VIP 10 s after its last renewal that the majority
+confirmed, and etcd expires the lease 20 s after it, so the old primary
+was cut off from the majority before the claim. Under synchronous
+replication it cannot acknowledge a write without its standby, which is
+the new primary. The exception is a client with `synchronous_commit`
+set to `local` or `off` (keel#156). A commit then has no second node to wait for, and without the
 exception every write on the new primary waits until the old primary
 is reseeded, which itself waits for the operator's confirmation. Case
 (c) measured that wait at 216 s from the VIP on the new primary, and
@@ -198,12 +216,14 @@ keel#148 bounds the writes' return at 5 s. A commit that the new
 primary takes alone is on one node only until the reseed; the alert
 says so at each run.
 
-Without the flag nothing changes. A planned promote and the cut
-replica of case (b) keep the synchronous wait. `keel database promote
---old-primary-gone` writes its statement
+Without one of these statements nothing changes. A planned promote and
+the cut replica of case (b) keep the synchronous wait. `keel database
+promote --old-primary-gone` writes its statement
 (`/var/lib/keel/database/old-primary-gone`) before it moves the VIP,
-so the follow that the claim starts uses it at the promotion; the mark
-is used once.
+and the VIP controller writes it, with the epoch of its claim, before
+it records the claim. So the follow that the claim starts uses it at
+the promotion. The mark is used once, and a mark of another epoch is
+removed unused.
 
 ## Measured
 

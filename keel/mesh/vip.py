@@ -251,6 +251,39 @@ def held_all(root: str) -> list[Held]:
     return found
 
 
+# the statement that the old primary is gone (decision 0054, the
+# amendments of 2026-10-14 and 2026-10-15): keel database promote
+# --old-primary-gone writes it with no epoch, before it claims; the
+# controller writes it with the epoch of its claim when it claims
+# because the lease of the newest claim expired (keel#165). keel
+# database follow reads it once, for a PostgreSQL primary only
+# (keel.system.dbpgfollow), and a statement of another epoch is stale
+GONE_MARK = "var/lib/keel/database/old-primary-gone"
+GONE_EPOCH = "epoch="
+
+
+def gone_text(expired: int, epoch: int) -> str:
+    return (f"keel vip control: the lease of epoch {expired} expired\n"
+            f"{GONE_EPOCH}{epoch}\n")
+
+
+def gone_epoch(text: str | None) -> int | None:
+    """The epoch of the claim that a statement is for; None for a
+    statement with no epoch (the operator's)"""
+    for line in (text or "").splitlines():
+        if line.startswith(GONE_EPOCH):
+            try:
+                return int(line[len(GONE_EPOCH):])
+            except ValueError:
+                return -1
+    return None
+
+
+def state_gone(root: str, expired: int, epoch: int) -> None:
+    """The controller's statement, written before the claim it is for"""
+    write_private(root, GONE_MARK, gone_text(expired, epoch))
+
+
 def fenced(held: Held) -> Held:
     """`held` once this node lost the VIP without letting it go"""
     return replace(held, fenced=True, lease=None)

@@ -146,7 +146,8 @@ def answered(ops: Ops, data: bytes) -> dict:
                             None if lease is None else str(lease))
             return {"ok": base64.b64encode(made.raw).decode()}
         if op == "hold":
-            ops.hold(raw(found), str(found["lease"]))
+            ops.hold(raw(found), str(found["lease"]),
+                     bool(found.get("expired")))
             return {"ok": None}
         if op == "carry":
             return {"ok": ops.carry(str(found["vip"]),
@@ -213,9 +214,10 @@ class Remote(Ops):
         return vipmsg.claim_of(base64.b64decode(
             self.ask("sign", vip=vip, epoch=epoch, lease=lease)))
 
-    def hold(self, raw_claim: bytes, lease: str) -> None:
+    def hold(self, raw_claim: bytes, lease: str,
+             expired: bool = False) -> None:
         self.ask("hold", raw=base64.b64encode(raw_claim).decode(),
-                 lease=lease)
+                 lease=lease, expired=expired)
 
     def carry(self, vip: str, age: float) -> bool:
         return bool(self.ask("carry", vip=vip, age=age))

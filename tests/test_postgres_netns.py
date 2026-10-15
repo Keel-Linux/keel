@@ -14,8 +14,8 @@ pair's synchronous commit on, a commit paying one round trip; the
 replica refusing writes while it is in recovery; `keel diff` clean on
 both. Then cases (b) to (e): the replica cut off, a commit waiting and
 alerted, acknowledged after the heal; the primary cut off and killed
-while the application writes, the operator's promote, no acknowledged
-row lost and the downtime; the old primary back, never acknowledging a
+while the application writes, the automatic failover once its lease
+expired, no acknowledged row lost and the downtime; the old primary back, never acknowledging a
 write, fenced, dumped, recorded and alerted once; and its confirmed
 reseed, the one rejoin path of 0054. In CI a missing tool fails
 instead of skipping; it runs in its own job, "postgres / trixie",
@@ -200,11 +200,17 @@ class TestAPostgresqlPairOnAPoorNetwork(unittest.TestCase):
 
     def test_c_the_unplanned_failover_loses_no_acknowledged_row(self):
         """The primary cut off and killed while the application writes;
-        the operator's keel database promote --old-primary-gone on B"""
+        B's VIP controller claims once the lease of A's claim expired,
+        and B takes writes with no operator (keel#165)"""
         found = self.found
         downtime = found["c_downtime"]
         print(f"(c) downtime: {downtime}", file=sys.stderr)
-        self.assertEqual(found["c_promote"]["code"], 0, found["c_promote"])
+        # no operator: the expired lease states the old primary gone
+        # (keel#165, the 0054 amendment of 2026-10-15)
+        self.assertIsNotNone(found["c_automatic_s"], downtime)
+        self.assertTrue(any("expired" in line
+                            for line in found["c_b_vip_log"]),
+                        found["c_b_vip_log"])
         self.assertEqual(found["c_acked_missing"], [], downtime)
         self.assertIsNotNone(downtime["carried_s"], downtime)
         self.assertIsNotNone(downtime["promoted_s"], downtime)
@@ -213,8 +219,8 @@ class TestAPostgresqlPairOnAPoorNetwork(unittest.TestCase):
                         downtime)
         # a base backup copies no slot: the new holder made the pair's
         self.assertIn("keel", found["c_b_slot"], found)
-        # --old-primary-gone: the new primary commits alone, alerted at
-        # each watch run (0054's one exception)
+        # the expired lease: the new primary commits alone, alerted at
+        # each watch run (0054's exception, amendment of 2026-10-15)
         self.assertEqual(found["c_b_sync_names"], "", found)
         self.assertIsNotNone(found["c_b_alone_alerted_s"], found["alerts"])
         self.assertIsNotNone(downtime["first_ok_after_s"], downtime)
@@ -222,9 +228,9 @@ class TestAPostgresqlPairOnAPoorNetwork(unittest.TestCase):
 
     def test_c_the_writes_resume_within_5_s_after_the_vip_lands(self):
         """The client-side bound of keel#148: the writes resume at most
-        5 s after the VIP lands on the new primary. With
-        --old-primary-gone the new primary commits alone (0054's one
-        exception); before it, every commit waited until the old primary
+        5 s after the VIP lands on the new primary. After the expired
+        lease the new primary commits alone (0054, amendment of
+        2026-10-15); before it, every commit waited until the old primary
         was reseeded (216 s in CI)"""
         downtime = self.found["c_downtime"]
         self.assertIsNotNone(downtime["first_ok_after_s"], downtime)
