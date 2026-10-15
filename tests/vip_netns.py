@@ -76,6 +76,7 @@ from etcd_netns import (
     measured,
     sh,
     start_etcd,
+    tune,
     utcnow,
 )
 
@@ -142,6 +143,7 @@ def child(index: int) -> int:
                  ("ip", "-6", "route", "add", "default", "via", f"{net}::1",
                   "dev", "uplink")):
         sh(*argv, pid=found.pid)
+    tune(found.pid)
     leg(f"to{n}")
     return found.pid
 

@@ -95,6 +95,16 @@ def leg(device: str, loss: str | None = None) -> None:
        delay, jitter, "loss", loss or lost)
 
 
+def tune(pid: int) -> None:
+    """keel's sysctl file for etcd (keel.mesh.etcdconf.sysctl), set in
+    a member's namespace, as systemd-sysctl and keel apply set it on a
+    node: tcp_retries2 is a setting of each network namespace"""
+    for line in etcdconf.sysctl().splitlines():
+        if "=" in line and not line.startswith("#"):
+            key, value = (one.strip() for one in line.split("=", 1))
+            sh("sysctl", "-q", "-w", f"{key}={value}", pid=pid)
+
+
 def child(index: int) -> int:
     found = subprocess.Popen(["unshare", "-n", "sleep", "3600"],
                              stdout=subprocess.DEVNULL,
@@ -115,6 +125,7 @@ def child(index: int) -> int:
                  ("ip", "-6", "route", "add", "default", "via", f"{net}::1",
                   "dev", "uplink")):
         sh(*argv, pid=found.pid)
+    tune(found.pid)
     leg(f"to{n}")
     return found.pid
 

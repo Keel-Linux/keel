@@ -1,3 +1,17 @@
+keel (0.23.31) unstable; urgency=medium
+
+  * etcd had no leader for 111 s on real nodes after a cut (keel#167).
+    A peer connection that lost its segments in a cut waited for its
+    next retransmission, up to 120 s, and etcd went on writing raft's
+    messages to it. keel now writes /etc/sysctl.d/90-keel-etcd.conf
+    with net.ipv4.tcp_retries2 = 5 and sets it live. The kernel ends
+    such a connection after about 14 s, and etcd dials again.
+  * The etcd netns test fails when an etcd peer connection reaches a
+    TCP backoff above 5, when a follower rejoins 20 s or more after
+    the heal, and when a leader cut has no new leader within 30 s.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Thu, 15 Oct 2026 23:45:00 +0000
+
 keel (0.23.30) unstable; urgency=medium
 
   * keel database status shows a PostgreSQL server (keel#155, item 1).

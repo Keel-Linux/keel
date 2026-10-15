@@ -13,7 +13,11 @@ enabled, apply writes from that state:
   root's CRL, owned by the etcd user the Debian unit runs as, 0600: no
   other user reads the key; etcd reads the CRL at each handshake;
 - the systemd drop-in that orders etcd after the overlay and sandboxes
-  it, followed by `systemctl daemon-reload`.
+  it, followed by `systemctl daemon-reload`;
+- /etc/sysctl.d/90-keel-etcd.conf, which ends a stalled peer connection
+  after 5 retransmissions (keel.mesh.etcdconf, keel#167), and the same
+  value set live with `sysctl -w`: the kernel reads it at each
+  retransmission, so etcd does not restart for it.
 
 Before this member is in a cluster there is nothing to render: a cloud
 advanced installation enables the overlay from its first boot (0041's
@@ -60,6 +64,8 @@ class EtcdState:
     initialized: bool
     # keel started etcd here for this mesh's cluster
     started: bool = True
+    # net.ipv4.tcp_retries2 now, on a live system (None under --root)
+    retries_live: str | None = None
 
 
 def wanted_files(root: str) -> dict[str, str | None]:
@@ -84,7 +90,9 @@ def observe_etcd(tree: Tree, doc: dict) -> EtcdState:
     except StateError as e:
         cluster, problem = None, str(e)
     paths = (etcdconf.ENVIRONMENT, etcdconf.DROP_IN, etcdconf.MEMBER_CERT,
-             etcdconf.MEMBER_KEY, etcdconf.TRUSTED, etcdconf.CRL)
+             etcdconf.MEMBER_KEY, etcdconf.TRUSTED, etcdconf.CRL,
+             etcdconf.SYSCTL)
+    live = tree.read(etcdconf.TCP_RETRIES2_LIVE).text
     return EtcdState(
         cluster=cluster, problem=problem, address=address,
         iface=wireguard.interface(wg),
@@ -92,7 +100,8 @@ def observe_etcd(tree: Tree, doc: dict) -> EtcdState:
         current={one: tree.read(one).text for one in paths},
         has_user=USER in passwd_entries(tree.read(PASSWD)),
         initialized=os.path.isdir(tree.path(INITIALIZED)),
-        started=tree.exists(etcdstate.STARTED))
+        started=tree.exists(etcdstate.STARTED),
+        retries_live=None if live is None else live.strip())
 
 
 def waiting(state: EtcdState | None) -> bool:
@@ -150,5 +159,24 @@ def plan_etcd(state: EtcdState, live: bool) -> tuple[list[Action], bool]:
         if live:
             actions.append(Run(("systemctl", "daemon-reload"),
                                "systemctl daemon-reload: etcd's drop-in"))
+    actions += plan_sysctl(state, live)
     return actions, moved or restarts(state.current[etcdconf.ENVIRONMENT],
                                       environment, state.initialized)
+
+
+def plan_sysctl(state: EtcdState, live: bool) -> list[Action]:
+    """The sysctl file, and its value set now on a live system"""
+    actions: list[Action] = []
+    text = etcdconf.sysctl()
+    if state.current[etcdconf.SYSCTL] != text:
+        actions.append(WriteFile(etcdconf.SYSCTL, text, PUBLIC_MODE, None,
+                                 f"write /{etcdconf.SYSCTL}: a stalled peer"
+                                 " connection of etcd ends after"
+                                 f" {etcdconf.TCP_RETRIES} retransmissions"))
+    wanted = str(etcdconf.TCP_RETRIES)
+    if live and state.retries_live is not None and \
+            state.retries_live != wanted:
+        actions.append(Run(("sysctl", "-q", "-w",
+                            f"{etcdconf.TCP_RETRIES2}={wanted}"),
+                           f"set {etcdconf.TCP_RETRIES2} to {wanted} now"))
+    return actions
