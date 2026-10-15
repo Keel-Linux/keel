@@ -171,6 +171,11 @@ def needs_follow(root: str, pair: dbpair.PairState, reading,
         return not replicating and dbfollow.diverged(root) is None
     if reading.read_only.value is True:
         return True
+    if not reading.role.known:
+        # a server that does not answer on the holder: follow starts it
+        # once the VIP is on wg0, and says why not otherwise (keel#168:
+        # stopped while the VIP was off wg0, it stayed stopped after)
+        return True
     overlay = ((doc.get("network") or {}).get("overlay") or {}).get(
         "wireguard") or {}
     return vipnet.carried(wireguard.interface(overlay), pair.vip,

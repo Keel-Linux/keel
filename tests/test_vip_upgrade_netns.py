@@ -22,13 +22,14 @@ import unittest
 import wgtools
 from test_etcd_netns import etcd_dir
 
+from keel.mesh.vip import RELEASE_AFTER
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DRIVER = os.path.join(REPO, "tests", "vip_upgrade_netns.py")
 # the longest gap in C's answers to the VIP, every 50 ms, an upgrade-style
 # restart may cause: a few pings lost on the links' own 2% each way, and
 # no more
 MAX_BLIP = 1.0
-RELEASE_AFTER = 10.0
 
 
 class TestUpgradesKeepTheVip(unittest.TestCase):

@@ -57,7 +57,8 @@ do is also bounded by what each node checks, as defence in depth:
   node can win it. Against etcd's 5 s election timeout
   (keel.mesh.etcdconf): a re-election in the majority takes 5 to 10 s,
   during which renewals fail, but etcd gives every lease its TTL again
-  on a leader change, so 10 s rides out one re-election without a move.
+  on a leader change, so RELEASE_AFTER (15 s) rides out one re-election
+  without a move (keel#167: 10 s did not, under loss).
   This is 0020's automatic failover, which etcd's three voters make
   possible;
 - every node follows the counter, and only the counter, and takes a
@@ -469,11 +470,12 @@ class Controller:
             self.alive[lease] = moment + ttl
             return
         expected = self.alive.get(lease)
-        expired = expected is not None and moment >= expected - EARLY
-        if not expired:
-            first = self.gone.setdefault(lease, moment)
-            if moment - first < GRACE:
-                return
+        first = self.gone.setdefault(lease, moment)
+        # expired: first seen gone at its due time, not before it; a
+        # lease gone early stays revoked however long this node waits
+        expired = expected is not None and first >= expected - EARLY
+        if not expired and moment - first < GRACE:
+            return
         self.claimed(facts, client, now, held, expired)
 
     def claim_again(self, facts: Facts, client: Client,
