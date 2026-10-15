@@ -249,8 +249,10 @@ Without one of these statements nothing changes. A planned promote and
 the cut replica of case (b) keep the synchronous wait. `keel database
 promote --old-primary-gone` writes its statement
 (`/var/lib/keel/database/old-primary-gone`) before it moves the VIP,
-and the VIP controller writes it, with the epoch of its claim, before
-it records the claim. So the follow that the claim starts uses it at
+and the VIP controller writes its own (`/var/lib/keel/vip/old-primary-gone`,
+the state directory that keel-vip.service may write, keel#178), with the
+epoch of its claim, before it records the claim. A statement that
+cannot be written never stops the claim. So the follow that the claim starts uses it at
 the promotion. The mark is used once, and a mark of another epoch is
 removed unused.
 

@@ -262,12 +262,15 @@ def held_all(root: str) -> list[Held]:
 
 # the statement that the old primary is gone (decision 0054, the
 # amendments of 2026-10-14 and 2026-10-15): keel database promote
-# --old-primary-gone writes it with no epoch, before it claims; the
-# controller writes it with the epoch of its claim when it claims
-# because the lease of the newest claim expired (keel#165). keel
-# database follow reads it once, for a PostgreSQL primary only
+# --old-primary-gone writes GONE_MARK with no epoch, before it claims;
+# the controller writes GONE_NOTE with the epoch of its claim when it
+# claims because the lease of the newest claim expired (keel#165). The
+# note is in the VIP's state directory: keel-vip.service writes only
+# there and in /etc/wireguard (ProtectSystem=strict, keel#178). keel
+# database follow reads each once, for a PostgreSQL primary only
 # (keel.system.dbpgfollow), and a statement of another epoch is stale
 GONE_MARK = "var/lib/keel/database/old-primary-gone"
+GONE_NOTE = f"{DIR}/old-primary-gone"
 GONE_EPOCH = "epoch="
 
 
@@ -290,7 +293,8 @@ def gone_epoch(text: str | None) -> int | None:
 
 def state_gone(root: str, expired: int, epoch: int) -> None:
     """The controller's statement, written before the claim it is for"""
-    write_private(root, GONE_MARK, gone_text(expired, epoch))
+    ensure(root)
+    write_private(root, GONE_NOTE, gone_text(expired, epoch))
 
 
 def unfenced(root: str, vip: str, own_key: str | None) -> bool:

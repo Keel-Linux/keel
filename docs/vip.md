@@ -343,8 +343,9 @@ cluster, split as keel#75 splits an invite:
     claim on the channel for the nodes that are not cloud advanced
     (third round, point 4). When the lease expired at its due time, and
     the controller saw it alive before, the claim also states that the
-    old primary is gone (`/var/lib/keel/database/old-primary-gone`,
-    with the epoch of the claim). Then a PostgreSQL primary commits
+    old primary is gone (`/var/lib/keel/vip/old-primary-gone`, with
+    the epoch of the claim, in the state directory that the unit may
+    write, keel#178). Then a PostgreSQL primary commits
     alone, as after `--old-primary-gone` (keel#165,
     `docs/replication-postgresql.md`). A revoked lease, or one that the
     controller never saw alive, states nothing.
