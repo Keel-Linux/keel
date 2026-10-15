@@ -1071,6 +1071,11 @@ def crashed(report: dict, pids: list[int], roots: list[str]) -> None:
     # the expired lease said the old primary is gone: the new primary
     # commits alone (0054, amendment of 2026-10-15), reloaded, and its
     # watch alerts at each run while it does
+    # the follow reloads the empty line just after the promotion: waited
+    # for, since no command returns after it now (keel#165)
+    report["c_b_alone_s"] = wait_until(
+        lambda: pg_ask(b_root, "SHOW synchronous_standby_names") == "",
+        30, 0.5)
     report["c_b_sync_names"] = pg_ask(b_root,
                                       "SHOW synchronous_standby_names")
     report["c_b_alone_alerted_s"] = wait_until(
