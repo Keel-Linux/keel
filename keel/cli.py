@@ -18,6 +18,8 @@ from keel.inspect import ROOT_DEFAULT, SECRETS_DIR_DEFAULT
 from keel.layers import (
     CACHE_DEFAULT,
     CACHE_ENV,
+    IMAGE_KEYRINGS_DEFAULT,
+    IMAGE_KEYRINGS_ENV,
     CHANNELS,
     KEYRING_DEFAULT,
     KEYRING_ENV,
@@ -287,6 +289,7 @@ def build_parser() -> argparse.ArgumentParser:
         commands.verify,
     )
     add_layer_options(verify_parser)
+    add_verify_options(verify_parser)
 
     pull_parser = _add_command(
         subparsers, "pull",
@@ -409,6 +412,29 @@ def add_layer_options(parser: argparse.ArgumentParser) -> None:
         metavar="DIR",
         help="directory of layer tarballs and hash files (default: the"
         " layers directory)",
+    )
+
+
+def add_verify_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--keyring",
+        dest="keyrings",
+        action="append",
+        default=None,
+        metavar="FILE",
+        help="an OpenPGP keyring that a layer .hash file or a release"
+        " MANIFEST is verified against, armored or binary; repeat it for"
+        " more than one. A signature by a key of any of them is good."
+        f" (default: ${IMAGE_KEYRINGS_ENV}, paths split by ':', else"
+        f" {' and '.join(IMAGE_KEYRINGS_DEFAULT)}; a missing file is"
+        " skipped)",
+    )
+    parser.add_argument(
+        "--release-manifest",
+        default=None,
+        metavar="FILE",
+        help="verify this release MANIFEST against FILE.asc, then each"
+        " listed file that is present, instead of the layers",
     )
 
 

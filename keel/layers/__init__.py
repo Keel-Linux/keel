@@ -10,6 +10,8 @@ from keel.layers.channel import Channel, State
 from keel.layers.constants import (
     CACHE_DEFAULT,
     CACHE_ENV,
+    IMAGE_KEYRINGS_DEFAULT,
+    IMAGE_KEYRINGS_ENV,
     KEYRING_DEFAULT,
     KEYRING_ENV,
     LAYERS_DEFAULT,
@@ -34,11 +36,14 @@ from keel.layers.pull import (
     fetch_channel_at,
     pull,
 )
+from keel.layers.release_manifest import verify as verify_release_manifest
 from keel.layers.verify import LayerResult, Report, verify_layers
 
 __all__ = [
     "CACHE_DEFAULT",
     "CACHE_ENV",
+    "IMAGE_KEYRINGS_DEFAULT",
+    "IMAGE_KEYRINGS_ENV",
     "CHANNELS",
     "KEYRING_DEFAULT",
     "KEYRING_ENV",
@@ -68,4 +73,5 @@ __all__ = [
     "pull",
     "validate",
     "verify_layers",
+    "verify_release_manifest",
 ]

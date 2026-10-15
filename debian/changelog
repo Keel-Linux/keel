@@ -1,3 +1,21 @@
+keel (0.23.28) unstable; urgency=medium
+
+  * keel verify checks the signature of a layer .hash file against the
+    keyrings of the main and the images roles, which
+    keel-archive-keyring 0.3.0 installs (decision 0055). A signature by
+    either key is good. A file that main and images both signed
+    verifies with only one of the 2 keyrings, because keel reads the
+    status lines of gpgv one signature at a time and not its exit code.
+    A good signature gives "ok: hash file signed by <fingerprint>", and
+    the digests come from the signed text. A BADSIG is a mismatch.
+  * keel verify --release-manifest FILE verifies a release MANIFEST
+    against FILE.asc with the same keyrings, then the size and sha256 of
+    each listed file that is present.
+  * keel verify --keyring FILE, which can repeat, and
+    $KEEL_IMAGE_KEYRINGS replace the 2 default keyrings.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Thu, 15 Oct 2026 17:00:00 +0000
+
 keel (0.23.27) unstable; urgency=medium
 
   * A returned old PostgreSQL primary no longer takes writes for 3 to

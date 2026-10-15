@@ -702,6 +702,8 @@ def verify(args) -> int:
     section 5.4) does not exist yet, and verify never claims more than
     it checked.
     """
+    if getattr(args, "release_manifest", None):
+        return verify_release_manifest(args)
     code = verify_layers(args)
     if code != exits.OK:
         return code
@@ -713,8 +715,31 @@ def verify(args) -> int:
     )
 
 
+def image_keyrings(args) -> tuple[str, ...]:
+    """The keyrings a .hash file or a release MANIFEST is verified with"""
+    named = getattr(args, "keyrings", None)
+    if named is None:
+        named = os.environ.get(layers.IMAGE_KEYRINGS_ENV, "").split(":")
+        named = [path for path in named if path] or list(
+            layers.IMAGE_KEYRINGS_DEFAULT
+        )
+    return tuple(named)
+
+
+def verify_release_manifest(args) -> int:
+    """keel verify --release-manifest: one line, then one per file"""
+    report = layers.verify_release_manifest(
+        args.release_manifest, image_keyrings(args)
+    )
+    for line in report.lines():
+        print(line)
+    return report.code
+
+
 def verify_layers(args) -> int:
-    report = layers.verify_layers(args.layers_dir, args.tarballs_dir)
+    report = layers.verify_layers(
+        args.layers_dir, args.tarballs_dir, image_keyrings(args)
+    )
     if not report.results:
         print(
             f"{args.layers_dir}: no layer manifests found", file=sys.stderr
