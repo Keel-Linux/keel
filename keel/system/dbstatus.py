@@ -1,9 +1,12 @@
 # Copyright (c) 2026 KeelLinux maintainers
-"""keel database status: one screen for the operator (0020, 0031, 0049)
+"""keel database status: one screen for the operator (0020, 0031, 0049,
+0054)
 
 The role from the VIP and from the server, the semi-synchronous status,
 the replica's lag and what it follows, the GTID positions, the
 certificate, a divergence, and the VIP's own lines (keel vip status).
+For PostgreSQL, keel.system.dbpgstatus gives the timeline, the
+synchronous commit, the standbys, the slots and what a standby receives.
 Reads only; never a secret.
 """
 
@@ -16,7 +19,7 @@ from keel.inspect.collect import database_servers
 from keel.inspect.dbreading import field_lines
 from keel.inspect.tree import Tree
 from keel.mesh.node import Node, NodeError
-from keel.system import dbfollow, dbpair, dbtls
+from keel.system import dbfollow, dbpair, dbpgstatus, dbtls
 
 
 def lines(root: str, spec: str) -> list[str]:
@@ -40,10 +43,14 @@ def lines(root: str, spec: str) -> list[str]:
                      f" ({pair.peer_key or 'no pair record'})")
         if pair.holder_address:
             found.append(f"  the primary's address: {pair.holder_address}")
-    installed = next((one for one in database_servers(tree)
-                      if one.engine.name == "mariadb"), None)
+    servers = {one.engine.name: one for one in database_servers(tree)}
+    installed = servers.get("mariadb")
+    if installed is None and "postgresql" in servers:
+        return (found + postgresql_lines(root, servers["postgresql"])
+                + vip_lines(root, spec))
     if installed is None:
-        found.append("server: no MariaDB server installed here")
+        found.append("server: no MariaDB or PostgreSQL server installed"
+                     " here")
         return found + vip_lines(root, spec)
     reading = installed.reading()
     found.append(f"server: {reading.role.value or 'unknown'}"
@@ -76,18 +83,36 @@ def lines(root: str, spec: str) -> list[str]:
     if reading.gtid.known:
         for name, value in reading.gtid.value.items():
             found.append(f"  gtid {name}: {value or '(empty)'}")
-    leaf = dbtls.summary(root)
-    found.append("  certificate: " + (
-        f"{leaf['subject']}, for {', '.join(leaf['addresses'])}, until"
-        f" {leaf['expires']}" if leaf.get("present") and "subject" in leaf
-        else leaf.get("problem") or "none"))
+    found.append("  certificate: " + _certificate(dbtls.summary(root)))
+    return found + _diverged(root) + vip_lines(root, spec)
+
+
+def postgresql_lines(root: str, installed) -> list[str]:
+    """The server's lines of a PostgreSQL node (keel#155): the role, the
+    status of keel.system.dbpgstatus, the certificate and a divergence"""
+    reading = installed.reading()
+    found = [f"server: {reading.role.value or 'unknown'}"
+             f" ({reading.role.source or reading.role.problem})"]
+    found += dbpgstatus.status_lines()
+    found.append("  certificate: " + _certificate(
+        dbtls.summary(root, "postgresql")))
+    return found + _diverged(root)
+
+
+def _certificate(leaf: dict) -> str:
+    if leaf.get("present") and "subject" in leaf:
+        return (f"{leaf['subject']}, for {', '.join(leaf['addresses'])},"
+                f" until {leaf['expires']}")
+    return leaf.get("problem") or "none"
+
+
+def _diverged(root: str) -> list[str]:
     diverged = dbfollow.diverged(root)
-    if diverged:
-        found.append(f"  diverged from the holder at"
-                     f" {diverged.get('holder')}: {dbfollow.described(diverged)}"
-                     f" (since {diverged.get('at')}); read only, not"
-                     " connected")
-    return found + vip_lines(root, spec)
+    if not diverged:
+        return []
+    return [f"  diverged from the holder at"
+            f" {diverged.get('holder')}: {dbfollow.described(diverged)}"
+            f" (since {diverged.get('at')}); read only, not connected"]
 
 
 def vip_lines(root: str, spec: str) -> list[str]:

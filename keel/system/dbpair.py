@@ -82,9 +82,11 @@ def observe_pair(root: str, doc: dict) -> PairState | None:
     if held is not None and held.claim is not None:
         role = vipstate.role(doc, held, own_key)
         # a node that released, or was fenced, while its own claim is
-        # still the newest it knows: the other member is the primary
-        holder_at = peer_at if own_key and same_key(
-            held.claim.holder, own_key) else held.claim.address
+        # still the newest it knows: the other member is the primary. On
+        # the holder itself, the primary is this node (keel#155, item 2).
+        own_claim = bool(own_key and same_key(held.claim.holder, own_key))
+        holder_at = peer_at if own_claim and role != PRIMARY \
+            else held.claim.address
     return PairState(
         vip=vip, own_key=own_key, peer_key=peer_key,
         peer_address=peer_at, role=role,
