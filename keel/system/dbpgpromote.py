@@ -63,7 +63,7 @@ def promote(
     """
     deadline = clock() + action.timeout
     while True:
-        in_recovery, replayed, received, problem = _positions(runner)
+        in_recovery, replayed, received, problem = positions(runner)
         if problem:
             return f"cannot read the standby's positions: {problem}." \
                 " Nothing was changed"
@@ -101,7 +101,7 @@ def lsn(value: str):
         return None
 
 
-def _positions(runner):
+def positions(runner):
     """What recovery replayed and what the walreceiver received; the
     reason they could not be read"""
     out = {}

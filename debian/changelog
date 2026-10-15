@@ -1,3 +1,16 @@
+keel (0.23.24) unstable; urgency=medium
+
+  * After the confirmed reseed, a PostgreSQL standby can take the VIP
+    again by itself, so an automatic failover repeats (keel#166). The
+    node stayed fenced in its VIP state after it lost the VIP, and a
+    fenced node never claims. keel database follow now clears that
+    fence when the node streams from the holder and received all that
+    the holder flushed. keel database watch runs follow on a fenced
+    standby that streams, so a node that is fenced now is cleared at
+    its next watch run. A node fenced on its own claim stays fenced.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Thu, 15 Oct 2026 13:30:00 +0000
+
 keel (0.23.23) unstable; urgency=medium
 
   * keel database promote --old-primary-gone made the database writable

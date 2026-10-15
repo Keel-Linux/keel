@@ -284,6 +284,8 @@ class TestAPostgresqlPairOnAPoorNetwork(unittest.TestCase):
         self.assertIsNotNone(found["d_b_sync_s"], found)
         # the pair's synchronous line is back on B once A streams
         self.assertEqual(found["d_b_sync_names"], "FIRST 1 (keel)", found)
+        # keel#166: the reseeded node may take the VIP by itself again
+        self.assertIsNotNone(found["d_a_unfenced_s"], found)
         self.assertIsNotNone(found["d_first_ack_s"], found)
         self.assertIsNotNone(found["d_rows_equal_s"], found)
         self.assertEqual(found["d_a_holds_unacked"],

@@ -549,6 +549,59 @@ class TestTheReplica(FollowTestCase):
                       found.lines)
         self.assertIn("role=replica", self.role_file(1))
 
+    def fence_vip(self, index: int) -> None:
+        from dataclasses import replace
+        held = vipnode.current(self.all[index], VIP)
+        vipstate.write(self.all[index].root, replace(held, fenced=True))
+
+    def test_a_standby_caught_up_with_the_holder_is_unfenced(self):
+        """keel#166: the confirmed reseed made this node the holder's
+        copy, so the VIP fence of its old loss is cleared once it
+        received everything the holder flushed: the next failover is
+        automatic again"""
+        self.pair_nodes()
+        self.fence_vip(1)
+        receiver = f"user=repl host={address(0)} port=5432 " \
+                   "password=******** sslmode=verify-full\n"
+        server = Server(in_recovery=True, receiver=receiver,
+                        positions="t\t0/4000098\t0/4000098\n")
+        found = self.follow(1, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertFalse(vipnode.current(self.all[1], VIP).fenced)
+        self.assertIn(dbpgfollow.UNFENCED_SAID, found.lines)
+
+    def test_a_standby_behind_the_holder_stays_fenced(self):
+        self.pair_nodes()
+        self.fence_vip(1)
+        receiver = f"user=repl host={address(0)} port=5432 " \
+                   "password=******** sslmode=verify-full\n"
+        server = Server(in_recovery=True, receiver=receiver,
+                        positions="t\t0/4000000\t0/4000000\n")
+        found = self.follow(1, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertTrue(vipnode.current(self.all[1], VIP).fenced)
+        self.assertNotIn(dbpgfollow.UNFENCED_SAID, found.lines)
+
+    def test_a_holder_that_does_not_answer_keeps_the_fence(self):
+        self.pair_nodes()
+        self.fence_vip(1)
+        receiver = f"user=repl host={address(0)} port=5432 " \
+                   "password=******** sslmode=verify-full\n"
+        server = Server(in_recovery=True, receiver=receiver,
+                        holder_down=True)
+        found = self.follow(1, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertTrue(vipnode.current(self.all[1], VIP).fenced)
+
+    def test_a_reseed_that_streams_clears_the_fence(self):
+        self.pair_nodes()
+        self.fence_vip(1)
+        server = Server(schemas=SYSTEM_DATABASES,
+                        positions="t\t0/4000098\t0/4000098\n")
+        found = self.follow(1, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertFalse(vipnode.current(self.all[1], VIP).fenced)
+
     def test_a_fresh_server_is_seeded(self):
         """Nothing of its own on disk: seeded from the holder without
         the confirmation, made a standby by the signal and the slot"""

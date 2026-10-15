@@ -752,6 +752,26 @@ class TestWatch(FollowTestCase):
         self.assertFalse(dbwatch.needs_follow(
             root, dbpair.PairState(VIP, KEYS[0]), standalone, {}))
 
+    def test_needs_follow_on_a_fenced_postgresql_standby(self):
+        """keel#166: a fenced replica that streams is followed again, so
+        follow clears the fence once it caught up; a MariaDB replica, or
+        one that follows nobody, is not"""
+        from keel.inspect.dbreading import Reading, Value
+        root = self.enterContext(__import__("tempfile").TemporaryDirectory())
+        os.makedirs(os.path.join(root, "var/lib/keel"))
+        with open(os.path.join(root, dbpair.ROLE_FILE), "w") as fob:
+            fob.write(dbpair.role_text("replica", VIP))
+        fenced = dbpair.PairState(VIP, KEYS[1], KEYS[0], address(0),
+                                  "replica", address(0), fenced=True)
+        streams = Reading(role=Value("replica"), read_only=Value(True),
+                          primary=Value({"host": address(0), "port": 5432}))
+        nobody = Reading(role=Value("replica"), read_only=Value(True))
+        pg = {"database": {"server": {"engine": "postgresql"}}}
+        maria = {"database": {"server": {"engine": "mariadb"}}}
+        self.assertTrue(dbwatch.needs_follow(root, fenced, streams, pg))
+        self.assertFalse(dbwatch.needs_follow(root, fenced, nobody, pg))
+        self.assertFalse(dbwatch.needs_follow(root, fenced, streams, maria))
+
 
 class TestStatus(FollowTestCase):
     def test_one_screen_for_the_operator(self):

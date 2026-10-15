@@ -284,6 +284,22 @@ def state_gone(root: str, expired: int, epoch: int) -> None:
     write_private(root, GONE_MARK, gone_text(expired, epoch))
 
 
+def unfenced(root: str, vip: str, own_key: str | None) -> bool:
+    """The fence of this node's old loss cleared, while another node's
+    claim is the newest it holds; whether it changed. keel database
+    follow clears it once this node's database is the holder's copy
+    and caught up (keel#166): the node then holds nothing the holder
+    lacks, and the next failover may be automatic again. A node fenced
+    on its own claim (cut off as the holder) stays fenced"""
+    with locked(root):
+        held = read(root, vip)
+        if held is None or not held.fenced or held.claim is None or \
+                own_key is None or same_key(held.claim.holder, own_key):
+            return False
+        write(root, replace(held, fenced=False))
+    return True
+
+
 def fenced(held: Held) -> Held:
     """`held` once this node lost the VIP without letting it go"""
     return replace(held, fenced=True, lease=None)

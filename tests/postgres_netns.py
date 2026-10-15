@@ -1195,6 +1195,13 @@ def crashed(report: dict, pids: list[int], roots: list[str]) -> None:
         (held_values(a_root, "crash-%") or set()) & set(unacked))
     report["d_b_holds_unacked"] = sorted((on_b or set()) & set(unacked))
     report["d_record_after"] = dbfollow.diverged(a_root)
+    # the VIP fence of A's loss is cleared once A is B's copy and caught
+    # up, within a watch run, so a next failover is automatic (keel#166)
+    from keel.mesh import vip as vipstate
+    report["d_a_unfenced_s"] = wait_until(
+        lambda: not (vipstate.read(a_root, vip_netns.VIP) or
+                     vipstate.Held(vip_netns.VIP)).fenced,
+        3 * WATCH_EVERY + 10, 1)
     report["d_back_alerted_s"] = wait_until(
         lambda: alerted("B", dbwatch.SYNC_BACK, since), 60, 0.5)
     report["d_a_status_line"] = OVERLAY.format(n=2) in str(
