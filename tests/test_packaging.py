@@ -66,3 +66,21 @@ class TestFollowUnit(unittest.TestCase):
         self.assertTrue(any("wg-quick@wg0.service" in line.split()
                             or "wg-quick@wg0.service" in line
                             for line in after), after)
+
+
+class TestStartGuard(unittest.TestCase):
+    """keel#156: the PostgreSQL unit runs keel database guard as root
+    before each start, from a drop-in the package installs"""
+
+    def test_the_drop_in_runs_the_guard_as_root_and_is_installed(self):
+        repo = dirname(dirname(CONTROL))
+        dropin = join(repo, "systemd", "postgresql@.service.d",
+                      "keel-guard.conf")
+        with open(dropin) as fob:
+            lines = [line.strip() for line in fob]
+        self.assertIn("ExecStartPre=+/usr/bin/keel database guard", lines)
+        with open(join(dirname(CONTROL), "keel.install")) as fob:
+            installed = fob.read()
+        self.assertIn("systemd/postgresql@.service.d/keel-guard.conf"
+                      " /usr/lib/systemd/system/postgresql@.service.d",
+                      installed)

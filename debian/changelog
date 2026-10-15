@@ -1,3 +1,18 @@
+keel (0.23.27) unstable; urgency=medium
+
+  * A returned old PostgreSQL primary no longer takes writes for 3 to
+    4 s after a boot or a heal (keel#156). keel installs a drop-in for
+    postgresql@.service that runs keel database guard as root before
+    each start. On a VIP pair, the server starts as a primary only when
+    this node's claim is proven, with the VIP on wg0. When the newest
+    claim is the other member's, the guard writes standby.signal first,
+    so the server starts as a standby that follows nobody. When this
+    node's own claim is not proven (at boot), the start is refused, and
+    keel database follow starts the server once the VIP is proven. On a
+    node with no pair the guard does nothing.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Thu, 15 Oct 2026 15:00:00 +0000
+
 keel (0.23.26) unstable; urgency=medium
 
   * The holder of a VIP with etcd now carries it for 15 s after its last

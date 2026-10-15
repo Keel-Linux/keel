@@ -79,6 +79,27 @@ In keel 0.23.18. The numbers under "Measured" come from the CI job
 
   Else the holder stays fenced, and follow refuses with what to do.
   The divergence record holds the 2 system identifiers for this rule.
+- **The start guard** (keel#156). PostgreSQL cannot be made read
+  only while it runs, so a server that starts as a primary takes
+  writes until keel stops it: 3 to 4 s on real nodes, after a boot and
+  after a heal. A client with `synchronous_commit` set to `local` or
+  `off` got such a write acknowledged. keel installs a drop-in for
+  `postgresql@.service` that runs `keel database guard` as root before
+  each start:
+  - with `standby.signal`, or before the pair's first claim, the
+    server starts as it is;
+  - when the newest claim is the other member's, or this node is
+    fenced, the guard writes `standby.signal` and removes the follow
+    drop-in first, so the server starts as a standby that follows
+    nobody;
+  - when the claim is this node's own and the VIP is on wg0, the
+    server starts as the primary;
+  - when the claim is this node's own and the VIP is not on wg0 (at
+    boot), the guard refuses the start. keel database follow starts
+    the server once the VIP is proven.
+
+  The guard asks nobody over the network. On a node with no pair it
+  does nothing.
 - **The holder makes the pair's slot.** A base backup copies no slot,
   so a promoted standby has none; follow makes the slot `keel` on the
   holder on each run, or the reseed of the old primary would never
@@ -164,11 +185,12 @@ answers success with a warning that the commit is only local.
   The writes resume within 5 s of the VIP on B (keel#148), B's watch
   alerts at each run, and no row that the application saw
   acknowledged is missing on B.
-- **(e) The diverged old primary.** A boots: its server starts as a
-  primary, and its boot follow, with its own old claim not proven,
-  stops it. Its VIP helper starts and takes B's newer claim; follow
-  fences the server, dumps it, records the divergence (timeline 1
-  against B's 2) and alerts once. Every write on A from its boot to
+- **(e) The diverged old primary.** A boots: `keel database guard`,
+  the start guard of its server, refuses the start, because its own
+  old claim is not proven (keel#156). Its VIP helper starts and takes
+  B's newer claim; follow starts the server, and the guard makes it a
+  standby that follows nobody before the start. Follow dumps it,
+  records the divergence (timeline 1 against B's 2) and alerts once. Every write on A from its boot to
   the fence is unacknowledged. The dump holds A's unacknowledged
   rows. Two watch runs later there is still one dump and one alert.
 - **(d) The old primary rejoins.** The operator confirms the reseed
