@@ -110,6 +110,9 @@ class TestThePair(Pair):
         b = dbpair.observe_pair(self.all[1].root, self.all[1].node.document())
         self.assertEqual((a.role, b.role), ("primary", "replica"))
         self.assertEqual(b.holder_address, address(0))
+        # keel#155, item 2: on the holder, the primary is this node, not
+        # the other member
+        self.assertEqual(a.holder_address, address(0))
         self.assertEqual(dbpair.primary_host(b, {}), address(0))
         # the planned move: A released, and its own claim is still the
         # newest it knows until B's comes: the other member is the primary

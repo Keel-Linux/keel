@@ -1,3 +1,24 @@
+keel (0.23.30) unstable; urgency=medium
+
+  * keel database status shows a PostgreSQL server (keel#155, item 1).
+    It said "no MariaDB server installed here" on a PostgreSQL pair.
+    Now it shows the role of the server, the timeline, the synchronous
+    commit and synchronous_standby_names, each standby that streams from
+    the node (address, state, sync state, replay lag), each replication
+    slot (active or not, restart_lsn, wal_status), what a standby
+    receives and its replay lag, the certificate and a divergence. One
+    psql question as the postgres account, read only.
+  * On the VIP holder, keel database status and keel spec apply named
+    the other member as the primary's address (keel#155, item 2). The
+    holder is now its own primary. A node that released, or was fenced,
+    while its own claim is the newest it knows still names the other
+    member.
+  * A test finds a debian/changelog entry with no trailer line (keel#155,
+    item 3). dpkg-parsechangelog only warns about one, and the package
+    builds. The entries of 0.23.18 and 0.23.17 had none until 0.23.21.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Thu, 15 Oct 2026 23:30:00 +0000
+
 keel (0.23.29) unstable; urgency=medium
 
   * With etcd, the automatic failover of a PostgreSQL pair left the VIP
