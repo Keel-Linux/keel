@@ -57,6 +57,13 @@ In keel 0.23.18. The numbers under "Measured" come from the CI job
   names it, and a fenced node takes no write after it. Both
   timelines are numbers (a standby's from its last checkpoint);
   `keel diff` and `keel database status` show them.
+- **The VIP fence after the reseed** (keel#166). A node that lost the
+  VIP while cut off is fenced in its VIP state, and a fenced node
+  never claims by itself. When the node streams from the holder and
+  received all that the holder flushed, follow clears that fence. The
+  holder's position comes first, from `IDENTIFY_SYSTEM`. The watch
+  runs follow on a fenced standby that streams, so the fence is
+  cleared within one watch run. The next failover is then automatic.
 - **A fenced node that holds the VIP** (keel#152). A fenced standby
   receives nothing, so the drain of a promotion cannot prove that it
   holds the pair's newest writes. Follow promotes it with no drain

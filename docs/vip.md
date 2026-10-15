@@ -173,8 +173,10 @@ with 409 and the epoch known.
 State, never the spec, one file per VIP under `/var/lib/keel/vip`,
 root's and 0600: the newest claim taken, verbatim; whether this node is
 **fenced** (it lost the VIP without letting it go: cut off, or away
-while another took it; it never claims it again by itself, only a
-promote here clears it); whether it **released** it when asked (a
+while another took it; it never claims it again by itself; a promote
+here clears it, and so does keel database follow on a PostgreSQL
+standby that is the holder's copy and caught up with it, after the
+confirmed reseed, keel#166); whether it **released** it when asked (a
 replica, not fenced); and with etcd the lease of its own claim. When the
 lease was last renewed is never kept: a time of one boot means nothing
 in the next.

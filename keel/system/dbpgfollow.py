@@ -390,6 +390,7 @@ def _replica(root: str, server: dict, state: DatabaseState,
     if _following(state, host, port):
         found.say(f"unchanged (a standby of [{host}]:{port})")
         _forget_divergence(root)
+        _unfence(root, state, host, port, found, runner)
         return
     held = dbpostgres.user_databases((state.schemas.text or "").splitlines())
     if held and state.reading.role.value != REPLICA and \
@@ -404,6 +405,8 @@ def _replica(root: str, server: dict, state: DatabaseState,
         return
     if not held:
         _seed(root, host, port, state, found, runner)
+        if found.problem is None:
+            _unfence(root, state, host, port, found, runner)
         return
     own = _own_timeline(root, runner)
     identified = _holder_identity(root, host, port, state, runner)
@@ -431,6 +434,39 @@ def _replica(root: str, server: dict, state: DatabaseState,
               f" holds is discarded (timeline {own or 'unknown'} against"
               f" the holder's {theirs})")
     _seed(root, host, port, state, found, runner)
+    if found.problem is None:
+        _unfence(root, state, host, port, found, runner)
+
+
+UNFENCED_SAID = (
+    "the VIP fence is cleared: this standby is the holder's copy and"
+    " received everything the holder flushed, so it may take the VIP"
+    " again when the lease of the holder expires (keel#166)"
+)
+
+
+def _unfence(root: str, state: DatabaseState, host: str, port: int,
+             found, runner) -> None:
+    """The VIP fence of this node's old loss cleared once its copy is
+    the holder's and caught up (keel#166). The fence keeps an old
+    primary from claiming by itself (0049); after the confirmed reseed
+    the node holds nothing the holder lacks. Caught up, not only
+    streaming: the position the holder flushed, asked first, is at or
+    below what this standby received, so no commit the holder
+    acknowledged alone is missing here"""
+    pair = state.pair
+    if pair is None or not pair.fenced:
+        return
+    identified = _holder_identity(root, host, port, state, runner)
+    flushed = dbpgpromote.lsn(identified[2]) \
+        if identified and len(identified) > 2 else None
+    if flushed is None:
+        return
+    _, _, received, problem = dbpgpromote.positions(runner)
+    if problem or received is None or received < flushed:
+        return
+    if vipstate.unfenced(root, pair.vip, pair.own_key):
+        found.say(UNFENCED_SAID)
 
 
 def _fence(root: str, found, runner) -> bool:
@@ -555,7 +591,7 @@ def _holder_identity(root: str, host: str, port: int,
     if problem:
         return None
     columns = (out.get("stdout") or "").strip().split("\t")
-    return (columns[0], columns[1]) if len(columns) > 1 else None
+    return tuple(columns[:3]) if len(columns) > 1 else None
 
 
 def _diverged(root: str, state: DatabaseState, holder: str, own: str | None,
