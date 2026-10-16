@@ -19,6 +19,8 @@ from keel.inspect.units import UnitState, read_units
 from keel.manifest import monit
 from keel.manifest.facts import gather
 from keel.manifest.resolve import Resolved, overlay_units
+from keel.system import anubiskey
+from keel.system.anubiskey import AnubisKey
 from keel.system.crowdsec import CrowdsecState, observe_crowdsec
 from keel.system.etcd import EtcdState, observe_etcd
 from keel.system.fwstate import FirewallState, observe_firewall
@@ -50,10 +52,18 @@ class ApplianceState:
     hooks: dict[str, OverlayHooks] = field(default_factory=dict)
     # etcd's state and files (keel.system.etcd), when the chain has it
     etcd: EtcdState | None = None
+    # the pair's Anubis key, asked of the other member, when this node
+    # has to ask for it (keel.system.anubiskey, Keel-Linux/common#56)
+    anubis_key: AnubisKey | None = None
 
 
-def observe_appliance(root: str, doc: dict) -> ApplianceState | None:
-    """None when the spec names no appliance"""
+def observe_appliance(root: str, doc: dict, start: bool = False,
+                      spec: str | None = None) -> ApplianceState | None:
+    """None when the spec names no appliance
+
+    `start` is whether this run may change the machine: only such a run
+    asks the other member of a pair for Anubis's key, over the members'
+    channel, with the spec at `spec` (keel.system.anubiskey)."""
     appliance = doc.get("appliance")
     if not isinstance(appliance, dict):
         return None
@@ -62,6 +72,7 @@ def observe_appliance(root: str, doc: dict) -> ApplianceState | None:
     units: dict[str, UnitState] = {}
     hooks: dict[str, OverlayHooks] = {}
     etcd = None
+    anubis_key = None
     if facts.resolved is not None:
         names = [unit for state in facts.resolved.overlays
                  for unit in overlay_units(facts.resolved, state.name)]
@@ -69,8 +80,13 @@ def observe_appliance(root: str, doc: dict) -> ApplianceState | None:
         hooks = {state.name: found for state in facts.resolved.overlays
                  if (found := observe_hooks(tree.root, state.name,
                                             state.manifest))}
-        if "etcd" in {state.name for state in facts.resolved.overlays}:
+        names = {state.name for state in facts.resolved.overlays}
+        if "etcd" in names:
             etcd = observe_etcd(tree, doc)
+        if anubiskey.OVERLAY in names and tree.root == ROOT_DEFAULT:
+            anubis_key = anubiskey.observe(
+                tree.root, doc, start,
+                spec or tree.path("etc/keel/instance.yaml"))
     return ApplianceState(
         resolved=facts.resolved,
         problems=facts.problems,
@@ -86,4 +102,5 @@ def observe_appliance(root: str, doc: dict) -> ApplianceState | None:
                                   and doc.get("firewall") is not None),
         hooks=hooks,
         etcd=etcd,
+        anubis_key=anubis_key,
     )

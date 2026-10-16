@@ -45,6 +45,7 @@ from keel.system.appstate import (
     ApplianceState,
     overlay_units,
 )
+from keel.system import anubiskey
 from keel.system.crowdsec import OVERLAY as CROWDSEC
 from keel.system.crowdsec import plan_identity
 from keel.system.etcd import OVERLAY as ETCD
@@ -129,6 +130,22 @@ def plan_overlay(name: str, wanted: str | None, units: tuple[str, ...],
         identity = plan_identity(state.crowdsec, live, available)
         actions += identity
     made = any(not isinstance(action, Note) for action in identity)
+    if on and name == anubiskey.OVERLAY and state.anubis_key is not None:
+        key = state.anubis_key
+        if key.problem:
+            return Step(field, (Refuse(key.problem),))
+        if key.value is None:
+            # nothing starts: the key unit would refuse to make one
+            return Step(field, (Note(key.waiting),))
+        if key.dangling:
+            actions.append(RemoveFile(
+                anubiskey.KEY, f"remove /{anubiskey.KEY}, a link whose"
+                " target is gone, so the key is not written through it"))
+        actions.append(WriteFile(
+            anubiskey.KEY, key.value + "\n", anubiskey.MODE, None,
+            f"write /{anubiskey.KEY}, the pair's Anubis key asked of the"
+            " other member (decision 0041, Keel-Linux/common#56)"))
+        made = True
     if on and name == ETCD and state.etcd is not None:
         rendered, made = plan_etcd(state.etcd, live)
         if waiting(state.etcd) or any(isinstance(action, Refuse)
