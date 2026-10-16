@@ -306,30 +306,35 @@ class TestStartAndPromote(Mesh):
         a, = self.members(1)
         etcd.created(a)
         a.node.apply.code = 16
-        a.node.run = lambda argv: "systemctl exited 3: inactive"
         self.assertFalse(etcd.start(a))
         self.assertIn("apply exited 16", self.text(0))
         self.assertIn("etcd may not run", self.text(0))
 
-    def test_a_failed_step_that_is_not_etcd_does_not_blame_etcd(self):
-        # keel#198: a database replica that joins before its pair exists
-        # has one refused step; etcd itself runs
+    def test_an_etcd_step_that_failed_is_still_blamed(self):
         a, = self.members(1)
         etcd.created(a)
         a.node.apply.code = 16
-        asked = []
-        a.node.run = lambda argv: asked.append(argv)
+        a.node.apply.lines = (
+            "overlays.etcd: start etcd.service: failed: no unit",)
         self.assertFalse(etcd.start(a))
-        self.assertEqual(asked, [("systemctl", "is-active", "--quiet",
-                                  "etcd.service")])
-        self.assertIn("apply exited 16", self.text(0))
-        self.assertIn("etcd runs", self.text(0))
-        self.assertNotIn("may not run", self.text(0))
-        with mock.patch("keel.mesh.etcdstate.credentials",
-                        return_value=False):
-            self.assertFalse(etcd.start(a))
-        self.assertIn("not started: this node holds no certificate",
-                      self.text(0))
+        self.assertIn("etcd may not run", self.text(0))
+
+    def test_a_failed_step_that_is_not_etcd_does_not_blame_etcd(self):
+        # keel#198: a database replica that joins before its pair exists
+        # has one refused step; the steps of etcd passed
+        a, = self.members(1)
+        etcd.created(a)
+        a.node.apply.code = 16
+        a.node.apply.lines = (
+            "overlays.etcd: write /var/lib/keel/etcd/started: done",
+            "database.server.replication.primary: refused: the secret is"
+            " not declared",
+        )
+        self.assertFalse(etcd.start(a))
+        text = self.text(0)
+        self.assertIn("apply exited 16", text)
+        self.assertIn("database.server.replication.primary", text)
+        self.assertNotIn("may not run", text)
 
     def test_the_start_enables_wireguard_that_etcd_requires(self):
         """keel#188: after keel mesh join the spec holds network.overlay

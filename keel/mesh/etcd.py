@@ -549,7 +549,19 @@ def stray(etcd: Etcd) -> None:
              " mesh's cluster")
 
 
-ETCD_ACTIVE = ("systemctl", "is-active", "--quiet", "etcd.service")
+OVERLAY_FIELD = "overlays.etcd"
+FAILED_MARKS = (": refused: ", ": failed: ")
+
+
+def failed_fields(lines: tuple[str, ...]) -> list[str]:
+    """The fields of the apply lines that say refused or failed, in order"""
+    found: list[str] = []
+    for line in lines:
+        field, sep, rest = line.partition(": ")
+        if sep and any(mark in line for mark in FAILED_MARKS) \
+                and field not in found:
+            found.append(field)
+    return found
 
 
 def start(etcd: Etcd) -> bool:
@@ -574,11 +586,13 @@ def start(etcd: Etcd) -> bool:
     if change.code != 0:
         change.shown(etcd.err)
         # the apply has other steps than etcd's (a database replica that
-        # joins before its pair exists has one refused, keel#198): say
-        # what is known of etcd, not what the exit code suggests
-        if etcd.node.run(ETCD_ACTIVE) is None:
-            etcd.err(f"etcd: apply exited {change.code}; etcd runs, so a"
-                     " step other than etcd failed: read the lines above")
+        # joins before its pair exists has one refused, keel#198): name
+        # the failed steps, and blame etcd only when one of them is its own
+        others = failed_fields(change.lines)
+        if others and not any(one.startswith(OVERLAY_FIELD)
+                              for one in others):
+            etcd.err(f"etcd: apply exited {change.code}; the failed step"
+                     f" is not etcd's: {', '.join(others)}")
         else:
             etcd.err(f"etcd: apply exited {change.code}; etcd may not run")
         return False
