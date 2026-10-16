@@ -69,6 +69,7 @@ from datetime import datetime, timezone
 
 from keel.inspect.dbreading import field_lines
 from keel.inspect.tree import File
+from keel.mesh import vip as vipstate
 from keel.mesh import vipnet
 from keel.mesh.node import Node, NodeError
 from keel.monitor import alerting
@@ -213,6 +214,11 @@ def _follow(root: str, spec: str, confirmed: bool, found: Followed,
             proven=lambda: proof if proof is not None else _proven(
                 root, doc, output, wait, sleep),
             alone=alone)
+    elif role == PRIMARY and vipstate.unconfirmed(root, pair.vip):
+        # the holder's doubt (keel#195): read only and fenced until a
+        # renewal of its lease is confirmed; the role file is left
+        _in_doubt(root, state, pair.vip, found, runner)
+        return
     elif role == PRIMARY and not _proven(root, doc, output, wait, sleep):
         # a paired node (it has a pair record: the other member is known)
         # with no claim at all is not proven either: its state file may have
@@ -302,6 +308,20 @@ def _proven(root: str, doc: dict, output, wait: float, sleep) -> bool:
         if vipnet.carried(iface, pair.vip, output):
             return True
     return False
+
+
+def _in_doubt(root: str, state: DatabaseState, vip: str, found: Followed,
+              runner) -> None:
+    """The holder's lease has had no renewal the majority confirmed for
+    keel.mesh.vipetcd.DOUBT s: read only, every client connection ended
+    (the fence of keel#186), until one is confirmed. A write that waits
+    for a cut replica would otherwise return OK when the dump thread to
+    it ends, about 12.6 s after the cut, before the release (keel#195)"""
+    if not _read_only(root, state, found, runner):
+        return
+    found.say(f"read only: the lease of {vip} has had no renewal the"
+              " majority confirmed, so this node may be cut off; it takes"
+              " writes again once a renewal is confirmed (keel#195)")
 
 
 def _unproven(root: str, state: DatabaseState, found: Followed,
@@ -444,7 +464,6 @@ def _unfence(root: str, host: str, port: int, state: DatabaseState,
     if any(applied.get(domain, 0) < sequence
            for domain, sequence in holder.items()):
         return
-    from keel.mesh import vip as vipstate
     if vipstate.unfenced(root, pair.vip, pair.own_key):
         found.say(UNFENCED_SAID)
 

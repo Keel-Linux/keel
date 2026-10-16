@@ -169,6 +169,12 @@ def needs_follow(root: str, pair: dbpair.PairState, reading,
             # PostgreSQL, keel#192 for MariaDB)
             return True
         return not replicating and dbfollow.diverged(root) is None
+    from keel.mesh import vip as vipstate
+    engine = ((doc.get("database") or {}).get("server") or {}).get("engine")
+    if engine == "mariadb" and vipstate.unconfirmed(root, pair.vip):
+        # the holder's doubt (keel#195): follow fences a writable server,
+        # and a fenced one stays as it is until a renewal is confirmed
+        return reading.read_only.value is not True
     if reading.read_only.value is True:
         return True
     if not reading.role.known:
