@@ -561,6 +561,9 @@ def start(etcd: Etcd) -> bool:
         doc = etcd.node.document()
         overlays = dict(doc.get("overlays") or {})
         overlays[OVERLAY] = ENABLED
+        # etcd requires wireguard (keel#188): the join wrote the overlay,
+        # and a first boot spec may still say disabled
+        overlays["wireguard"] = ENABLED
         change = etcd.node.change({**doc, "overlays": overlays})
     except (StateError, NodeError, OSError) as e:
         etcd.err(f"etcd: not started: {e}")
