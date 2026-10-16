@@ -51,7 +51,7 @@ CLAIM, RELEASE, EPOCH, PAIR = "claim", "release", "epoch", "pair"
 SECRET = "secret"
 KINDS = (CLAIM, RELEASE, EPOCH, PAIR, SECRET)
 # the names of the secrets a pair shares, and their size
-SECRET_NAMES = ("database/replication",)
+SECRET_NAMES = ("database/replication", "anubis/signing_key")
 MAX_SECRET = 256
 LABEL = b"keel vip 1\n"
 # a claim with its pair record is about 1200 bytes; an answer carries one

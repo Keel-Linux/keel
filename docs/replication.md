@@ -57,6 +57,18 @@ database:
   `replication.primary` (the holder's own overlay address, never the
   VIP: 0029), and the replication credential (below). The three stay
   accepted in the spec and must agree with the record when declared.
+- **Anubis's key comes from the pair too** (0041, `shared: true`;
+  Keel-Linux/common#56), on a MariaDB or a PostgreSQL pair. The primary
+  makes `/etc/anubis/keel.key` at its first start of Anubis. On the
+  node whose spec says `role: replica`, with Anubis enabled, no key
+  file and no `secrets.anubis_signing_key` declared, `keel spec apply`
+  asks the other member of the pair record for the key, with the same
+  signed `secret` message as the replication credential, and writes it
+  with mode 0600 before Anubis starts. Before the pair record exists,
+  while the primary has no key yet, or while it does not answer, the
+  apply starts nothing for Anubis, says why, and a later apply asks
+  again. An answer that is no key refuses the step. A key that is there
+  is never replaced.
 - **Clients connect to the VIP**, the embedded WordPress of 0047 among
   them later. The VIP is never on the replica.
 - **Both nodes carry the same drop-in**, whatever their role:
