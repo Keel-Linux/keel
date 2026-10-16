@@ -1439,7 +1439,11 @@ goes through the same window, marker, lock, timers and boot unit, with
   restart, and a kept file whose interface has another MTU gets the same
   action, said as drift (keel#139). The package's postinst runs `keel
   network mtu`, which does the same for each WireGuard interface that is
-  up, so an upgrade needs no reboot. A change
+  up, so an upgrade needs no reboot. Every peer gets
+  `PersistentKeepalive = 25` when the spec gives none (keel#140), set
+  live with `wg set`; a change that only sets a peer's keepalive cannot
+  cut the node off either, and keel mesh keeps it with no handshake, as
+  an addition. A change
   that only added peers live is marked so in the window's marker, and
   keel mesh keeps it with no handshake (mesh.md). A change is dated on the clock a session's
   start time is read on (the start of a thread, in seconds since the
