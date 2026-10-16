@@ -101,7 +101,7 @@ Built into MariaDB 11.8, no plugin to install. On both nodes:
 rpl_semi_sync_master_enabled = ON
 rpl_semi_sync_slave_enabled = ON
 rpl_semi_sync_master_wait_point = AFTER_SYNC
-rpl_semi_sync_master_timeout = 10000
+rpl_semi_sync_master_timeout = 30000
 rpl_semi_sync_master_wait_no_slave = OFF
 slave_net_timeout = 10
 ```
@@ -114,7 +114,7 @@ found). A node with no replica connected does not wait
 replica's own SQL thread a master with no slave, and it waited the 10 s
 on the first transaction it applied ("Waiting for semi-sync ACK from
 slave" for 9.9 s, the end to end test's trace); a connected replica that
-does not answer still costs the primary the 10 s, which is the fallback
+does not answer still costs the primary the 30 s, which is the fallback
 below. A replica that hears nothing for 10 s reconnects (heartbeats every
 5 s) instead of MariaDB's 60.
 
@@ -124,7 +124,7 @@ nobody until it is promoted; a primary with `slave_enabled` replicates
 from nobody. A commit on the primary returns once the replica has
 *received* it (not applied), one round trip, 250 ms in the design case.
 
-**The fallback.** With no acknowledgement within 10 s the primary
+**The fallback.** With no acknowledgement within 30 s the primary
 commits asynchronously (`Rpl_semi_sync_master_status: OFF`) and stays
 so until the replica is back and caught up, when MariaDB turns it on
 again by itself. Writes continue (the maintainer's answer). keel reports
@@ -140,14 +140,35 @@ it:
   records the state in `/var/lib/keel/database/semi-sync` so a lasting
   fallback alerts once, not every 30 s.
 
-**What the fallback means at a failover.** A write that was waiting for
-the replica when the link broke commits on the old primary after the
-10 s, before or around the moment the VIP's fence (the lease's 10 s
-release, 0049) takes it read-only; it never reached the replica and is
-an errant transaction. So an old primary cut off *while clients were
-writing* usually comes back diverged and waits for the operator (below),
-and one cut off while idle rejoins by itself. Both are measured in the
-test, and docs say so.
+**The timeout is longer than the VIP's release** (keel#186). Until
+keel 0.23.36 it was 10 s, the maintainer's answer of 2026-10-03. The
+VIP's release is 15 s since keel#174 (0049, amendment of 2026-10-15).
+So on a cut primary, a write that waited for the replica returned OK
+after 10 s, and the next writes returned OK at once, until the old
+primary dropped the VIP at about 15 s. These writes never reached the
+replica, and the new primary did not have them: acknowledged writes
+were lost. The timeout is now 30 s: the release, the follow that it
+starts, and room. A replica that is lost while the primary keeps the
+VIP still gives the fallback, 30 s after the last acknowledgement in
+place of 10 s.
+
+**The fence ends the client connections** (keel#186). `SET GLOBAL
+read_only = ON` waits for the backup lock behind a write that waits for
+the replica's acknowledgement, and that write returns OK when the
+timeout ends. So when follow turns a node read only that took writes
+(the VIP released or fenced, or a claim that is not proven), it sets
+`read_only` in a client of its own and, while that waits, kills every
+client connection: not the server's own threads, not this node's own
+replication threads. A write that waited gets an error, not OK. The
+dump threads of its replicas end too, because a fenced node serves no
+replica (keel#193): a dump thread to a cut replica stays, and when
+that replica connects again with the same server id, MariaDB 11.8.6
+ends the old thread and then takes no connection. Ended by a `KILL`,
+the thread ends cleanly. Its row stays on
+the old primary as an errant transaction, so an old primary cut off
+*while clients were writing* comes back diverged and waits for the
+operator's confirmed reseed (below). One cut off while idle rejoins by
+itself.
 
 ## The replica serves nothing (0031, 0049)
 

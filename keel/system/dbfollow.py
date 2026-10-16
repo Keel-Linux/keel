@@ -309,16 +309,24 @@ def _unproven(root: str, state: DatabaseState, found: Followed,
               " newer claim makes it a replica")
 
 
+FENCED = (
+    "; every client connection was ended, so no write that waited for"
+    " the replica is acknowledged after this (keel#186)"
+)
+
+
 def _read_only(root: str, state: DatabaseState, found: Followed,
                runner) -> bool:
     """read_only on, the drop-in, the root lock; whether all went"""
     if state.reading.read_only.value is not True:
+        # the fence (keel#186): read_only while the client connections
+        # are killed, so a write that waits for the ACK gets no OK
         statements = mariadb.set_read_only(True)
-        problem = _send(runner, statements.text)
+        problem = dbreadonly.fence(runner)
         if problem:
             found.fail(f"{statements.summary} failed: {problem}")
             return False
-        found.say(statements.summary)
+        found.say(statements.summary + FENCED)
     _write(root, mariadb.ROLE_DROPIN, mariadb.role_dropin_text(),
            DROPIN_MODE)
     problem = dbreadonly.lock(root, runner)
