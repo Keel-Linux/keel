@@ -93,6 +93,15 @@ DROPIN_MODE = 0o644
 GTID_QUESTION = mariadb.QUIET_CLIENT + (
     "--execute", "SELECT @@gtid_binlog_state, @@gtid_binlog_pos")
 HOLDER_GTID_SQL = "SELECT @@gtid_binlog_state, @@gtid_slave_pos"
+# what this replica applied: its binary log (log_slave_updates) and its
+# slave position, which a reseed sets from the dump (keel#192)
+APPLIED_QUESTION = mariadb.QUIET_CLIENT + (
+    "--execute", "SELECT @@gtid_binlog_state, @@gtid_slave_pos")
+UNFENCED_SAID = (
+    "the VIP fence is cleared: this replica applied everything the holder"
+    " logged, so it may take the VIP again when the lease of the holder"
+    " expires (keel#192)"
+)
 CHECK = "database-rejoin"
 # how long follow waits for this node's own claim to be proven, the VIP
 # on wg0, before it leaves the server read only: keel vip promote's own
@@ -387,6 +396,7 @@ def _replica(root: str, doc: dict, server: dict, state: DatabaseState,
         if error is None:
             found.say(f"unchanged (a replica of [{host}]:{port})")
             _forget_divergence(root)
+            _unfence(root, host, port, state, found, runner)
             return
         if not confirmed:
             found.fail(f"this node replicates from [{host}]:{port} and its"
@@ -406,6 +416,37 @@ def _replica(root: str, doc: dict, server: dict, state: DatabaseState,
         _seed(root, host, port, state, (), found, runner)
         return
     _rejoin(root, host, port, state, held, confirmed, found, runner)
+
+
+def _unfence(root: str, host: str, port: int, state: DatabaseState,
+             found: Followed, runner) -> None:
+    """The VIP fence of this node's old loss cleared once it replicates
+    from the holder and applied everything the holder logged (keel#192,
+    the twin of keel#166 for PostgreSQL). The fence keeps an old primary
+    from claiming by itself (0049); a rejoined or reseeded replica holds
+    nothing the holder lacks. Caught up, per GTID domain: the newest
+    sequence the holder logged is at or below what this node applied,
+    in its binary log or its slave position (gtid_strict_mode keeps the
+    sequences of a domain in order on both nodes)"""
+    pair = state.pair
+    if pair is None or not pair.fenced:
+        return
+    theirs = _holder_gtid(root, host, port, state, runner)
+    mine = _ask(runner, APPLIED_QUESTION)
+    if theirs is None or mine is None:
+        return
+    try:
+        holder = dbgtid.newest(theirs.strip().partition("\t")[0])
+        applied = dbgtid.newest(",".join(
+            part for part in mine.strip().split("\t") if part))
+    except ValueError:
+        return
+    if any(applied.get(domain, 0) < sequence
+           for domain, sequence in holder.items()):
+        return
+    from keel.mesh import vip as vipstate
+    if vipstate.unfenced(root, pair.vip, pair.own_key):
+        found.say(UNFENCED_SAID)
 
 
 def _seed(root: str, host: str, port: int, state: DatabaseState,
