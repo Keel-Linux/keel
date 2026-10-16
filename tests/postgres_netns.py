@@ -668,6 +668,10 @@ def play(report: dict, pids: list[int], pairs, roots: list[str],
             (f"CREATE DATABASE {APP_DB}", None),
             (f"CREATE USER {APP_USER} WITH PASSWORD '{APP_PASSWORD}'", None),
             (f"GRANT ALL ON DATABASE {APP_DB} TO {APP_USER}", None),
+            # as the keel-lnpp check database had it: repl may not
+            # connect, and the reseed of case (d) must still work
+            # (keel#183)
+            (f"REVOKE CONNECT ON DATABASE {APP_DB} FROM PUBLIC", None),
             (f"GRANT USAGE ON SCHEMA public TO {APP_USER}", APP_DB),
             (f"CREATE TABLE t (id SERIAL PRIMARY KEY, v TEXT,"
              " at DOUBLE PRECISION)", APP_DB),

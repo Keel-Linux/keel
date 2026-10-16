@@ -131,6 +131,21 @@ class TestReach(unittest.TestCase):
                                runner=lambda a, **k: answer("t\t2\t100\n"))
         self.assertIn("itself a standby", found.problem)
 
+    def test_the_probe_sums_only_the_databases_repl_may_connect_to(self):
+        """keel#183: pg_database_size() needs CONNECT, and an application
+        database with REVOKE CONNECT FROM PUBLIC stopped every reseed"""
+        sql = dbpgseed.PROBE_SQL
+        self.assertIn("has_database_privilege(oid, 'CONNECT')", sql)
+        self.assertIn("FILTER (WHERE has_database_privilege", sql)
+        self.assertIn(
+            "count(*) FILTER (WHERE NOT has_database_privilege", sql)
+
+    def test_a_database_left_out_does_not_stop_the_probe(self):
+        found = dbpgseed.reach(self.root(), HOST, PORT, PASSWORD,
+                               runner=lambda a, **k: answer(
+                                   "f\t3\t100\t1\n"))
+        self.assertEqual(found.problem, "")
+
     def recording(self, ran, stdout):
         def runner(argv, **kwargs):
             ran.append(list(argv))
@@ -174,10 +189,33 @@ class TestSeed(unittest.TestCase):
         if "--command" in argv:
             sql = argv[argv.index("--command") + 1]
             if sql == dbpgseed.PROBE_SQL:
-                return answer("f\t2\t100\n")
+                return answer(getattr(self, "probe_answer", "f\t2\t100\n"))
             if sql == dbpgseed.STREAMING_QUESTION:
                 return answer("streaming\n")
         return answer()
+
+    def test_no_room_names_the_databases_the_size_left_out(self):
+        """keel#183: the free space check counts only what repl may
+        measure, so a refusal says how many databases it left out"""
+        self.probe_answer = "f\t3\t100\t2\n"
+        small = os.statvfs_result((4096, 4096, 10, 0, 0, 0, 0, 0, 0, 255))
+        with mock.patch.object(dbpgseed.os, "statvfs", return_value=small):
+            problem = dbpgseed.seed(self.root, SeedAction(), self.runner,
+                                    self.clock, lambda s: None,
+                                    lambda pid: False)
+        self.assertIn("needs 200 bytes free", problem)
+        self.assertIn("2 database(s)", problem)
+        self.assertIn("CONNECT", problem)
+
+    def test_no_room_says_nothing_of_left_out_databases_when_none_are(self):
+        self.probe_answer = "f\t3\t100\t0\n"
+        small = os.statvfs_result((4096, 4096, 10, 0, 0, 0, 0, 0, 0, 255))
+        with mock.patch.object(dbpgseed.os, "statvfs", return_value=small):
+            problem = dbpgseed.seed(self.root, SeedAction(), self.runner,
+                                    self.clock, lambda s: None,
+                                    lambda pid: False)
+        self.assertIn("needs 200 bytes free", problem)
+        self.assertNotIn("database(s)", problem)
 
     def test_the_happy_path_stops_swaps_starts_and_streams(self):
         self.assertIsNone(dbpgseed.seed(self.root, SeedAction(),
