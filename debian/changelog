@@ -1,3 +1,14 @@
+keel (0.23.35) unstable; urgency=medium
+
+  * The VIP overlay waits for etcd's cluster, as etcd does (keel#106).
+    Before cluster.json exists, keel diff compares only whether
+    keel-vip.service is enabled and says why it does not run, and
+    keel spec apply enables it and does not start it. Before, a cloud
+    simple pair always reported overlays.vip as drift, and each apply
+    printed a start that did nothing.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 16 Oct 2026 10:12:04 +0000
+
 keel (0.23.34) unstable; urgency=medium
 
   * The other member of a pair gets Anubis's signing key from the
