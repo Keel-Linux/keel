@@ -3,6 +3,7 @@
 a mesh adopted under keel 0.18, with no CA, in one process"""
 
 import json
+from dataclasses import replace
 import os
 import unittest
 from datetime import timedelta
@@ -68,6 +69,14 @@ class TestFormOnAnAdoptedMesh(Mesh):
         self.assertEqual(etcdform.form(a, False, out.append), exits.OK)
         self.assertEqual(out, ["etcd: every ready member is in the cluster"])
         client.members_ = [voter(0), voter(1), voter(2, name=False)]
+        out = []
+        self.assertEqual(etcdform.form(a, True, out.append), exits.OK)
+        self.assertEqual(out[0], "would send the first cluster again to"
+                         f" {address(2)}")
+        # keel#199: a member of the first cluster that never ran is
+        # listed with its name, and no client URL
+        named = replace(voter(2), client_urls=())
+        client.members_ = [voter(0), voter(1), named]
         out = []
         self.assertEqual(etcdform.form(a, True, out.append), exits.OK)
         self.assertEqual(out[0], "would send the first cluster again to"

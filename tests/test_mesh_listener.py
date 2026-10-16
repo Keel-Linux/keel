@@ -249,3 +249,53 @@ class TestLimiter(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAFailedConnection(unittest.TestCase):
+    def test_the_slot_is_free_before_the_connection_closes(self):
+        """keel#177: a client whose TLS handshake fails sees the close
+        and may ask again at once; its slot must be free by then, or the
+        next connection of the same source is closed unread (CI, the
+        mesh job of keel#200: test_a_client_without_tls_does_not_stop_
+        the_listener)"""
+        order = []
+
+        class Raw:
+            def settimeout(self, seconds):
+                pass
+
+            def shutdown(self, how):
+                pass
+
+            def close(self):
+                order.append("close")
+
+        class Context:
+            def wrap_socket(self, raw, server_side=False):
+                raise OSError("not TLS")
+
+        listener.serve_one(mock.Mock(), Context(), Raw(), "::1", "::1",
+                           lambda: order.append("release"))
+        self.assertEqual(order, ["release", "close"])
+
+
+    def test_the_members_channel_frees_its_slot_first_too(self):
+        from keel.mesh import memberlink
+        order = []
+
+        class Raw:
+            def settimeout(self, seconds):
+                pass
+
+            def shutdown(self, how):
+                pass
+
+            def makefile(self, *args, **kwargs):
+                raise OSError("gone")
+
+            def close(self):
+                order.append("close")
+
+        memberlink.serve_one(mock.Mock(), Raw(), "fd00::2",
+                             lambda: order.append("release"))
+        self.assertEqual(order, ["release", "close"])

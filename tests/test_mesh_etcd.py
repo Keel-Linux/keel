@@ -363,8 +363,10 @@ class TestTend(Mesh):
     def test_learners_promoted_or_removed_and_leaves_renewed(self):
         etcdstate.save_cluster(self.a.root, Cluster("new", (
             Member(KEYS[0], address(0)),), MESH.hex()))
-        started = EtcdMember("5", "keel-x", ("https://[fd00::5]:2380",), (),
-                             True)
+        # a learner that started named itself and published its client
+        # URLs (keel#199)
+        started = EtcdMember("5", "keel-x", ("https://[fd00::5]:2380",),
+                             ("https://[fd00::5]:2379",), True)
         never = EtcdMember("6", "", ("https://[fd00::6]:2380",), (), True)
         self.fake.members_ = [voter(0), started, never]
         self.assertEqual(etcdcare.tend(self.a), exits.OK)
