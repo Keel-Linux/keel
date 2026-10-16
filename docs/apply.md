@@ -516,8 +516,21 @@ was:
    `RESET SLAVE ALL`) and the databases `--destroy-local-database`
    confirmed are dropped.
 7. **Load and start.** The copy is loaded through the local client, the
-   accounts are aligned, `gtid_slave_pos` is set to the dump's position,
-   and replication starts.
+   accounts are aligned, the node's binary log starts at the history of
+   the copy, `gtid_slave_pos` is set to the dump's position, and
+   replication starts.
+
+**The binary log starts at the history of the copy** (keel#202). The copy
+holds the effect of every transaction the primary logged, the ones of
+its first boot too: the hook that sets the administrative password
+writes before the pair exists, under another server id. The replica does
+not log the load, so after it the node runs `RESET MASTER` and sets
+`gtid_binlog_state` to the primary's GTIDs under other server ids than
+the dump's position names, then the position. Without this, the first
+primary came back from every cut as diverged. A server can take this
+state only while it writes a binary log, so on a pair `keel database
+follow` waits until `@@log_bin` is on, and the apply copies the holder
+after the restart that turns it on.
 
 A failure while loading leaves an incomplete copy and no replication; the
 next run sees databases it did not make and asks for
