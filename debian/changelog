@@ -1,3 +1,15 @@
+keel (0.23.32) unstable; urgency=medium
+
+  * The invite's listener and the members' channel free the slot of a
+    source before the answer leaves (keel#177). Before, the thread
+    freed it only after it closed the connection. A source that asked
+    again at once, on a loaded machine, found its slot taken, and the
+    listener closed the new connection unread.
+  * CI: the 5 netns tests of the mesh run in the job "mesh / trixie"
+    alone. The unit test job skips them unless KEEL_MESH_NETNS is set.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 16 Oct 2026 01:30:00 +0000
+
 keel (0.23.31) unstable; urgency=medium
 
   * etcd had no leader for 111 s on real nodes after a cut (keel#167).
