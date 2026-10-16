@@ -28,6 +28,21 @@ three successive retransmission timeouts; a dead leader is seen in 5 to
 five minutes (0020) costs nothing. Pre-vote stays on, etcd 3.5's
 default, so a member back from a partition does not depose the leader.
 
+etcd sends raft's messages over long-lived TCP connections to each
+peer (keel#167). A connection that loses its segments in a cut doubles
+its retransmission timeout each time, up to the kernel's 120 s. etcd
+goes on writing to such a connection and does not see an error, so its
+messages wait for the next retransmission, also after the heal: in the
+netns harness a survivor's votes waited up to 40 s and no leader came,
+and on real nodes etcd had no leader for 111 s. A sysctl file sets
+`net.ipv4.tcp_retries2` to 5 (the kernel's default is 15, about 15
+minutes): the kernel ends such a connection after about 14 s of
+retransmissions, etcd sees the error and dials again. The setting holds
+for IPv6 too and for every TCP connection of the node, whose other
+users (the database pairs' replication) dial again as well. At the
+design case's 2% loss, 6 losses of one segment in a row come once in
+10^10 segments, so a working connection is not ended.
+
 A systemd drop-in orders etcd after the overlay's interface, restarts
 it on failure, lets it wait for its quorum as long as it takes
 (TimeoutStartSec=infinity: it reports ready only with a quorum, and a
@@ -56,6 +71,10 @@ CRL = f"{TLS_DIR}/crl.pem"
 # and a client certificate
 METRICS = "http://[::1]:2381"
 DATA_DIR = "/var/lib/etcd/default"
+SYSCTL = "etc/sysctl.d/90-keel-etcd.conf"
+TCP_RETRIES2 = "net.ipv4.tcp_retries2"
+TCP_RETRIES2_LIVE = "proc/sys/net/ipv4/tcp_retries2"
+TCP_RETRIES = 5
 HEARTBEAT_MS = 300
 ELECTION_MS = 5000
 HEADER = ("# Written by keel from /var/lib/keel/etcd (handbook decisions"
@@ -94,6 +113,15 @@ def environment(address: str, cluster: Cluster, crl: bool = True) -> str:
     ) + ((("ETCD_CLIENT_CRL_FILE", f"/{CRL}"),
           ("ETCD_PEER_CRL_FILE", f"/{CRL}")) if crl else ())
     return HEADER + "".join(f"{key}={value}\n" for key, value in values)
+
+
+def sysctl() -> str:
+    """The sysctl file: the kernel ends a TCP connection after
+    TCP_RETRIES retransmissions, so etcd dials a stalled peer again"""
+    return HEADER + ("# A peer connection of etcd that a cut stalled ends"
+                     " after about 14 s,\n# and etcd dials again"
+                     " (Keel-Linux/keel#167).\n"
+                     f"{TCP_RETRIES2} = {TCP_RETRIES}\n")
 
 
 def drop_in(iface: str) -> str:

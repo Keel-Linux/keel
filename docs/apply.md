@@ -1068,6 +1068,7 @@ overlay enabled, apply writes from that state:
 | --- | --- |
 | `/etc/default/etcd` | the environment trixie's `etcd.service` reads: peers on `https://[overlay]:2380`, clients on `https://[overlay]:2379` and `https://[::1]:2379`, never a wildcard; client certificates required of both, TLS 1.3; the JSON gateway off (keel asks over gRPC with etcdctl, keel#83); `/health` and `/metrics` alone on a plain listener, `http://[::1]:2381`, for Monit; the initial cluster and its token; heartbeat 300 ms, election timeout 5000 ms. 0644 |
 | `/etc/etcd/keel/member.crt`, `member.key`, `ca.crt`, `crl.pem` | this member's certificate with its chain, its key, the mesh's root, and the root's CRL (`ETCD_PEER_CRL_FILE`, `ETCD_CLIENT_CRL_FILE`), which etcd reads at each handshake. 0600, owned by `etcd` |
+| `/etc/sysctl.d/90-keel-etcd.conf` | `net.ipv4.tcp_retries2 = 5`: the kernel ends a peer connection that a cut stalled after about 14 s, and etcd dials again (keel#167); apply also sets it live with `sysctl -w`, with no restart. 0644 |
 | `/etc/systemd/system/etcd.service.d/keel.conf` | after `wg-quick@<interface>`, restarted on failure, `TimeoutStartSec=infinity` (etcd reports ready only with a quorum), and systemd's sandbox: no capability, `ProtectSystem=strict` with `/var/lib/etcd` writable, the kernel and namespace protections, `@system-service` system calls. Then `systemctl daemon-reload`. 0644 |
 
 etcd is started with `systemctl start --no-block`, and restarted
