@@ -1,3 +1,14 @@
+keel (0.23.39) unstable; urgency=medium
+
+  * A MariaDB holder whose lease is in doubt acknowledges no write
+    (keel#195). keel vip control marks the doubt once the last renewal
+    that the majority confirmed is 6 s old, and keel database follow
+    fences a MariaDB holder until a renewal is confirmed again. Before,
+    on a cut holder, a write that waited for the replica returned OK
+    when the dump thread to the cut replica ended, before the release.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 16 Oct 2026 12:06:06 +0000
+
 keel (0.23.38) unstable; urgency=medium
 
   * The VIP fence of a MariaDB replica that rejoined or was reseeded is

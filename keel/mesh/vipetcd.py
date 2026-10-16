@@ -88,6 +88,12 @@ from keel.network.wireguard import same_key
 __all__ = ["RELEASE_AFTER", "TTL"]
 
 RENEW = 2.0
+# a holder with no renewal the majority confirmed for this long marks its
+# doubt, and keel database follow turns a MariaDB holder read only until
+# a renewal is confirmed (keel#195): after the longest normal gap (a
+# renewal period and a call), well before a dump thread to a cut replica
+# ends (tcp_retries2 = 5: about 12.6 s) or the release (RELEASE_AFTER)
+DOUBT = 6.0
 # one call to this member's etcd: a renewal that takes longer is not
 # one the holder can count on
 CALL_TIMEOUT = 2.0
@@ -330,6 +336,20 @@ class Ops:
     def carried(self, vip: str) -> bool | None:
         return vipnet.carried(self.here.iface(), vip, self.here.node.output)
 
+    def doubt(self, vip: str, on: bool) -> None:
+        """The doubt of the lease of this node's own claim, marked or
+        cleared (keel#195); only for this node's own VIP"""
+        if vipstate.address(vip) != self.facts().vip:
+            raise VipError(f"{vip} is not this node's appliance.vip")
+        if vipstate.mark_unconfirmed(self.here.root, vip, on):
+            self.here.err(
+                f"vip {vip}: no renewal the majority confirmed for"
+                f" {DOUBT:g} s: this node may be cut off, and a MariaDB"
+                " server here acknowledges no write until one is (keel#195)"
+                if on else
+                f"vip {vip}: a renewal is confirmed again: the doubt is"
+                " cleared (keel#195)")
+
     def bounded(self, vip: str) -> bool | None:
         return vipnet.bounded(self.here.iface(), vip, self.here.node.output)
 
@@ -359,6 +379,14 @@ class Controller:
         self.reclaim: set[str] = set()
         # the renewal each VIP's address last took its lifetime from
         self.lifted: dict[str, float] = {}
+        # the VIPs whose doubt this process marked, and those whose mark
+        # it cleared since (a mark an earlier process left goes at the
+        # first renewal this one has confirmed, keel#195)
+        self.doubted: set[str] = set()
+        self.cleared: set[str] = set()
+        # when this process first saw each claim of its own that it has
+        # not renewed yet: a controller that starts cut off doubts too
+        self.began: dict[str, float] = {}
 
     def own(self, facts: Facts) -> list[Held]:
         """The VIPs this node holds by its own claim on a lease"""
@@ -368,7 +396,12 @@ class Controller:
     def holding(self) -> None:
         """One turn of the holder's duty, for each VIP it holds"""
         facts = self.ops.facts()
-        for held in self.own(facts):
+        owned = self.own(facts)
+        # a mark goes with the claim: a node that no longer holds it does
+        # not start a later claim read only
+        for vip in sorted(self.doubted - {one.vip for one in owned}):
+            self.mark(vip, False)
+        for held in owned:
             vip = held.vip
             if vip in self.reclaim:
                 continue
@@ -380,8 +413,13 @@ class Controller:
             base = self.renewed.get(vip)
             if base is None:
                 self.started_with(vip)
+                began = self.began.setdefault(vip, self.clock())
+                if self.clock() - began >= DOUBT:
+                    self.doubt(vip, self.clock() - began)
                 continue
+            self.began.pop(vip, None)
             age = self.clock() - base
+            self.doubt(vip, age)
             if not 0 <= age < RELEASE_AFTER:
                 if self.ops.carried(vip):
                     self.ops.drop(vip, False, (
@@ -394,6 +432,31 @@ class Controller:
                     self.ops.carried(vip) is False:
                 if self.ops.carry(vip, age):
                     self.lifted[vip] = base
+
+    def doubt(self, vip: str, age: float) -> None:
+        """The holder's doubt marked once its last confirmed renewal is
+        DOUBT s old, cleared once a renewal is confirmed again"""
+        if not 0 <= age < DOUBT:
+            if vip not in self.doubted:
+                self.mark(vip, True)
+            return
+        if vip in self.doubted or vip not in self.cleared:
+            self.mark(vip, False)
+
+    def mark(self, vip: str, on: bool) -> None:
+        """The mark of the doubt, best effort: a mark that cannot be
+        written is said, and never stops the release (keel#195)"""
+        try:
+            self.ops.doubt(vip, on)
+        except FAILURES as e:
+            self.err(f"vip {vip}: doubt not marked: {e}")
+            return
+        if on:
+            self.doubted.add(vip)
+            self.cleared.discard(vip)
+        else:
+            self.doubted.discard(vip)
+            self.cleared.add(vip)
 
     def started_with(self, vip: str) -> None:
         """Before this controller's first renewal: an address a previous

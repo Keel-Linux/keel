@@ -291,6 +291,47 @@ def gone_epoch(text: str | None) -> int | None:
     return None
 
 
+# the holder's doubt (keel#195): keel vip control marks, through its
+# root half, that the lease of its own claim has had no renewal the
+# majority confirmed for keel.mesh.vipetcd.DOUBT s, and removes the mark
+# at the next confirmed renewal. keel database follow turns a MariaDB
+# holder read only while the mark is there: a write that waits for a
+# cut replica would return OK when the dump thread to it ends, before
+# the release. Only the root half writes it, in the state directory, as
+# keel-vip.service may (keel#178); follow only reads it (keel#164)
+UNCONFIRMED_SUFFIX = ".unconfirmed"
+
+
+def unconfirmed_file(vip: str) -> str:
+    return f"{DIR}/{address(vip)}{UNCONFIRMED_SUFFIX}"
+
+
+def unconfirmed(root: str, vip: str) -> bool:
+    """Whether the holder marked the lease of `vip` as in doubt"""
+    try:
+        return os.path.exists(path(root, unconfirmed_file(vip)))
+    except ValueError:
+        return False
+
+
+def mark_unconfirmed(root: str, vip: str, on: bool) -> bool:
+    """The mark set or removed; whether anything changed. ValueError for
+    what is not a VIP, so no path comes from the controller unchecked"""
+    target = path(root, unconfirmed_file(vip))
+    if on:
+        if os.path.exists(target):
+            return False
+        ensure(root)
+        write_private(root, unconfirmed_file(vip),
+                      "keel vip control: no renewal the majority confirmed\n")
+        return True
+    try:
+        os.remove(target)
+    except FileNotFoundError:
+        return False
+    return True
+
+
 def state_gone(root: str, expired: int, epoch: int) -> None:
     """The controller's statement, written before the claim it is for"""
     ensure(root)
