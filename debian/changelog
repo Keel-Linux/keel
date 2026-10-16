@@ -1,3 +1,16 @@
+keel (0.23.34) unstable; urgency=medium
+
+  * The other member of a pair gets Anubis's signing key from the
+    primary (Keel-Linux/common#56, decision 0041). A node whose spec
+    makes it a database replica, with Anubis enabled and no key, asks
+    the other member over the members' channel, as for the replication
+    credential, and writes the key with mode 0600 before Anubis starts.
+    Before, nothing copied the key, and anubis@keel did not start on
+    the replica. Before the pair exists, the apply starts nothing for
+    Anubis and says why.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 16 Oct 2026 10:04:07 +0000
+
 keel (0.23.33) unstable; urgency=medium
 
   * The reseed of a PostgreSQL standby works when the role repl has no
