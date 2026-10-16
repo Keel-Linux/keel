@@ -306,8 +306,25 @@ class TestStartAndPromote(Mesh):
         a, = self.members(1)
         etcd.created(a)
         a.node.apply.code = 16
+        a.node.run = lambda argv: "systemctl exited 3: inactive"
         self.assertFalse(etcd.start(a))
         self.assertIn("apply exited 16", self.text(0))
+        self.assertIn("etcd may not run", self.text(0))
+
+    def test_a_failed_step_that_is_not_etcd_does_not_blame_etcd(self):
+        # keel#198: a database replica that joins before its pair exists
+        # has one refused step; etcd itself runs
+        a, = self.members(1)
+        etcd.created(a)
+        a.node.apply.code = 16
+        asked = []
+        a.node.run = lambda argv: asked.append(argv)
+        self.assertFalse(etcd.start(a))
+        self.assertEqual(asked, [("systemctl", "is-active", "--quiet",
+                                  "etcd.service")])
+        self.assertIn("apply exited 16", self.text(0))
+        self.assertIn("etcd runs", self.text(0))
+        self.assertNotIn("may not run", self.text(0))
         with mock.patch("keel.mesh.etcdstate.credentials",
                         return_value=False):
             self.assertFalse(etcd.start(a))
