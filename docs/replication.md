@@ -147,10 +147,25 @@ So on a cut primary, a write that waited for the replica returned OK
 after 10 s, and the next writes returned OK at once, until the old
 primary dropped the VIP at about 15 s. These writes never reached the
 replica, and the new primary did not have them: acknowledged writes
-were lost. The timeout is now 30 s: the release, the follow that it
-starts, and room. A replica that is lost while the primary keeps the
-VIP still gives the fallback, 30 s after the last acknowledgement in
-place of 10 s.
+were lost. The timeout is now 30 s. Since keel#195 the fence comes
+earlier than the release, at the doubt of the lease: on real nodes,
+6.1 s to 8.8 s after a cut (the cross-site rehearsal of 2026-10-16).
+10 s would leave 1.2 s in the worst case measured; 30 s leaves room.
+A replica that is lost while the primary keeps the VIP still gives the
+fallback, 30 s after the last acknowledgement in place of 10 s.
+
+**The fence starts when the lease is in doubt** (keel#195). A cut
+holder that keeps the VIP until the release (15 s) cannot wait for it:
+a write that waits for the cut replica returns OK when the dump thread
+to that replica ends (`wait_no_slave = OFF`). With
+`net.ipv4.tcp_retries2 = 5` that is about 12.6 s after the cut. So
+when the holder's lease has had no renewal that the majority confirmed
+for 6 s, the controller marks its doubt ([docs/vip.md](vip.md), "The
+holder's doubt"). `keel-database-follow.path` starts follow, which
+fences the server as below and leaves the role as it is. The server
+takes writes again at the next confirmed renewal. `wait_no_slave = ON`
+does not help: a new primary has no replica yet, and its first write
+would wait for the whole timeout.
 
 **The fence ends the client connections** (keel#186). `SET GLOBAL
 read_only = ON` waits for the backup lock behind a write that waits for
@@ -186,8 +201,12 @@ itself.
 - The replica's server listens on its own overlay address (for its pair
   peer: replication and the rejoin's comparison), `::1`, and the VIP it
   never receives. Clients are configured with the VIP, so they never
-  reach it; in cloud advanced the derived firewall accepts 3306 on `wg0`
-  from the pair peer and for the VIP only.
+  reach it. In cloud advanced the derived firewall accepts 3306 on
+  `wg0` only, never on the uplink (0041: a `mesh` port), from every
+  member of the mesh, as for every `mesh` port. The accounts decide
+  who logs in: `repl` needs the pair's certificate (below). The real
+  test of 2026-10-16 found that this text said "from the pair peer and
+  for the VIP only", which the firewall does not do.
 - `database.client.replicas` keeps its meaning for a client that reads
   from replicas it names; a paired set names none (0031, "0013, Several
   replicas").
