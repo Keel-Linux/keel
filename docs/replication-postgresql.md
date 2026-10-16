@@ -57,6 +57,13 @@ In keel 0.23.18. The numbers under "Measured" come from the CI job
   names it, and a fenced node takes no write after it. Both
   timelines are numbers (a standby's from its last checkpoint);
   `keel diff` and `keel database status` show them.
+- **The probe before a copy** asks the primary, as `repl`, whether it
+  is a standby and how large its databases are, to check the free
+  space for the copy. `pg_database_size()` needs CONNECT on a
+  database, and an application can revoke CONNECT from PUBLIC. So the
+  size counts only the databases that `repl` may connect to, and a
+  refusal for lack of space says how many it left out (keel#183).
+  The base backup copies every database, CONNECT or not.
 - **The VIP fence after the reseed** (keel#166). A node that lost the
   VIP while cut off is fenced in its VIP state, and a fenced node
   never claims by itself. When the node streams from the holder and

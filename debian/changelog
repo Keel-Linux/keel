@@ -1,3 +1,13 @@
+keel (0.23.33) unstable; urgency=medium
+
+  * The reseed of a PostgreSQL standby works when the role repl has no
+    CONNECT on a database (keel#183). The probe of the primary measures
+    only the databases that repl may connect to, and a refusal for lack
+    of space says how many it left out. Before, an application database
+    with REVOKE CONNECT FROM PUBLIC stopped every reseed.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 16 Oct 2026 09:52:55 +0000
+
 keel (0.23.32) unstable; urgency=medium
 
   * The invite's listener and the members' channel free the slot of a
