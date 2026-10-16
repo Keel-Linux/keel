@@ -1,3 +1,15 @@
+keel (0.23.41) unstable; urgency=medium
+
+  * Every overlay peer gets PersistentKeepalive = 25 (keel#140). The
+    keepalive keeps the NAT and firewall state open between sites, so
+    a node behind a filter that drops unsolicited inbound UDP stays
+    reachable when the mesh is idle. The release test of LNMP 19.0-3
+    found it: the root holder could not send the cluster to the member
+    on BR2 after 290 s with no traffic. keel spec apply sets it live;
+    keel diff takes 25 as the default of a peer that gives none.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 16 Oct 2026 16:28:02 +0000
+
 keel (0.23.40) unstable; urgency=medium
 
   * keel mesh etcd form sends the cluster again to a member of the
