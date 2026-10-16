@@ -1,3 +1,18 @@
+keel (0.23.36) unstable; urgency=medium
+
+  * A cut MariaDB primary no longer acknowledges writes that the new
+    primary never gets (keel#186). The fence of a node that loses the
+    VIP sets read_only while it kills every client connection, so a
+    write that waits for the replica's ACK gets an error and no OK.
+    rpl_semi_sync_master_timeout is 30 s (was 10 s), longer than the
+    VIP's release of 15 s, so the fence comes first.
+  * The fence also ends the dump threads of its replicas (keel#193). A
+    dump thread to a cut replica stayed, and when that replica connected
+    again with the same server id, MariaDB 11.8.6 took no connection
+    after it.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 16 Oct 2026 10:47:27 +0000
+
 keel (0.23.35) unstable; urgency=medium
 
   * The VIP overlay waits for etcd's cluster, as etcd does (keel#106).

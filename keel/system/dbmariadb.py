@@ -114,7 +114,11 @@ PAIR_LINES = (
     "rpl_semi_sync_master_wait_no_slave = OFF\n"
     "slave_net_timeout = 10\n"
 )
-SEMI_SYNC_TIMEOUT_MS = 10000
+# longer than the VIP's release (keel.mesh.vip.RELEASE_AFTER, 15 s) and
+# the fence that follows it, with room: a write that waits for the ACK
+# on a cut primary must not return OK before the fence ends it
+# (keel#186); a lost replica still falls back to asynchronous commits
+SEMI_SYNC_TIMEOUT_MS = 30000
 ROLE_HEADER = (
     "# Written by keel database follow (decision 0049). Both nodes of a\n"
     "# pair boot read only: an old primary that crashed must not take a\n"
