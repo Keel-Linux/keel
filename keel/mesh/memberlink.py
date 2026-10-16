@@ -261,8 +261,10 @@ def serve_one(front: Front, raw: socket.socket, source: str,
         pass
     finally:
         read.cancel()
-        raw.close()
+        # free first: a source that sees the close may ask again at once
+        # and must find its slot free (keel#177)
         release()
+        raw.close()
 
 
 def bound(iface: str, address: str, port: int) -> socket.socket:
