@@ -19,6 +19,7 @@ from keel.inspect.units import UnitState, read_units
 from keel.manifest import monit
 from keel.manifest.facts import gather
 from keel.manifest.resolve import Resolved, overlay_units
+from keel.mesh.etcdstate import CLUSTER
 from keel.system import anubiskey
 from keel.system.anubiskey import AnubisKey
 from keel.system.crowdsec import CrowdsecState, observe_crowdsec
@@ -55,6 +56,9 @@ class ApplianceState:
     # the pair's Anubis key, asked of the other member, when this node
     # has to ask for it (keel.system.anubiskey, Keel-Linux/common#56)
     anubis_key: AnubisKey | None = None
+    # the VIP overlay waits for etcd's cluster: its unit's start
+    # condition is cluster.json (keel#106)
+    vip_waits: bool = False
 
 
 def observe_appliance(root: str, doc: dict, start: bool = False,
@@ -73,6 +77,7 @@ def observe_appliance(root: str, doc: dict, start: bool = False,
     hooks: dict[str, OverlayHooks] = {}
     etcd = None
     anubis_key = None
+    vip_waits = False
     if facts.resolved is not None:
         names = [unit for state in facts.resolved.overlays
                  for unit in overlay_units(facts.resolved, state.name)]
@@ -81,6 +86,7 @@ def observe_appliance(root: str, doc: dict, start: bool = False,
                  if (found := observe_hooks(tree.root, state.name,
                                             state.manifest))}
         names = {state.name for state in facts.resolved.overlays}
+        vip_waits = "vip" in names and not tree.exists(CLUSTER)
         if "etcd" in names:
             etcd = observe_etcd(tree, doc)
         if anubiskey.OVERLAY in names and tree.root == ROOT_DEFAULT:
@@ -103,4 +109,5 @@ def observe_appliance(root: str, doc: dict, start: bool = False,
         hooks=hooks,
         etcd=etcd,
         anubis_key=anubis_key,
+        vip_waits=vip_waits,
     )

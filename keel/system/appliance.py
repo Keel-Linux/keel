@@ -54,6 +54,12 @@ from keel.system.hooks import plan_hooks
 from keel.system.monitor import NOTIFY, reload
 
 MONIT_FIELD = "derived.monit"
+VIP = "vip"
+VIP_WAITS = (
+    "keel-vip.service waits for etcd's cluster (cluster.json): it starts"
+    " once etcd forms; without etcd, keel vip check (keel-vip-check.timer)"
+    " does its work (keel#106)"
+)
 MODE = 0o600
 ENABLED = "enabled"
 DISABLED = "disabled"
@@ -155,16 +161,23 @@ def plan_overlay(name: str, wanted: str | None, units: tuple[str, ...],
     if not on:
         # what reacts to the overlay lets go of it before its units stop
         actions += hooked
+    waits = on and name == VIP and state.vip_waits
     for unit in (units if on else tuple(reversed(units))):
         found = state.units[unit]
-        if on:
+        if waits:
+            # enabled, never started: its start condition is etcd's
+            # cluster, so a start does nothing (keel#106)
+            actions += start(systemctl, unit, found, False, False)
+        elif on:
             actions += start(systemctl, unit, found, live, made,
                              name == ETCD)
         else:
             actions += stop(systemctl, unit, found, live)
     if on:
         actions += hooked
-    if all(isinstance(action, Note) for action in actions):
+    if waits and live:
+        actions.append(Note(VIP_WAITS))
+    if all(isinstance(action, Note) for action in actions) and not waits:
         # under --root a hook was not run, which is not "unchanged"
         listed = units + tuple(hook.path for hook in hooks.hooks
                                if live) if hooks else units
