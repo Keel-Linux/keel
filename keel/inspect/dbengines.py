@@ -109,9 +109,12 @@ def own_account(user: str, host: str) -> bool:
     """Whether an account is the server's own and not anybody's"""
     return (user in MARIADB_OWN_ACCOUNTS
             and host.lower() in MARIADB_OWN_HOSTS)
+# a sender with no client address streams from this machine's socket
+# (pg_receivewal of postgresql-common), and is no replica (keel#201)
 POSTGRESQL_SQL = {
     "state": "SELECT pg_is_in_recovery(),"
-             " (SELECT count(*) FROM pg_stat_replication),"
+             " (SELECT count(*) FROM pg_stat_replication"
+             " WHERE client_addr IS NOT NULL),"
              " current_setting('port')",
     "receiver": "SELECT conninfo FROM pg_stat_wal_receiver",
     "standby": "SELECT current_setting('primary_conninfo')",
