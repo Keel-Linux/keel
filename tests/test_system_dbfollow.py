@@ -40,7 +40,7 @@ class Server:
                  holder_state: str = "0-1-10,0-2-20", holder_pos: str = "",
                  sql_running: str = "Yes", holder_down: bool = False,
                  bypass: str = "'root'@'localhost'\n'admin'@'localhost'\n",
-                 dump_fails: bool = False):
+                 dump_fails: bool = False, slave_pos: str = ""):
         self.replicating_from = replicating_from
         self.read_only = read_only
         self.schemas = schemas
@@ -50,6 +50,7 @@ class Server:
         self.holder_down = holder_down
         self.bypass = bypass
         self.dump_fails = dump_fails
+        self.slave_pos = slave_pos
         self.sent: list[str] = []
         self.argv: list[list[str]] = []
 
@@ -107,6 +108,8 @@ class Server:
                 out = "keel:account\n"
         elif "SHOW REPLICA STATUS" in asked:
             out = self.status()
+        elif "gtid_binlog_state, @@gtid_slave_pos" in asked:
+            out = f"{self.binlog_state}\t{self.slave_pos}\n"
         elif "gtid_binlog_state, @@gtid_binlog_pos" in asked:
             out = f"{self.binlog_state}\t{self.binlog_pos}\n"
         elif "SCHEMATA" in asked:
@@ -395,6 +398,80 @@ class TestTheReplica(FollowTestCase):
         with mock.patch.object(dbfollow, "follow") as inner:
             self.assertIsNone(dbfollow.followed(here.root, here.node.path))
         inner.assert_called_once()
+
+
+class TestTheFenceOfACaughtUpReplica(FollowTestCase):
+    """keel#192: the VIP fence of a replica that rejoined or was reseeded
+    is cleared once it applied everything the holder logged, as keel#166
+    does for PostgreSQL; before, a MariaDB pair failed over once only"""
+
+    def fence_vip(self, index: int) -> None:
+        from dataclasses import replace
+
+        from keel.mesh import vip as vipstate
+        from keel.mesh import vipnode
+        held = vipnode.current(self.all[index], VIP)
+        vipstate.write(self.all[index].root, replace(held, fenced=True))
+
+    def fenced(self, index: int) -> bool:
+        from keel.mesh import vipnode
+        return vipnode.current(self.all[index], VIP).fenced
+
+    def test_a_replica_caught_up_with_the_holder_is_unfenced(self):
+        self.pair_nodes()
+        self.fence_vip(1)
+        # reseeded: the dump's position is the slave position, the
+        # holder's older GTIDs of another server id are not in the binlog
+        server = Server(replicating_from=address(0), read_only="ON",
+                        binlog_state="0-2-3", slave_pos="0-1-30",
+                        holder_state="0-2-7,0-1-30")
+        found = self.follow(1, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertFalse(self.fenced(1))
+        self.assertIn(dbfollow.UNFENCED_SAID, found.lines)
+
+    def test_a_replica_behind_the_holder_stays_fenced(self):
+        self.pair_nodes()
+        self.fence_vip(1)
+        server = Server(replicating_from=address(0), read_only="ON",
+                        binlog_state="0-2-3", slave_pos="0-1-29",
+                        holder_state="0-2-7,0-1-30")
+        found = self.follow(1, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertTrue(self.fenced(1))
+        self.assertNotIn(dbfollow.UNFENCED_SAID, found.lines)
+
+    def test_a_holder_that_does_not_answer_keeps_the_fence(self):
+        self.pair_nodes()
+        self.fence_vip(1)
+        server = Server(replicating_from=address(0), read_only="ON",
+                        slave_pos="0-1-30", holder_down=True)
+        found = self.follow(1, server)
+        self.assertTrue(self.fenced(1))
+
+    def test_a_replica_whose_sql_thread_stopped_stays_fenced(self):
+        self.pair_nodes()
+        self.fence_vip(1)
+        server = Server(replicating_from=address(0), read_only="ON",
+                        sql_running="No", slave_pos="0-1-30",
+                        holder_state="0-1-30")
+        self.follow(1, server)
+        self.assertTrue(self.fenced(1))
+
+    def test_the_watch_follows_a_fenced_replica_of_either_engine(self):
+        from keel.inspect.dbreading import Reading, Value
+        root = self.enterContext(__import__("tempfile").TemporaryDirectory())
+        os.makedirs(os.path.join(root, "var/lib/keel"))
+        with open(os.path.join(root, dbpair.ROLE_FILE), "w") as fob:
+            fob.write(dbpair.role_text("replica", VIP))
+        fenced = dbpair.PairState(VIP, KEYS[1], KEYS[0], address(0),
+                                  "replica", address(0), fenced=True)
+        replicates = Reading(role=Value("replica"), read_only=Value(True),
+                             primary=Value({"host": address(0),
+                                            "port": 3306}))
+        maria = {"database": {"server": {"engine": "mariadb"}}}
+        self.assertTrue(dbwatch.needs_follow(root, fenced, replicates,
+                                             maria))
 
 
 class TestTheOldPrimaryAtBoot(FollowTestCase):
@@ -776,8 +853,8 @@ class TestWatch(FollowTestCase):
 
     def test_needs_follow_on_a_fenced_postgresql_standby(self):
         """keel#166: a fenced replica that streams is followed again, so
-        follow clears the fence once it caught up; a MariaDB replica, or
-        one that follows nobody, is not"""
+        follow clears the fence once it caught up; one that follows
+        nobody is not"""
         from keel.inspect.dbreading import Reading, Value
         root = self.enterContext(__import__("tempfile").TemporaryDirectory())
         os.makedirs(os.path.join(root, "var/lib/keel"))
@@ -792,7 +869,8 @@ class TestWatch(FollowTestCase):
         maria = {"database": {"server": {"engine": "mariadb"}}}
         self.assertTrue(dbwatch.needs_follow(root, fenced, streams, pg))
         self.assertFalse(dbwatch.needs_follow(root, fenced, nobody, pg))
-        self.assertFalse(dbwatch.needs_follow(root, fenced, streams, maria))
+        # a MariaDB replica too since keel#192
+        self.assertTrue(dbwatch.needs_follow(root, fenced, streams, maria))
 
 
 class TestStatus(FollowTestCase):

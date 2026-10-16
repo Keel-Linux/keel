@@ -49,6 +49,14 @@ def errant(own_state: str, holder_state: str, holder_pos: str = "") -> (
             if theirs.get((domain, server), 0) < sequence]
 
 
+def newest(text: str) -> dict[int, int]:
+    """The newest sequence of each domain in a GTID list"""
+    found: dict[int, int] = {}
+    for (domain, _), sequence in parse(text).items():
+        found[domain] = max(found.get(domain, 0), sequence)
+    return found
+
+
 def describe(found: list[str]) -> str:
     """One line naming each errant GTID by domain, server id and sequence"""
     parts = []

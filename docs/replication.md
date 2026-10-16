@@ -342,6 +342,17 @@ each watch run (keel#154, [docs/vip.md](vip.md)). The path unit is the seam
 between the VIP's helper, which holds `CAP_NET_ADMIN` alone and cannot
 run `runuser`, and the database, which needs root.
 
+**The VIP fence after a rejoin or a reseed** (keel#192, the twin of
+keel#166 for PostgreSQL). A node that lost the VIP while it was cut
+off is fenced: it takes the VIP again only by `keel vip promote` there
+(0049). After it rejoined by GTID, or after the confirmed reseed, it
+holds nothing that the holder lacks. When it replicates from the
+holder, with its SQL thread running, and it applied the newest
+sequence that the holder logged in each GTID domain, `keel database
+follow` clears the fence. `keel database watch` runs follow on a fenced
+replica that replicates, so the fence goes within 2 watch runs. Before,
+a MariaDB pair failed over by itself once only.
+
 ## The old primary coming back (0049)
 
 Read only from the moment it learns the higher epoch. Then `keel
