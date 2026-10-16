@@ -79,12 +79,15 @@ network:
 class Recorded:
     """apply: the documents given, and the code it answers"""
 
-    def __init__(self, code: int = 0):
+    def __init__(self, code: int = 0, lines: tuple[str, ...] = ()):
         self.code = code
+        self.lines = lines
         self.documents: list[dict] = []
 
     def __call__(self, doc: dict, root: str, window: int) -> int:
         self.documents.append(doc)
+        for line in self.lines:
+            print(line)
         print("apply: done")
         return self.code
 

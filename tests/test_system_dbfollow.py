@@ -40,7 +40,9 @@ class Server:
                  holder_state: str = "0-1-10,0-2-20", holder_pos: str = "",
                  sql_running: str = "Yes", holder_down: bool = False,
                  bypass: str = "'root'@'localhost'\n'admin'@'localhost'\n",
-                 dump_fails: bool = False, slave_pos: str = ""):
+                 dump_fails: bool = False, slave_pos: str = "",
+                 log_bin: str = "1"):
+        self.log_bin = log_bin
         self.replicating_from = replicating_from
         self.read_only = read_only
         self.schemas = schemas
@@ -108,6 +110,8 @@ class Server:
                 out = "keel:account\n"
         elif "SHOW REPLICA STATUS" in asked:
             out = self.status()
+        elif asked == "SELECT @@log_bin":
+            out = f"{self.log_bin}\n"
         elif "gtid_binlog_state, @@gtid_slave_pos" in asked:
             out = f"{self.binlog_state}\t{self.slave_pos}\n"
         elif "gtid_binlog_state, @@gtid_binlog_pos" in asked:
@@ -267,6 +271,22 @@ class TestThePrimary(FollowTestCase):
 
 
 class TestTheReplica(FollowTestCase):
+    def test_a_server_with_no_binary_log_is_not_seeded_yet(self):
+        # keel#202: the follow that the VIP's promotion starts on the
+        # replica runs before keel spec apply writes the pair's
+        # configuration. A copy loaded then cannot carry the binary log
+        # history of the primary, which the old primary needs to rejoin.
+        # The apply seeds it after the restart that turns the log on.
+        self.pair_nodes()
+        server = Server(schemas="", log_bin="0")
+        found = self.follow(1, server)
+        self.assertIsNone(found.problem, found.lines)
+        joined = "\n".join(found.lines)
+        self.assertIn("binary log", joined)
+        self.assertNotIn("seeded from", joined)
+        self.assertFalse(any(one[0] == "mariadb-dump" for one in server.argv))
+        self.assertFalse(any("CHANGE MASTER" in one for one in server.sent))
+
     def test_a_fresh_server_is_made_read_only_locked_and_seeded(self):
         self.pair_nodes()
         server = Server(schemas="")

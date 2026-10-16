@@ -93,6 +93,11 @@ BACKUPS = "var/backups/keel/mariadb"
 DROPIN_MODE = 0o644
 GTID_QUESTION = mariadb.QUIET_CLIENT + (
     "--execute", "SELECT @@gtid_binlog_state, @@gtid_binlog_pos")
+LOG_BIN_QUESTION = mariadb.QUIET_CLIENT + ("--execute", "SELECT @@log_bin")
+WAITS_FOR_BINARY_LOG = (
+    "this server writes no binary log yet, so the copy of the holder waits:"
+    " keel spec apply writes the pair's configuration and then copies it"
+)
 HOLDER_GTID_SQL = "SELECT @@gtid_binlog_state, @@gtid_slave_pos"
 # what this replica applied: its binary log (log_slave_updates) and its
 # slave position, which a reseed sets from the dump (keel#192)
@@ -470,6 +475,17 @@ def _unfence(root: str, host: str, port: int, state: DatabaseState,
 
 def _seed(root: str, host: str, port: int, state: DatabaseState,
           drop: tuple[str, ...], found: Followed, runner) -> None:
+    # The copy must carry the primary's binary log history, or the old
+    # primary comes back as diverged by the GTIDs of its first boot
+    # (keel#202), and a server can take that history only while it writes
+    # a binary log. The follow that the VIP's promotion starts on a new
+    # replica runs before keel spec apply has written the pair's
+    # configuration: the apply seeds it, after the restart that turns the
+    # log on.
+    logged = _ask(runner, LOG_BIN_QUESTION)
+    if logged is not None and logged.strip() == "0":
+        found.say(WAITS_FOR_BINARY_LOG)
+        return
     action = SeedReplica(host, port, state.credential.value, drop,
                          dbtls.options_lines(root), dbtls.master_options(root))
     problem = dbseed.seed(root, action, runner)
