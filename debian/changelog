@@ -1,3 +1,12 @@
+keel (0.23.43) unstable; urgency=medium
+
+  * keel mesh join names the failed step when the apply fails on a step
+    other than etcd's, and no longer says that etcd may not run
+    (keel#198). The 0.23.42 fix asked whether etcd was running, which
+    it is not yet at that point of a join.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 16 Oct 2026 21:20:00 +0000
+
 keel (0.23.42) unstable; urgency=medium
 
   * A seeded MariaDB replica starts its binary log at the history of the
