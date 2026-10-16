@@ -657,6 +657,61 @@ class TestTheOldPrimaryAtBoot(FollowTestCase):
         self.assertIn("SET GLOBAL read_only = OFF;\n", server.sent)
 
 
+class TestTheHolderInDoubt(FollowTestCase):
+    """keel#195: a holder whose lease has no renewal the majority
+    confirmed for vipetcd.DOUBT s may be cut off; a write that waits for
+    the replica there returns OK when the dump thread to it ends, before
+    the release. So follow fences the server while the mark is there,
+    and the watch does not lift it"""
+
+    def mark(self, index: int, on: bool = True) -> None:
+        from keel.mesh import vip as vipstate
+        vipstate.mark_unconfirmed(self.all[index].root, VIP, on)
+
+    def test_a_writable_holder_in_doubt_is_fenced(self):
+        self.pair_nodes()
+        self.mark(0)
+        server = Server()
+        found = self.follow(0, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertIn("SET GLOBAL read_only = ON;\n", server.sent)
+        self.assertNotIn("SET GLOBAL read_only = OFF;\n", server.sent)
+        self.assertIn("keel#195", " ".join(found.lines))
+
+    def test_a_read_only_holder_in_doubt_stays_read_only(self):
+        self.pair_nodes()
+        self.mark(0)
+        server = Server(read_only="ON")
+        found = self.follow(0, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertNotIn("SET GLOBAL read_only = OFF;\n", server.sent)
+
+    def test_once_confirmed_the_holder_is_writable_again(self):
+        self.pair_nodes()
+        self.mark(0)
+        self.mark(0, False)
+        server = Server(read_only="ON")
+        found = self.follow(0, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertIn("SET GLOBAL read_only = OFF;\n", server.sent)
+
+    def test_the_watch_follows_a_writable_holder_in_doubt_only(self):
+        from keel.inspect.dbreading import Reading, Value
+        from keel.mesh import vip as vipstate
+        root = self.enterContext(__import__("tempfile").TemporaryDirectory())
+        os.makedirs(os.path.join(root, "var/lib/keel"))
+        with open(os.path.join(root, dbpair.ROLE_FILE), "w") as fob:
+            fob.write(dbpair.role_text("primary", VIP))
+        holder = dbpair.PairState(VIP, KEYS[0], KEYS[1], address(1),
+                                  "primary", address(0))
+        doc = {"database": {"server": {"engine": "mariadb"}}}
+        writable = Reading(role=Value("primary"), read_only=Value(False))
+        fenced = Reading(role=Value("primary"), read_only=Value(True))
+        vipstate.mark_unconfirmed(root, VIP, True)
+        self.assertTrue(dbwatch.needs_follow(root, holder, writable, doc))
+        self.assertFalse(dbwatch.needs_follow(root, holder, fenced, doc))
+
+
 class TestNoClaimAndNoAddress(FollowTestCase):
     """The security review of keel#104: no claim is no proof, a VIP gone
     from wg0 is followed again, and two runs never interleave"""
