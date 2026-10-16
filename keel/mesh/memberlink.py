@@ -45,6 +45,7 @@ from keel.mesh.listener import (
     READ_TIMEOUT,
     Capped,
     Limiter,
+    once,
     shut,
 )
 from keel.mesh.members import ANNOUNCE, LIST, MAX_BODY, PORT, Roster
@@ -207,10 +208,13 @@ class Front:
 
 @dataclass
 class Connection:
-    """What a handler needs of the connection it serves"""
+    """What a handler needs of the connection it serves; the handler
+    calls `release` before the answer leaves (keel#177), as the invite's
+    listener does"""
 
     front: Front
     read: threading.Timer
+    release: Callable[[], None]
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -232,6 +236,7 @@ class Handler(BaseHTTPRequestHandler):
         self.server.read.cancel()
         found = self.server.front.handle(self.command, self.path, body,
                                          plain(self.client_address[0]))
+        self.server.release()
         self.send_response(found.status)
         self.send_header("Content-Type", CONTENT_TYPE)
         self.send_header("Content-Length", str(len(found.body)))
@@ -246,11 +251,12 @@ class Handler(BaseHTTPRequestHandler):
 
 def serve_one(front: Front, raw: socket.socket, source: str,
               release: Callable[[], None]) -> None:
+    release = once(release)
     read = threading.Timer(REQUEST_DEADLINE, shut, ([raw],))
     read.start()
     try:
         raw.settimeout(READ_TIMEOUT)
-        Handler(raw, (source, 0), Connection(front, read))
+        Handler(raw, (source, 0), Connection(front, read, release))
     except (OSError, ValueError):
         pass
     finally:
