@@ -408,6 +408,22 @@ def replicate_from(
     )
 
 
+def keep_history(state: str) -> Statements:
+    """Give a seeded replica the binary log state of its copy
+
+    `state` is keel.system.dbgtid.carried. `RESET MASTER` first: the
+    state can be set only on an empty binary log, and what the node
+    logged before the copy replaced its data is not history of the copy
+    (keel#202).
+    """
+    return Statements(
+        "RESET MASTER;\n"
+        + (f"SET GLOBAL gtid_binlog_state = {literal(state)};\n"
+           if state else ""),
+        "start the binary log at the history of the copy",
+    )
+
+
 def stop_replicating() -> Statements:
     """Stop replicating and forget where from, which is half of promoting
 
