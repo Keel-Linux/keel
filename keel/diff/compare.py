@@ -390,8 +390,9 @@ def with_slaac_default(network: dict) -> dict:
 
 
 def with_overlay_defaults(network: dict) -> dict:
-    """The overlay's interface and port as apply renders them when the
-    spec leaves them out, so a machine carrying them is not drift. A copy.
+    """The overlay's interface and port, and each peer's keepalive, as
+    apply renders them when the spec leaves them out, so a machine
+    carrying them is not drift, and one without the keepalive is. A copy.
     """
     overlay = network.get("overlay")
     wg = overlay.get("wireguard") if isinstance(overlay, dict) else None
@@ -399,6 +400,10 @@ def with_overlay_defaults(network: dict) -> dict:
         return network
     wg = {"interface": wireguard.DEFAULT_INTERFACE,
           "listen_port": wireguard.DEFAULT_PORT, **wg}
+    if isinstance(wg.get("peers"), list):
+        wg["peers"] = [
+            {"persistent_keepalive": wireguard.DEFAULT_KEEPALIVE, **peer}
+            if isinstance(peer, dict) else peer for peer in wg["peers"]]
     return {**network, "overlay": {**overlay, "wireguard": wg}}
 
 
