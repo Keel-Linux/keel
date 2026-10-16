@@ -1,3 +1,17 @@
+keel (0.23.42) unstable; urgency=medium
+
+  * A seeded MariaDB replica starts its binary log at the history of the
+    copy (keel#202). The first primary wrote GTIDs at its first boot
+    under another server id; the replica never had them, so the primary
+    came back from every cut as diverged. After the load the replica
+    runs RESET MASTER and sets gtid_binlog_state.
+  * keel mesh join no longer says that etcd may not run when etcd runs
+    and another step of the apply failed (keel#198).
+  * keel diff does not count a PostgreSQL sender with no client address
+    as a replica (keel#201).
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 16 Oct 2026 20:00:00 +0000
+
 keel (0.23.41) unstable; urgency=medium
 
   * Every overlay peer gets PersistentKeepalive = 25 (keel#140). The

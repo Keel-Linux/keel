@@ -549,6 +549,9 @@ def stray(etcd: Etcd) -> None:
              " mesh's cluster")
 
 
+ETCD_ACTIVE = ("systemctl", "is-active", "--quiet", "etcd.service")
+
+
 def start(etcd: Etcd) -> bool:
     """`overlays.etcd: enabled` in this node's own spec, applied, once it
     holds its certificate: apply renders etcd's configuration and starts
@@ -570,7 +573,14 @@ def start(etcd: Etcd) -> bool:
         return False
     if change.code != 0:
         change.shown(etcd.err)
-        etcd.err(f"etcd: apply exited {change.code}; etcd may not run")
+        # the apply has other steps than etcd's (a database replica that
+        # joins before its pair exists has one refused, keel#198): say
+        # what is known of etcd, not what the exit code suggests
+        if etcd.node.run(ETCD_ACTIVE) is None:
+            etcd.err(f"etcd: apply exited {change.code}; etcd runs, so a"
+                     " step other than etcd failed: read the lines above")
+        else:
+            etcd.err(f"etcd: apply exited {change.code}; etcd may not run")
         return False
     etcdstate.write(etcd.root, etcdstate.STARTED, "started\n")
     return True
