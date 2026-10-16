@@ -1,3 +1,13 @@
+keel (0.23.38) unstable; urgency=medium
+
+  * The VIP fence of a MariaDB replica that rejoined or was reseeded is
+    cleared once it applied everything the holder logged (keel#192), as
+    keel#166 does for PostgreSQL. Before, a MariaDB pair failed over by
+    itself once only, and a second loss of the holder left both nodes
+    fenced and read only.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 16 Oct 2026 10:51:34 +0000
+
 keel (0.23.37) unstable; urgency=medium
 
   * etcd that keel spec apply starts for the cluster of cluster.json is
