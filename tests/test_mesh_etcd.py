@@ -314,6 +314,24 @@ class TestStartAndPromote(Mesh):
         self.assertIn("not started: this node holds no certificate",
                       self.text(0))
 
+    def test_the_start_enables_wireguard_that_etcd_requires(self):
+        """keel#188: after keel mesh join the spec holds network.overlay
+        and overlays.wireguard: disabled from the first boot; etcd
+        requires wireguard, so a start that enabled etcd alone wrote a
+        spec that does not validate, and etcd never started"""
+        import yaml
+        a, = self.members(1)
+        etcd.created(a)
+        doc = a.node.document()
+        doc["overlays"] = {**(doc.get("overlays") or {}),
+                           "wireguard": "disabled", "etcd": "disabled"}
+        with open(a.node.path, "w") as fob:
+            yaml.safe_dump(doc, fob)
+        self.assertTrue(etcd.start(a))
+        found = yaml.safe_load(open(a.node.path))["overlays"]
+        self.assertEqual((found["wireguard"], found["etcd"]),
+                         ("enabled", "enabled"))
+
     def test_promote_tries_then_hands_over(self):
         fake = FakeEtcd()
         a, b = self.members(2, etcd=fake)

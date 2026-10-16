@@ -107,6 +107,26 @@ class TestObserve(Root):
         actions, _ = etcd.plan_etcd(self.observed(), True)
         self.assertNotIsInstance(actions[0], Refuse)
 
+    def test_an_apply_that_starts_etcd_for_the_cluster_marks_it(self):
+        """keel#188: an apply that starts etcd for the cluster of
+        cluster.json records that keel started it, or every later apply
+        refused the member as one keel never started"""
+        self.formed()
+        os.remove(os.path.join(self.root, etcdstate.STARTED))
+        actions, _ = etcd.plan_etcd(self.observed(), True)
+        marks = [one for one in actions if isinstance(one, WriteFile)
+                 and one.path == etcdstate.STARTED]
+        self.assertEqual(len(marks), 1)
+        # under a root nothing starts, so nothing is marked
+        actions, _ = etcd.plan_etcd(self.observed(), False)
+        self.assertFalse(any(isinstance(one, WriteFile)
+                             and one.path == etcdstate.STARTED
+                             for one in actions))
+        # a member keel never started is still refused
+        os.makedirs(os.path.join(self.root, etcd.INITIALIZED))
+        actions, _ = etcd.plan_etcd(self.observed(), True)
+        self.assertIsInstance(actions[0], Refuse)
+
     def test_a_live_value_other_than_5_is_set_now(self):
         """keel#167: the kernel reads tcp_retries2 at each
         retransmission, so the value is set at once, with no restart"""

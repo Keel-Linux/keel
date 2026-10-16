@@ -139,6 +139,14 @@ def plan_etcd(state: EtcdState, live: bool) -> tuple[list[Action], bool]:
                        " keel-overlay-etcd marked it as etcd-server's own"
                        " lone member, and an operator any other")], False
     actions: list[Action] = []
+    if live and not state.initialized and not state.started:
+        # this apply starts etcd for this mesh's cluster, as the join and
+        # the form do: recorded, or every later apply refuses the member
+        # as one keel never started (keel#188)
+        actions.append(WriteFile(
+            etcdstate.STARTED, "started\n", SECRET_MODE, None,
+            f"write /{etcdstate.STARTED}: keel starts etcd here for this"
+            " mesh's cluster"))
     environment = etcdconf.environment(
         state.address, state.cluster, etcdconf.CRL in state.wanted)
     if state.current[etcdconf.ENVIRONMENT] != environment:

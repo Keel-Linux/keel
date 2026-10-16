@@ -1,3 +1,14 @@
+keel (0.23.37) unstable; urgency=medium
+
+  * etcd that keel spec apply starts for the cluster of cluster.json is
+    recorded as started by keel (keel#188), and the start of etcd at a
+    join enables the wireguard overlay that etcd requires. Before, a
+    first boot spec with wireguard disabled left etcd not started at
+    the third join, and after the operator enabled both, every apply
+    refused the member as one keel never started.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 16 Oct 2026 10:24:15 +0000
+
 keel (0.23.36) unstable; urgency=medium
 
   * A cut MariaDB primary no longer acknowledges writes that the new
