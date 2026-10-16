@@ -526,3 +526,69 @@ class TestObserve(ManifestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAnubisKeyOfAPair(PlanCase):
+    """Keel-Linux/common#56: the other member of a pair writes the
+    primary's Anubis key before anubis.service starts (decision 0041)"""
+
+    WEB_ON = {**ON, "nginx": "enabled", "anubis": "enabled"}
+
+    def web_state(self, **fields) -> ApplianceState:
+        web_units = {unit: UnitState(unit, "disabled", "inactive")
+                     for unit in UNITS + ("nginx.service",
+                                          "anubis.service")}
+        return self.state(resolved=gather(self.root, "web").resolved,
+                          units=web_units, **fields)
+
+    def web_plan(self, state: ApplianceState):
+        doc = {"version": 1, "appliance": {"name": "web"},
+               "overlays": self.WEB_ON}
+        steps = plan_appliance(doc, state, True, LIVE)
+        return [step for step in steps if step.field == "overlays.anubis"]
+
+    def test_a_key_asked_of_the_other_member_is_written_first(self):
+        from keel.system.anubiskey import KEY, AnubisKey
+        state = self.web_state(anubis_key=AnubisKey(value="ab" * 32))
+        (step,) = self.web_plan(state)
+        writes = [a for a in step.actions if isinstance(a, WriteFile)]
+        self.assertEqual([(w.path, w.content, w.mode) for w in writes],
+                         [(KEY, "ab" * 32 + "\n", 0o600)])
+        self.assertNotIn("ab" * 32, writes[0].describe())
+        kinds = [type(a).__name__ for a in step.actions]
+        self.assertLess(kinds.index("WriteFile"), kinds.index("Run"))
+        self.assertIn(("systemctl", "start", "anubis.service"),
+                      [a.argv for a in step.actions if isinstance(a, Run)])
+
+    def test_a_link_whose_target_is_gone_is_removed_before_the_write(self):
+        from keel.system.anubiskey import KEY, AnubisKey
+        state = self.web_state(anubis_key=AnubisKey(value="ab" * 32,
+                                                    dangling=True))
+        (step,) = self.web_plan(state)
+        kinds = [type(a).__name__ for a in step.actions]
+        self.assertEqual(kinds[:2], ["RemoveFile", "WriteFile"])
+        self.assertEqual(step.actions[0].path, KEY)
+
+    def test_a_replica_in_no_pair_yet_starts_nothing_and_says_why(self):
+        from keel.system.anubiskey import AnubisKey
+        state = self.web_state(anubis_key=AnubisKey(
+            waiting="the key is the primary's: keel vip pair first"))
+        (step,) = self.web_plan(state)
+        self.assertEqual([type(a).__name__ for a in step.actions], ["Note"])
+        self.assertIn("keel vip pair", step.actions[0].describe())
+
+    def test_a_primary_that_cannot_be_asked_is_refused(self):
+        from keel.system.anubiskey import AnubisKey
+        state = self.web_state(anubis_key=AnubisKey(
+            problem="the other node at fd00::1 did not answer"))
+        (step,) = self.web_plan(state)
+        self.assertEqual([type(a).__name__ for a in step.actions],
+                         ["Refuse"])
+        self.assertIn("did not answer", step.actions[0].describe())
+
+    def test_without_a_key_to_ask_the_step_is_as_before(self):
+        (step,) = self.web_plan(self.web_state())
+        self.assertFalse(any(isinstance(a, WriteFile)
+                             for a in step.actions))
+        self.assertIn(("systemctl", "start", "anubis.service"),
+                      [a.argv for a in step.actions if isinstance(a, Run)])
