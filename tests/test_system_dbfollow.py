@@ -187,9 +187,11 @@ class FollowTestCase(Pair):
                                self.said[claim].append)
 
     def follow(self, index: int, server: Server, confirmed: bool = False,
-               live: bool = True, wait: float = 0.0) -> dbfollow.Followed:
+               live: bool = True, wait: float = 0.0,
+               nothing_without_vip: bool = False) -> dbfollow.Followed:
         here = self.all[index]
         found = dbfollow.Followed()
+        found.nothing_without_vip = nothing_without_vip
         with mock.patch("keel.inspect.constants.ROOT_DEFAULT", here.root), \
                 mock.patch("keel.inspect.collect.paths.ROOT_DEFAULT",
                            here.root), \
@@ -397,6 +399,15 @@ class TestTheReplica(FollowTestCase):
         os.remove(os.path.join(self.all[1].root, dbtls.KEY))
         found = self.follow(1, Server(schemas=""))
         self.assertIn("certificate is not in place", found.problem)
+
+    def test_a_node_with_no_vip_that_asks_for_it_has_nothing_to_follow(self):
+        """keel#211: the command and the unit are not a failure there; a
+        spec apply that declares a role still refuses (above)"""
+        self.nodes(vips=(None, None), paired=False)
+        found = self.follow(2, Server(), nothing_without_vip=True)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertTrue(any("nothing to follow" in line
+                            for line in found.lines), found.lines)
 
     def test_a_node_in_no_pair_or_with_no_claim_says_so(self):
         self.nodes(vips=(None, None), paired=False)

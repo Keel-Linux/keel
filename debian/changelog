@@ -1,3 +1,13 @@
+keel (0.23.44) unstable; urgency=medium
+
+  * keel database follow, which keel-database-follow.service runs, says
+    "nothing to follow" and exits 0 on a node with no appliance.vip, the
+    witness of a pair. It exited 16, and the unit stayed failed
+    (keel#211). keel spec apply that declares a role on such a node still
+    refuses.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Sun, 18 Oct 2026 17:00:00 +0000
+
 keel (0.23.43) unstable; urgency=medium
 
   * keel mesh join names the failed step when the apply fails on a step
