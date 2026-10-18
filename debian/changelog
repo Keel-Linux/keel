@@ -3,10 +3,11 @@ keel (0.23.45) unstable; urgency=medium
   * An old PostgreSQL primary rejoins with pg_rewind against the new
     primary when it can, and no longer needs a full reseed (handbook
     decision 0054, amendment of 2026-10-18). Follow dumps the fenced
-    node, stops it, runs pg_rewind --dry-run, then pg_rewind, and starts
-    it as a standby on the new timeline. If the dry run refuses, nothing
+    node, stops it, runs pg_rewind, and starts it as a standby on the
+    new timeline. If pg_rewind refuses before the copy begins, nothing
     changes and the confirmed reseed stays the fallback. A rewind that
-    fails halfway marks the copy unusable until the reseed.
+    fails halfway marks the copy unusable until the reseed. There is no
+    dry run: it reads as much as the run does.
   * The pair drop-in adds wal_keep_size = 256MB. An apply of the older
     drop-in writes it and reloads the server; it never restarts it.
   * The holder grants the replication role the four functions that

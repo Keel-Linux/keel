@@ -51,29 +51,32 @@ In keel 0.23.18. The numbers under "Measured" come from the CI job
   after it. A node holding no user database is seeded without any
   confirmation.
 - **The rewind** (`keel.system.dbpgrewind`). After the dump, follow
-  stops the fenced server and runs `pg_rewind --dry-run` against the
-  holder. The dry run changes nothing. If it passes, follow runs
-  `pg_rewind`, writes the follow drop-in and `standby.signal`, starts
-  the server, and waits for the walreceiver to stream on the holder's
-  timeline. What the old primary wrote after the fork point is
-  discarded, and the dump holds it. The holder is only read, so what
-  it acknowledged stays. No flag is needed. Follow does not rewind
-  when `--destroy-local-database` is given: that flag asks for the
-  reseed.
-- **When the rewind is not tried.** Follow does not stop the server
-  if its `wal_log_hints` and `data_checksums` are both off, if
-  `full_page_writes` is off, if `pg_rewind` is not installed, or if
-  the holder is itself a standby. It says why, records the divergence
-  as before, and waits for the confirmed reseed. If the dry run fails,
-  the server starts again as the fenced standby it was, nothing is
-  changed, and the same reseed path applies. The refusal is marked
+  stops the fenced server and runs `pg_rewind --progress` against the
+  holder. Then it writes the follow drop-in and `standby.signal`,
+  starts the server, and waits for the walreceiver to stream on the
+  holder's timeline. What the old primary wrote after the fork point
+  is discarded, and the dump holds it. The holder is only read, so
+  what it acknowledged stays. No flag is needed. Follow does not
+  rewind when `--destroy-local-database` is given: that flag asks for
+  the reseed. There is no dry run: a dry run reads as much as the
+  run does. On the design case's link (250 ms, 1.5 % loss) the read
+  of the WAL segments takes 20 minutes, and a dry run would spend it
+  twice.
+- **When the rewind is not tried or refuses.** Follow does not stop
+  the server if its `wal_log_hints` and `data_checksums` are both
+  off, if `full_page_writes` is off, if `pg_rewind` is not
+  installed, or if the holder is itself a standby. It says why,
+  records the divergence as before, and waits for the confirmed
+  reseed. If `pg_rewind` fails before it prints `need to copy`, it
+  changed nothing: the server starts again as the fenced standby it
+  was, and the same reseed path applies. The refusal is marked
   (`/var/lib/keel/database/rewind-refused`), because the server is
-  stopped for each dry run: the next try is 10 minutes later.
-- **A rewind that fails halfway.** If `pg_rewind` fails after its dry
-  run passed, the data directory is half copied. Follow writes
-  `/var/lib/keel/database/rewind-failed`, never runs `pg_rewind` on
-  that copy again, and says that only the confirmed reseed replaces
-  it. The reseed removes the mark.
+  stopped for each run: the next try is 10 minutes later.
+- **A rewind that fails halfway.** If `pg_rewind` fails after it
+  printed `need to copy`, the data directory is half copied. Follow
+  writes `/var/lib/keel/database/rewind-failed`, never runs
+  `pg_rewind` on that copy again, and says that only the confirmed
+  reseed replaces it. The reseed removes the mark.
 - **What the rewind needs.** `wal_log_hints = on` and
   `wal_keep_size = 256MB` are in the pair drop-in. The first has been
   there since 0.23.x. The second keeps the WAL back to the last

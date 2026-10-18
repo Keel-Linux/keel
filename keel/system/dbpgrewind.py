@@ -12,18 +12,20 @@ the cheaper path, in this order:
    holder what it is: a node that cannot be rewound is not stopped;
 2. stop the server and wait until its postmaster is gone: a clean
    shutdown, which pg_rewind needs;
-3. run pg_rewind with --dry-run. It changes nothing. When it refuses,
-   the server starts again as the fenced standby it was, and the caller
-   records the divergence;
-4. run pg_rewind. It only changes this node: it reads the holder and
-   never writes to it, so what the holder acknowledged stays. What this
-   node wrote after the fork point is discarded; the dump that the
-   caller kept first holds it;
+3. run pg_rewind with --progress. It only changes this node: it reads
+   the holder and never writes to it, so what the holder acknowledged
+   stays. What this node wrote after the fork point is discarded; the
+   dump that the caller kept first holds it. A run that fails before it
+   says "need to copy" changed nothing: the server starts again as the
+   fenced standby it was, and the caller records the divergence. There
+   is no dry run, because a dry run reads as much as the run does, and
+   on the design case's link (250 ms, 1.5 % loss) that is 20 minutes
+   spent twice;
 5. write the follow drop-in and standby.signal, start the server, and
    wait for the walreceiver to stream from the holder on the new
    timeline.
 
-A run that fails after its dry run passed leaves the data directory
+A run that fails after it said "need to copy" leaves the data directory
 half copied. The mark FAILED then says that this copy is unusable:
 nothing runs pg_rewind on it again and only the confirmed reseed
 replaces it (the manual says to take a new copy).
@@ -41,13 +43,16 @@ from keel.system import dbpgseed, dbpostgres
 from keel.system.dbseed import _run, spool
 
 FAILED = "var/lib/keel/database/rewind-failed"
+# pg_rewind --progress prints this line when the copy begins
+COPY_BEGINS = "need to copy"
 # the dump taken before the rewind: the rewind writes no divergence
 # record, and a run after a half copy or a standby that did not stream
 # must not dump the half copied cluster again
 DUMP = "var/lib/keel/database/rewind-dump"
-# the last dry run that refused, with the reason: its time is the time
-# of the refusal. The server is stopped for each dry run, so a node that
-# cannot be rewound asks again only after RETRY_S, not at each follow
+# the last run that failed before the copy, with the reason: its time is
+# the time of the refusal. The server is stopped for each run, so a node
+# that cannot be rewound asks again only after RETRY_S, not at each
+# follow
 REFUSED = "var/lib/keel/database/rewind-refused"
 RETRY_S = 600
 # what pg_rewind needs of this node: either data checksums or
@@ -103,7 +108,7 @@ def keep(root: str, dump: str) -> None:
 
 def _write(root: str, relative: str, text: str) -> None:
     """A mark under the state directory; best effort, since a mark that
-    cannot be written only costs a second dump or a second dry run"""
+    cannot be written only costs a second dump or a second run"""
     path = os.path.join(root, relative)
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -168,7 +173,7 @@ def rejoin(root: str, host: str, port: int, password: str, tls: str,
     divergence path, with the reseed that the operator confirms."""
     waiting = _refused_ago(root)
     if waiting is not None:
-        found.say(f"no pg_rewind: the dry run refused {waiting:.0f} s ago"
+        found.say(f"no pg_rewind: the last run refused {waiting:.0f} s ago"
                   f" and the next one is {RETRY_S - waiting:.0f} s away")
         return FALLBACK
     why = _cannot(root, runner)
@@ -219,13 +224,12 @@ def _rewind(root, argv, dropdir, datadir, unit, source, found, runner,
     if problem:
         found.fail(f"{problem}; nothing else was changed")
         return HALT
-    refused = _run(runner, argv + ("--dry-run",))
-    if refused:
+    failed = _run(runner, argv + ("--progress",))
+    if failed and COPY_BEGINS not in failed:
         found.say("no pg_rewind: pg_rewind cannot rewind this node"
-                  f" ({_tail(refused)}); nothing was changed")
-        _write(root, REFUSED, _tail(refused))
+                  f" ({_tail(failed)}); nothing was changed")
+        _write(root, REFUSED, _tail(failed))
         return _started(unit, found, runner)
-    failed = _run(runner, argv)
     if failed:
         return _failed(root, unit, failed, found, runner)
     host, port, password, tls = source
@@ -262,7 +266,7 @@ def _standby(dropdir: str, datadir: str, action) -> str:
 
 
 def _started(unit: str, found, runner) -> Outcome:
-    """The fenced standby started again after a dry run that refused"""
+    """The fenced standby started again after a run that refused"""
     problem = _run(runner, ("systemctl", "start", unit))
     if problem:
         found.fail(f"the server could not be started again: {problem}")
@@ -271,7 +275,7 @@ def _started(unit: str, found, runner) -> Outcome:
 
 
 def _failed(root: str, unit: str, detail: str, found, runner) -> Outcome:
-    """The run failed after the dry run passed: the mark, and the server
+    """The run failed after the copy began: the mark, and the server
     started again if it can, as the standby that follows nobody"""
     detail = _tail(detail)
     _write(root, FAILED, detail)

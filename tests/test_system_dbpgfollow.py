@@ -76,8 +76,8 @@ class Server:
         self.holder_system = holder_system
         # what the server says of wal_log_hints, data_checksums and
         # full_page_writes (unknown by default: no rewind is tried),
-        # and how pg_rewind answers: "ok", "refused" (the dry run
-        # fails) or "halfway" (the dry run passes, the run fails)
+        # and how pg_rewind answers: "ok", "refused" (it fails before
+        # the copy) or "halfway" (it fails after the copy began)
         self.settings = settings
         self.rewind = rewind
         self.grants_fail = grants_fail
@@ -113,12 +113,18 @@ class Server:
             return subprocess.CompletedProcess(
                 argv, 1, b"", b'ERROR:  role "repl" does not exist')
         if any(one.endswith("/pg_rewind") for one in argv):
-            dry = "--dry-run" in argv
-            if self.rewind == "refused" or (
-                    self.rewind == "halfway" and not dry):
+            # pg_rewind --progress says "need to copy" when the copy
+            # begins: a failure before it changed nothing, a failure
+            # after it left the data directory half copied
+            if self.rewind == "refused":
                 return subprocess.CompletedProcess(
                     argv, 1, b"", b"pg_rewind: error: target server needs"
                     b" to use either data checksums or wal_log_hints")
+            if self.rewind == "halfway":
+                return subprocess.CompletedProcess(
+                    argv, 1, b"", b"pg_rewind: need to copy 51 MB (total"
+                    b" source directory size is 70 MB)\npg_rewind: error:"
+                    b" could not fetch remote file")
             return subprocess.CompletedProcess(argv, 0, b"", b"")
         if argv[:2] == ["ss", "-lntH"]:
             out = f"LISTEN 0 80 [{address(1)}]:5432 [::]:*\n"

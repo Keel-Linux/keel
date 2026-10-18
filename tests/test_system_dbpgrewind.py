@@ -3,7 +3,7 @@
 (decision 0054, amendment of 2026-10-18)
 
 The follow of tests/test_system_dbpgfollow.py with a server that answers
-as 17 does: the settings pg_rewind needs, the dry run, the run, and the
+as 17 does: the settings pg_rewind needs, the run, and the
 walreceiver. The real run is tests/postgres_netns.py.
 """
 
@@ -57,17 +57,12 @@ class TestTheRewind(FollowTestCase):
         fence = server.argv.index(["systemctl", "restart", UNIT])
         dump = index_of(server, "pg_dumpall")
         stop = server.argv.index(["systemctl", "stop", UNIT])
-        dry = next(n for n, argv in enumerate(server.argv)
-                   if "--dry-run" in argv)
         run = next(n for n, argv in enumerate(server.argv)
-                   if argv[-1:] != ["--dry-run"] and any(
-                       one.endswith("/pg_rewind") for one in argv)
-                   and "--dry-run" not in argv)
+                   if any(one.endswith("/pg_rewind") for one in argv))
         start = server.argv.index(["systemctl", "start", UNIT])
         self.assertLess(fence, dump)
         self.assertLess(dump, stop)
-        self.assertLess(stop, dry)
-        self.assertLess(dry, run)
+        self.assertLess(stop, run)
         self.assertLess(run, start)
         # no copy of the holder, no divergence, no alert
         self.assertFalse(self.ran(server, "pg_basebackup"))
@@ -81,13 +76,17 @@ class TestTheRewind(FollowTestCase):
         self.assertIn(f"primary_slot_name = '{dbpostgres.SLOT}'", dropin)
         self.assertIn("role=replica", self.role_file(1))
 
-    def test_the_dry_run_comes_first_and_changes_nothing(self):
+    def test_pg_rewind_runs_once_and_says_when_the_copy_begins(self):
+        """A dry run copies as much as the run does: on the design
+        case's link that is 20 minutes spent twice. One run, with
+        --progress, whose "need to copy" line marks the start of the
+        copy"""
         server, found, _ = self.follow_old_primary()
         calls = [argv for argv in server.argv
                  if any(one.endswith("/pg_rewind") for one in argv)]
-        self.assertEqual(len(calls), 2)
-        self.assertIn("--dry-run", calls[0])
-        self.assertNotIn("--dry-run", calls[1])
+        self.assertEqual(len(calls), 1)
+        self.assertIn("--progress", calls[0])
+        self.assertNotIn("--dry-run", calls[0])
 
     def test_pg_rewind_gets_the_cluster_the_holder_and_the_tls(self):
         server, found, _ = self.follow_old_primary()
@@ -159,7 +158,7 @@ class TestTheRewind(FollowTestCase):
         self.assertIn("is itself a standby", " ".join(found.lines))
         self.assertNotIn(["systemctl", "stop", UNIT], server.argv)
 
-    def test_a_dry_run_that_fails_leaves_the_node_as_it_was(self):
+    def test_a_run_that_fails_before_the_copy_leaves_the_node_as_it_was(self):
         server, found, alerted = self.follow_old_primary(
             old_primary(rewind="refused"))
         self.assertIn("diverged", found.problem)
@@ -168,7 +167,7 @@ class TestTheRewind(FollowTestCase):
         calls = [argv for argv in server.argv
                  if any(one.endswith("/pg_rewind") for one in argv)]
         self.assertEqual(len(calls), 1)
-        # stopped for the dry run, started again as the fenced standby
+        # stopped for the run, started again as the fenced standby
         stop = server.argv.index(["systemctl", "stop", UNIT])
         start = server.argv.index(["systemctl", "start", UNIT])
         self.assertLess(stop, start)
@@ -180,8 +179,8 @@ class TestTheRewind(FollowTestCase):
         self.assertEqual(dbfollow.diverged(root)["holder"], address(0))
         self.assertEqual(alerted.call_count, 1)
 
-    def test_a_dry_run_that_fails_is_not_asked_again_at_once(self):
-        """The server is stopped for each dry run: a node that cannot be
+    def test_a_run_that_fails_before_the_copy_is_not_asked_again_at_once(self):
+        """The server is stopped for each run: a node that cannot be
         rewound must not stop and start every 30 s"""
         server, found, _ = self.follow_old_primary(
             old_primary(rewind="refused"))
@@ -192,7 +191,7 @@ class TestTheRewind(FollowTestCase):
         self.assertEqual(server.argv.count(["systemctl", "stop", UNIT]),
                          stops)
 
-    def test_a_dry_run_that_failed_is_asked_again_after_a_while(self):
+    def test_a_run_that_failed_before_the_copy_is_asked_again_after_a_while(self):
         server, found, _ = self.follow_old_primary(
             old_primary(rewind="refused"))
         server.rewind = "ok"
@@ -412,7 +411,7 @@ class TestWhatCanGoWrong(FollowTestCase):
         self.assertIn("rewound and could not start", found.problem)
         self.assertIn("no memory", found.problem)
 
-    def test_a_server_that_does_not_start_after_a_dry_run_is_said(self):
+    def test_a_server_that_does_not_start_after_a_refused_run_is_said(self):
         server, _, found = self.run_follow(
             lambda one: Failing(one, ("systemctl", "start", UNIT),
                             detail=b"no memory"),
