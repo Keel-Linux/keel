@@ -1031,6 +1031,23 @@ class BootWrites:
             self.halt.wait(2)
 
 
+def stuck_facts(root: str) -> dict:
+    """What a rewind that never ended leaves to read: the processes, the
+    unit's journal and the state directory of the node"""
+    return {
+        "ps": sh("sh", "-c", "ps -eo pid,ppid,etimes,stat,args | grep -E"
+                 " 'pg_rewind|postgres|systemctl|runuser|keel' | grep -v"
+                 " grep | cut -c1-240", check=False),
+        "journal": sh("journalctl", "-u", service_of(root), "-o", "cat",
+                      "--no-pager", "-n", "40", check=False),
+        "state": sh("sh", "-c", f"ls -la {root}/var/lib/keel/database;"
+                    f" ls {root}/var/backups/keel/postgresql", check=False),
+        "pgdata": sh("sh", "-c", f"ls {root}/var/lib/postgresql/*/main |"
+                     " head -40; cat "
+                     f"{root}/var/lib/postgresql/*/main/postmaster.pid"
+                     " 2>&1 | head -2", check=False)}
+
+
 def crashed(report: dict, pids: list[int], roots: list[str]) -> None:
     """(c), (e), (d): the primary A cut off while the application
     writes, then killed; B promoted by itself once A's lease expired; A back
@@ -1130,6 +1147,8 @@ def crashed(report: dict, pids: list[int], roots: list[str]) -> None:
             == "streaming" and dbfollow.diverged(a_root) is None,
             360, 1)
         rewound_at = time.time()
+        if report["e_rewound_s"] is None:
+            report["e_stuck"] = stuck_facts(a_root)
         report["e_follow_log_rewound"] = agent_send("A", "followlog")
         mark(report, "case_e_rewound")
     finally:
