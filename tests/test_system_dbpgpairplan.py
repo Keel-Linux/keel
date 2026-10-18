@@ -15,7 +15,7 @@ from vip_helpers import KEYS, VIP, address
 from keel.inspect import constants as paths
 from keel.inspect.tree import File
 from keel.mesh import etcdstate
-from keel.system import dbpair, dbpgpairplan, dbpostgres, dbtls
+from keel.system import dbpair, dbpgpairplan, dbpgrewind, dbpostgres, dbtls
 from keel.system.actions import (
     EnsureDatabaseTls,
     FollowVip,
@@ -58,7 +58,7 @@ def state(pair: PairState = PAIR, dropin: str | None = None,
           pair_dropin: str | None = None, hba: str | None = None,
           ident: str | None = None, nonlocal_bind: str = "0",
           credential_known: bool = True, binary: str = BINARY,
-          enabled: str = "enabled") -> DatabaseState:
+          enabled: str = "enabled", down: str = "") -> DatabaseState:
     return DatabaseState(
         engine="postgresql", live=True, binary=binary,
         reading=postgresql_reading(PG_STANDALONE, SOCKETS),
@@ -71,7 +71,7 @@ def state(pair: PairState = PAIR, dropin: str | None = None,
         credential=Credential(value=PASSWORD) if credential_known
         else Credential(problem="not held here yet"),
         pair=pair, nonlocal_bind=File("sysctl", nonlocal_bind),
-        enabled=enabled,
+        enabled=enabled, down=down,
     )
 
 
@@ -280,6 +280,37 @@ class TestThePairPlan(unittest.TestCase):
                       sent[0].statements)
         self.assertIn("CREATE ROLE repl", sent[1].statements)
         self.assertIn(PASSWORD.replace("'", "''"), sent[1].statements)
+
+    def test_a_server_down_after_a_failed_rewind_goes_to_the_reseed(self):
+        """pg_rewind failed halfway and the copy does not start: the
+        confirmed reseed replaces it and needs no answer from the
+        server (0054, amendment of 2026-10-18)"""
+        import tempfile
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as root:
+            mark = os.path.join(root, dbpgrewind.FAILED)
+            os.makedirs(os.path.dirname(mark))
+            with open(mark, "w") as fob:
+                fob.write("pg_rewind failed\n")
+            down = state(down="postgresql does not start")
+            with mock.patch("keel.system.dbpgpairplan.paths.ROOT_DEFAULT",
+                            root):
+                confirmed = plan_database(DOC, down, True, "/spec.yaml")
+                unconfirmed = plan_database(DOC, down, False, "/spec.yaml")
+        follows = [one for step in confirmed for one in step.actions
+                   if one.__class__.__name__ == "FollowVip"]
+        self.assertEqual(len(follows), 1, confirmed)
+        self.assertTrue(follows[0].confirmed)
+        self.assertEqual(len(confirmed), 1)
+        refused = [one for step in unconfirmed for one in step.actions
+                   if isinstance(one, Refuse)]
+        self.assertIn("not answering", refused[0].summary)
+
+    def test_a_server_down_with_no_failed_rewind_is_refused(self):
+        down = state(down="postgresql does not start")
+        plan = plan_database(DOC, down, True, "/spec.yaml")
+        refused = only(plan[0], Refuse)
+        self.assertIn("not answering", refused[0].summary)
 
     def test_a_missing_credential_refuses_the_authorizations(self):
         plan = plan_database(DOC, state(credential_known=False), False)

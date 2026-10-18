@@ -33,7 +33,7 @@ changed hba or ident file alone is reloaded, which is enough for both.
 import os
 
 from keel.inspect import constants as paths
-from keel.system import dbpair, dbpostgres, dbtls
+from keel.system import dbpair, dbpgrewind, dbpostgres, dbtls
 from keel.system.actions import (
     Action,
     EnsureDatabaseTls,
@@ -74,6 +74,11 @@ NAME_NOTE = (
     " name its subject, and docs/spec.md calls a name fragile for this"
     " reason: it fails quietly when DNS does"
 )
+UNUSABLE_NOTE = (
+    "the copy of this node is unusable (pg_rewind failed halfway) and its"
+    " server does not answer: --destroy-local-database replaces it with a"
+    " copy of the holder"
+)
 UNCHANGED = (
     "unchanged ({path}, a paired node, primary-capable; the hba, ident"
     " and pair drop-in beside it are unchanged too)"
@@ -87,6 +92,12 @@ def plan_pair(doc: dict, state: DatabaseState, confirmed: bool,
     server = declared_server(doc)
     declared = str(server.get("role") or "")
     pair = state.pair
+    if state.down and confirmed and dbpgrewind.broken(paths.ROOT_DEFAULT):
+        # pg_rewind failed halfway and the copy does not start: only the
+        # confirmed reseed replaces it, and it needs no answer from the
+        # server (0054, amendment of 2026-10-18)
+        return [Step(ROLE_FIELD, (Note(UNUSABLE_NOTE), FollowVip(
+            spec, confirmed)))]
     refusal = cannot_act(state, declared)
     if refusal:
         return [Step(FIELD, (refusal,))]
