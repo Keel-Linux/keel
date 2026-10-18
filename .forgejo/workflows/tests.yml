@@ -21,6 +21,12 @@ jobs:
     with:
       threshold: 95
       package: keel
+      # Four pytest-xdist workers. The tests job was one
+      # process of 18 minutes and set the wall time of every pull
+      # request. Four workers is what the VM can give without
+      # starving the container jobs. Coverage is measured in every
+      # worker, and the gate stays 95 percent.
+      workers: "4"
       # gnupg and gpgv are what the channel tests sign and verify
       # with. Named rather than assumed: without them those tests
       # skip, and a skipped suite would pass the coverage gate on
