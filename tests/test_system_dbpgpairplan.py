@@ -212,6 +212,43 @@ class TestThePairPlan(unittest.TestCase):
         self.assertNotIn(("systemctl", "reload", dbpostgres.boot_unit()),
                          runs)
 
+    def test_a_pair_dropin_of_an_older_keel_is_rewritten_and_reloaded(self):
+        """0.23.44 adds wal_keep_size, which the server takes on a
+        reload: the upgrade never restarts a primary that serves clients
+        (0054, amendment of 2026-10-18)"""
+        dropin, _, hba, ident = wanted_files(DOC, state())
+        ident_path = os.path.join(paths.ROOT_DEFAULT, state().ident.path)
+        older = dbpostgres.pair_dropin_text(ident_path, legacy=True)
+        self.assertNotIn("wal_keep_size", older)
+        plan = plan_database(
+            DOC, state(dropin=dropin, pair_dropin=older, hba=hba,
+                       ident=ident, nonlocal_bind="1"), False)
+        runs = [one.argv for one in only(plan[0], Run)]
+        self.assertIn(("systemctl", "reload", dbpostgres.boot_unit()), runs)
+        self.assertNotIn(("systemctl", "restart", dbpostgres.boot_unit()),
+                         runs)
+        written = {one.path: one.content
+                   for one in only(plan[0], WriteFile)}
+        self.assertEqual(list(written), [PG_PAIR])
+        self.assertIn("wal_keep_size = 256MB\n", written[PG_PAIR])
+        self.assertIn("synchronous_standby_names = 'FIRST 1", written[PG_PAIR])
+
+    def test_an_older_pair_dropin_that_commits_alone_stays_alone(self):
+        dropin, _, hba, ident = wanted_files(DOC, state())
+        ident_path = os.path.join(paths.ROOT_DEFAULT, state().ident.path)
+        older = dbpostgres.alone_text(
+            dbpostgres.pair_dropin_text(ident_path, legacy=True))
+        plan = plan_database(
+            DOC, state(dropin=dropin, pair_dropin=older, hba=hba,
+                       ident=ident, nonlocal_bind="1"), False)
+        written = {one.path: one.content
+                   for one in only(plan[0], WriteFile)}
+        self.assertIn("wal_keep_size = 256MB\n", written[PG_PAIR])
+        self.assertIn("synchronous_standby_names = ''", written[PG_PAIR])
+        runs = [one.argv for one in only(plan[0], Run)]
+        self.assertNotIn(("systemctl", "restart", dbpostgres.boot_unit()),
+                         runs)
+
     def test_a_name_origin_gets_a_line_but_pins_no_certificate(self):
         doc = {
             **DOC,
@@ -232,10 +269,12 @@ class TestThePairPlan(unittest.TestCase):
         self.assertIn("db.example.org", notes)
         self.assertIn("pins no certificate", notes)
 
-    def test_the_authorizations_send_the_slot_and_the_role(self):
+    def test_the_authorizations_send_the_slot_the_role_and_the_grants(self):
         plan = plan_database(DOC, state(), False)
         sent = only(plan[1], RunSql)
-        self.assertEqual(len(sent), 2)
+        self.assertEqual(len(sent), 3)
+        self.assertIn("GRANT EXECUTE ON FUNCTION pg_catalog.pg_ls_dir",
+                      sent[2].statements)
         self.assertEqual(sent[0].argv, dbpostgres.CLIENT)
         self.assertIn("pg_create_physical_replication_slot('keel')",
                       sent[0].statements)

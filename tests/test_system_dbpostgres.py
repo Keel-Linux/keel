@@ -267,6 +267,40 @@ class TestSlotStatements(unittest.TestCase):
             "SET synchronous_commit = local;\n"), made.text)
 
 
+class TestThePairKeepsWalForTheRewind(unittest.TestCase):
+    def test_the_pair_dropin_keeps_wal_and_hints(self):
+        text = dbpostgres.pair_dropin_text("/etc/p/ident")
+        self.assertIn("wal_log_hints = on\n", text)
+        self.assertIn("wal_keep_size = 256MB\n", text)
+
+    def test_the_older_text_has_no_keep_size(self):
+        older = dbpostgres.pair_dropin_text("/etc/p/ident", legacy=True)
+        self.assertIn("wal_log_hints = on\n", older)
+        self.assertNotIn("wal_keep_size", older)
+        self.assertIn("ident_file = '/etc/p/ident'\n", older)
+
+
+class TestRewindStatements(unittest.TestCase):
+    def test_the_role_may_call_the_four_functions_of_pg_rewind(self):
+        made = dbpostgres.rewind_statements()
+        self.assertEqual(len(dbpostgres.REWIND_FUNCTIONS), 4)
+        for name in dbpostgres.REWIND_FUNCTIONS:
+            self.assertIn(f"GRANT EXECUTE ON FUNCTION {name} TO repl;",
+                          made.text)
+        self.assertIn("pg_rewind", made.summary)
+
+    def test_the_grants_are_refused_on_no_standby_and_commit_alone(self):
+        """A grant is refused in recovery, and under the pair's
+        synchronous commit it would wait for a standby that may not
+        exist yet, the way slot_statements has it"""
+        made = dbpostgres.rewind_statements()
+        self.assertTrue(made.text.startswith(
+            "SET synchronous_commit = local;\n"), made.text)
+        self.assertIn("IF pg_is_in_recovery() THEN", made.text)
+        self.assertLess(made.text.index("RETURN"),
+                        made.text.index("GRANT"))
+
+
 class TestSysctlText(unittest.TestCase):
     def test_the_pair_binds_the_vip_on_both_nodes(self):
         text = dbpostgres.sysctl_text()

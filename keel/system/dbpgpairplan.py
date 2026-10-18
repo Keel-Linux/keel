@@ -7,8 +7,8 @@ configuration, whatever the VIP's role: the drop-in of a
 primary-capable node (its listen addresses, the hba file, the TLS
 files of the leaf keel.system.dbtls made for this engine), the pair's
 drop-in (synchronous commit waits for the standby of application_name
-`keel`, with no timeout, and wal_log_hints is the revisit path for
-pg_rewind), the whole of pg_hba.conf with a replication line and a
+`keel`, with no timeout, and wal_log_hints and wal_keep_size are what
+pg_rewind needs), the whole of pg_hba.conf with a replication line and a
 postgres-database line per declared origin, and the user name map
 pg_ident.conf the replication lines' cert method consults: a
 replication connection's certificate CN is `<member> postgresql`,
@@ -144,6 +144,16 @@ def _configuration(server: dict, state: DatabaseState,
     pair_kept = state.pair_dropin.readable and \
         state.pair_dropin.text in (pair_wanted,
                                    dbpostgres.alone_text(pair_wanted))
+    # the text of keel before 0.23.44 lacks wal_keep_size, which the
+    # server takes on a reload: written, never a restart (a primary
+    # that serves clients is not restarted for it), and a primary that
+    # commits alone keeps committing alone
+    pair_older = dbpostgres.pair_dropin_text(ident_path, legacy=True)
+    pair_reload = state.pair_dropin.readable and \
+        state.pair_dropin.text in (pair_older,
+                                   dbpostgres.alone_text(pair_older))
+    if pair_reload and dbpostgres.commits_alone(state.pair_dropin.text):
+        pair_wanted = dbpostgres.alone_text(pair_wanted)
     hba_kept = state.hba.readable and state.hba.text == hba_wanted
     ident_kept = state.ident.readable and \
         state.ident.text == ident_wanted
@@ -186,7 +196,7 @@ def _configuration(server: dict, state: DatabaseState,
             state.ident.path, ident_wanted, DROPIN_MODE, None,
             f"write {state.ident.path}: the peer's certificate CN mapped"
             " to the replication role"))
-    if not (dropin_kept and pair_kept):
+    if not (dropin_kept and (pair_kept or pair_reload)):
         actions.append(Run(
             ("systemctl", "restart", dbpostgres.boot_unit()),
             "restart the server, which is the only way these take"
@@ -215,7 +225,8 @@ def _certificate_names(allowed: list[str]) -> list[str]:
 
 
 def _authorizations(server: dict, state: DatabaseState) -> Step:
-    """The replication role and the pair's slot, as declared
+    """The replication role, the pair's slot and the grants that the
+    rewind of an old primary reads through, as declared
 
     Both statements are idempotent, so they are sent on every apply;
     the hba file's rewrite is what withdraws an origin (its line goes
@@ -226,9 +237,11 @@ def _authorizations(server: dict, state: DatabaseState) -> Step:
         return Step(AUTHORIZATIONS, (Refuse(state.credential.problem),))
     slot = dbpostgres.slot_statements()
     role = dbpostgres.role_statements(state.credential.value)
+    rewind = dbpostgres.rewind_statements()
     return Step(AUTHORIZATIONS, (
         RunSql(dbpostgres.CLIENT, slot.text, slot.summary),
         RunSql(dbpostgres.CLIENT, role.text, role.summary),
+        RunSql(dbpostgres.CLIENT, rewind.text, rewind.summary),
     ))
 
 

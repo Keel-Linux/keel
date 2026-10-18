@@ -14,15 +14,16 @@ The other rows:
 | held by this node's newest claim, not on wg0 | a primary is stopped: pg cannot be made read only while it runs, and a stopped server takes no writes; a standby refuses them already |
 | held by the other member | a standby of the holder left alone; a server that holds data and takes writes (an old primary) fenced first, a standby that follows nobody; then seeded from the holder, or reseeded once confirmed |
 
-The rejoin (0054, "rejoin after promotion = confirmed reseed", no
-pg_rewind this version): timelines answer whether the copy on disk is
+The rejoin (0054, amended 2026-10-18: pg_rewind when it can, else the
+confirmed reseed): timelines answer whether the copy on disk is
 the holder's history or one this node's own writes forked from — the
 holder's is asked with the replication protocol (IDENTIFY_SYSTEM, the
 replication privilege is enough for the pair's role) over TLS, this
 node's from its current WAL file's name. A node holding no user
 database is seeded without the confirmation: there is nothing of its
 own to lose. A node holding data is dumped first (pg_dumpall, the
-twin of the MariaDB twin's), and reseeds only on
+twin of the MariaDB twin's). Then keel.system.dbpgrewind tries
+pg_rewind against the holder. When it cannot, the node reseeds only on
 --destroy-local-database; until then the divergence is recorded, the
 way dbfollow's GTID errancy is, under the same path, so inspect and
 diff read either engine's record.
@@ -38,7 +39,8 @@ from keel.mesh import vip as vipstate
 from keel.monitor import alerting
 from keel.spec.constants import DEFAULT_PORTS
 from keel.spec.origins import canonical
-from keel.system import dbpair, dbpgpromote, dbpgseed, dbpostgres, dbtls
+from keel.system import dbpair, dbpgpromote, dbpgrewind, dbpgseed, \
+    dbpostgres, dbtls
 from keel.system.actions import PromoteReplica
 from keel.system.database import DRAIN_TIMEOUT, REPLICA
 from keel.system.dbfollow import DIVERGED
@@ -79,21 +81,7 @@ FENCED_REFUSED = (
 )
 
 
-class PairSeed:
-    """The attributes dbpgseed reads, with the pair's slot
-
-    keel.system.actions is engine neutral on purpose (0054): SeedReplica
-    has no slot field, so the follow flow hands dbpgseed.seed a plain
-    object with the slot the pair streams from (the standby's
-    primary_slot_name, constant SLOT of keel.system.dbpostgres)
-    """
-
-    def __init__(self, host: str, port: int, password: str, tls: str):
-        self.host = host
-        self.port = port
-        self.password = password
-        self.tls = tls
-        self.slot = dbpostgres.SLOT
+PairSeed = dbpgseed.PairAction
 
 
 def follow(root: str, state: DatabaseState, server: dict, role: str,
@@ -373,7 +361,9 @@ def _rewrite(root: str, change, runner) -> tuple[str, bool]:
 
 
 def _ensure_slot(found, runner) -> None:
-    """The pair's slot on the holder, made when it is not there
+    """The pair's slot on the holder, made when it is not there, and
+    the grants that the rewind of an old primary reads through
+    (keel.system.dbpgrewind), which a holder of an older keel lacks
 
     A base backup copies no replication slot (pg_basebackup leaves
     pg_replslot out), so a standby promoted to the holder has none, and
@@ -381,10 +371,12 @@ def _ensure_slot(found, runner) -> None:
     would never stream (found when the pair's cases (b) to (e) were
     built, on PostgreSQL 17). The statement is idempotent and commits without the
     standby (keel.system.dbpostgres.slot_statements)."""
-    statements = dbpostgres.slot_statements()
-    problem = _run(runner, dbpostgres.CLIENT, text=statements.text)
-    if problem:
-        found.fail(f"{statements.summary} failed: {problem}")
+    for statements in (dbpostgres.slot_statements(),
+                       dbpostgres.rewind_statements()):
+        problem = _run(runner, dbpostgres.CLIENT, text=statements.text)
+        if problem:
+            found.fail(f"{statements.summary} failed: {problem}")
+            return
 
 
 def _replica(root: str, server: dict, state: DatabaseState,
@@ -401,6 +393,9 @@ def _replica(root: str, server: dict, state: DatabaseState,
         found.say(f"unchanged (a standby of [{host}]:{port})")
         _forget_divergence(root)
         _unfence(root, state, host, port, found, runner)
+        return
+    if dbpgrewind.broken(root) and not confirmed:
+        found.fail(dbpgrewind.unusable(root))
         return
     held = dbpostgres.user_databases((state.schemas.text or "").splitlines())
     if held and state.reading.role.value != REPLICA and \
@@ -437,6 +432,15 @@ def _replica(root: str, server: dict, state: DatabaseState,
             return
         found.say(f"a dump of what this node holds is kept at {kept}")
     if not confirmed:
+        outcome = dbpgrewind.rejoin(
+            root, host, port, state.credential.value,
+            dbtls.options_lines(root, "postgresql"), found, runner)
+        if outcome.halt:
+            return
+        if outcome.rejoined:
+            _forget_divergence(root)
+            _unfence(root, state, host, port, found, runner)
+            return
         _diverged(root, state, host, own, theirs, kept, found,
                   systems=(_own_system(runner), identified[0]))
         return
@@ -629,6 +633,7 @@ def _diverged(root: str, state: DatabaseState, holder: str, own: str | None,
 
 
 def _forget_divergence(root: str) -> None:
+    dbpgrewind.forget(root)
     try:
         os.remove(os.path.join(root, DIVERGED))
     except FileNotFoundError:

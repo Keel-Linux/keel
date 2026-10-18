@@ -21,8 +21,8 @@ from vip_helpers import KEYS, VIP, Pair, address
 
 from keel.mesh import vipnode, vippromote
 from keel.mesh import vip as vipstate
-from keel.system import dbfollow, dbpair, dbpgfollow, dbpostgres, dbsecret, \
-    dbtls
+from keel.system import dbfollow, dbpair, dbpgfollow, dbpgrewind, \
+    dbpostgres, dbsecret, dbtls
 from keel.system.actions import FollowVip, PromoteReplica
 from keel.system.database import plan_promote
 
@@ -31,6 +31,7 @@ PRIMARY_SPEC = {"engine": "postgresql", "role": "primary",
 REPLICA_SPEC = {"engine": "postgresql", "role": "replica",
                 "listen": [address(1), "::1"]}
 BINARY = "usr/lib/postgresql/17/bin/postgres"
+REWIND_BINARY = "usr/lib/postgresql/17/bin/pg_rewind"
 DATADIR = "var/lib/postgresql/17/main"
 FOLLOW_DROPIN = "etc/postgresql/17/main/conf.d/" + dbpostgres.FOLLOW_DROPIN_NAME
 PAIR_DROPIN = "etc/postgresql/17/main/conf.d/" + dbpostgres.PAIR_DROPIN_NAME
@@ -56,7 +57,9 @@ class Server:
                  holder_timeline: str = "2", holder_down: bool = False,
                  positions: str = "t\t0/4000100\t0/4000098\n",
                  dump_fails: bool = False, streaming: str = "",
-                 system: str = "72377", holder_system: str = "72377"):
+                 system: str = "72377", holder_system: str = "72377",
+                 settings: str = "", rewind: str = "refused",
+                 holder_standby: bool = False, streams: bool = True):
         self.row = ("t" if in_recovery else "f") + "\t0\t5432\n"
         self.receiver = receiver
         self.standby = standby
@@ -70,6 +73,14 @@ class Server:
         self.streaming = streaming
         self.system = system
         self.holder_system = holder_system
+        # what the server says of wal_log_hints, data_checksums and
+        # full_page_writes (unknown by default: no rewind is tried),
+        # and how pg_rewind answers: "ok", "refused" (the dry run
+        # fails) or "halfway" (the dry run passes, the run fails)
+        self.settings = settings
+        self.rewind = rewind
+        self.holder_standby = holder_standby
+        self.streams = streams
         self.sent: list[str] = []
         self.argv: list[list[str]] = []
 
@@ -95,6 +106,14 @@ class Server:
             # the fence's restart: standby.signal makes the start a
             # recovery
             self.row = "t" + self.row[1:]
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+        if any(one.endswith("/pg_rewind") for one in argv):
+            dry = "--dry-run" in argv
+            if self.rewind == "refused" or (
+                    self.rewind == "halfway" and not dry):
+                return subprocess.CompletedProcess(
+                    argv, 1, b"", b"pg_rewind: error: target server needs"
+                    b" to use either data checksums or wal_log_hints")
             return subprocess.CompletedProcess(argv, 0, b"", b"")
         if argv[:2] == ["ss", "-lntH"]:
             out = f"LISTEN 0 80 [{address(1)}]:5432 [::]:*\n"
@@ -129,7 +148,9 @@ class Server:
             else:
                 # the seed's probe of the primary: not in recovery,
                 # nothing of its own
-                out = "f\t0\t100\n"
+                out = ("t" if self.holder_standby else "f") + "\t0\t100\n"
+        elif sql == dbpgrewind.SETTINGS_SQL:
+            out = self.settings
         elif "pg_last_wal_replay_lsn" in sql:
             out = self.positions
         elif sql == dbpgfollow.STREAMING_SQL:
@@ -151,7 +172,7 @@ class Server:
         elif "pg_last_wal_replay_lsn" in sql:
             out = self.positions
         elif "status FROM pg_stat_wal_receiver" in sql:
-            out = "streaming\n"
+            out = "streaming\n" if self.streams else ""
         if text:
             return subprocess.CompletedProcess(argv, code, out, err)
         return subprocess.CompletedProcess(argv, code, out.encode(),
@@ -193,10 +214,11 @@ class FollowTestCase(Pair):
             doc["database"] = {"server": dict(server)}
             here.node.write(doc)
             dbsecret.keep(here.root, "pw")
-            binary = os.path.join(here.root, BINARY)
-            os.makedirs(os.path.dirname(binary), exist_ok=True)
-            with open(binary, "w"):
-                pass
+            for name in (BINARY, REWIND_BINARY):
+                binary = os.path.join(here.root, name)
+                os.makedirs(os.path.dirname(binary), exist_ok=True)
+                with open(binary, "w"):
+                    pass
             for relative in ("var/tmp", "var/backups/keel",
                              DATADIR,
                              "etc/postgresql/17/main/conf.d"):

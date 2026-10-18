@@ -149,6 +149,18 @@ def seed(root: str, action, runner=subprocess.run,
             f" {e.strerror or e}"
 
 
+class PairAction:
+    """The attributes write_follow reads: the holder, the pair's
+    password and TLS, and the slot the standby streams from"""
+
+    def __init__(self, host: str, port: int, password: str, tls: str):
+        self.host = host
+        self.port = port
+        self.password = password
+        self.tls = tls
+        self.slot = dbpostgres.SLOT
+
+
 def write_pgpass(directory: str, host: str, port: int, password: str) -> str:
     """The pgpass file, created exclusively at mode 0600; its path
 
@@ -406,6 +418,11 @@ def _standby_in_place(dropdir: str, datadir: str, fresh: str,
     primary.
     """
     os.rename(fresh, datadir)
+    return write_follow(dropdir, action)
+
+
+def write_follow(dropdir: str, action) -> str:
+    """The follow drop-in of the standby; the reason it failed, if so"""
     try:
         os.makedirs(dropdir, exist_ok=True)
         follow = os.path.join(dropdir, dbpostgres.FOLLOW_DROPIN_NAME)
