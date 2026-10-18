@@ -151,11 +151,30 @@ class TestTheRewind(FollowTestCase):
         self.assertIn("diverged", found.problem)
         self.assertIn("pg_rewind is not installed", " ".join(found.lines))
 
-    def test_a_holder_that_is_a_standby_keeps_the_fallback(self):
-        server, found, _ = self.follow_old_primary(
+    def test_a_holder_that_is_not_promoted_yet_is_waited_for(self):
+        """The VIP lands before the holder's follow promotes it: the old
+        primary is back for a few seconds while the holder is a standby.
+        No divergence is recorded and no alert is sent; the next run
+        asks again"""
+        server, found, alerted = self.follow_old_primary(
             old_primary(holder_standby=True))
-        self.assertIn("diverged", found.problem)
+        self.assertIsNone(found.problem, found.lines)
         self.assertIn("is itself a standby", " ".join(found.lines))
+        self.assertIn("not promoted yet", " ".join(found.lines))
+        self.assertNotIn(["systemctl", "stop", UNIT], server.argv)
+        self.assertIsNone(dbfollow.diverged(self.all[1].root))
+        alerted.assert_not_called()
+        # the next run, the holder promoted: rewound
+        server.holder_standby = False
+        found = self.follow(1, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertIn("rewound against", " ".join(found.lines))
+
+    def test_a_holder_that_the_probe_cannot_ask_keeps_the_fallback(self):
+        server, found, alerted = self.follow_old_primary(
+            old_primary(probe_fails=True))
+        self.assertIn("diverged", found.problem)
+        self.assertIn("no pg_rewind", " ".join(found.lines))
         self.assertNotIn(["systemctl", "stop", UNIT], server.argv)
 
     def test_a_run_that_fails_before_the_copy_leaves_the_node_as_it_was(self):

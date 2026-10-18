@@ -82,6 +82,8 @@ class Outcome(NamedTuple):
 REJOINED = Outcome(rejoined=True)
 HALT = Outcome(halt=True)
 FALLBACK = Outcome()
+# the holder is a standby that is not promoted yet: nothing is recorded
+WAIT = Outcome(halt=True)
 
 
 def broken(root: str) -> bool:
@@ -191,6 +193,10 @@ def rejoin(root: str, host: str, port: int, password: str, tls: str,
         with spool(root) as directory:
             pgpass = dbpgseed.write_pgpass(directory, host, port, password)
             _, problem = dbpgseed._probe(pgpass, host, port, runner, tls)
+            if problem and "is itself a standby" in problem:
+                found.say(f"{problem}: the holder is not promoted yet,"
+                          " and the next run asks again")
+                return WAIT
             if problem:
                 found.say(f"no pg_rewind: {problem}")
                 return FALLBACK

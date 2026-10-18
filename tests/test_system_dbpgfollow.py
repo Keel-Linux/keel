@@ -59,7 +59,7 @@ class Server:
                  dump_fails: bool = False, streaming: str = "",
                  system: str = "72377", holder_system: str = "72377",
                  settings: str = "", rewind: str = "refused",
-                 grants_fail: bool = False,
+                 grants_fail: bool = False, probe_fails: bool = False,
                  holder_standby: bool = False, streams: bool = True):
         self.row = ("t" if in_recovery else "f") + "\t0\t5432\n"
         self.receiver = receiver
@@ -81,6 +81,7 @@ class Server:
         self.settings = settings
         self.rewind = rewind
         self.grants_fail = grants_fail
+        self.probe_fails = probe_fails
         self.holder_standby = holder_standby
         self.streams = streams
         self.sent: list[str] = []
@@ -156,6 +157,9 @@ class Server:
             if sql == dbpgfollow.IDENTIFY_SYSTEM:
                 out = (f"{self.holder_system}\t{self.holder_timeline}"
                        "\t0/4000098\n")
+            elif self.probe_fails:
+                return subprocess.CompletedProcess(
+                    argv, 2, b"", b"psql: error: connection refused")
             else:
                 # the seed's probe of the primary: not in recovery,
                 # nothing of its own
