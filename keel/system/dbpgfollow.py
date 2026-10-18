@@ -472,7 +472,7 @@ def _unfence(root: str, state: DatabaseState, host: str, port: int,
     primary from claiming by itself (0049); after the confirmed reseed
     the node holds nothing the holder lacks. Caught up, not only
     streaming: the position the holder flushed, asked first, is at or
-    below what this standby received, so no commit the holder
+    below what this standby received or replayed, so no commit the holder
     acknowledged alone is missing here"""
     pair = state.pair
     if pair is None or not pair.fenced:
@@ -482,8 +482,13 @@ def _unfence(root: str, state: DatabaseState, host: str, port: int,
         if identified and len(identified) > 2 else None
     if flushed is None:
         return
-    _, _, received, problem = dbpgpromote.positions(runner)
-    if problem or received is None or received < flushed:
+    _, replayed, received, problem = dbpgpromote.positions(runner)
+    # what the node replayed is on the node whatever the walreceiver
+    # reports: after a rewind the receiver starts at the start of its
+    # segment and an idle holder sends nothing more
+    have = max((one for one in (replayed, received) if one is not None),
+               default=None)
+    if problem or have is None or have < flushed:
         return
     if vipstate.unfenced(root, pair.vip, pair.own_key):
         found.say(UNFENCED_SAID)

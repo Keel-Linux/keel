@@ -616,6 +616,24 @@ class TestTheReplica(FollowTestCase):
         self.assertTrue(vipnode.current(self.all[1], VIP).fenced)
         self.assertNotIn(dbpgfollow.UNFENCED_SAID, found.lines)
 
+    def test_a_rewound_standby_that_replayed_the_holder_s_position_is_unfenced(
+            self):
+        """After a rewind the walreceiver starts at the start of its
+        segment, and an idle holder sends nothing more, so the received
+        position stays below what the node replayed from its own WAL.
+        What the node replayed is on the node (0054, amendment of
+        2026-10-18)"""
+        self.pair_nodes()
+        self.fence_vip(1)
+        receiver = f"user=repl host={address(0)} port=5432 " \
+                   "password=******** sslmode=verify-full\n"
+        server = Server(in_recovery=True, receiver=receiver,
+                        positions="t\t0/4000100\t0/4000000\n")
+        found = self.follow(1, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertFalse(vipnode.current(self.all[1], VIP).fenced)
+        self.assertIn(dbpgfollow.UNFENCED_SAID, found.lines)
+
     def test_a_holder_that_does_not_answer_keeps_the_fence(self):
         self.pair_nodes()
         self.fence_vip(1)
