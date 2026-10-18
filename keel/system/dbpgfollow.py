@@ -155,6 +155,7 @@ def _primary(root: str, state: DatabaseState, found, runner,
     _ensure_slot(found, runner)
     if found.problem is None:
         _alone(root, alone, found, runner)
+        _ensure_grants(found, runner)
     _forget_divergence(root)
 
 
@@ -361,9 +362,7 @@ def _rewrite(root: str, change, runner) -> tuple[str, bool]:
 
 
 def _ensure_slot(found, runner) -> None:
-    """The pair's slot on the holder, made when it is not there, and
-    the grants that the rewind of an old primary reads through
-    (keel.system.dbpgrewind), which a holder of an older keel lacks
+    """The pair's slot on the holder, made when it is not there
 
     A base backup copies no replication slot (pg_basebackup leaves
     pg_replslot out), so a standby promoted to the holder has none, and
@@ -376,8 +375,15 @@ def _ensure_slot(found, runner) -> None:
     if problem:
         found.fail(f"{statements.summary} failed: {problem}")
         return
-    # the grants only help a later rewind, which falls back to the
-    # reseed without them: a failure here never fails the follow
+
+
+def _ensure_grants(found, runner) -> None:
+    """The grants that the rewind of an old primary reads through
+    (keel.system.dbpgrewind), which a holder of an older keel lacks.
+    They come after the commit alone: the writes of the new primary
+    resume before this statement (keel#148 bounds them at 5 s). They only
+    help a later rewind, which falls back to the reseed without them, so a
+    failure here never fails the follow"""
     grants = dbpostgres.rewind_statements()
     problem = _run(runner, dbpostgres.CLIENT, text=grants.text)
     if problem:
