@@ -132,9 +132,13 @@ class TestPromote(unittest.TestCase):
         self.assertIn("not in recovery", problem)
 
     def test_a_drain_that_never_finishes_times_out_writing_nothing(self):
+        """the positions move but never meet: replay creeps behind the
+        stream, so the standby is not stalled and not drained"""
+        creeping = [f"t\t0/{0x1000 + n:X}\t0/{0x9000 + n:X}\n"
+                    for n in range(40)]
         problem = dbpgpromote.promote(
             "/", PromoteAction(timeout=5),
-            runner=self.runner(["t\t0/A\t0/1000\n"]),
+            runner=self.runner(creeping),
             clock=self.clock, sleep=self.sleep)
         self.assertIn("did not replay everything", problem)
         self.assertIn("5 s", problem)
@@ -171,6 +175,80 @@ class TestPromote(unittest.TestCase):
             runner=self.runner(["t\t0/A\t0/1000\n"]),
             clock=self.clock, sleep=self.sleep)
         self.assertIn("did not replay everything", problem)
+
+
+class TestIncompleteRecord(unittest.TestCase):
+    """keel#215: the walreceiver flushes the bytes that arrived, and a cut
+    can end the stream inside a record. Replay cannot apply the first
+    bytes of a record, so it stands at the end of the last whole record
+    and replay never reaches the received position. Measured on a real
+    pair: received 0/7EC8000, replayed 0/7EC7A58 (1448 bytes, one TCP
+    segment), both still for 417 s. pg_promote() replays every whole
+    record that is in pg_wal before it ends recovery, so a standby whose
+    two positions stand still needs no more wait."""
+
+    def setUp(self):
+        self.ran = []
+        self.now = [0.0]
+        self.slept = 0.0
+        self.said = []
+
+    def clock(self):
+        return self.now[0]
+
+    def sleep(self, seconds):
+        self.slept += seconds
+        self.now[0] += seconds
+
+    def runner(self, rows):
+        rows = list(rows)
+
+        def run(argv, **kwargs):
+            self.ran.append(list(argv))
+            if kwargs.get("text") is not None:
+                return answer()
+            return answer(rows.pop(0) if len(rows) > 1 else rows[0])
+        return run
+
+    def promote(self, rows, timeout=600):
+        return dbpgpromote.promote(
+            "/", PromoteAction(timeout=timeout), runner=self.runner(rows),
+            clock=self.clock, sleep=self.sleep, say=self.said.append)
+
+    def test_positions_that_stand_still_are_promoted_after_the_stall(self):
+        problem = self.promote(["t\t0/7EC7A58\t0/7EC8000\n"])
+        self.assertIsNone(problem)
+        self.assertEqual(self.slept, dbpgpromote.STALL_SECONDS)
+        self.assertEqual(self.ran[-1], list(dbpostgres.CLIENT))
+        self.assertEqual(len(self.said), 1)
+        self.assertIn("1448 bytes", self.said[0])
+        self.assertIn("incomplete record", self.said[0])
+
+    def test_a_received_position_that_moves_starts_the_stall_again(self):
+        moving = [f"t\t0/1000\t0/{0x2000 + n:X}\n" for n in range(8)]
+        problem = self.promote(moving + ["t\t0/1000\t0/2007\n"])
+        self.assertIsNone(problem)
+        self.assertEqual(self.slept, 7 + dbpgpromote.STALL_SECONDS)
+
+    def test_a_replay_position_that_moves_starts_the_stall_again(self):
+        moving = [f"t\t0/{0x1000 + n:X}\t0/9000\n" for n in range(6)]
+        problem = self.promote(moving + ["t\t0/1005\t0/9000\n"])
+        self.assertIsNone(problem)
+        self.assertEqual(self.slept, 5 + dbpgpromote.STALL_SECONDS)
+
+    def test_a_stall_shorter_than_the_limit_is_not_enough(self):
+        rows = ["t\t0/1000\t0/2000\n"] * 3 + ["t\t0/1001\t0/2000\n"]
+        problem = self.promote(rows, timeout=4)
+        self.assertIn("did not replay everything", problem)
+        self.assertEqual(self.said, [])
+
+    def test_a_drained_standby_says_nothing_about_a_record(self):
+        self.assertIsNone(self.promote(["t\t0/1000\t0/1000\n"]))
+        self.assertEqual(self.said, [])
+
+    def test_the_stall_never_promotes_a_standby_that_receives_nothing(self):
+        problem = self.promote(["t\t0/1000\t\n"])
+        self.assertIn("receives nothing", problem)
 
 
 if __name__ == "__main__":

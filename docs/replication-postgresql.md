@@ -223,6 +223,16 @@ answers success with a warning that the commit is only local.
   The writes resume within 5 s of the VIP on B (keel#148), B's watch
   alerts at each run, and no row that the application saw
   acknowledged is missing on B.
+- **The stream cut inside a record (keel#215).** The walreceiver flushes
+  the bytes that arrived, so a cut can leave the received position a few
+  bytes after the end of the last whole record. Replay cannot apply a
+  part of a record, so it never reaches the received position, and the
+  drain of the promotion cannot end on equality. The drain ends when
+  neither position has moved for 5 s. `pg_promote()` replays every whole
+  record that is in `pg_wal` before it ends recovery, so only the unfinished
+  record is left behind. Follow says how many bytes. A standby whose
+  positions move keeps its wait of 600 s, and one that receives nothing is
+  refused.
 - **(e) The diverged old primary.** A boots: `keel database guard`,
   the start guard of its server, refuses the start, because its own
   old claim is not proven (keel#156). Its VIP helper starts and takes
