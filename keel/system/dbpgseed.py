@@ -52,9 +52,17 @@ from contextlib import contextmanager
 from keel.system import dbpostgres
 from keel.system.dbseed import DISK_MARGIN, KEPT, Reach, _run, spool
 
+# pg_database_size() needs CONNECT on the database (or the role
+# pg_read_all_stats), and an application may revoke CONNECT from PUBLIC:
+# the size counts only the databases repl may connect to, and the last
+# column counts the others, which the free space check leaves out
+# (keel#183)
 PROBE_SQL = (
     "SELECT pg_is_in_recovery(), count(*),"
-    " COALESCE(sum(pg_database_size(oid)), 0) FROM pg_database"
+    " COALESCE(sum(pg_database_size(oid))"
+    " FILTER (WHERE has_database_privilege(oid, 'CONNECT')), 0),"
+    " count(*) FILTER (WHERE NOT has_database_privilege(oid, 'CONNECT'))"
+    " FROM pg_database"
     " WHERE datname NOT IN ('template0', 'template1')"
 )
 STREAMING_QUESTION = "SELECT status FROM pg_stat_wal_receiver"
@@ -88,6 +96,10 @@ IS_STANDBY = (
 NO_ROOM = (
     "the copy of [{host}]:{port} needs {need} bytes free where {datadir}"
     " keeps its data, and {free} are"
+)
+LEFT_OUT = (
+    " (the need leaves out {count} database(s) that the role {user} has"
+    " no CONNECT on, so the copy needs more)"
 )
 BASEBACKUP_FAILED = "pg_basebackup of [{host}]:{port} failed: {detail}"
 START_FAILED = (
@@ -216,7 +228,7 @@ def _seed(
     if problem:
         return f"{problem}; {KEPT}"
     _, _, dropdir, datadir = dbpostgres.cluster_paths(root)
-    problem = _room(datadir, found["size"], action)
+    problem = _room(datadir, found["size"], action, found["left_out"])
     if problem:
         return f"{problem}; {KEPT}"
     aside = datadir + ASIDE_SUFFIX
@@ -317,17 +329,20 @@ def _probe(pgpass: str, host: str, port: int, runner,
              "user": dbpostgres.REPLICATION_USER}
     if problem:
         return {}, UNREACHABLE.format(detail=problem, **where)
-    columns = (out["stdout"].strip().split("\t") + ["", "0"])[:3]
+    columns = (out["stdout"].strip().split("\t") + ["", "0", "0"])[:4]
     if columns[0] == "t":
         return {}, IS_STANDBY.format(**where)
+    return {"size": _count(columns[2]), "left_out": _count(columns[3])}, ""
+
+
+def _count(column: str) -> int:
     try:
-        size = int(columns[2] or 0)
+        return int(column or 0)
     except ValueError:
-        size = 0
-    return {"size": size}, ""
+        return 0
 
 
-def _room(datadir: str, size: int, action) -> str:
+def _room(datadir: str, size: int, action, left_out: int = 0) -> str:
     """Why the copy may not fit where the server keeps its data, if so
 
     Checked before anything is stopped: the peak is the old directory
@@ -341,7 +356,10 @@ def _room(datadir: str, size: int, action) -> str:
     need = size * DISK_MARGIN
     if free < need:
         return NO_ROOM.format(datadir=datadir, free=free, need=need,
-                              host=action.host, port=action.port)
+                              host=action.host, port=action.port) + (
+            LEFT_OUT.format(count=left_out,
+                            user=dbpostgres.REPLICATION_USER)
+            if left_out else "")
     return ""
 
 

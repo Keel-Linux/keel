@@ -196,6 +196,13 @@ ADDED = "added"
 CHANGED = "changed"
 
 
+def paths(one: dict | None) -> dict | None:
+    """A peer as far as the paths to it go: without its keepalive"""
+    if one is None:
+        return None
+    return {k: v for k, v in one.items() if k != "persistent_keepalive"}
+
+
 def live_peers(old: str, new: str, iface: str, dump: str,
                live_mtu: int | None = None) -> list[tuple[str, ...]] | None:
     """The `wg set` lines of `live_plan`, or None"""
@@ -237,8 +244,10 @@ def live_plan(old: str, new: str, iface: str, dump: str,
     `wg set` does not.
 
     With the lines, whether they only add peers the interface does not
-    hold (keel#117): such a change removes nothing and changes no peer
-    this node reaches, so it cannot cut this node off.
+    hold (keel#117), or set the keepalive of a peer it holds (the
+    keepalive every peer gets, keel#140): such a change removes nothing
+    and changes no path to a peer this node reaches, so it cannot cut
+    this node off.
     """
     before, after = wireguard.parse(old), wireguard.parse(new)
     if before.problems or after.problems or before.inline_key or \
@@ -264,7 +273,9 @@ def live_plan(old: str, new: str, iface: str, dump: str,
                 for name in ("address", "ipv4_address")
                 if before.section.get(name)]
     for key in set(was) | set(now):
-        if was.get(key) != now.get(key) and not all(
+        # a change of the keepalive alone changes no path: the upgrade
+        # writes it for every peer, an off-link one too (keel#140)
+        if paths(was.get(key)) != paths(now.get(key)) and not all(
                 on_link(one, networks) for one in (was.get(key),
                                                    now.get(key)) if one):
             return None
@@ -280,8 +291,15 @@ def live_plan(old: str, new: str, iface: str, dump: str,
         found = peer_fix(iface, now[key], held.get(key), old_ips)
         if found:
             commands.append(found)
-            added = added and key not in held
+            # a keepalive set on a peer it holds changes nothing it
+            # reaches, as an addition does not
+            added = added and (key not in held or keepalive_only(found))
     return commands, added and bool(commands)
+
+
+def keepalive_only(argv: tuple[str, ...]) -> bool:
+    """A `wg set` line that sets one peer's keepalive and nothing else"""
+    return len(argv) == 7 and argv[5] == "persistent-keepalive"
 
 
 def mtu_line(before: int | None, after: int | None, now: int | None,

@@ -69,6 +69,7 @@ from datetime import datetime, timezone
 
 from keel.inspect.dbreading import field_lines
 from keel.inspect.tree import File
+from keel.mesh import vip as vipstate
 from keel.mesh import vipnet
 from keel.mesh.node import Node, NodeError
 from keel.monitor import alerting
@@ -92,7 +93,21 @@ BACKUPS = "var/backups/keel/mariadb"
 DROPIN_MODE = 0o644
 GTID_QUESTION = mariadb.QUIET_CLIENT + (
     "--execute", "SELECT @@gtid_binlog_state, @@gtid_binlog_pos")
+LOG_BIN_QUESTION = mariadb.QUIET_CLIENT + ("--execute", "SELECT @@log_bin")
+WAITS_FOR_BINARY_LOG = (
+    "this server writes no binary log yet, so the copy of the holder waits:"
+    " keel spec apply writes the pair's configuration and then copies it"
+)
 HOLDER_GTID_SQL = "SELECT @@gtid_binlog_state, @@gtid_slave_pos"
+# what this replica applied: its binary log (log_slave_updates) and its
+# slave position, which a reseed sets from the dump (keel#192)
+APPLIED_QUESTION = mariadb.QUIET_CLIENT + (
+    "--execute", "SELECT @@gtid_binlog_state, @@gtid_slave_pos")
+UNFENCED_SAID = (
+    "the VIP fence is cleared: this replica applied everything the holder"
+    " logged, so it may take the VIP again when the lease of the holder"
+    " expires (keel#192)"
+)
 CHECK = "database-rejoin"
 # how long follow waits for this node's own claim to be proven, the VIP
 # on wg0, before it leaves the server read only: keel vip promote's own
@@ -204,6 +219,11 @@ def _follow(root: str, spec: str, confirmed: bool, found: Followed,
             proven=lambda: proof if proof is not None else _proven(
                 root, doc, output, wait, sleep),
             alone=alone)
+    elif role == PRIMARY and vipstate.unconfirmed(root, pair.vip):
+        # the holder's doubt (keel#195): read only and fenced until a
+        # renewal of its lease is confirmed; the role file is left
+        _in_doubt(root, state, pair.vip, found, runner)
+        return
     elif role == PRIMARY and not _proven(root, doc, output, wait, sleep):
         # a paired node (it has a pair record: the other member is known)
         # with no claim at all is not proven either: its state file may have
@@ -295,6 +315,20 @@ def _proven(root: str, doc: dict, output, wait: float, sleep) -> bool:
     return False
 
 
+def _in_doubt(root: str, state: DatabaseState, vip: str, found: Followed,
+              runner) -> None:
+    """The holder's lease has had no renewal the majority confirmed for
+    keel.mesh.vipetcd.DOUBT s: read only, every client connection ended
+    (the fence of keel#186), until one is confirmed. A write that waits
+    for a cut replica would otherwise return OK when the dump thread to
+    it ends, about 12.6 s after the cut, before the release (keel#195)"""
+    if not _read_only(root, state, found, runner):
+        return
+    found.say(f"read only: the lease of {vip} has had no renewal the"
+              " majority confirmed, so this node may be cut off; it takes"
+              " writes again once a renewal is confirmed (keel#195)")
+
+
 def _unproven(root: str, state: DatabaseState, found: Followed,
               runner) -> None:
     """This node's own claim, not proven: read only and locked, and
@@ -309,16 +343,24 @@ def _unproven(root: str, state: DatabaseState, found: Followed,
               " newer claim makes it a replica")
 
 
+FENCED = (
+    "; every client connection was ended, so no write that waited for"
+    " the replica is acknowledged after this (keel#186)"
+)
+
+
 def _read_only(root: str, state: DatabaseState, found: Followed,
                runner) -> bool:
     """read_only on, the drop-in, the root lock; whether all went"""
     if state.reading.read_only.value is not True:
+        # the fence (keel#186): read_only while the client connections
+        # are killed, so a write that waits for the ACK gets no OK
         statements = mariadb.set_read_only(True)
-        problem = _send(runner, statements.text)
+        problem = dbreadonly.fence(runner)
         if problem:
             found.fail(f"{statements.summary} failed: {problem}")
             return False
-        found.say(statements.summary)
+        found.say(statements.summary + FENCED)
     _write(root, mariadb.ROLE_DROPIN, mariadb.role_dropin_text(),
            DROPIN_MODE)
     problem = dbreadonly.lock(root, runner)
@@ -379,6 +421,7 @@ def _replica(root: str, doc: dict, server: dict, state: DatabaseState,
         if error is None:
             found.say(f"unchanged (a replica of [{host}]:{port})")
             _forget_divergence(root)
+            _unfence(root, host, port, state, found, runner)
             return
         if not confirmed:
             found.fail(f"this node replicates from [{host}]:{port} and its"
@@ -400,8 +443,49 @@ def _replica(root: str, doc: dict, server: dict, state: DatabaseState,
     _rejoin(root, host, port, state, held, confirmed, found, runner)
 
 
+def _unfence(root: str, host: str, port: int, state: DatabaseState,
+             found: Followed, runner) -> None:
+    """The VIP fence of this node's old loss cleared once it replicates
+    from the holder and applied everything the holder logged (keel#192,
+    the twin of keel#166 for PostgreSQL). The fence keeps an old primary
+    from claiming by itself (0049); a rejoined or reseeded replica holds
+    nothing the holder lacks. Caught up, per GTID domain: the newest
+    sequence the holder logged is at or below what this node applied,
+    in its binary log or its slave position (gtid_strict_mode keeps the
+    sequences of a domain in order on both nodes)"""
+    pair = state.pair
+    if pair is None or not pair.fenced:
+        return
+    theirs = _holder_gtid(root, host, port, state, runner)
+    mine = _ask(runner, APPLIED_QUESTION)
+    if theirs is None or mine is None:
+        return
+    try:
+        holder = dbgtid.newest(theirs.strip().partition("\t")[0])
+        applied = dbgtid.newest(",".join(
+            part for part in mine.strip().split("\t") if part))
+    except ValueError:
+        return
+    if any(applied.get(domain, 0) < sequence
+           for domain, sequence in holder.items()):
+        return
+    if vipstate.unfenced(root, pair.vip, pair.own_key):
+        found.say(UNFENCED_SAID)
+
+
 def _seed(root: str, host: str, port: int, state: DatabaseState,
           drop: tuple[str, ...], found: Followed, runner) -> None:
+    # The copy must carry the primary's binary log history, or the old
+    # primary comes back as diverged by the GTIDs of its first boot
+    # (keel#202), and a server can take that history only while it writes
+    # a binary log. The follow that the VIP's promotion starts on a new
+    # replica runs before keel spec apply has written the pair's
+    # configuration: the apply seeds it, after the restart that turns the
+    # log on.
+    logged = _ask(runner, LOG_BIN_QUESTION)
+    if logged is not None and logged.strip() == "0":
+        found.say(WAITS_FOR_BINARY_LOG)
+        return
     action = SeedReplica(host, port, state.credential.value, drop,
                          dbtls.options_lines(root), dbtls.master_options(root))
     problem = dbseed.seed(root, action, runner)

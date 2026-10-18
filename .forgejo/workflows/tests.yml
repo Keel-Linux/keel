@@ -149,7 +149,9 @@ jobs:
   # on, the replica read only, keel diff clean (tests/test_mariadb_netns.py;
   # the fallback, the promote, the failover and rejoin, the diverged old
   # primary and the replica's refusals are the follow-up pull request's).
-  # The check is "mariadb / trixie".
+  # Also the fence of an old primary on two real servers: a write that
+  # waits for the replica's ACK gets no OK once the fence ran (keel#186,
+  # tests/test_mariadb_fence_real.py). The check is "mariadb / trixie".
   mariadb:
     permissions:
       contents: read
@@ -166,7 +168,7 @@ jobs:
           zstd
         systemctl stop mariadb
         KEEL_MARIADB_NETNS=1 PYTHONPATH=. python3 -m pytest -q -s \
-          tests/test_mariadb_netns.py
+          tests/test_mariadb_netns.py tests/test_mariadb_fence_real.py
   # The unplanned failover of a cloud simple MariaDB pair (keel#108,
   # keel#118) on the mariadb job's nodes and links, the specs in cloud
   # simple with etcd disabled, so the VIP moves without a lease, as on

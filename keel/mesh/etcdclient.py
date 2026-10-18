@@ -74,8 +74,11 @@ class Tls:
 
 @dataclass(frozen=True)
 class Member:
-    """One member as etcd lists it; `started` once it ran and named
-    itself, which a learner added for a join that never came has not"""
+    """One member as etcd lists it; `started` once it ran: it named
+    itself and published its client URLs. A learner added for a join
+    that never came has no name; a member of the first cluster that
+    never ran has the name of ETCD_INITIAL_CLUSTER and no client URL
+    (keel#199)"""
 
     id: str
     name: str
@@ -85,7 +88,7 @@ class Member:
 
     @property
     def started(self) -> bool:
-        return bool(self.name)
+        return bool(self.name) and bool(self.client_urls)
 
     @property
     def address(self) -> str | None:

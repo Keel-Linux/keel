@@ -175,12 +175,20 @@ def of_the_pair(here: Here, message: vipmsg.Message, what: str) -> str:
 
 def shared(here: Here, message: vipmsg.Message) -> Answer:
     """A secret the pair shares, to the other member alone"""
-    from keel.system import dbsecret
+    from keel.system import anubiskey, dbsecret
     vip = of_the_pair(here, message, "ask a shared secret")
     name = message.body.get("name")
     if name not in vipmsg.SECRET_NAMES:
         raise Refusal(400, f"no shared secret is named {name!r}")
-    value = dbsecret.read(here.root)
+    if name == anubiskey.NAME:
+        # Keel-Linux/common#56: the key the primary's first start of
+        # Anubis made (decision 0041, shared: true)
+        value = anubiskey.read(here.root)
+        if value is None:
+            raise Refusal(404, f"this node holds no {name} secret yet:"
+                          " its first start of Anubis makes it")
+    else:
+        value = dbsecret.read(here.root)
     if value is None:
         raise Refusal(404, f"this node holds no {name} secret yet: the"
                       " pair's primary makes it at its first apply")

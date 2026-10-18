@@ -417,6 +417,100 @@ class TestTheController(WithEtcd):
         self.turn(0)
         self.assertTrue(self.carried(0))
 
+    def test_a_holder_with_no_confirmed_renewal_marks_its_doubt(self):
+        """keel#195: on a cut MariaDB holder a write that waits for the
+        replica returns OK when the dump thread to it ends, about 12.6 s
+        after the cut, before the release; so the holder marks its doubt
+        after DOUBT s with no renewal the majority confirmed, keeps the
+        VIP, and clears the mark at the next confirmed renewal"""
+        root = self.all[0].root
+        self.promote(0)
+        self.run_for(3, 0)
+        self.assertFalse(vipstate.unconfirmed(root, VIP))
+        # a renewal confirmed now, then none
+        self.sleep(vipetcd.RENEW)
+        self.turn(0)
+        self.kv.refuse = "keepalive"
+        self.sleep(vipetcd.DOUBT - 1)
+        self.turn(0)
+        self.assertFalse(vipstate.unconfirmed(root, VIP))
+        self.sleep(1.5)
+        self.turn(0)
+        self.assertTrue(vipstate.unconfirmed(root, VIP))
+        self.assertTrue(self.carried(0))
+        self.assertIn("no renewal the majority confirmed", self.text(0))
+        self.kv.refuse = None
+        self.sleep(vipetcd.RENEW)
+        self.turn(0)
+        self.assertFalse(vipstate.unconfirmed(root, VIP))
+        self.assertTrue(self.carried(0))
+
+    def test_a_mark_left_by_an_earlier_controller_goes_at_a_renewal(self):
+        root = self.all[0].root
+        self.promote(0)
+        vipstate.mark_unconfirmed(root, VIP, True)
+        self.controllers[0] = self.controller(0)
+        self.sleep(vipetcd.RENEW)
+        self.turn(0)
+        self.assertFalse(vipstate.unconfirmed(root, VIP))
+
+    def test_a_mark_that_cannot_be_written_never_stops_the_release(self):
+        """the doubt is best effort: the release at RELEASE_AFTER stays,
+        whatever becomes of the mark"""
+        self.promote(0)
+        self.sleep(vipetcd.RENEW)
+        self.turn(0)
+        self.kv.refuse = "keepalive"
+        with mock.patch.object(vipetcd.Ops, "doubt",
+                               side_effect=OSError("read-only")):
+            self.sleep(vipetcd.RELEASE_AFTER + 0.5)
+            self.turn(0)
+        self.assertFalse(self.carried(0))
+        self.assertIn("doubt not marked", self.text(0))
+
+    def test_a_restarted_controller_cut_off_marks_its_doubt(self):
+        """a controller that starts with no confirmed renewal of its
+        own marks the doubt DOUBT s after it first saw its claim"""
+        root = self.all[0].root
+        self.promote(0)
+        self.kv.refuse = "keepalive"
+        self.controllers[0] = self.controller(0)
+        self.turn(0)
+        self.assertFalse(vipstate.unconfirmed(root, VIP))
+        self.sleep(vipetcd.DOUBT + 0.5)
+        self.turn(0)
+        self.assertTrue(vipstate.unconfirmed(root, VIP))
+
+    def test_a_mark_goes_with_the_claim(self):
+        """a node that no longer holds its claim (its lease gone, here)
+        clears its mark, so a later claim does not start read only"""
+        root = self.all[0].root
+        self.promote(0)
+        self.sleep(vipetcd.RENEW)
+        self.turn(0)
+        self.kv.refuse = "keepalive"
+        self.sleep(vipetcd.DOUBT + 0.5)
+        self.turn(0)
+        self.assertTrue(vipstate.unconfirmed(root, VIP))
+        self.kv.refuse = None
+        self.kv.revoke(self.lease())
+        self.sleep(vipetcd.RENEW)
+        self.turn(0)
+        self.turn(0)
+        self.assertFalse(vipstate.unconfirmed(root, VIP))
+
+    def test_the_doubt_comes_well_before_the_end_of_a_dump_thread(self):
+        """the doubt, plus a follow that turns MariaDB read only, ends
+        before a dump thread to a cut replica can end (tcp_retries2 = 5:
+        about 12.6 s at the least) and before the semi-synchronous
+        timeout; and after the longest normal renewal gap"""
+        from keel.system import dbmariadb
+        self.assertLessEqual(vipetcd.DOUBT + 4, 12)
+        self.assertLess(vipetcd.DOUBT + 4,
+                        dbmariadb.SEMI_SYNC_TIMEOUT_MS / 1000)
+        self.assertGreater(vipetcd.DOUBT,
+                           vipetcd.RENEW + vipetcd.CALL_TIMEOUT)
+
     def test_the_holder_rides_out_a_re_election_under_loss(self):
         """keel#167: a cut of the site of etcd's leader made the holder
         drop the VIP 2 to 4 s: the new leader came 7.4 s after the cut,

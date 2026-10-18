@@ -498,7 +498,7 @@ class TestThePairPlan(unittest.TestCase):
                      "rpl_semi_sync_master_enabled = ON",
                      "rpl_semi_sync_slave_enabled = ON",
                      "rpl_semi_sync_master_wait_point = AFTER_SYNC",
-                     "rpl_semi_sync_master_timeout = 10000",
+                     "rpl_semi_sync_master_timeout = 30000",
                      "rpl_semi_sync_master_wait_no_slave = OFF",
                      "slave_net_timeout = 10",
                      f"bind-address = {address(0)},::1,{VIP}",

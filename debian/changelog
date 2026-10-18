@@ -1,3 +1,137 @@
+keel (0.23.43) unstable; urgency=medium
+
+  * keel mesh join names the failed step when the apply fails on a step
+    other than etcd's, and no longer says that etcd may not run
+    (keel#198). The 0.23.42 fix asked whether etcd was running, which
+    it is not yet at that point of a join.
+  * The follow of a new MariaDB replica waits until the server writes a
+    binary log, and keel spec apply then copies the holder (keel#202).
+    The VIP's promotion started the copy before the apply wrote the
+    pair's configuration. The server wrote no binary log then, so the
+    history of the primary's first boot did not reach it. The old
+    primary came back as diverged. Now it rejoins by GTID.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 16 Oct 2026 21:20:00 +0000
+
+keel (0.23.42) unstable; urgency=medium
+
+  * A seeded MariaDB replica starts its binary log at the history of the
+    copy (keel#202). The first primary wrote GTIDs at its first boot
+    under another server id; the replica never had them, so the primary
+    came back from every cut as diverged. After the load the replica
+    runs RESET MASTER and sets gtid_binlog_state.
+  * keel mesh join no longer says that etcd may not run when etcd runs
+    and another step of the apply failed (keel#198).
+  * keel diff does not count a PostgreSQL sender with no client address
+    as a replica (keel#201).
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 16 Oct 2026 20:00:00 +0000
+
+keel (0.23.41) unstable; urgency=medium
+
+  * Every overlay peer gets PersistentKeepalive = 25 (keel#140). The
+    keepalive keeps the NAT and firewall state open between sites, so
+    a node behind a filter that drops unsolicited inbound UDP stays
+    reachable when the mesh is idle. The release test of LNMP 19.0-3
+    found it: the root holder could not send the cluster to the member
+    on BR2 after 290 s with no traffic. keel spec apply sets it live;
+    keel diff takes 25 as the default of a peer that gives none.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 16 Oct 2026 16:28:02 +0000
+
+keel (0.23.40) unstable; urgency=medium
+
+  * keel mesh etcd form sends the cluster again to a member of the
+    first cluster that never ran (keel#199). etcd lists such a member
+    with its name and no client URL; keel took the name as proof that
+    it ran, so the member stayed out, and etcd ran with 2 of 3 voters.
+  * The invite's listener and the members' channel free the slot of a
+    connection that failed before they close it (keel#177). A client
+    that asked again at once found its slot taken.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 16 Oct 2026 16:36:14 +0000
+
+keel (0.23.39) unstable; urgency=medium
+
+  * A MariaDB holder whose lease is in doubt acknowledges no write
+    (keel#195). keel vip control marks the doubt once the last renewal
+    that the majority confirmed is 6 s old, and keel database follow
+    fences a MariaDB holder until a renewal is confirmed again. Before,
+    on a cut holder, a write that waited for the replica returned OK
+    when the dump thread to the cut replica ended, before the release.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 16 Oct 2026 12:06:06 +0000
+
+keel (0.23.38) unstable; urgency=medium
+
+  * The VIP fence of a MariaDB replica that rejoined or was reseeded is
+    cleared once it applied everything the holder logged (keel#192), as
+    keel#166 does for PostgreSQL. Before, a MariaDB pair failed over by
+    itself once only, and a second loss of the holder left both nodes
+    fenced and read only.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 16 Oct 2026 10:51:34 +0000
+
+keel (0.23.37) unstable; urgency=medium
+
+  * etcd that keel spec apply starts for the cluster of cluster.json is
+    recorded as started by keel (keel#188), and the start of etcd at a
+    join enables the wireguard overlay that etcd requires. Before, a
+    first boot spec with wireguard disabled left etcd not started at
+    the third join, and after the operator enabled both, every apply
+    refused the member as one keel never started.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 16 Oct 2026 10:24:15 +0000
+
+keel (0.23.36) unstable; urgency=medium
+
+  * A cut MariaDB primary no longer acknowledges writes that the new
+    primary never gets (keel#186). The fence of a node that loses the
+    VIP sets read_only while it kills every client connection, so a
+    write that waits for the replica's ACK gets an error and no OK.
+    rpl_semi_sync_master_timeout is 30 s (was 10 s), longer than the
+    VIP's release of 15 s, so the fence comes first.
+  * The fence also ends the dump threads of its replicas (keel#193). A
+    dump thread to a cut replica stayed, and when that replica connected
+    again with the same server id, MariaDB 11.8.6 took no connection
+    after it.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 16 Oct 2026 10:47:27 +0000
+
+keel (0.23.35) unstable; urgency=medium
+
+  * The VIP overlay waits for etcd's cluster, as etcd does (keel#106).
+    Before cluster.json exists, keel diff compares only whether
+    keel-vip.service is enabled and says why it does not run, and
+    keel spec apply enables it and does not start it. Before, a cloud
+    simple pair always reported overlays.vip as drift, and each apply
+    printed a start that did nothing.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 16 Oct 2026 10:12:04 +0000
+
+keel (0.23.34) unstable; urgency=medium
+
+  * The other member of a pair gets Anubis's signing key from the
+    primary (Keel-Linux/common#56, decision 0041). A node whose spec
+    makes it a database replica, with Anubis enabled and no key, asks
+    the other member over the members' channel, as for the replication
+    credential, and writes the key with mode 0600 before Anubis starts.
+    Before, nothing copied the key, and anubis@keel did not start on
+    the replica. Before the pair exists, the apply starts nothing for
+    Anubis and says why.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 16 Oct 2026 10:04:07 +0000
+
+keel (0.23.33) unstable; urgency=medium
+
+  * The reseed of a PostgreSQL standby works when the role repl has no
+    CONNECT on a database (keel#183). The probe of the primary measures
+    only the databases that repl may connect to, and a refusal for lack
+    of space says how many it left out. Before, an application database
+    with REVOKE CONNECT FROM PUBLIC stopped every reseed.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 16 Oct 2026 09:52:55 +0000
+
 keel (0.23.32) unstable; urgency=medium
 
   * The invite's listener and the members' channel free the slot of a

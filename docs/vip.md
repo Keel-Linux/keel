@@ -382,6 +382,28 @@ makes the kernel drop it sooner, by 14 s after that renewal, also
 for a frozen process (a stopped container), which no controller can
 cover: `tests/test_vip_upgrade_netns.py` (d).
 
+### The holder's doubt (keel#195)
+
+The holder renews its lease every 2 s. When its last renewal that the
+majority confirmed is 6 s old (`DOUBT`), the controller marks its
+doubt: its root half writes `/var/lib/keel/vip/<vip>.unconfirmed`.
+The holder keeps the VIP, as before, until the release at 15 s. At
+the next confirmed renewal the mark goes. A mark that an earlier
+controller left goes at the first renewal that the new one confirms,
+so a stale mark only keeps the node read only, never writable.
+
+The mark is for the database: `keel database follow` turns a MariaDB
+holder read only while the mark is there, with the fence of keel#186,
+and `keel database watch` does not lift it
+([docs/replication.md](replication.md)). On a cut MariaDB holder, a
+write that waits for the replica returns OK when the dump thread to
+the cut replica ends. With `net.ipv4.tcp_retries2 = 5` that is about
+12.6 s after the cut, before the release. 6 s is above the longest
+normal gap between two confirmed renewals (a renewal period and a
+call, 4 s). An etcd re-election that stops renewals for more than 6 s
+turns the MariaDB holder read only for the rest of it. That costs
+writes for some seconds, and it loses no acknowledged write.
+
 ### The margin between the two holders (keel#126)
 
 etcd gives a lease's time to live in whole seconds, rounded down. A

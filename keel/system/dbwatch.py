@@ -163,12 +163,18 @@ def needs_follow(root: str, pair: dbpair.PairState, reading,
     if role == dbpair.REPLICA:
         from keel.system import dbfollow
         replicating = reading.role.value == "replica"
-        if replicating and pair.fenced and reading.primary.value and \
-                _engine(doc) == "postgresql":
-            # a fenced standby that streams: follow clears the fence
-            # once it caught up with the holder (keel#166)
+        if replicating and pair.fenced and reading.primary.value:
+            # a fenced standby that streams or replicates: follow clears
+            # the fence once it caught up with the holder (keel#166 for
+            # PostgreSQL, keel#192 for MariaDB)
             return True
         return not replicating and dbfollow.diverged(root) is None
+    from keel.mesh import vip as vipstate
+    engine = ((doc.get("database") or {}).get("server") or {}).get("engine")
+    if engine == "mariadb" and vipstate.unconfirmed(root, pair.vip):
+        # the holder's doubt (keel#195): follow fences a writable server,
+        # and a fenced one stays as it is until a renewal is confirmed
+        return reading.read_only.value is not True
     if reading.read_only.value is True:
         return True
     if not reading.role.known:
@@ -180,11 +186,6 @@ def needs_follow(root: str, pair: dbpair.PairState, reading,
         "wireguard") or {}
     return vipnet.carried(wireguard.interface(overlay), pair.vip,
                           output) is False
-
-
-def _engine(doc: dict) -> str:
-    return str(((doc.get("database") or {}).get("server") or {})
-               .get("engine") or "")
 
 
 def semi_sync(root: str, pair: dbpair.PairState, out, err,

@@ -335,8 +335,11 @@ def serve_one(listener: Listener, context, raw: socket.socket, source: str,
         pass
     finally:
         read.cancel()
-        held[-1].close()
+        # free first: a client that sees the close may ask again at once,
+        # and it must find its slot free (keel#177), also when the
+        # handshake failed and the handler never ran
         release()
+        held[-1].close()
 
 
 def run(server: socket.socket, listener: Listener, context,

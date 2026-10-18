@@ -516,8 +516,21 @@ was:
    `RESET SLAVE ALL`) and the databases `--destroy-local-database`
    confirmed are dropped.
 7. **Load and start.** The copy is loaded through the local client, the
-   accounts are aligned, `gtid_slave_pos` is set to the dump's position,
-   and replication starts.
+   accounts are aligned, the node's binary log starts at the history of
+   the copy, `gtid_slave_pos` is set to the dump's position, and
+   replication starts.
+
+**The binary log starts at the history of the copy** (keel#202). The copy
+holds the effect of every transaction the primary logged, the ones of
+its first boot too: the hook that sets the administrative password
+writes before the pair exists, under another server id. The replica does
+not log the load, so after it the node runs `RESET MASTER` and sets
+`gtid_binlog_state` to the primary's GTIDs under other server ids than
+the dump's position names, then the position. Without this, the first
+primary came back from every cut as diverged. A server can take this
+state only while it writes a binary log, so on a pair `keel database
+follow` waits until `@@log_bin` is on, and the apply copies the holder
+after the restart that turns it on.
 
 A failure while loading leaves an incomplete copy and no replication; the
 next run sees databases it did not make and asks for
@@ -1439,7 +1452,11 @@ goes through the same window, marker, lock, timers and boot unit, with
   restart, and a kept file whose interface has another MTU gets the same
   action, said as drift (keel#139). The package's postinst runs `keel
   network mtu`, which does the same for each WireGuard interface that is
-  up, so an upgrade needs no reboot. A change
+  up, so an upgrade needs no reboot. Every peer gets
+  `PersistentKeepalive = 25` when the spec gives none (keel#140), set
+  live with `wg set`; a change that only sets a peer's keepalive cannot
+  cut the node off either, and keel mesh keeps it with no handshake, as
+  an addition. A change
   that only added peers live is marked so in the window's marker, and
   keel mesh keeps it with no handshake (mesh.md). A change is dated on the clock a session's
   start time is read on (the start of a thread, in seconds since the
