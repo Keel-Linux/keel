@@ -1,3 +1,19 @@
+keel (0.23.46) unstable; urgency=medium
+
+  * The drain of a PostgreSQL promotion ends when neither the replayed
+    nor the received position has moved for 5 s (keel#215). A cut can end
+    the stream inside a record: the walreceiver flushes the bytes that
+    arrived, replay stands at the end of the last whole record, and the two
+    positions never meet. On a real pair the standby that took the VIP
+    waited 417 s (received 0/7EC8000, replayed 0/7EC7A58, one TCP segment
+    apart). pg_promote() replays every whole record that is in pg_wal
+    before it ends recovery, so only the unfinished record is left behind,
+    and no standby can apply that. A standby whose positions still move
+    keeps its wait, and a standby that receives nothing is still refused.
+    Follow says how many bytes it left behind.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Sun, 18 Oct 2026 23:45:00 +0000
+
 keel (0.23.45) unstable; urgency=medium
 
   * An old PostgreSQL primary rejoins with pg_rewind against the new

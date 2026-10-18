@@ -144,7 +144,7 @@ def _primary(root: str, state: DatabaseState, found, runner,
                   " takes writes")
     elif state.reading.role.value == REPLICA:
         action = PromoteReplica(DRAIN_TIMEOUT, engine="postgresql")
-        problem = dbpgpromote.promote(root, action, runner)
+        problem = dbpgpromote.promote(root, action, runner, say=found.say)
         if problem:
             found.fail(problem)
             return

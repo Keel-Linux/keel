@@ -21,7 +21,7 @@ from vip_helpers import KEYS, VIP, Pair, address
 
 from keel.mesh import vipnode, vippromote
 from keel.mesh import vip as vipstate
-from keel.system import dbfollow, dbpair, dbpgfollow, dbpgrewind, \
+from keel.system import dbfollow, dbpair, dbpgfollow, dbpgpromote, dbpgrewind, \
     dbpostgres, dbsecret, dbtls
 from keel.system.actions import FollowVip, PromoteReplica
 from keel.system.database import plan_promote
@@ -307,6 +307,25 @@ class TestThePrimary(FollowTestCase):
         self.assertIn("drained and promoted", " ".join(found.lines))
         self.assertTrue(any("pg_promote()" in one for one in server.sent))
         self.assertIn("role=primary", self.role_file(0))
+
+    def test_a_stream_cut_inside_a_record_does_not_hold_the_promotion(self):
+        """keel#215: received 0/7EC8000, replayed 0/7EC7A58, both still:
+        the last record is not whole, replay never reaches the received
+        position, and the follow waited 417 s on a real pair"""
+        self.pair_nodes()
+        receiver = f"user=repl host={address(1)} port=5432 " \
+                   "password=******** sslmode=verify-full\n"
+        server = Server(in_recovery=True, receiver=receiver,
+                        positions="t\t0/7EC7A58\t0/7EC8000\n")
+        with mock.patch.object(dbpgpromote, "STALL_SECONDS", 0.2), \
+                mock.patch.object(dbpgpromote, "POLL_SECONDS", 0.05):
+            found = self.follow(0, server)
+        self.assertIsNone(found.problem, found.lines)
+        text = " ".join(found.lines)
+        self.assertIn("incomplete record", text)
+        self.assertIn("1448 bytes", text)
+        self.assertIn("drained and promoted", text)
+        self.assertTrue(any("pg_promote()" in one for one in server.sent))
 
     def test_a_promoted_standby_makes_the_pair_s_slot(self):
         """A base backup copies no slot: the new holder makes the
