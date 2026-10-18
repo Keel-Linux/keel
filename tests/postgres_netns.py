@@ -490,6 +490,13 @@ def server(index: int, pid: int, root: str) -> str:
        "-D", datadir,
        "-E", "UTF8", "--auth-local=peer", "--auth-host=scram-sha-256",
        "--no-sync",
+       # pg_rewind copies the WAL segments of the new primary in full,
+       # 16 MB each by default: at 50 kB/s on the design case's link
+       # that is 5 minutes for one, and a node has three to copy. The
+       # test is about what keel decides, not about that cost, which the
+       # release test on real nodes measures (0054, amendment of
+       # 2026-10-18)
+       "--wal-segsize=1",
        env={**os.environ, "TMPDIR": os.path.join(root, "var/tmp")})
     # the cluster's configuration, under the root the way Debian's
     # layout has it: the data directory, the port, the loopback and the
@@ -1146,7 +1153,7 @@ def crashed(report: dict, pids: list[int], roots: list[str]) -> None:
             lambda: pg_ask(a_root, "SELECT status FROM"
                            " pg_stat_wal_receiver", timeout=5)
             == "streaming" and dbfollow.diverged(a_root) is None,
-            360, 1)
+            600, 1)
         rewound_at = time.time()
         if report["e_rewound_s"] is None:
             report["e_stuck"] = stuck_facts(a_root)
