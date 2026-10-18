@@ -234,7 +234,8 @@ class FollowTestCase(Pair):
                                self.said[claim].append)
 
     def follow(self, index: int, server: Server, confirmed: bool = False,
-               wait: float = 0.0, alone: bool = False) -> dbfollow.Followed:
+               wait: float = 0.0, alone: bool = False,
+               down: str = "") -> dbfollow.Followed:
         here = self.all[index]
         found = dbfollow.Followed()
         with mock.patch("keel.inspect.constants.ROOT_DEFAULT", here.root), \
@@ -243,7 +244,7 @@ class FollowTestCase(Pair):
                 mock.patch("keel.system.dbstate.paths.ROOT_DEFAULT",
                            here.root), \
                 mock.patch("keel.inspect.collect.subprocess.run", server), \
-                mock.patch("keel.system.dbready.ready", return_value=""), \
+                mock.patch("keel.system.dbready.ready", return_value=down), \
                 mock.patch("keel.system.dbready.enabled",
                            return_value="enabled"), \
                 mock.patch("keel.system.dbseed.subprocess.run", server), \

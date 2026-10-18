@@ -41,6 +41,10 @@ from keel.system import dbpgseed, dbpostgres
 from keel.system.dbseed import _run, spool
 
 FAILED = "var/lib/keel/database/rewind-failed"
+# the dump taken before the rewind: the rewind writes no divergence
+# record, and a run after a half copy or a standby that did not stream
+# must not dump the half copied cluster again
+DUMP = "var/lib/keel/database/rewind-dump"
 # what pg_rewind needs of this node: either data checksums or
 # wal_log_hints on, and full page writes
 SETTINGS_SQL = (
@@ -76,10 +80,33 @@ def broken(root: str) -> bool:
 
 
 def forget(root: str) -> None:
+    for relative in (FAILED, DUMP):
+        try:
+            os.remove(os.path.join(root, relative))
+        except FileNotFoundError:
+            pass
+
+
+def keep(root: str, dump: str) -> None:
+    """Record the dump this node took before the rewind"""
+    path = os.path.join(root, DUMP)
     try:
-        os.remove(os.path.join(root, FAILED))
-    except FileNotFoundError:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fob:
+            fob.write(dump + "\n")
+        os.chmod(path, 0o600)
+    except OSError:
         pass
+
+
+def kept(root: str) -> str | None:
+    """The dump recorded before the rewind, when it is still there"""
+    try:
+        with open(os.path.join(root, DUMP)) as fob:
+            path = fob.read().strip()
+    except OSError:
+        return None
+    return path if os.path.isfile(path) else None
 
 
 def unusable(root: str) -> str:

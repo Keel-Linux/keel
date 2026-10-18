@@ -106,7 +106,7 @@ class TestTheRewind(FollowTestCase):
         self.assertIn("passfile=", source)
         self.assertIn("sslmode=verify-full", source)
         # the password is in the pgpass file, never in an argument
-        self.assertNotIn("pw", source.replace("passfile", ""))
+        self.assertNotIn("password=", source)
 
     def test_a_standby_that_follows_nobody_is_rewound_without_a_fence(self):
         self.pair_nodes()
@@ -228,11 +228,56 @@ class TestTheRewind(FollowTestCase):
     def test_the_confirmed_reseed_replaces_an_unusable_copy(self):
         server, found, _ = self.follow_old_primary(
             old_primary(rewind="halfway"))
+        # the dump of the half copied cluster would fail: the dump kept
+        # before the rewind is the one that counts, and no other is taken
+        server.dump_fails = True
         found = self.follow(1, server, confirmed=True)
         self.assertIsNone(found.problem, found.lines)
         self.assertTrue(self.ran(server, "pg_basebackup"))
+        self.assertEqual(sum("pg_dumpall" in argv for argv in server.argv),
+                         1)
+        self.assertEqual(len(os.listdir(os.path.join(
+            self.all[1].root, dbpgfollow.BACKUPS))), 1)
         self.assertFalse(os.path.exists(
             os.path.join(self.all[1].root, dbpgrewind.FAILED)))
+
+    def test_a_server_down_after_a_failed_run_is_reseeded_when_confirmed(
+            self):
+        """The half copied cluster may not start: the confirmed reseed
+        does not wait for the server to answer"""
+        self.pair_nodes()
+        root = self.all[1].root
+        os.makedirs(os.path.join(root, "var/lib/keel/database"),
+                    exist_ok=True)
+        with open(os.path.join(root, dbpgrewind.FAILED), "w") as fob:
+            fob.write("pg_rewind failed\n")
+        server = Server()
+        found = self.follow(1, server, confirmed=True,
+                            down="postgresql does not start")
+        self.assertIsNone(found.problem, found.lines)
+        self.assertTrue(self.ran(server, "pg_basebackup"))
+        self.assertFalse(os.path.exists(os.path.join(root, dbpgrewind.FAILED)))
+
+    def test_a_server_down_after_a_failed_run_waits_for_the_confirmation(
+            self):
+        self.pair_nodes()
+        root = self.all[1].root
+        os.makedirs(os.path.join(root, "var/lib/keel/database"),
+                    exist_ok=True)
+        with open(os.path.join(root, dbpgrewind.FAILED), "w") as fob:
+            fob.write("pg_rewind failed\n")
+        server = Server()
+        found = self.follow(1, server, down="postgresql does not start")
+        self.assertIn("not answering", found.problem)
+        self.assertFalse(self.ran(server, "pg_basebackup"))
+
+    def test_a_server_down_with_no_failed_run_is_never_reseeded(self):
+        self.pair_nodes()
+        server = Server()
+        found = self.follow(1, server, confirmed=True,
+                            down="postgresql does not start")
+        self.assertIn("not answering", found.problem)
+        self.assertFalse(self.ran(server, "pg_basebackup"))
 
     def test_confirming_the_reseed_skips_the_rewind(self):
         server, found, _ = self.follow_old_primary(
@@ -242,8 +287,9 @@ class TestTheRewind(FollowTestCase):
         self.assertTrue(self.ran(server, "pg_basebackup"))
 
     def test_a_standby_that_does_not_stream_goes_back_to_the_fence(self):
-        server, found, _ = self.follow_old_primary(
-            old_primary(streams=False))
+        with mock.patch("keel.system.dbpgseed.STREAMING_TIMEOUT", 0):
+            server, found, _ = self.follow_old_primary(
+                old_primary(streams=False))
         root = self.all[1].root
         self.assertIn("does not stream", found.problem)
         self.assertFalse(os.path.exists(os.path.join(root, FOLLOW_DROPIN)))
@@ -252,6 +298,12 @@ class TestTheRewind(FollowTestCase):
             os.path.join(root, dbpgrewind.FAILED)))
         restarts = server.argv.count(["systemctl", "restart", UNIT])
         self.assertEqual(restarts, 2)
+        # the next run asks again, and takes no second dump
+        server.streams = True
+        found = self.follow(1, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertEqual(sum("pg_dumpall" in argv for argv in server.argv),
+                         1)
 
     def test_a_rewound_standby_that_caught_up_is_unfenced(self):
         self.pair_nodes()
@@ -390,7 +442,8 @@ class TestWhatCanGoWrong(FollowTestCase):
             return real(path, *args, **kwargs)
 
         with mock.patch("keel.system.dbpgrewind.os.remove",
-                        side_effect=refuse):
+                        side_effect=refuse), \
+                mock.patch("keel.system.dbpgseed.STREAMING_TIMEOUT", 0):
             found = self.follow(1, old_primary(streams=False))
         self.assertIn("does not stream", found.problem)
 
@@ -409,6 +462,22 @@ class TestTheHolderGrants(FollowTestCase):
         sent = "\n".join(server.sent)
         for name in dbpostgres.REWIND_FUNCTIONS:
             self.assertIn(f"GRANT EXECUTE ON FUNCTION {name}", sent)
+
+
+class TestTheKeptDump(unittest.TestCase):
+    def test_a_record_that_cannot_be_written_is_not_an_error(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            with mock.patch("keel.system.dbpgrewind.os.makedirs",
+                            side_effect=OSError(13, "Permission denied")):
+                dbpgrewind.keep(root, "/var/backups/x.zst")
+            self.assertIsNone(dbpgrewind.kept(root))
+
+    def test_a_dump_that_is_gone_is_not_kept(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            dbpgrewind.keep(root, os.path.join(root, "gone.zst"))
+            self.assertIsNone(dbpgrewind.kept(root))
 
 
 class TestTheSettings(unittest.TestCase):

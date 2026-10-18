@@ -75,7 +75,7 @@ from keel.mesh.node import Node, NodeError
 from keel.monitor import alerting
 from keel.network import live, wireguard
 from keel.spec.constants import DEFAULT_PORTS
-from keel.system import dbgtid, dbpair, dbreadonly, dbseed, dbtls
+from keel.system import dbgtid, dbpair, dbpgrewind, dbreadonly, dbseed, dbtls
 from keel.system import dbmariadb as mariadb
 from keel.system.actions import PromoteReplica, SeedReplica
 from keel.system.database import DRAIN_TIMEOUT, PRIMARY, REPLICA
@@ -206,10 +206,14 @@ def _follow(root: str, spec: str, confirmed: bool, found: Followed,
                   " proven (the VIP is not on wg0), so its server stays"
                   " stopped until the VIP decides")
         return
-    if state.down:
+    # a copy that pg_rewind half copied may not start: only the confirmed
+    # reseed replaces it, and it needs no answer from the server
+    reseed_down = bool(state.down) and confirmed and \
+        state.engine == "postgresql" and dbpgrewind.broken(root)
+    if state.down and not reseed_down:
         found.fail(f"the server is not answering ({state.down})")
         return
-    if not state.reading.role.known:
+    if not reseed_down and not state.reading.role.known:
         found.fail(f"the server could not be asked what it is"
                    f" ({state.reading.role.problem})")
         return
@@ -220,6 +224,9 @@ def _follow(root: str, spec: str, confirmed: bool, found: Followed,
     server = declared_server(doc)
     role = dbpair.role_of(pair, str(server.get("role") or ""))
     record_role = True
+    if reseed_down:
+        from keel.system import dbpgfollow
+        state = dbpgfollow.for_reseed(root, state, server, spec)
     if state.engine == "postgresql":
         # the engine's rows (0054): read_only, the role drop-in, the
         # root lock and GTID errancy are MariaDB's; a standby's

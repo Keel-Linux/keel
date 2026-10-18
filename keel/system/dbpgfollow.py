@@ -432,6 +432,7 @@ def _replica(root: str, server: dict, state: DatabaseState,
             return
         found.say(f"a dump of what this node holds is kept at {kept}")
     if not confirmed:
+        dbpgrewind.keep(root, kept)
         outcome = dbpgrewind.rejoin(
             root, host, port, state.credential.value,
             dbtls.options_lines(root, "postgresql"), found, runner)
@@ -531,9 +532,11 @@ def _kept_dump(root: str) -> str | None:
         with open(os.path.join(root, DIVERGED)) as fob:
             recorded = json.load(fob)
     except (OSError, ValueError):
-        return None
+        return dbpgrewind.kept(root)
     path = recorded.get("dump") if isinstance(recorded, dict) else None
-    return path if isinstance(path, str) and os.path.isfile(path) else None
+    if isinstance(path, str) and os.path.isfile(path):
+        return path
+    return dbpgrewind.kept(root)
 
 
 def _following(state: DatabaseState, host: str, port: int) -> bool:
@@ -630,6 +633,20 @@ def _diverged(root: str, state: DatabaseState, holder: str, own: str | None,
                            host=os.uname().nodename, vip=state.pair.vip,
                            holder=holder, own=own or "unknown",
                            theirs=theirs, backups=BACKUPS), CHECK)
+
+
+def for_reseed(root: str, state: DatabaseState, server: dict,
+               spec: str) -> DatabaseState:
+    """The state of a node whose server does not start, for the
+    confirmed reseed of a copy that pg_rewind half copied: the
+    credential and the certificate, which an observation of a server
+    that does not answer leaves out"""
+    from dataclasses import replace
+    from keel.system import dbstate
+    return replace(
+        state, credential=dbstate.credential(server, root, state.pair,
+                                             False, spec),
+        tls_ready=dbtls.present(root, "postgresql"))
 
 
 def _forget_divergence(root: str) -> None:
