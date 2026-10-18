@@ -283,7 +283,9 @@ class TestAPostgresqlPairOnAPoorNetwork(unittest.TestCase):
         self.assertEqual(found["e_alerts"], [], found)
         self.assertEqual(found["e_in_recovery"], "t", found)
         self.assertEqual(found["e_receivers"], "1", found)
-        log = " ".join(found["e_follow_log_rewound"]["follows"])
+        # read two watch runs later: the follow that rewinds ends after
+        # the node streams
+        log = " ".join(found["e_follow_log"]["follows"])
         self.assertIn("rewound against", log)
         self.assertNotIn("seeded from", log)
         self.assertFalse(any(line.startswith("database.server.diverged")

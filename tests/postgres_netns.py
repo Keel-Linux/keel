@@ -1157,7 +1157,6 @@ def crashed(report: dict, pids: list[int], roots: list[str]) -> None:
         rewound_at = time.time()
         if report["e_rewound_s"] is None:
             report["e_stuck"] = stuck_facts(a_root)
-        report["e_follow_log_rewound"] = agent_send("A", "followlog")
         mark(report, "case_e_rewound")
     finally:
         boot.stop()
