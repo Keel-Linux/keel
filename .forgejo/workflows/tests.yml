@@ -34,6 +34,9 @@ jobs:
       # the overlay tests hand keel's key and file to (tests/wgtools.py);
       # in CI they fail rather than skip without it.
       apt-packages: bats shellcheck gnupg gpgv wireguard-tools
+  # The jobs with a container start in the order of this file, 5 at a
+  # time. The long ones come first (mesh, postgres), so that the last
+  # job does not start after 8 minutes.
   # keel mesh end to end (decision 0048) in a Debian trixie system
   # container, the release keel ships on: three network namespaces,
   # the real wg-quick and TLS, as root in the container
@@ -60,146 +63,6 @@ jobs:
           tests/test_mesh4_netns.py tests/test_network_overlay_live_netns.py \
           tests/test_network_overlay_mtu_netns.py \
           tests/test_mesh_late_netns.py tests/test_mesh_channel.py
-  # etcd over the mesh (decisions 0025, 0048, 0050) in a Debian trixie
-  # system container: three namespaces, the real wg-quick and trixie's
-  # etcd 3.5 and etcdctl, keel's CA and rendered configuration, on links of 250 ms
-  # ±25 ms with 2% loss; it forms, keeps its leader for 60 s, and a
-  # follower cut off for 45 s rejoins (tests/test_etcd_netns.py; the
-  # 5 and 2 minutes of the brief run by hand, ETCD_SOAK=full). The
-  # check is "etcd / trixie".
-  etcd:
-    runs-on: keel-lxc
-    uses: keel-linux/.github/.github/workflows/lxc-trixie.yml@main
-    with:
-      timeout: 20
-      run: |
-        apt-get update -qq
-        apt-get install -y -qq --no-install-recommends python3-pytest \
-          python3-yaml wireguard-tools iproute2 iputils-ping openssl \
-          etcd-server etcd-client
-        KEEL_ETCD_NETNS=1 PYTHONPATH=. python3 -m pytest -q -s \
-          tests/test_etcd_netns.py
-  # The service VIP on the mesh (decision 0049) in a Debian trixie
-  # system container: three namespaces, the real wg-quick and trixie's
-  # etcd 3.5, keel's members' channel and VIP controller, on links of
-  # 250 ms ±25 ms with 2% loss measured first; a planned promote, the
-  # primary cut off, the heal and a stale claim, the VIP's holders read
-  # every 200 ms (tests/test_vip_netns.py). The check is "vip / trixie".
-  # The helper and the controller run as systemd units joined to each
-  # node's namespace, so the container boots systemd, and their
-  # hardening is read from the kernel.
-  vip:
-    runs-on: keel-lxc
-    uses: keel-linux/.github/.github/workflows/lxc-trixie.yml@main
-    with:
-      systemd: true
-      timeout: 30
-      run: |
-        apt-get update -qq
-        apt-get install -y -qq --no-install-recommends python3-pytest \
-          python3-yaml wireguard-tools iproute2 iputils-ping openssl \
-          etcd-server etcd-client util-linux
-        KEEL_VIP_NETNS=1 PYTHONPATH=. python3 -m pytest -q -s \
-          tests/test_vip_netns.py
-  # Upgrades on a pair whose VIP is active (the maintainer's requirement
-  # of 2026-10-10), on the nodes and links of the vip job: keel-vip.service
-  # try-restarted on the holder and the replica as keel-overlay-vip's
-  # postinst does, its helper killed, etcd restarted on each member in
-  # turn through keel-overlay-etcd's gate, a second member's restart held
-  # back while the first is down, and the holder's controller frozen
-  # (tests/test_vip_upgrade_netns.py). The check is "vip-upgrade / trixie".
-  vip-upgrade:
-    runs-on: keel-lxc
-    uses: keel-linux/.github/.github/workflows/lxc-trixie.yml@main
-    with:
-      systemd: true
-      timeout: 30
-      run: |
-        apt-get update -qq
-        apt-get install -y -qq --no-install-recommends python3-pytest \
-          python3-yaml wireguard-tools iproute2 iputils-ping openssl \
-          etcd-server etcd-client util-linux
-        KEEL_VIP_UPGRADE_NETNS=1 PYTHONPATH=. python3 -m pytest -q -s \
-          tests/test_vip_upgrade_netns.py
-  # keel#83 on the mesh: three members in the layout before keel#83 (an
-  # intermediate CA per member), the VIP held by a pair, moved by keel
-  # mesh etcd reissue while the VIP's holders are sampled every 200 ms
-  # and each member's quorum read every second, on links of 250 ms
-  # ±25 ms with 2% loss measured first; then etcd refuses the member
-  # outside the pair its writes, no member can mint a certificate, a
-  # renewal goes through the root and waits while it is cut off, and
-  # the rollback turns auth off (tests/test_etcd_auth_netns.py). The
-  # check is "etcd-auth / trixie". The VIP's units need systemd, as the
-  # vip job's do.
-  etcd-auth:
-    permissions:
-      contents: read
-    runs-on: keel-lxc
-    uses: keel-linux/.github/.github/workflows/lxc-trixie.yml@main
-    with:
-      systemd: true
-      timeout: 40
-      run: |
-        apt-get update -qq
-        apt-get install -y -qq --no-install-recommends python3-pytest \
-          python3-yaml wireguard-tools iproute2 iputils-ping openssl \
-          etcd-server etcd-client util-linux
-        KEEL_ETCD_AUTH_NETNS=1 PYTHONPATH=. python3 -m pytest -q -s \
-          tests/test_etcd_auth_netns.py
-  # A MariaDB pair on the mesh (decisions 0020, 0031, 0049) in a Debian
-  # trixie system container: the vip job's three nodes and links (250 ms
-  # ±25 ms with 2% loss measured first), etcd, the VIP's units, and
-  # trixie's MariaDB 11.8 as a server per node in its namespace: case (a)
-  # of docs/replication.md, the replica seeded over TLS, a write at the
-  # VIP read on it with the lag measured, semi-synchronous replication
-  # on, the replica read only, keel diff clean (tests/test_mariadb_netns.py;
-  # the fallback, the promote, the failover and rejoin, the diverged old
-  # primary and the replica's refusals are the follow-up pull request's).
-  # Also the fence of an old primary on two real servers: a write that
-  # waits for the replica's ACK gets no OK once the fence ran (keel#186,
-  # tests/test_mariadb_fence_real.py). The check is "mariadb / trixie".
-  mariadb:
-    permissions:
-      contents: read
-    runs-on: keel-lxc
-    uses: keel-linux/.github/.github/workflows/lxc-trixie.yml@main
-    with:
-      systemd: true
-      timeout: 35
-      run: |
-        apt-get update -qq
-        apt-get install -y -qq --no-install-recommends python3-pytest \
-          python3-yaml wireguard-tools iproute2 iputils-ping openssl \
-          etcd-server etcd-client util-linux mariadb-server mariadb-client \
-          zstd
-        systemctl stop mariadb
-        KEEL_MARIADB_NETNS=1 PYTHONPATH=. python3 -m pytest -q -s \
-          tests/test_mariadb_netns.py tests/test_mariadb_fence_real.py
-  # The unplanned failover of a cloud simple MariaDB pair (keel#108,
-  # keel#118) on the mariadb job's nodes and links, the specs in cloud
-  # simple with etcd disabled, so the VIP moves without a lease, as on
-  # the real pair: the primary killed and cut off, the operator's
-  # promote 2 s after, the writes at the VIP back within 15 s of it plus
-  # the three full timeouts it waits on the dead old primary, and
-  # no acknowledged row lost (tests/test_mariadb_simple_netns.py). The
-  # check is "mariadb-simple / trixie".
-  mariadb-simple:
-    permissions:
-      contents: read
-    runs-on: keel-lxc
-    uses: keel-linux/.github/.github/workflows/lxc-trixie.yml@main
-    with:
-      systemd: true
-      timeout: 35
-      run: |
-        apt-get update -qq
-        apt-get install -y -qq --no-install-recommends python3-pytest \
-          python3-yaml wireguard-tools iproute2 iputils-ping openssl \
-          etcd-server etcd-client util-linux mariadb-server mariadb-client \
-          zstd
-        systemctl stop mariadb
-        KEEL_MARIADB_SIMPLE_NETNS=1 PYTHONPATH=. python3 -m pytest -q -s \
-          tests/test_mariadb_simple_netns.py
   # A PostgreSQL pair on the mesh (decision 0054) in a Debian trixie
   # system container: the vip job's three nodes and links (250 ms
   # +-25 ms with 2% loss measured first), etcd, the VIP's units, and
@@ -232,6 +95,146 @@ jobs:
         systemctl stop postgresql
         KEEL_POSTGRES_NETNS=1 PYTHONPATH=. python3 -m pytest -q -s \
           tests/test_postgres_netns.py
+  # Upgrades on a pair whose VIP is active (the maintainer's requirement
+  # of 2026-10-10), on the nodes and links of the vip job: keel-vip.service
+  # try-restarted on the holder and the replica as keel-overlay-vip's
+  # postinst does, its helper killed, etcd restarted on each member in
+  # turn through keel-overlay-etcd's gate, a second member's restart held
+  # back while the first is down, and the holder's controller frozen
+  # (tests/test_vip_upgrade_netns.py). The check is "vip-upgrade / trixie".
+  vip-upgrade:
+    runs-on: keel-lxc
+    uses: keel-linux/.github/.github/workflows/lxc-trixie.yml@main
+    with:
+      systemd: true
+      timeout: 30
+      run: |
+        apt-get update -qq
+        apt-get install -y -qq --no-install-recommends python3-pytest \
+          python3-yaml wireguard-tools iproute2 iputils-ping openssl \
+          etcd-server etcd-client util-linux
+        KEEL_VIP_UPGRADE_NETNS=1 PYTHONPATH=. python3 -m pytest -q -s \
+          tests/test_vip_upgrade_netns.py
+  # A MariaDB pair on the mesh (decisions 0020, 0031, 0049) in a Debian
+  # trixie system container: the vip job's three nodes and links (250 ms
+  # ±25 ms with 2% loss measured first), etcd, the VIP's units, and
+  # trixie's MariaDB 11.8 as a server per node in its namespace: case (a)
+  # of docs/replication.md, the replica seeded over TLS, a write at the
+  # VIP read on it with the lag measured, semi-synchronous replication
+  # on, the replica read only, keel diff clean (tests/test_mariadb_netns.py;
+  # the fallback, the promote, the failover and rejoin, the diverged old
+  # primary and the replica's refusals are the follow-up pull request's).
+  # Also the fence of an old primary on two real servers: a write that
+  # waits for the replica's ACK gets no OK once the fence ran (keel#186,
+  # tests/test_mariadb_fence_real.py). The check is "mariadb / trixie".
+  mariadb:
+    permissions:
+      contents: read
+    runs-on: keel-lxc
+    uses: keel-linux/.github/.github/workflows/lxc-trixie.yml@main
+    with:
+      systemd: true
+      timeout: 35
+      run: |
+        apt-get update -qq
+        apt-get install -y -qq --no-install-recommends python3-pytest \
+          python3-yaml wireguard-tools iproute2 iputils-ping openssl \
+          etcd-server etcd-client util-linux mariadb-server mariadb-client \
+          zstd
+        systemctl stop mariadb
+        KEEL_MARIADB_NETNS=1 PYTHONPATH=. python3 -m pytest -q -s \
+          tests/test_mariadb_netns.py tests/test_mariadb_fence_real.py
+  # The service VIP on the mesh (decision 0049) in a Debian trixie
+  # system container: three namespaces, the real wg-quick and trixie's
+  # etcd 3.5, keel's members' channel and VIP controller, on links of
+  # 250 ms ±25 ms with 2% loss measured first; a planned promote, the
+  # primary cut off, the heal and a stale claim, the VIP's holders read
+  # every 200 ms (tests/test_vip_netns.py). The check is "vip / trixie".
+  # The helper and the controller run as systemd units joined to each
+  # node's namespace, so the container boots systemd, and their
+  # hardening is read from the kernel.
+  vip:
+    runs-on: keel-lxc
+    uses: keel-linux/.github/.github/workflows/lxc-trixie.yml@main
+    with:
+      systemd: true
+      timeout: 30
+      run: |
+        apt-get update -qq
+        apt-get install -y -qq --no-install-recommends python3-pytest \
+          python3-yaml wireguard-tools iproute2 iputils-ping openssl \
+          etcd-server etcd-client util-linux
+        KEEL_VIP_NETNS=1 PYTHONPATH=. python3 -m pytest -q -s \
+          tests/test_vip_netns.py
+  # etcd over the mesh (decisions 0025, 0048, 0050) in a Debian trixie
+  # system container: three namespaces, the real wg-quick and trixie's
+  # etcd 3.5 and etcdctl, keel's CA and rendered configuration, on links of 250 ms
+  # ±25 ms with 2% loss; it forms, keeps its leader for 60 s, and a
+  # follower cut off for 45 s rejoins (tests/test_etcd_netns.py; the
+  # 5 and 2 minutes of the brief run by hand, ETCD_SOAK=full). The
+  # check is "etcd / trixie".
+  etcd:
+    runs-on: keel-lxc
+    uses: keel-linux/.github/.github/workflows/lxc-trixie.yml@main
+    with:
+      timeout: 20
+      run: |
+        apt-get update -qq
+        apt-get install -y -qq --no-install-recommends python3-pytest \
+          python3-yaml wireguard-tools iproute2 iputils-ping openssl \
+          etcd-server etcd-client
+        KEEL_ETCD_NETNS=1 PYTHONPATH=. python3 -m pytest -q -s \
+          tests/test_etcd_netns.py
+  # keel#83 on the mesh: three members in the layout before keel#83 (an
+  # intermediate CA per member), the VIP held by a pair, moved by keel
+  # mesh etcd reissue while the VIP's holders are sampled every 200 ms
+  # and each member's quorum read every second, on links of 250 ms
+  # ±25 ms with 2% loss measured first; then etcd refuses the member
+  # outside the pair its writes, no member can mint a certificate, a
+  # renewal goes through the root and waits while it is cut off, and
+  # the rollback turns auth off (tests/test_etcd_auth_netns.py). The
+  # check is "etcd-auth / trixie". The VIP's units need systemd, as the
+  # vip job's do.
+  etcd-auth:
+    permissions:
+      contents: read
+    runs-on: keel-lxc
+    uses: keel-linux/.github/.github/workflows/lxc-trixie.yml@main
+    with:
+      systemd: true
+      timeout: 40
+      run: |
+        apt-get update -qq
+        apt-get install -y -qq --no-install-recommends python3-pytest \
+          python3-yaml wireguard-tools iproute2 iputils-ping openssl \
+          etcd-server etcd-client util-linux
+        KEEL_ETCD_AUTH_NETNS=1 PYTHONPATH=. python3 -m pytest -q -s \
+          tests/test_etcd_auth_netns.py
+  # The unplanned failover of a cloud simple MariaDB pair (keel#108,
+  # keel#118) on the mariadb job's nodes and links, the specs in cloud
+  # simple with etcd disabled, so the VIP moves without a lease, as on
+  # the real pair: the primary killed and cut off, the operator's
+  # promote 2 s after, the writes at the VIP back within 15 s of it plus
+  # the three full timeouts it waits on the dead old primary, and
+  # no acknowledged row lost (tests/test_mariadb_simple_netns.py). The
+  # check is "mariadb-simple / trixie".
+  mariadb-simple:
+    permissions:
+      contents: read
+    runs-on: keel-lxc
+    uses: keel-linux/.github/.github/workflows/lxc-trixie.yml@main
+    with:
+      systemd: true
+      timeout: 35
+      run: |
+        apt-get update -qq
+        apt-get install -y -qq --no-install-recommends python3-pytest \
+          python3-yaml wireguard-tools iproute2 iputils-ping openssl \
+          etcd-server etcd-client util-linux mariadb-server mariadb-client \
+          zstd
+        systemctl stop mariadb
+        KEEL_MARIADB_SIMPLE_NETNS=1 PYTHONPATH=. python3 -m pytest -q -s \
+          tests/test_mariadb_simple_netns.py
   # A change that ships must come with a changelog entry, or it cannot be
   # installed and never reaches an appliance. The rule and its tests are
   # bin/require-changelog of the .github repository. The check is
