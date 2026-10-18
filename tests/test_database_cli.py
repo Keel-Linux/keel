@@ -56,6 +56,22 @@ class TestTheCommands(unittest.TestCase):
                                    "--root", self.root)
         self.assertEqual(code, exits.OK, out)
 
+    def test_follow_on_a_node_with_no_vip_has_nothing_to_follow_and_succeeds(self):
+        """keel#211: the witness of a pair declares no appliance.vip, and
+        keel-database-follow.service ended failed there"""
+        from keel.system import dbfollow
+        seen = {}
+
+        def no_pair(root, spec, confirmed, found):
+            seen["flag"] = found.nothing_without_vip
+            found.say("nothing to follow: " + dbfollow.NO_PAIR)
+        with mock.patch.object(dbfollow, "follow", side_effect=no_pair):
+            code, out, _ = run_cli("database", "follow", "--spec", self.spec,
+                                   "--root", self.root)
+        self.assertTrue(seen["flag"])
+        self.assertEqual(code, exits.OK, out)
+        self.assertNotIn("refused", out)
+
     def test_guard_reaches_its_flow_and_says_why(self):
         from keel.system import dbpgguard
 

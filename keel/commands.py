@@ -496,6 +496,7 @@ def database_follow(args) -> int:
         return exits.APPLY_NEEDS_ROOT
     found = dbfollow.Followed(lambda line: print(
         f"database.server.role: {line}"))
+    found.nothing_without_vip = True
     dbfollow.follow(os.path.abspath(root), args.spec,
                     getattr(args, "destroy_local_database", False), found)
     return exits.APPLY_FAILED if found.problem else exits.OK

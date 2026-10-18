@@ -137,6 +137,11 @@ class Followed:
         self.lines: list[str] = []
         self.out = out
         self.problem: str | None = None
+        # keel database follow, run by keel-database-follow.service, sets
+        # this: a node with no appliance.vip, the witness of a pair, has
+        # nothing to follow, and that is no failure (keel#211). A spec apply
+        # that declares a role leaves it off, and still refuses.
+        self.nothing_without_vip = False
 
     def say(self, line: str) -> None:
         self.lines.append(line)
@@ -184,9 +189,15 @@ def _follow(root: str, spec: str, confirmed: bool, found: Followed,
                              spec=spec)
     if state is None:
         declared = (doc.get("appliance") or {}).get("vip")
+        if not declared and found.nothing_without_vip:
+            found.say(f"nothing to follow: {NO_PAIR}")
+            return
         found.fail(NO_SERVER if declared else NO_PAIR)
         return
     if state.pair is None:
+        if found.nothing_without_vip:
+            found.say(f"nothing to follow: {NO_PAIR}")
+            return
         found.fail(NO_PAIR)
         return
     pair = state.pair
