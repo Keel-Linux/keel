@@ -285,8 +285,11 @@ class TestRewindStatements(unittest.TestCase):
         made = dbpostgres.rewind_statements()
         self.assertEqual(len(dbpostgres.REWIND_FUNCTIONS), 4)
         for name in dbpostgres.REWIND_FUNCTIONS:
-            self.assertIn(f"GRANT EXECUTE ON FUNCTION {name} TO repl;",
-                          made.text)
+            self.assertIn(
+                f"GRANT EXECUTE ON FUNCTION {name}"
+                f" TO {dbpostgres.REPLICATION_USER};", made.text)
+        self.assertIn(f"rolname = '{dbpostgres.REPLICATION_USER}'",
+                      made.text)
         self.assertIn("pg_rewind", made.summary)
 
     def test_the_grants_are_refused_on_no_standby_and_commit_alone(self):

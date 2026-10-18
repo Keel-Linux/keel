@@ -353,7 +353,8 @@ def database_command(here, words: list[str]) -> dict | None:
         return {"code": code, "out": out.getvalue().splitlines(),
                 "took_s": round(time.monotonic() - started, 2)}
     if words[:1] == ["followlog"]:
-        return {"log": FOLLOWER.log[-20:], "runs": FOLLOWER.runs}
+        return {"log": FOLLOWER.log[-20:], "runs": FOLLOWER.runs,
+                "follows": [one for one in FOLLOWER.log if " follow (" in one]}
     if words[:1] == ["role-file"]:
         try:
             with open(os.path.join(root, "var/lib/keel/role")) as fob:

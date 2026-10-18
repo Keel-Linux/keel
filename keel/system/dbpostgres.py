@@ -424,6 +424,30 @@ REWIND_FUNCTIONS = (
 )
 
 
+# written out in full, with no splice: nothing here is built from a value
+REWIND_SQL = (
+    "SET synchronous_commit = local;\n"
+    "DO $keel$\n"
+    "BEGIN\n"
+    "   IF pg_is_in_recovery() THEN\n"
+    "      RETURN;\n"
+    "   END IF;\n"
+    "   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'repl') THEN\n"
+    "      RETURN;\n"
+    "   END IF;\n"
+    "   GRANT EXECUTE ON FUNCTION pg_catalog.pg_ls_dir(text, boolean,"
+    " boolean) TO repl;\n"
+    "   GRANT EXECUTE ON FUNCTION pg_catalog.pg_stat_file(text, boolean)"
+    " TO repl;\n"
+    "   GRANT EXECUTE ON FUNCTION pg_catalog.pg_read_binary_file(text)"
+    " TO repl;\n"
+    "   GRANT EXECUTE ON FUNCTION pg_catalog.pg_read_binary_file(text,"
+    " bigint, bigint, boolean) TO repl;\n"
+    "END\n"
+    "$keel$;\n"
+)
+
+
 def rewind_statements() -> Statements:
     """The grants that let the old primary rewind against this server
 
@@ -433,24 +457,8 @@ def rewind_statements() -> Statements:
     network-namespace test). The SET comes first for the reason
     slot_statements gives.
     """
-    grants = "".join(
-        f"      GRANT EXECUTE ON FUNCTION {name} TO {REPLICATION_USER};\n"
-        for name in REWIND_FUNCTIONS)
-    exists = ("   IF NOT EXISTS (SELECT FROM pg_roles"
-              f" WHERE rolname = '{REPLICATION_USER}') THEN\n"
-              "      RETURN;\n"
-              "   END IF;\n")
     return Statements(
-        "SET synchronous_commit = local;\n"
-        "DO $keel$\n"
-        "BEGIN\n"
-        "   IF pg_is_in_recovery() THEN\n"
-        "      RETURN;\n"
-        "   END IF;\n"
-        + exists
-        + grants +
-        "END\n"
-        "$keel$;\n",
+        REWIND_SQL,
         "ensure the replication role may read the files that pg_rewind"
         " reads",
     )

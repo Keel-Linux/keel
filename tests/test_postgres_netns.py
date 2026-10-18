@@ -231,7 +231,7 @@ class TestAPostgresqlPairOnAPoorNetwork(unittest.TestCase):
         self.assertEqual(found["c_b_sync_names"], "", found)
         self.assertIsNotNone(found["c_b_alone_alerted_s"], found["alerts"])
         self.assertIsNotNone(downtime["first_ok_after_s"], downtime)
-        self.assertIsNotNone(found["d_a_streaming_s"], found)
+        self.assertIsNotNone(found["e_rewound_s"], found)
 
     def test_c_the_writes_resume_within_5_s_after_the_vip_lands(self):
         """The client-side bound of keel#148: the writes resume at most
@@ -283,7 +283,7 @@ class TestAPostgresqlPairOnAPoorNetwork(unittest.TestCase):
         self.assertEqual(found["e_alerts"], [], found)
         self.assertEqual(found["e_in_recovery"], "t", found)
         self.assertEqual(found["e_receivers"], "1", found)
-        log = " ".join(found["e_follow_log_rewound"]["log"])
+        log = " ".join(found["e_follow_log_rewound"]["follows"])
         self.assertIn("rewound against", log)
         self.assertNotIn("seeded from", log)
         self.assertFalse(any(line.startswith("database.server.diverged")
