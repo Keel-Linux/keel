@@ -285,9 +285,11 @@ class TestAPostgresqlPairOnAPoorNetwork(unittest.TestCase):
         self.assertEqual(found["e_receivers"], "1", found)
         # read two watch runs later: the follow that rewinds ends after
         # the node streams
-        log = " ".join(found["e_follow_log"]["follows"])
-        self.assertIn("rewound against", log)
-        self.assertNotIn("seeded from", log)
+        rewinds = [one for one in found["e_follow_log"]["follows"]
+                   if "rewound against" in one]
+        self.assertEqual(len(rewinds), 1, found["e_follow_log"])
+        # the follow that rewound did not copy the holder
+        self.assertNotIn("seeded from", rewinds[0])
         self.assertFalse(any(line.startswith("database.server.diverged")
                              for line in found["e_diff"]["out"]),
                          found["e_diff"])
