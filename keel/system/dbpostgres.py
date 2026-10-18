@@ -132,15 +132,23 @@ PRIMARY_LINES = (
 # The pair's lines, on both nodes whatever the role (0054): the
 # primary confirms a commit only after the standby of application_name
 # `keel` received and flushed it, with no timeout — while the replica
-# is away the primary stops committing; wal_log_hints is the revisit
-# path for pg_rewind, not used in this version.
+# is away the primary stops committing; wal_log_hints is what lets the
+# old primary rejoin with pg_rewind (0054, amendment of 2026-10-18).
 SLOT = "keel"
 SYNC_LINE = f"synchronous_standby_names = 'FIRST 1 ({SLOT})'\n"
-PAIR_LINES = (
+LEGACY_PAIR_LINES = (
     SYNC_LINE
     + "synchronous_commit = on\n"
     "wal_log_hints = on\n"
 )
+# pg_rewind reads the old primary's WAL back to its last checkpoint
+# before the fork. The server recycles WAL older than its shutdown
+# checkpoint (the pair's slot keeps only what the standby lacks), so
+# the pair keeps the last 256 MB. A server takes wal_keep_size on a
+# reload; the older keel wrote LEGACY_PAIR_LINES, and an apply of the
+# new text reloads and never restarts (keel.system.dbpgpairplan).
+KEEP_LINE = "wal_keep_size = 256MB\n"
+PAIR_LINES = LEGACY_PAIR_LINES + KEEP_LINE
 # The one exception to the rule above (0054, amended 2026-10-14): when
 # the operator promotes with --old-primary-gone, the new primary has no
 # standby, and with the line above every commit would wait until the
@@ -369,12 +377,14 @@ def ident_text(cns: list[str]) -> str:
     return "".join(lines)
 
 
-def pair_dropin_text(ident: str = "") -> str:
+def pair_dropin_text(ident: str = "", legacy: bool = False) -> str:
     """The pair drop-in, on both nodes whatever the role: the
     synchronous commit policy and wal_log_hints (0054). `ident` is the
     ident file's path, set only by the pair (hba_text's verify lines
-    consult the map it holds), as a GUC beside the others"""
-    return (DROPIN_HEADER + PAIR_LINES
+    consult the map it holds), as a GUC beside the others. `legacy` is
+    the text that keel before 0.23.44 wrote, which an apply replaces
+    with a reload"""
+    return (DROPIN_HEADER + (LEGACY_PAIR_LINES if legacy else PAIR_LINES)
             + (f"ident_file = '{ident}'\n" if ident else ""))
 
 
@@ -397,6 +407,60 @@ def slot_statements() -> Statements:
         " pg_is_in_recovery() AND NOT EXISTS (SELECT 1 FROM"
         f" pg_replication_slots WHERE slot_name = '{SLOT}');\n",
         "ensure the replication slot of the pair exists on the primary",
+    )
+
+
+# The functions pg_rewind calls on its source server, which the manual
+# names for a role that is not a superuser (pg_rewind, "Description").
+# They read files of the holder as the server user, so the grant is
+# made in the postgres database only, and the replication role, which
+# copies the whole cluster already, is the one that holds it (0054,
+# amendment of 2026-10-18).
+REWIND_FUNCTIONS = (
+    "pg_catalog.pg_ls_dir(text, boolean, boolean)",
+    "pg_catalog.pg_stat_file(text, boolean)",
+    "pg_catalog.pg_read_binary_file(text)",
+    "pg_catalog.pg_read_binary_file(text, bigint, bigint, boolean)",
+)
+
+
+# written out in full, with no splice: nothing here is built from a value
+REWIND_SQL = (
+    "SET synchronous_commit = local;\n"
+    "DO $keel$\n"
+    "BEGIN\n"
+    "   IF pg_is_in_recovery() THEN\n"
+    "      RETURN;\n"
+    "   END IF;\n"
+    "   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'repl') THEN\n"
+    "      RETURN;\n"
+    "   END IF;\n"
+    "   GRANT EXECUTE ON FUNCTION pg_catalog.pg_ls_dir(text, boolean,"
+    " boolean) TO repl;\n"
+    "   GRANT EXECUTE ON FUNCTION pg_catalog.pg_stat_file(text, boolean)"
+    " TO repl;\n"
+    "   GRANT EXECUTE ON FUNCTION pg_catalog.pg_read_binary_file(text)"
+    " TO repl;\n"
+    "   GRANT EXECUTE ON FUNCTION pg_catalog.pg_read_binary_file(text,"
+    " bigint, bigint, boolean) TO repl;\n"
+    "END\n"
+    "$keel$;\n"
+)
+
+
+def rewind_statements() -> Statements:
+    """The grants that let the old primary rewind against this server
+
+    Idempotent, and a no-op on a standby, where a grant is refused, and
+    where the role is not made yet: the follow of a new primary runs
+    before the apply that makes the role (found by the pair's
+    network-namespace test). The SET comes first for the reason
+    slot_statements gives.
+    """
+    return Statements(
+        REWIND_SQL,
+        "ensure the replication role may read the files that pg_rewind"
+        " reads",
     )
 
 

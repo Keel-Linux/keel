@@ -353,7 +353,8 @@ def database_command(here, words: list[str]) -> dict | None:
         return {"code": code, "out": out.getvalue().splitlines(),
                 "took_s": round(time.monotonic() - started, 2)}
     if words[:1] == ["followlog"]:
-        return {"log": FOLLOWER.log[-20:], "runs": FOLLOWER.runs}
+        return {"log": FOLLOWER.log[-20:], "runs": FOLLOWER.runs,
+                "follows": [one for one in FOLLOWER.log if " follow (" in one]}
     if words[:1] == ["role-file"]:
         try:
             with open(os.path.join(root, "var/lib/keel/role")) as fob:
@@ -478,7 +479,7 @@ def server(index: int, pid: int, root: str) -> str:
     # them (keel.inspect.dbengines' installed check)
     os.makedirs(os.path.join(root, "usr/lib/postgresql", version, "bin"),
                 exist_ok=True)
-    for tool in ("postgres", "pg_ctl"):
+    for tool in ("postgres", "pg_ctl", "pg_rewind"):
         target = os.path.join(root, "usr/lib/postgresql", version, "bin",
                               tool)
         if not os.path.exists(target):
@@ -489,6 +490,13 @@ def server(index: int, pid: int, root: str) -> str:
        "-D", datadir,
        "-E", "UTF8", "--auth-local=peer", "--auth-host=scram-sha-256",
        "--no-sync",
+       # pg_rewind copies the WAL segments of the new primary in full,
+       # 16 MB each by default: at 50 kB/s on the design case's link
+       # that is 5 minutes for one, and a node has three to copy. The
+       # test is about what keel decides, not about that cost, which the
+       # release test on real nodes measures (0054, amendment of
+       # 2026-10-18)
+       "--wal-segsize=1",
        env={**os.environ, "TMPDIR": os.path.join(root, "var/tmp")})
     # the cluster's configuration, under the root the way Debian's
     # layout has it: the data directory, the port, the loopback and the
@@ -1031,11 +1039,29 @@ class BootWrites:
             self.halt.wait(2)
 
 
+def stuck_facts(root: str) -> dict:
+    """What a rewind that never ended leaves to read: the processes, the
+    unit's journal and the state directory of the node"""
+    return {
+        "ps": sh("sh", "-c", "ps -eo pid,ppid,etimes,stat,args | grep -E"
+                 " 'pg_rewind|postgres|systemctl|runuser|keel' | grep -v"
+                 " grep | cut -c1-240", check=False),
+        "journal": sh("journalctl", "-u", service_of(root), "-o", "cat",
+                      "--no-pager", "-n", "40", check=False),
+        "state": sh("sh", "-c", f"ls -la {root}/var/lib/keel/database;"
+                    f" ls {root}/var/backups/keel/postgresql", check=False),
+        "pgdata": sh("sh", "-c", f"ls {root}/var/lib/postgresql/*/main |"
+                     " head -40; cat "
+                     f"{root}/var/lib/postgresql/*/main/postmaster.pid"
+                     " 2>&1 | head -2", check=False)}
+
+
 def crashed(report: dict, pids: list[int], roots: list[str]) -> None:
     """(c), (e), (d): the primary A cut off while the application
     writes, then killed; B promoted by itself once A's lease expired; A back
-    from its crash, fenced, dumped, recorded and alerted; then reseeded
-    once confirmed, the one rejoin path 0054 has"""
+    from its crash, fenced and dumped, then rewound against B with
+    pg_rewind and streaming from it, with no reseed (0054, amendment of
+    2026-10-18). The reseed itself is the seed of case (a)"""
     import vip_netns
     from keel.system import dbfollow, dbpgfollow, dbwatch
     from vip_netns import OVERLAY, agent_send, wait_until
@@ -1115,13 +1141,23 @@ def crashed(report: dict, pids: list[int], roots: list[str]) -> None:
     try:
         report["e_follow_at_boot"] = follow_when_etcd_answers(agent_send)
         # A's VIP helper starts again: its lease is gone, so it is fenced
-        # and takes B's claim; follow fences A's server, dumps it and
-        # records the divergence
+        # and takes B's claim; follow fences A's server, dumps it, stops
+        # it, rewinds it against B and starts it as B's standby (0054,
+        # amendment of 2026-10-18)
         vip_netns.tended(0, a_pid, a_root,
                          os.path.join(a_root, "instance.yaml"))
-        report["e_diverged_s"] = wait_until(
-            lambda: dbfollow.diverged(a_root) is not None, 240, 1)
-        mark(report, "case_e_diverged")
+        report["e_fenced_s"] = wait_until(
+            lambda: dumps_of(a_root), 240, 1)
+        mark(report, "case_e_fenced")
+        report["e_rewound_s"] = wait_until(
+            lambda: pg_ask(a_root, "SELECT status FROM"
+                           " pg_stat_wal_receiver", timeout=5)
+            == "streaming" and dbfollow.diverged(a_root) is None,
+            600, 1)
+        rewound_at = time.time()
+        if report["e_rewound_s"] is None:
+            report["e_stuck"] = stuck_facts(a_root)
+        mark(report, "case_e_rewound")
     finally:
         boot.stop()
     report["e_boot_writes"] = boot.done
@@ -1138,42 +1174,19 @@ def crashed(report: dict, pids: list[int], roots: list[str]) -> None:
                if one["node"] == "A" and not one["ok"]
                and cut_at - 1 <= one["t"] < killed_at]
     report["e_a_unacked"] = unacked
-    report["e_a_holds"] = sorted((held_values(a_root, "crash-%") or set())
-                                 & set(unacked))
     dumps = dumps_of(a_root)
     report["e_dumps"] = [os.path.basename(one) for one in dumps]
+    # the dump was taken before the rewind: it holds A's own writes
     report["e_dump_holds"] = dump_holds(dumps[-1], unacked) if dumps else []
     report["e_diff"] = agent_send("A", "diff")
     report["e_dbstatus"] = agent_send("A", "dbstatus")
-    # two watch runs later: still one dump, still one alert
+    # two watch runs later: still one dump, no divergence, no alert
     time.sleep(2 * WATCH_EVERY + 5)
     report["e_dumps_later"] = [os.path.basename(one)
                                for one in dumps_of(a_root)]
     report["e_alerts"] = [one.get("text", "")[:200] for one in
                           alerted("A", dbpgfollow.DIVERGED_TITLE, since)]
     report["e_follow_log"] = agent_send("A", "followlog")
-    # (d) the rejoin: the operator confirms the reseed on A; when A's
-    # walreceiver first streams is sampled from the driver, since the
-    # seed waits for it inside the apply
-    streaming: dict = {}
-    stop = threading.Event()
-
-    def sample() -> None:
-        while not stop.is_set() and "at" not in streaming:
-            if pg_ask(a_root, "SELECT status FROM pg_stat_wal_receiver",
-                      timeout=5) == "streaming":
-                streaming["at"] = time.time()
-            stop.wait(0.2)
-    sampler = threading.Thread(target=sample, daemon=True)
-    sampler.start()
-    report["d_apply"] = apply_with_cert_ask_retry("A", 900, destroy=True)
-    reseeded_at = time.time()
-    # one ask can miss while A's server restarts: the sampler goes on a
-    # while after the apply, until it saw A stream
-    wait_until(lambda: "at" in streaming, 60, 0.5)
-    stop.set()
-    sampler.join()
-    mark(report, "case_d_reseeded")
     report["d_streaming_s"] = wait_until(
         lambda: agent_send("A", "wstatus").get("status") == "streaming",
         120, 1)
@@ -1184,22 +1197,14 @@ def crashed(report: dict, pids: list[int], roots: list[str]) -> None:
                                       "SHOW synchronous_standby_names")
     # the writer's next write on B is acknowledged: the downtime's end
     report["d_first_ack_s"] = wait_until(
-        lambda: any(one["ok"] and one["t"] > reseeded_at
+        lambda: any(one["ok"] and one["t"] > rewound_at
                     for one in writer.done), 120, 0.2)
     time.sleep(3)
     writer.stop()
     watched.stop()
     report["c_downtime"] = downtime(writer, watched, cut_at, promote_at,
-                                    promoted_at, reseeded_at)
-    # B acknowledged nothing between its promotion and A's first stream:
-    # its only standby is A, and the copy is never taken for it
-    a_streaming_at = streaming.get("at")
-    report["d_a_streaming_s"] = None if a_streaming_at is None \
-        else round(a_streaming_at - cut_at, 2)
-    report["d_acked_before_a_streamed"] = [
-        {"n": one["n"], "end_s": round(one["end"] - cut_at, 2)}
-        for one in writer.done if one["ok"] and one["t"] > killed_at
-        and (a_streaming_at is None or one["end"] < a_streaming_at - 1.0)]
+                                    promoted_at, rewound_at)
+    report["d_rewound_s"] = round(rewound_at - cut_at, 2)
     acked = {f"crash-{one['n']}" for one in writer.done if one["ok"]}
     on_b = held_values(b_root, "crash-%")
     report["c_acked_missing"] = sorted(acked - (on_b or set()))[:20] \

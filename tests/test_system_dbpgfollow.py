@@ -21,8 +21,8 @@ from vip_helpers import KEYS, VIP, Pair, address
 
 from keel.mesh import vipnode, vippromote
 from keel.mesh import vip as vipstate
-from keel.system import dbfollow, dbpair, dbpgfollow, dbpostgres, dbsecret, \
-    dbtls
+from keel.system import dbfollow, dbpair, dbpgfollow, dbpgrewind, \
+    dbpostgres, dbsecret, dbtls
 from keel.system.actions import FollowVip, PromoteReplica
 from keel.system.database import plan_promote
 
@@ -31,6 +31,7 @@ PRIMARY_SPEC = {"engine": "postgresql", "role": "primary",
 REPLICA_SPEC = {"engine": "postgresql", "role": "replica",
                 "listen": [address(1), "::1"]}
 BINARY = "usr/lib/postgresql/17/bin/postgres"
+REWIND_BINARY = "usr/lib/postgresql/17/bin/pg_rewind"
 DATADIR = "var/lib/postgresql/17/main"
 FOLLOW_DROPIN = "etc/postgresql/17/main/conf.d/" + dbpostgres.FOLLOW_DROPIN_NAME
 PAIR_DROPIN = "etc/postgresql/17/main/conf.d/" + dbpostgres.PAIR_DROPIN_NAME
@@ -56,7 +57,10 @@ class Server:
                  holder_timeline: str = "2", holder_down: bool = False,
                  positions: str = "t\t0/4000100\t0/4000098\n",
                  dump_fails: bool = False, streaming: str = "",
-                 system: str = "72377", holder_system: str = "72377"):
+                 system: str = "72377", holder_system: str = "72377",
+                 settings: str = "", rewind: str = "refused",
+                 grants_fail: bool = False, probe_fails: bool = False,
+                 holder_standby: bool = False, streams: bool = True):
         self.row = ("t" if in_recovery else "f") + "\t0\t5432\n"
         self.receiver = receiver
         self.standby = standby
@@ -70,6 +74,16 @@ class Server:
         self.streaming = streaming
         self.system = system
         self.holder_system = holder_system
+        # what the server says of wal_log_hints, data_checksums and
+        # full_page_writes (unknown by default: no rewind is tried),
+        # and how pg_rewind answers: "ok", "refused" (it fails before
+        # the copy) or "halfway" (it fails after the copy began)
+        self.settings = settings
+        self.rewind = rewind
+        self.grants_fail = grants_fail
+        self.probe_fails = probe_fails
+        self.holder_standby = holder_standby
+        self.streams = streams
         self.sent: list[str] = []
         self.argv: list[list[str]] = []
 
@@ -95,6 +109,23 @@ class Server:
             # the fence's restart: standby.signal makes the start a
             # recovery
             self.row = "t" + self.row[1:]
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+        if self.grants_fail and "GRANT EXECUTE" in (stdin or ""):
+            return subprocess.CompletedProcess(
+                argv, 1, b"", b'ERROR:  role "repl" does not exist')
+        if any(one.endswith("/pg_rewind") for one in argv):
+            # pg_rewind --progress says "need to copy" when the copy
+            # begins: a failure before it changed nothing, a failure
+            # after it left the data directory half copied
+            if self.rewind == "refused":
+                return subprocess.CompletedProcess(
+                    argv, 1, b"", b"pg_rewind: error: target server needs"
+                    b" to use either data checksums or wal_log_hints")
+            if self.rewind == "halfway":
+                return subprocess.CompletedProcess(
+                    argv, 1, b"", b"pg_rewind: need to copy 51 MB (total"
+                    b" source directory size is 70 MB)\npg_rewind: error:"
+                    b" could not fetch remote file")
             return subprocess.CompletedProcess(argv, 0, b"", b"")
         if argv[:2] == ["ss", "-lntH"]:
             out = f"LISTEN 0 80 [{address(1)}]:5432 [::]:*\n"
@@ -126,10 +157,15 @@ class Server:
             if sql == dbpgfollow.IDENTIFY_SYSTEM:
                 out = (f"{self.holder_system}\t{self.holder_timeline}"
                        "\t0/4000098\n")
+            elif self.probe_fails:
+                return subprocess.CompletedProcess(
+                    argv, 2, b"", b"psql: error: connection refused")
             else:
                 # the seed's probe of the primary: not in recovery,
                 # nothing of its own
-                out = "f\t0\t100\n"
+                out = ("t" if self.holder_standby else "f") + "\t0\t100\n"
+        elif sql == dbpgrewind.SETTINGS_SQL:
+            out = self.settings
         elif "pg_last_wal_replay_lsn" in sql:
             out = self.positions
         elif sql == dbpgfollow.STREAMING_SQL:
@@ -151,7 +187,7 @@ class Server:
         elif "pg_last_wal_replay_lsn" in sql:
             out = self.positions
         elif "status FROM pg_stat_wal_receiver" in sql:
-            out = "streaming\n"
+            out = "streaming\n" if self.streams else ""
         if text:
             return subprocess.CompletedProcess(argv, code, out, err)
         return subprocess.CompletedProcess(argv, code, out.encode(),
@@ -193,10 +229,11 @@ class FollowTestCase(Pair):
             doc["database"] = {"server": dict(server)}
             here.node.write(doc)
             dbsecret.keep(here.root, "pw")
-            binary = os.path.join(here.root, BINARY)
-            os.makedirs(os.path.dirname(binary), exist_ok=True)
-            with open(binary, "w"):
-                pass
+            for name in (BINARY, REWIND_BINARY):
+                binary = os.path.join(here.root, name)
+                os.makedirs(os.path.dirname(binary), exist_ok=True)
+                with open(binary, "w"):
+                    pass
             for relative in ("var/tmp", "var/backups/keel",
                              DATADIR,
                              "etc/postgresql/17/main/conf.d"):
@@ -212,7 +249,8 @@ class FollowTestCase(Pair):
                                self.said[claim].append)
 
     def follow(self, index: int, server: Server, confirmed: bool = False,
-               wait: float = 0.0, alone: bool = False) -> dbfollow.Followed:
+               wait: float = 0.0, alone: bool = False,
+               down: str = "") -> dbfollow.Followed:
         here = self.all[index]
         found = dbfollow.Followed()
         with mock.patch("keel.inspect.constants.ROOT_DEFAULT", here.root), \
@@ -221,7 +259,7 @@ class FollowTestCase(Pair):
                 mock.patch("keel.system.dbstate.paths.ROOT_DEFAULT",
                            here.root), \
                 mock.patch("keel.inspect.collect.subprocess.run", server), \
-                mock.patch("keel.system.dbready.ready", return_value=""), \
+                mock.patch("keel.system.dbready.ready", return_value=down), \
                 mock.patch("keel.system.dbready.enabled",
                            return_value="enabled"), \
                 mock.patch("keel.system.dbseed.subprocess.run", server), \
@@ -581,6 +619,24 @@ class TestTheReplica(FollowTestCase):
         self.assertIsNone(found.problem, found.lines)
         self.assertTrue(vipnode.current(self.all[1], VIP).fenced)
         self.assertNotIn(dbpgfollow.UNFENCED_SAID, found.lines)
+
+    def test_a_rewound_standby_that_replayed_the_holder_s_position_is_unfenced(
+            self):
+        """After a rewind the walreceiver starts at the start of its
+        segment, and an idle holder sends nothing more, so the received
+        position stays below what the node replayed from its own WAL.
+        What the node replayed is on the node (0054, amendment of
+        2026-10-18)"""
+        self.pair_nodes()
+        self.fence_vip(1)
+        receiver = f"user=repl host={address(0)} port=5432 " \
+                   "password=******** sslmode=verify-full\n"
+        server = Server(in_recovery=True, receiver=receiver,
+                        positions="t\t0/4000100\t0/4000000\n")
+        found = self.follow(1, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertFalse(vipnode.current(self.all[1], VIP).fenced)
+        self.assertIn(dbpgfollow.UNFENCED_SAID, found.lines)
 
     def test_a_holder_that_does_not_answer_keeps_the_fence(self):
         self.pair_nodes()

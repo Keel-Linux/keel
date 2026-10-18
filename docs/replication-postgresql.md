@@ -39,24 +39,55 @@ In keel 0.23.18. The numbers under "Measured" come from the CI job
   again (the state file's key `sync_commit`).
 - **The replication slot `keel`** on the primary keeps its WAL while
   the replica is away; the walreceiver names itself `keel`.
-- **The rejoin after a promotion is a confirmed reseed and nothing
-  else** (0054): equal timelines do not prove the copy is safe to
-  resume from, so there is no `pg_rewind` and no repoint path this
-  version. A node holding no user database is seeded without the
-  confirmation; one holding data is dumped first
-  (`pg_dumpall`, compressed under `/var/backups/keel/postgresql/`)
-  and reseeds on `--destroy-local-database`, and until then the
-  divergence is recorded (`/var/lib/keel/database/diverged`, the
-  timelines this node's own history forked from the holder's) and the
-  node stays as it is, read only in recovery. An old primary is not
+- **The rejoin after a promotion is `pg_rewind` when it can, else a
+  confirmed reseed** (0054, amended 2026-10-18). An old primary is not
   in recovery when it comes back, and PostgreSQL cannot be made read
   only while it runs, so follow fences it first: `standby.signal` in
   its data directory, no follow drop-in, a restart. The server is
   then a standby that follows nobody; it refuses every write and
-  serves the dump. The dump is taken once per divergence: the record
-  names it, and a fenced node takes no write after it. Both
-  timelines are numbers (a standby's from its last checkpoint);
-  `keel diff` and `keel database status` show them.
+  serves the dump. A node holding data is dumped first (`pg_dumpall`,
+  compressed under `/var/backups/keel/postgresql/`). The dump is
+  taken once per divergence, because a fenced node takes no write
+  after it. A node holding no user database is seeded without any
+  confirmation.
+- **The rewind** (`keel.system.dbpgrewind`). After the dump, follow
+  stops the fenced server and runs `pg_rewind --progress` against the
+  holder. Then it writes the follow drop-in and `standby.signal`,
+  starts the server, and waits for the walreceiver to stream on the
+  holder's timeline. What the old primary wrote after the fork point
+  is discarded, and the dump holds it. The holder is only read, so
+  what it acknowledged stays. No flag is needed. Follow does not
+  rewind when `--destroy-local-database` is given: that flag asks for
+  the reseed. There is no dry run: a dry run reads as much as the
+  run does. On the design case's link (250 ms, 1.5 % loss) the read
+  of the WAL segments takes 20 minutes, and a dry run would spend it
+  twice.
+- **When the rewind is not tried or refuses.** Follow does not stop
+  the server if its `wal_log_hints` and `data_checksums` are both
+  off, if `full_page_writes` is off, if `pg_rewind` is not
+  installed, or if the holder is itself a standby. It says why,
+  records the divergence as before, and waits for the confirmed
+  reseed. If `pg_rewind` fails before it prints `need to copy`, it
+  changed nothing: the server starts again as the fenced standby it
+  was, and the same reseed path applies. The refusal is marked
+  (`/var/lib/keel/database/rewind-refused`), because the server is
+  stopped for each run: the next try is 10 minutes later.
+- **A rewind that fails halfway.** If `pg_rewind` fails after it
+  printed `need to copy`, the data directory is half copied. Follow
+  writes `/var/lib/keel/database/rewind-failed`, never runs
+  `pg_rewind` on that copy again, and says that only the confirmed
+  reseed replaces it. The reseed removes the mark.
+- **What the rewind needs.** `wal_log_hints = on` and
+  `wal_keep_size = 256MB` are in the pair drop-in. The first has been
+  there since 0.23.x. The second keeps the WAL back to the last
+  checkpoint before the fork, which the server would recycle. An
+  apply of an older drop-in writes the new line and reloads; it never
+  restarts the server. The holder grants the role `repl` the four
+  functions that `pg_rewind` reads files through
+  (`pg_ls_dir`, `pg_stat_file` and two `pg_read_binary_file`), in the
+  `postgres` database only. The apply and each follow of the holder
+  make the grants. `pg_rewind` connects with the same TLS options and
+  pgpass file as the base backup.
 - **The probe before a copy** asks the primary, as `repl`, whether it
   is a standby and how large its databases are, to check the free
   space for the copy. `pg_database_size()` needs CONNECT on a
@@ -196,18 +227,17 @@ answers success with a warning that the commit is only local.
   the start guard of its server, refuses the start, because its own
   old claim is not proven (keel#156). Its VIP helper starts and takes
   B's newer claim; follow starts the server, and the guard makes it a
-  standby that follows nobody before the start. Follow dumps it,
-  records the divergence (timeline 1 against B's 2) and alerts once. Every write on A from its boot to
-  the fence is unacknowledged. The dump holds A's unacknowledged
-  rows. Two watch runs later there is still one dump and one alert.
-- **(d) The old primary rejoins.** The operator confirms the reseed
-  on A (`keel spec apply --system-only --destroy-local-database`).
-  A streams from B, the divergence record is gone, `FIRST 1 (keel)` is
-  back on B and each commit waits for A again, B's watch alerts the
-  end, and the rows of A and B agree.
-
-Under 0054 every old primary that holds data diverges by its
-timeline, so (d) is the confirmed reseed of (e)'s node, one cycle.
+  standby that follows nobody before the start. Follow dumps it. Every
+  write on A from its boot to the fence is unacknowledged. The dump
+  holds A's unacknowledged rows. Two watch runs later there is still
+  one dump.
+- **(d) The old primary rejoins.** With no operator, follow rewinds A
+  against B (0054, amended 2026-10-18). A streams from B, there is no
+  divergence record and no alert, `FIRST 1 (keel)` is back on B and
+  each commit waits for A again, B's watch alerts the end, and the
+  rows of A and B agree. A holds none of the rows that only A held.
+  The reseed (`keel spec apply --system-only --destroy-local-database`)
+  is the fallback: the seed of case (a) is the same code.
 
 ## The one exception: the new primary after the old primary is gone
 
@@ -270,7 +300,10 @@ All rows are the CI job's (`postgres / trixie`), runs of keel#149 on
 2026-10-14 (the overlay measured at 227 to 229 ms minimum, 251 ms
 median, 3.25 to 5 % loss). Where the runs differ, each number is given.
 The rows of (c) after the VIP lands on B are the run with the exception
-of --old-primary-gone; the row before it is the run without.
+of --old-primary-gone; the row before it is the run without. The rows
+of (e) and (d) are from before 0.23.44, when the rejoin was the confirmed
+reseed. The rewind is measured in the handbook's evidence file
+`2026-10-18-postgresql-pg-rewind.md`.
 
 | What | Measured |
 | --- | --- |
