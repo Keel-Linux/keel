@@ -180,13 +180,29 @@ class TestTheRewind(FollowTestCase):
         self.assertEqual(dbfollow.diverged(root)["holder"], address(0))
         self.assertEqual(alerted.call_count, 1)
 
-    def test_a_dry_run_that_fails_is_asked_again_by_the_next_follow(self):
+    def test_a_dry_run_that_fails_is_not_asked_again_at_once(self):
+        """The server is stopped for each dry run: a node that cannot be
+        rewound must not stop and start every 30 s"""
+        server, found, _ = self.follow_old_primary(
+            old_primary(rewind="refused"))
+        stops = server.argv.count(["systemctl", "stop", UNIT])
+        found = self.follow(1, server)
+        self.assertIn("diverged", found.problem)
+        self.assertIn("refused", " ".join(found.lines))
+        self.assertEqual(server.argv.count(["systemctl", "stop", UNIT]),
+                         stops)
+
+    def test_a_dry_run_that_failed_is_asked_again_after_a_while(self):
         server, found, _ = self.follow_old_primary(
             old_primary(rewind="refused"))
         server.rewind = "ok"
-        found = self.follow(1, server)
+        later = dbpgrewind._now() + dbpgrewind.RETRY_S + 1
+        with mock.patch("keel.system.dbpgrewind._now", return_value=later):
+            found = self.follow(1, server)
         self.assertIsNone(found.problem, found.lines)
         self.assertIsNone(dbfollow.diverged(self.all[1].root))
+        self.assertFalse(os.path.exists(
+            os.path.join(self.all[1].root, dbpgrewind.REFUSED)))
 
     def test_a_node_that_cannot_stop_is_not_changed(self):
         self.pair_nodes()
@@ -478,6 +494,16 @@ class TestTheKeptDump(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             dbpgrewind.keep(root, os.path.join(root, "gone.zst"))
             self.assertIsNone(dbpgrewind.kept(root))
+
+
+class TestTheGrantsNeverFailTheFollow(FollowTestCase):
+    def test_grants_that_fail_are_said_and_the_follow_goes_on(self):
+        self.pair_nodes()
+        server = Server(in_recovery=False, grants_fail=True)
+        found = self.follow(0, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertTrue(any("pg_rewind reads" in line and "failed" in line
+                            for line in found.lines), found.lines)
 
 
 class TestTheSettings(unittest.TestCase):

@@ -45,6 +45,11 @@ FAILED = "var/lib/keel/database/rewind-failed"
 # record, and a run after a half copy or a standby that did not stream
 # must not dump the half copied cluster again
 DUMP = "var/lib/keel/database/rewind-dump"
+# the last dry run that refused, with the reason: its time is the time
+# of the refusal. The server is stopped for each dry run, so a node that
+# cannot be rewound asks again only after RETRY_S, not at each follow
+REFUSED = "var/lib/keel/database/rewind-refused"
+RETRY_S = 600
 # what pg_rewind needs of this node: either data checksums or
 # wal_log_hints on, and full page writes
 SETTINGS_SQL = (
@@ -79,8 +84,12 @@ def broken(root: str) -> bool:
     return os.path.exists(os.path.join(root, FAILED))
 
 
+def _now() -> float:
+    return time.time()
+
+
 def forget(root: str) -> None:
-    for relative in (FAILED, DUMP):
+    for relative in (FAILED, DUMP, REFUSED):
         try:
             os.remove(os.path.join(root, relative))
         except FileNotFoundError:
@@ -89,14 +98,29 @@ def forget(root: str) -> None:
 
 def keep(root: str, dump: str) -> None:
     """Record the dump this node took before the rewind"""
-    path = os.path.join(root, DUMP)
+    _write(root, DUMP, dump)
+
+
+def _write(root: str, relative: str, text: str) -> None:
+    """A mark under the state directory; best effort, since a mark that
+    cannot be written only costs a second dump or a second dry run"""
+    path = os.path.join(root, relative)
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w") as fob:
-            fob.write(dump + "\n")
+            fob.write(text + "\n")
         os.chmod(path, 0o600)
     except OSError:
         pass
+
+
+def _refused_ago(root: str) -> float | None:
+    """Seconds since the last refusal when it is younger than RETRY_S"""
+    try:
+        age = _now() - os.path.getmtime(os.path.join(root, REFUSED))
+    except OSError:
+        return None
+    return age if 0 <= age < RETRY_S else None
 
 
 def kept(root: str) -> str | None:
@@ -142,6 +166,11 @@ def rejoin(root: str, host: str, port: int, password: str, tls: str,
 
     Every reason not to rewind is said on `found` and falls back: the
     divergence path, with the reseed that the operator confirms."""
+    waiting = _refused_ago(root)
+    if waiting is not None:
+        found.say(f"no pg_rewind: the dry run refused {waiting:.0f} s ago"
+                  f" and the next one is {RETRY_S - waiting:.0f} s away")
+        return FALLBACK
     why = _cannot(root, runner)
     if why:
         found.say(f"no pg_rewind: {why}")
@@ -194,6 +223,7 @@ def _rewind(root, argv, dropdir, datadir, unit, source, found, runner,
     if refused:
         found.say("no pg_rewind: pg_rewind cannot rewind this node"
                   f" ({_tail(refused)}); nothing was changed")
+        _write(root, REFUSED, _tail(refused))
         return _started(unit, found, runner)
     failed = _run(runner, argv)
     if failed:
@@ -244,14 +274,7 @@ def _failed(root: str, unit: str, detail: str, found, runner) -> Outcome:
     """The run failed after the dry run passed: the mark, and the server
     started again if it can, as the standby that follows nobody"""
     detail = _tail(detail)
-    path = os.path.join(root, FAILED)
-    try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as fob:
-            fob.write(detail + "\n")
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
+    _write(root, FAILED, detail)
     _run(runner, ("systemctl", "start", unit))
     found.fail(UNUSABLE.format(detail=detail))
     return HALT

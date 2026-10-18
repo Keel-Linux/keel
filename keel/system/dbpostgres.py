@@ -427,12 +427,19 @@ REWIND_FUNCTIONS = (
 def rewind_statements() -> Statements:
     """The grants that let the old primary rewind against this server
 
-    Idempotent, and a no-op on a standby, where a grant is refused. The
-    SET comes first for the reason slot_statements gives.
+    Idempotent, and a no-op on a standby, where a grant is refused, and
+    where the role is not made yet: the follow of a new primary runs
+    before the apply that makes the role (found by the pair's
+    network-namespace test). The SET comes first for the reason
+    slot_statements gives.
     """
     grants = "".join(
         f"      GRANT EXECUTE ON FUNCTION {name} TO {REPLICATION_USER};\n"
         for name in REWIND_FUNCTIONS)
+    exists = ("   IF NOT EXISTS (SELECT FROM pg_roles"
+              f" WHERE rolname = '{REPLICATION_USER}') THEN\n"
+              "      RETURN;\n"
+              "   END IF;\n")
     return Statements(
         "SET synchronous_commit = local;\n"
         "DO $keel$\n"
@@ -440,6 +447,7 @@ def rewind_statements() -> Statements:
         "   IF pg_is_in_recovery() THEN\n"
         "      RETURN;\n"
         "   END IF;\n"
+        + exists
         + grants +
         "END\n"
         "$keel$;\n",

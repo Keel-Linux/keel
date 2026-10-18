@@ -371,12 +371,17 @@ def _ensure_slot(found, runner) -> None:
     would never stream (found when the pair's cases (b) to (e) were
     built, on PostgreSQL 17). The statement is idempotent and commits without the
     standby (keel.system.dbpostgres.slot_statements)."""
-    for statements in (dbpostgres.slot_statements(),
-                       dbpostgres.rewind_statements()):
-        problem = _run(runner, dbpostgres.CLIENT, text=statements.text)
-        if problem:
-            found.fail(f"{statements.summary} failed: {problem}")
-            return
+    statements = dbpostgres.slot_statements()
+    problem = _run(runner, dbpostgres.CLIENT, text=statements.text)
+    if problem:
+        found.fail(f"{statements.summary} failed: {problem}")
+        return
+    # the grants only help a later rewind, which falls back to the
+    # reseed without them: a failure here never fails the follow
+    grants = dbpostgres.rewind_statements()
+    problem = _run(runner, dbpostgres.CLIENT, text=grants.text)
+    if problem:
+        found.say(f"{grants.summary} failed: {problem}")
 
 
 def _replica(root: str, server: dict, state: DatabaseState,

@@ -59,6 +59,7 @@ class Server:
                  dump_fails: bool = False, streaming: str = "",
                  system: str = "72377", holder_system: str = "72377",
                  settings: str = "", rewind: str = "refused",
+                 grants_fail: bool = False,
                  holder_standby: bool = False, streams: bool = True):
         self.row = ("t" if in_recovery else "f") + "\t0\t5432\n"
         self.receiver = receiver
@@ -79,6 +80,7 @@ class Server:
         # fails) or "halfway" (the dry run passes, the run fails)
         self.settings = settings
         self.rewind = rewind
+        self.grants_fail = grants_fail
         self.holder_standby = holder_standby
         self.streams = streams
         self.sent: list[str] = []
@@ -107,6 +109,9 @@ class Server:
             # recovery
             self.row = "t" + self.row[1:]
             return subprocess.CompletedProcess(argv, 0, b"", b"")
+        if self.grants_fail and "GRANT EXECUTE" in (stdin or ""):
+            return subprocess.CompletedProcess(
+                argv, 1, b"", b'ERROR:  role "repl" does not exist')
         if any(one.endswith("/pg_rewind") for one in argv):
             dry = "--dry-run" in argv
             if self.rewind == "refused" or (

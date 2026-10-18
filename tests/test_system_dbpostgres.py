@@ -300,6 +300,15 @@ class TestRewindStatements(unittest.TestCase):
         self.assertLess(made.text.index("RETURN"),
                         made.text.index("GRANT"))
 
+    def test_the_grants_wait_for_the_role(self):
+        """The follow of a new primary runs before the apply that makes
+        the role: a grant to a role that is not there fails (found by
+        the pair's network-namespace test)"""
+        text = dbpostgres.rewind_statements().text
+        guard = text.index("IF NOT EXISTS (SELECT FROM pg_roles"
+                           " WHERE rolname = 'repl')")
+        self.assertLess(guard, text.index("GRANT"))
+
 
 class TestSysctlText(unittest.TestCase):
     def test_the_pair_binds_the_vip_on_both_nodes(self):

@@ -66,8 +66,9 @@ In keel 0.23.18. The numbers under "Measured" come from the CI job
   the holder is itself a standby. It says why, records the divergence
   as before, and waits for the confirmed reseed. If the dry run fails,
   the server starts again as the fenced standby it was, nothing is
-  changed, and the same reseed path applies. The next run tries the
-  rewind again.
+  changed, and the same reseed path applies. The refusal is marked
+  (`/var/lib/keel/database/rewind-refused`), because the server is
+  stopped for each dry run: the next try is 10 minutes later.
 - **A rewind that fails halfway.** If `pg_rewind` fails after its dry
   run passed, the data directory is half copied. Follow writes
   `/var/lib/keel/database/rewind-failed`, never runs `pg_rewind` on
