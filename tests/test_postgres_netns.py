@@ -221,9 +221,13 @@ class TestAPostgresqlPairOnAPoorNetwork(unittest.TestCase):
         self.assertEqual(found["c_acked_missing"], [], downtime)
         self.assertIsNotNone(downtime["carried_s"], downtime)
         self.assertIsNotNone(downtime["promoted_s"], downtime)
-        # follow does not lag the VIP (keel#118, the MariaDB twin's bound)
-        self.assertLess(downtime["promoted_s"] - downtime["carried_s"], 3.0,
-                        downtime)
+        # follow does not lag the VIP (keel#118, the MariaDB twin's bound),
+        # and a cut that ended the stream inside a record adds the stall
+        # of the drain (keel#215, 2 s): the bound is the 5 s of keel#148. This
+        # test runs on a lossy link, where
+        # that happens in some runs (4.02 s measured, 2 s of it the stall)
+        self.assertLess(downtime["promoted_s"] - downtime["carried_s"],
+                        5.0, downtime)
         # a base backup copies no slot: the new holder made the pair's
         self.assertIn("keel", found["c_b_slot"], found)
         # the expired lease: the new primary commits alone, alerted at
