@@ -245,7 +245,7 @@ answers success with a warning that the commit is only local.
   bytes after the end of the last whole record. Replay cannot apply a
   part of a record, so it never reaches the received position, and the
   drain of the promotion cannot end on equality. The drain ends when
-  neither position has moved for 5 s. `pg_promote()` replays every whole
+  neither position has moved for 2 s. `pg_promote()` replays every whole
   record that is in `pg_wal` before it ends recovery, so only the unfinished
   record is left behind. Follow says how many bytes. A standby whose
   positions move keeps its wait of 600 s, and one that receives nothing is

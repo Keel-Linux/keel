@@ -4,6 +4,7 @@ runners: no server, no clock but a fake one, no sleep but a counter"""
 
 import subprocess
 import unittest
+from unittest import mock
 
 from keel.system import dbpostgres, dbpgpromote
 
@@ -171,7 +172,7 @@ class TestPromote(unittest.TestCase):
     def test_unpadded_hex_never_says_drained_too_early(self):
         # text comparison would call 0/A >= 0/1000 drained; numbers do not
         problem = dbpgpromote.promote(
-            "/", PromoteAction(timeout=2),
+            "/", PromoteAction(timeout=1),
             runner=self.runner(["t\t0/A\t0/1000\n"]),
             clock=self.clock, sleep=self.sleep)
         self.assertIn("did not replay everything", problem)
@@ -237,8 +238,9 @@ class TestIncompleteRecord(unittest.TestCase):
         self.assertEqual(self.slept, 5 + dbpgpromote.STALL_SECONDS)
 
     def test_a_stall_shorter_than_the_limit_is_not_enough(self):
-        rows = ["t\t0/1000\t0/2000\n"] * 3 + ["t\t0/1001\t0/2000\n"]
-        problem = self.promote(rows, timeout=4)
+        same = int(dbpgpromote.STALL_SECONDS)
+        rows = ["t\t0/1000\t0/2000\n"] * same + ["t\t0/1001\t0/2000\n"]
+        problem = self.promote(rows, timeout=same + 1)
         self.assertIn("did not replay everything", problem)
         self.assertEqual(self.said, [])
 
@@ -249,6 +251,110 @@ class TestIncompleteRecord(unittest.TestCase):
     def test_the_stall_never_promotes_a_standby_that_receives_nothing(self):
         problem = self.promote(["t\t0/1000\t\n"])
         self.assertIn("receives nothing", problem)
+
+
+class TestTheStallNeverEndsWhileReplayMoves(unittest.TestCase):
+    """The coordinator's condition for a stall shorter than 5 s: the drain
+    ends by stall only when replay stood still for the whole stall. Replay
+    is local, so the received position is the one that can stall for a
+    reason of the network, and a stall of the received position alone
+    never ends the drain. Each test runs with the limits of 5 s and 2 s."""
+
+    LIMITS = (5.0, 2.0)
+
+    def run_drain(self, rows, limit, timeout=600):
+        """Run promote over `rows`, one row a poll; the rows' last one
+        repeats. Returns (problem, the rows that were read, the times)"""
+        read, times = [], []
+        now = [0.0]
+
+        def clock():
+            return now[0]
+
+        def sleep(seconds):
+            now[0] += seconds
+        pending = list(rows)
+
+        def run(argv, **kwargs):
+            if kwargs.get("input") is not None:  # the promote statement
+                return answer()
+            row = pending.pop(0) if len(pending) > 1 else pending[0]
+            read.append(row)
+            times.append(now[0])
+            return answer(row)
+        with mock.patch.object(dbpgpromote, "STALL_SECONDS", limit):
+            problem = dbpgpromote.promote(
+                "/", PromoteAction(timeout=timeout), runner=run,
+                clock=clock, sleep=sleep, say=lambda line: None)
+        return problem, read, times
+
+    @staticmethod
+    def row(replayed, received):
+        return f"t\t0/{replayed:X}\t0/{received:X}\n"
+
+    def test_a_received_position_that_stands_still_does_not_end_the_drain_while_replay_moves(self):
+        for limit in self.LIMITS:
+            with self.subTest(limit=limit):
+                rows = [self.row(0x1000 + n * 8, 0x9000)
+                        for n in range(200)]
+                problem, read, _times = self.run_drain(rows, limit,
+                                                       timeout=150)
+                self.assertIn("did not replay everything", problem)
+                self.assertEqual(len(read), 151)
+
+    def test_replay_that_moves_within_every_stall_never_ends_it(self):
+        for limit in self.LIMITS:
+            with self.subTest(limit=limit):
+                # one step every second poll: the quiet time is 1 s
+                rows = []
+                for n in range(100):
+                    rows += [self.row(0x1000 + n * 8, 0x9000)] * 2
+                problem, _read, _times = self.run_drain(rows, limit,
+                                                        timeout=120)
+                self.assertIn("did not replay everything", problem)
+
+    def test_replay_that_stands_still_for_the_whole_stall_ends_it(self):
+        for limit in self.LIMITS:
+            with self.subTest(limit=limit):
+                rows = [self.row(0x1000 + n * 8, 0x9000)
+                        for n in range(10)]
+                rows += [self.row(0x1000 + 9 * 8, 0x9000)]
+                problem, _read, times = self.run_drain(rows, limit)
+                self.assertIsNone(problem)
+                self.assertEqual(times[-1] - 9, limit)
+
+    def test_random_polls_never_end_the_drain_inside_a_moving_window(self):
+        """seeded random positions: whenever the drain ends with replay
+        behind the received position, both positions stood still for the
+        whole stall before, and replay moved never in that window"""
+        import random
+        for limit in self.LIMITS:
+            for seed in range(300):
+                rng = random.Random(seed)
+                replayed, received = 0x1000, 0x1000
+                rows = []
+                for _ in range(80):
+                    if rng.random() < 0.5:
+                        received += rng.choice((0, 0, 8, 64, 1448))
+                    if rng.random() < 0.5 and replayed < received:
+                        replayed = min(received,
+                                       replayed + rng.choice((8, 64, 700)))
+                    rows.append(self.row(replayed, received))
+                problem, read, times = self.run_drain(rows, limit,
+                                                      timeout=79)
+                if problem is not None:
+                    continue
+                last = read[-1]
+                behind = last.split("\t")[1] != last.split("\t")[2].strip()
+                if not behind:
+                    continue
+                window = [row for row, at in zip(read, times)
+                          if at >= times[-1] - limit]
+                self.assertEqual(
+                    len(set(window)), 1,
+                    f"limit {limit} seed {seed}: the drain ended with the"
+                    f" positions moving: {window}")
+                self.assertGreaterEqual(times[-1] - times[0], limit)
 
 
 if __name__ == "__main__":

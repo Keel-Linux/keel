@@ -1,3 +1,19 @@
+keel (0.23.48) unstable; urgency=medium
+
+  * The stall that ends the drain of a PostgreSQL promotion is 2 s, not 5 s
+    (keel#215, keel 0.23.46). The cost of a cut that ends the stream inside
+    a record was 5 s: the first database write came 6.79 s after the VIP.
+    The condition did not change: the drain ends by stall only when neither
+    the replayed nor the received position moved for the whole stall, so a
+    replay that still moves never ends it. Replay is local, and only the
+    received position can stall because of the network; a received position
+    that stands still while replay moves keeps the wait. Tests with random
+    positions, run with 5 s and with 2 s, check that. If replay stands still
+    for 2 s with whole records pending (a query that blocks it on a
+    standby), pg_promote() still replays them before it ends recovery.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Mon, 19 Oct 2026 03:00:00 +0000
+
 keel (0.23.47) unstable; urgency=medium
 
   * Before the rejoin of an old PostgreSQL primary, keel estimates what
