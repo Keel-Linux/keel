@@ -27,6 +27,11 @@ drain ends then too, when neither position has moved for STALL_SECONDS:
 nothing more arrives, and pg_promote() replays every whole record that
 is in pg_wal before it ends recovery, so only the bytes of the unfinished
 record are left behind, which no standby can apply.
+
+The stall counts only while BOTH positions stand still: any step of the
+replayed position, which is local, or of the received one starts it again,
+so a replay that still moves never ends the drain. tests/
+test_system_dbpgpromote.py checks that with random positions.
 """
 
 import subprocess
@@ -40,7 +45,7 @@ POSITIONS = (
     " pg_last_wal_receive_lsn()"
 )
 POLL_SECONDS = 1.0
-STALL_SECONDS = 5.0
+STALL_SECONDS = 2.0
 NOT_STANDBY = (
     "the server is not in recovery: only a standby is promoted"
 )
