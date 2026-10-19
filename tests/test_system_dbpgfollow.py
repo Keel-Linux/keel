@@ -21,8 +21,8 @@ from vip_helpers import KEYS, VIP, Pair, address
 
 from keel.mesh import vipnode, vippromote
 from keel.mesh import vip as vipstate
-from keel.system import dbfollow, dbpair, dbpgfollow, dbpgpromote, dbpgrewind, \
-    dbpostgres, dbsecret, dbtls
+from keel.system import dbfollow, dbpair, dbpgcost, dbpgfollow, dbpgpromote, \
+    dbpgrewind, dbpostgres, dbsecret, dbtls
 from keel.system.actions import FollowVip, PromoteReplica
 from keel.system.database import plan_promote
 
@@ -60,6 +60,7 @@ class Server:
                  system: str = "72377", holder_system: str = "72377",
                  settings: str = "", rewind: str = "refused",
                  grants_fail: bool = False, probe_fails: bool = False,
+                 history: str = "", wal_listing: str = "",
                  holder_standby: bool = False, streams: bool = True):
         self.row = ("t" if in_recovery else "f") + "\t0\t5432\n"
         self.receiver = receiver
@@ -82,6 +83,8 @@ class Server:
         self.rewind = rewind
         self.grants_fail = grants_fail
         self.probe_fails = probe_fails
+        self.history = history
+        self.wal_listing = wal_listing
         self.holder_standby = holder_standby
         self.streams = streams
         self.sent: list[str] = []
@@ -157,6 +160,12 @@ class Server:
             if sql == dbpgfollow.IDENTIFY_SYSTEM:
                 out = (f"{self.holder_system}\t{self.holder_timeline}"
                        "\t0/4000098\n")
+            elif sql.startswith("SELECT convert_from"):
+                out = self.history
+            elif sql == dbpgcost.WAL_SQL:
+                out = self.wal_listing
+            elif sql.startswith("SELECT length(pg_read_binary_file"):
+                out = "262144\n"
             elif self.probe_fails:
                 return subprocess.CompletedProcess(
                     argv, 2, b"", b"psql: error: connection refused")
@@ -166,6 +175,8 @@ class Server:
                 out = ("t" if self.holder_standby else "f") + "\t0\t100\n"
         elif sql == dbpgrewind.SETTINGS_SQL:
             out = self.settings
+        elif sql == dbpgcost.REPLAY_SQL:
+            out = "0/3000200\n"
         elif "pg_last_wal_replay_lsn" in sql:
             out = self.positions
         elif sql == dbpgfollow.STREAMING_SQL:

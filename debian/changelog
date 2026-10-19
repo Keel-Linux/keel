@@ -1,3 +1,24 @@
+keel (0.23.47) unstable; urgency=medium
+
+  * Before the rejoin of an old PostgreSQL primary, keel estimates what
+    pg_rewind would copy (the WAL files of the holder from the segment of
+    the fork, and the WAL that the old primary wrote after it) and what
+    a base backup would copy, and times the link. A rewind that takes 120 s
+    or less is taken. Otherwise keel picks the smaller one (handbook
+    decision 0054, second amendment of 2026-10-18). On a link of 250 ms and
+    1.5 % loss the rewind of a small cluster took 21 minutes and the
+    reseed 2.4 minutes.
+  * The reseed that keel picks needs no --destroy-local-database when the
+    holder holds the newest claim of the VIP and this node is fenced. With
+    no room to keep a copy of the old data, the flag is required.
+  * A reseed keeps the old data directory as <datadir>.keel-kept-<stamp>,
+    says the path and sends an alert. keel keeps the newest copy and
+    deletes the others after 7 days or when the free space is low.
+  * keel sends an alert when pg_rewind fails after it began to copy
+    (keel#214).
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Sun, 18 Oct 2026 23:30:00 +0000
+
 keel (0.23.46) unstable; urgency=medium
 
   * The drain of a PostgreSQL promotion ends when neither the replayed

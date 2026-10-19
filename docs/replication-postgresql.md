@@ -62,6 +62,23 @@ In keel 0.23.18. The numbers under "Measured" come from the CI job
   run does. On the design case's link (250 ms, 1.5 % loss) the read
   of the WAL segments takes 20 minutes, and a dry run would spend it
   twice.
+- **The cheaper rejoin** (`keel.system.dbpgcost`, 0.23.46). Before the
+  rejoin, follow estimates the copy of `pg_rewind`: the WAL files of the
+  holder from the segment of the fork on (the holder's timeline history
+  file names the fork), plus the WAL that this node wrote after it. It
+  estimates the copy of a base backup: the databases of the holder, at
+  0.3 of their size. It times a read of 256 KB of the holder's WAL. A
+  rewind that takes 120 s or less is taken. Otherwise the smaller one is
+  taken. With no estimate, keel rewinds. When keel picks the reseed, it
+  needs no flag if the holder holds the newest claim of the VIP and
+  there is room to keep the old data. If not, the divergence is recorded
+  and the flag is required.
+- **The kept copy** (`keel.system.dbpgkeep`). A reseed renames the old
+  data directory to `<datadir>.keel-kept-<UTC stamp>`, says the path
+  and sends an alert. keel keeps the newest copy, and deletes the others
+  after 7 days or, oldest first, when the free space is below the larger
+  of 1 GiB and 5 % of the file system. Follow prunes at each run of a
+  standby of the holder.
 - **When the rewind is not tried or refuses.** Follow does not stop
   the server if its `wal_log_hints` and `data_checksums` are both
   off, if `full_page_writes` is off, if `pg_rewind` is not

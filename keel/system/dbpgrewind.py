@@ -39,6 +39,7 @@ import subprocess
 import time
 from typing import NamedTuple
 
+from keel.monitor import alerting
 from keel.system import dbpgseed, dbpostgres
 from keel.system.dbseed import _run, spool
 
@@ -69,6 +70,10 @@ UNUSABLE = (
     " connected; keel spec apply --system-only --destroy-local-database"
     " reseeds it from the holder, the dump kept first"
 )
+
+
+UNUSABLE_TITLE = "pg_rewind left an unusable copy of the old primary"
+UNUSABLE_CHECK = "database-rewind-failed"
 
 
 class Outcome(NamedTuple):
@@ -287,6 +292,8 @@ def _failed(root: str, unit: str, detail: str, found, runner) -> Outcome:
     _write(root, FAILED, detail)
     _run(runner, ("systemctl", "start", unit))
     found.fail(UNUSABLE.format(detail=detail))
+    alerting.alert(root, lambda line: found.say(line), UNUSABLE_TITLE,
+                   UNUSABLE.format(detail=detail), UNUSABLE_CHECK)
     return HALT
 
 
