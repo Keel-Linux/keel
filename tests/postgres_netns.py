@@ -1103,6 +1103,9 @@ def crashed(report: dict, pids: list[int], roots: list[str]) -> None:
         f"keel-vip-test-{vip_netns.NAMES[1]}", "-o", "cat", "--no-pager",
         check=False).splitlines() if "claimed at epoch" in line]
     mark(report, "case_c_promoted")
+    # the follow makes the slot just after the promotion: waited for
+    wait_until(lambda: pg_ask(b_root, "SELECT slot_name FROM"
+                              " pg_replication_slots"), 30, 0.5)
     report["c_b_slot"] = pg_ask(b_root, "SELECT slot_name FROM"
                                 " pg_replication_slots")
     # the expired lease said the old primary is gone: the new primary

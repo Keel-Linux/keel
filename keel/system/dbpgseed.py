@@ -49,7 +49,7 @@ import subprocess
 import time
 from contextlib import contextmanager
 
-from keel.system import dbpostgres
+from keel.system import dbpgkeep, dbpostgres
 from keel.system.dbseed import DISK_MARGIN, KEPT, Reach, _run, spool
 
 # pg_database_size() needs CONNECT on the database (or the role
@@ -159,6 +159,10 @@ class PairAction:
         self.password = password
         self.tls = tls
         self.slot = dbpostgres.SLOT
+        # keep the old data directory when there is room (decision 0054,
+        # second amendment of 2026-10-18); `kept` is where it went
+        self.keep = False
+        self.kept = ""
 
 
 def write_pgpass(directory: str, host: str, port: int, password: str) -> str:
@@ -260,7 +264,10 @@ def _seed(
     if problem:
         shutil.rmtree(fresh, ignore_errors=True)
         return f"{problem}; {KEPT}"
-    problem = _swap(dropdir, datadir, aside, fresh, action, runner, unit)
+    keep = bool(getattr(action, "keep", False)) \
+        and dbpgkeep.can_keep(datadir, found["size"])
+    problem = _swap(dropdir, datadir, aside, fresh, action, runner, unit,
+                    keep)
     if problem:
         return problem
     problem = _run(runner, ("systemctl", "start", unit))
@@ -397,12 +404,20 @@ def _basebackup(fresh: str, pgpass: str, action, runner) -> str:
 
 
 def _swap(dropdir: str, datadir: str, aside: str, fresh: str,
-          action, runner, unit: str) -> str:
+          action, runner, unit: str, keep: bool = False) -> str:
     """Move the copy in; undo every failure before the old copy goes"""
     os.rename(datadir, aside)
     problem = _standby_in_place(dropdir, datadir, fresh, action)
     if problem:
         return _undo(runner, datadir, aside, problem, unit)
+    if keep:
+        kept = dbpgkeep.kept_name(datadir)
+        try:
+            os.rename(aside, kept)
+            action.kept = kept
+            return ""
+        except OSError:
+            pass
     shutil.rmtree(aside)
     return ""
 
