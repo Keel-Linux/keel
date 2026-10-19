@@ -172,7 +172,7 @@ class TestPromote(unittest.TestCase):
     def test_unpadded_hex_never_says_drained_too_early(self):
         # text comparison would call 0/A >= 0/1000 drained; numbers do not
         problem = dbpgpromote.promote(
-            "/", PromoteAction(timeout=2),
+            "/", PromoteAction(timeout=1),
             runner=self.runner(["t\t0/A\t0/1000\n"]),
             clock=self.clock, sleep=self.sleep)
         self.assertIn("did not replay everything", problem)
@@ -238,8 +238,9 @@ class TestIncompleteRecord(unittest.TestCase):
         self.assertEqual(self.slept, 5 + dbpgpromote.STALL_SECONDS)
 
     def test_a_stall_shorter_than_the_limit_is_not_enough(self):
-        rows = ["t\t0/1000\t0/2000\n"] * 3 + ["t\t0/1001\t0/2000\n"]
-        problem = self.promote(rows, timeout=4)
+        same = int(dbpgpromote.STALL_SECONDS)
+        rows = ["t\t0/1000\t0/2000\n"] * same + ["t\t0/1001\t0/2000\n"]
+        problem = self.promote(rows, timeout=same + 1)
         self.assertIn("did not replay everything", problem)
         self.assertEqual(self.said, [])
 
