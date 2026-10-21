@@ -26,8 +26,10 @@ from keel.network.wireguard import allowed, same_key
 
 PRIMARY, REPLICA = vipstate.PRIMARY, vipstate.REPLICA
 ROLE_FILE = "var/lib/keel/role"
-# what keel-database-follow and the Webmin banner of tracker#57 read
-ROLE_TEXT = "role={role}\nreplicates=database\nvip={vip}\n"
+# what keel-database-follow and the Webmin banner of tracker#57 read;
+# `files` joins the database's replication when the appliance declares
+# a replicated path for this node's mode (0050's amendment)
+ROLE_TEXT = "role={role}\nreplicates={replicates}\nvip={vip}\n"
 
 
 @dataclass(frozen=True)
@@ -140,8 +142,9 @@ def allowed_hosts(pair: PairState, server: dict) -> list[str] | None:
     return [pair.peer_address] if pair.peer_address else None
 
 
-def role_text(role: str, vip: str) -> str:
-    return ROLE_TEXT.format(role=role, vip=vip)
+def role_text(role: str, vip: str, files: bool = False) -> str:
+    replicated = "database,files" if files else "database"
+    return ROLE_TEXT.format(role=role, replicates=replicated, vip=vip)
 
 
 def bind_addresses(listen: list | None, overlay: list[str],
