@@ -74,6 +74,8 @@ def answer(here: Here, body: bytes, key: str) -> Answer:
             return countersigned(here, message)
         if message.kind == vipmsg.SECRET:
             return shared(here, message)
+        if message.kind == vipmsg.DEVICE:
+            return device(here, message)
         return released(here, message)
     except ProtocolError as e:
         here.err(f"vip: refused a message from {key}: {e}")
@@ -194,6 +196,21 @@ def shared(here: Here, message: vipmsg.Message) -> Answer:
                       " pair's primary makes it at its first apply")
     here.err(f"vip {vip}: the {name} secret given to {message.sender}")
     return Answer(200, json.dumps({"value": value}).encode())
+
+
+def device(here: Here, message: vipmsg.Message) -> Answer:
+    """This node's Syncthing device ID, to the pair's other member
+    alone (0050's amendment, point 3); the ID is public, the channel
+    is the TLS inside WireGuard, as a shared secret's is"""
+    from keel.system import filesync
+    vip = of_the_pair(here, message, "ask the device ID")
+    value = filesync.device_id(here.root)
+    if value is None:
+        raise Refusal(404, "this node holds no syncthing identity yet:"
+                      " its first live apply or database follow makes it")
+    here.err(f"vip {vip}: the syncthing device ID given to"
+             f" {message.sender}")
+    return Answer(200, json.dumps({"id": value}).encode())
 
 
 def released(here: Here, message: vipmsg.Message) -> Answer:

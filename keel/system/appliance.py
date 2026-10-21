@@ -10,6 +10,9 @@ Webmin and keel all expect (Keel-Linux/common, packages/README.md).
 CrowdSec's identity is made on its first enable (keel.system.crowdsec).
 etcd's configuration is rendered from the mesh's state, and etcd waits
 for its cluster before anything is started (keel.system.etcd).
+Syncthing's configuration is rendered from the manifest and the pair's
+role, its folders send-only or receive-only with the database's
+(0050's amendment, keel.system.filesync).
 An overlay's state hooks, Coraza's for one, which has no unit, run after
 its units come up and before they go down (keel.system.hooks).
 
@@ -45,11 +48,12 @@ from keel.system.appstate import (
     ApplianceState,
     overlay_units,
 )
-from keel.system import anubiskey
+from keel.system import anubiskey, filesync
 from keel.system.crowdsec import OVERLAY as CROWDSEC
 from keel.system.crowdsec import plan_identity
 from keel.system.etcd import OVERLAY as ETCD
 from keel.system.etcd import plan_etcd, waiting
+from keel.system.filesync import plan_filesync
 from keel.system.hooks import plan_hooks
 from keel.system.monitor import NOTIFY, reload
 
@@ -158,6 +162,12 @@ def plan_overlay(name: str, wanted: str | None, units: tuple[str, ...],
                                       for action in rendered):
             return Step(field, tuple(rendered))
         actions += rendered
+    if on and name == filesync.OVERLAY and state.filesync is not None:
+        rendered, restart = plan_filesync(state.filesync, live)
+        if any(isinstance(action, Refuse) for action in rendered):
+            return Step(field, tuple(rendered))
+        actions += rendered
+        made = made or restart
     if not on:
         # what reacts to the overlay lets go of it before its units stop
         actions += hooked
@@ -170,7 +180,7 @@ def plan_overlay(name: str, wanted: str | None, units: tuple[str, ...],
             actions += start(systemctl, unit, found, False, False)
         elif on:
             actions += start(systemctl, unit, found, live, made,
-                             name == ETCD)
+                             name in (ETCD, filesync.OVERLAY))
         else:
             actions += stop(systemctl, unit, found, live)
     if on:

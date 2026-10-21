@@ -166,6 +166,38 @@ jobs:
           etcd-server etcd-client util-linux
         KEEL_VIP_NETNS=1 PYTHONPATH=. python3 -m pytest -q -s \
           tests/test_vip_netns.py
+  # File replication with syncthing (decision 0050 and its amendment of
+  # 2026-10-20) on the vip job's two-node layout, without etcd: the
+  # members' channel alone carries the `device` message, and keel's flip
+  # (keel.system.filesync.follow_flip) renders the configuration the
+  # real syncthing 2.1 from the Keel archive runs from. The link walks
+  # decision 0050's profiles — ideal, regional, the design case, the
+  # design case with 2% loss, and a partition and heal — measured before
+  # each scenario (tests/test_filesync_netns.py). The check is
+  # "filesync / trixie". syncthing and the overlay that carries its
+  # user and unit come from the Keel archive's trixie-testing, like the
+  # appliances under test (Keel-Linux/common#64).
+  filesync:
+    runs-on: keel-lxc
+    uses: keel-linux/.github/.github/workflows/lxc-trixie.yml@main
+    with:
+      timeout: 40
+      run: |
+        apt-get update -qq
+        apt-get install -y -qq --no-install-recommends curl gpg
+        curl -sf -m 30 -o /tmp/keel-archive-keyring.asc \
+          https://archive.keellinux.org/keel-archive-keyring.asc
+        gpg --dearmor < /tmp/keel-archive-keyring.asc \
+          > /usr/share/keyrings/keel-archive-keyring.gpg
+        echo "deb [signed-by=/usr/share/keyrings/keel-archive-keyring.gpg]\
+          https://archive.keellinux.org trixie-testing main" \
+          > /etc/apt/sources.list.d/keel-testing.list
+        apt-get update -qq
+        apt-get install -y -qq --no-install-recommends python3-pytest \
+          python3-yaml wireguard-tools iproute2 iputils-ping openssl \
+          util-linux syncthing keel-overlay-syncthing
+        KEEL_FILE_SYNC_NETNS=1 PYTHONPATH=. python3 -m pytest -q -s \
+          tests/test_filesync_netns.py
   # etcd over the mesh (decisions 0025, 0048, 0050) in a Debian trixie
   # system container: three namespaces, the real wg-quick and trixie's
   # etcd 3.5 and etcdctl, keel's CA and rendered configuration, on links of 250 ms

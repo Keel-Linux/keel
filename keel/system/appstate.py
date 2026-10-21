@@ -20,8 +20,9 @@ from keel.manifest import monit
 from keel.manifest.facts import gather
 from keel.manifest.resolve import Resolved, overlay_units
 from keel.mesh.etcdstate import CLUSTER
-from keel.system import anubiskey
+from keel.system import anubiskey, filesync
 from keel.system.anubiskey import AnubisKey
+from keel.system.filesync import FileSyncState
 from keel.system.crowdsec import CrowdsecState, observe_crowdsec
 from keel.system.etcd import EtcdState, observe_etcd
 from keel.system.fwstate import FirewallState, observe_firewall
@@ -53,6 +54,9 @@ class ApplianceState:
     hooks: dict[str, OverlayHooks] = field(default_factory=dict)
     # etcd's state and files (keel.system.etcd), when the chain has it
     etcd: EtcdState | None = None
+    # what syncthing renders from, manifest and role (keel.system.filesync,
+    # 0050's amendment): None when the chain replicates no path
+    filesync: FileSyncState | None = None
     # the pair's Anubis key, asked of the other member, when this node
     # has to ask for it (keel.system.anubiskey, Keel-Linux/common#56)
     anubis_key: AnubisKey | None = None
@@ -77,6 +81,7 @@ def observe_appliance(root: str, doc: dict, start: bool = False,
     hooks: dict[str, OverlayHooks] = {}
     etcd = None
     anubis_key = None
+    filesync_state = None
     vip_waits = False
     if facts.resolved is not None:
         names = [unit for state in facts.resolved.overlays
@@ -89,6 +94,11 @@ def observe_appliance(root: str, doc: dict, start: bool = False,
         vip_waits = "vip" in names and not tree.exists(CLUSTER)
         if "etcd" in names:
             etcd = observe_etcd(tree, doc)
+        if filesync.OVERLAY in names and tree.root == ROOT_DEFAULT:
+            # the identity is made on the live system only, as the pair's
+            # Anubis key is asked there, never into an image
+            filesync_state = filesync.observe_filesync(
+                tree, doc, facts.resolved, start)
         if anubiskey.OVERLAY in names and tree.root == ROOT_DEFAULT:
             anubis_key = anubiskey.observe(
                 tree.root, doc, start,
@@ -109,5 +119,6 @@ def observe_appliance(root: str, doc: dict, start: bool = False,
         hooks=hooks,
         etcd=etcd,
         anubis_key=anubis_key,
+        filesync=filesync_state,
         vip_waits=vip_waits,
     )

@@ -971,5 +971,27 @@ class TestWithoutEtcd(FollowTestCase):
             found, _ = self.follow_learning(0, Server())
         self.assertNotIn("took epoch 2", " ".join(found.lines))
 
+class TestTheFileFlip(FollowTestCase):
+    """0050's amendment, point 5: the folders flip with the database
+    role for PostgreSQL too, and pause when the follow records nothing
+    (the holder did not answer: record_role stays False, the role file
+    is left as it was)"""
+
+    def test_the_primary_flip_flips_the_folders(self):
+        self.pair_nodes()
+        with mock.patch("keel.system.filesync.follow_flip") as flipped:
+            found = self.follow(0, Server())
+        self.assertIsNone(found.problem, found.lines)
+        self.assertEqual(flipped.call_count, 1)
+        self.assertEqual(flipped.call_args.args[3], "primary")
+
+    def test_a_failed_follow_pauses_the_folders(self):
+        self.pair_nodes()
+        with mock.patch("keel.system.filesync.follow_flip") as flipped:
+            found = self.follow(1, Server(holder_down=True))
+        self.assertIsNotNone(found.problem)
+        self.assertIsNone(flipped.call_args.args[3])
+
+
 if __name__ == "__main__":
     unittest.main()

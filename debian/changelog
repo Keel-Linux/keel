@@ -1,3 +1,41 @@
+keel (0.23.52) unstable; urgency=medium
+
+  * File replication with syncthing, one operation with the database
+    role's (0050 and its amendment of 2026-10-20): the appliance
+    manifest's state.replicate is one syncthing folder per path in
+    cloud simple and cloud advanced, send-only on the proven primary,
+    receive-only on the replica with simple versioning, paused while a
+    node is in doubt or not proven. state.exclude is the folder's
+    .stignore. The device ID is made on the node once and asked of the
+    pair's other member at each flip in a new signed `device` vipmsg
+    kind, answered only to the pair member, with and without etcd.
+    Every flip first writes the folders' state (paused, primary or
+    replica) to /run/keel/filesync/state; apply renders from that file
+    only, and a missing file means paused, so apply never sends again
+    what a flip paused. The state does not survive a reboot, and the
+    unit's drop-in has an ExecStartPre that pauses every folder in
+    config.xml when there is no state, so a node that was primary at
+    shutdown sends nothing before a follow proves it. A follow that proves no role pauses the
+    folders at every exit. A running syncthing gets the type and the
+    pause through its REST API and keeps running; the configuration
+    file stays for a cold start. Where the API gives no answer,
+    syncthing restarts and keel reads the folders back. A flip or a
+    role hook that fails is a follow problem, and keel database watch
+    follows again until it is done. The API key goes in a request
+    header, never in a command line. Manifest paths are checked before
+    they reach the configuration, the unit's drop-in or a .stignore.
+    The GUI and the REST API listen on the loopback with an API key
+    root only; the unit's drop-in grants write access to the home and
+    the replicated paths only, each with the "-" prefix. After the flip
+    each executable of /usr/lib/keel/roles.d/ runs with the role, with
+    a minimal environment. keel diff shows the direction, the state and
+    the peer of each folder and the counts receiveOnlyChangedFiles and
+    needFiles; one alert goes out for each change of the set of counts
+    (needFiles after three runs in a row). A node that replicates no
+    path sees no change: no identity, no ask, no diff rows.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Thu, 22 Oct 2026 23:00:00 +0000
+
 keel (0.23.51) unstable; urgency=medium
 
   * The ntfy channel of monitor.notify takes a list of servers as well as
