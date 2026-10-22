@@ -34,6 +34,8 @@ from keel.spec.validate_secret import validate_secret
 IFACE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,15}$")
 CHAT_ID_RE = re.compile(r"^(-?[0-9]+|@[A-Za-z0-9_]{5,})$")
 PERCENT_KEYS = ("warn", "critical")
+# decision 0063: one ntfy server for each site, and room to spare
+NTFY_MAX_SERVERS = 5
 # A cycle of an hour is already a monitor that looks once an hour; 64 of
 # them is the longest duration any machine could hold.
 LONGEST_CYCLE = 3600
@@ -94,7 +96,8 @@ def working_channels(notify: Any, security: Any) -> list[str]:
     if notify.get("email") is True and alerts_address(security):
         found.append("email")
     for name in ("telegram", "ntfy", "webhook"):
-        if isinstance(notify.get(name), dict) and notify[name]:
+        shapes = (dict, list) if name == "ntfy" else dict
+        if isinstance(notify.get(name), shapes) and notify[name]:
             found.append(name)
     return found
 
@@ -277,7 +280,48 @@ def _token_errors(key: str, spec: Any, check_secret_files: bool) -> (
 
 
 def _validate_ntfy(ntfy: Any, check_secret_files: bool) -> list[str]:
+    """One server as a mapping, or a list of 1 to NTFY_MAX_SERVERS"""
     key = "monitor.notify.ntfy"
+    if not isinstance(ntfy, list):
+        return _validate_ntfy_server(key, ntfy, check_secret_files)
+    if not 1 <= len(ntfy) <= NTFY_MAX_SERVERS:
+        return [f"{key}: a list must hold 1 to {NTFY_MAX_SERVERS} servers,"
+                f" it holds {len(ntfy)}"]
+    errors: list[str] = []
+    seen: dict[tuple[str, str], int] = {}
+    for index, server in enumerate(ntfy):
+        where = f"{key}[{index}]"
+        if server is None:
+            errors.append(f"{where}: must be a mapping")
+            continue
+        errors.extend(_validate_ntfy_server(where, server,
+                                            check_secret_files))
+        identity = _ntfy_identity(server)
+        if identity is None:
+            continue
+        same = seen.setdefault(identity, index)
+        if same != index:
+            errors.append(f"{where}.url: the same as {key}[{same}].url")
+    return errors
+
+
+def _ntfy_identity(server: Any) -> tuple[str, str] | None:
+    """What makes two servers one: the URL, or the file that holds it
+
+    None for a server whose URL is missing or of the wrong type: its
+    own errors say so already.
+    """
+    url = server.get("url") if isinstance(server, dict) else None
+    if isinstance(url, dict) and isinstance(url.get("file"), str):
+        return "file", url["file"]
+    if isinstance(url, str):
+        return "url", url
+    return None
+
+
+def _validate_ntfy_server(key: str, ntfy: Any, check_secret_files: bool) -> (
+    list[str]
+):
     error = mapping_error(key, ntfy)
     if error or ntfy is None:
         return [error] if error else []

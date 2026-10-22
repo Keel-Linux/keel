@@ -7,7 +7,8 @@ the argument vector keel.monitor.render wrote; the channels come from
 /etc/keel/monitor.json, which apply wrote as root (keel.monitor.
 channelfile), never from the spec. One message is built and sent to
 every channel there, and a channel that fails does not stop the others.
-When none takes it, the message goes to syslog at user.crit and to
+The ntfy channel may hold a list of servers, and each server is a channel
+of its own with its own line. When none takes it, the message goes to syslog at user.crit and to
 root's mailbox, the two places left on the machine itself.
 
 It writes nothing of its own: monit runs it as `python3 -B`, so not even
@@ -292,19 +293,32 @@ def send(settings: dict, message: Message, level: str,
     }
     deliveries = []
     for name, sender in senders.items():
-        channel = settings.get(name)
-        if not channel:
-            continue
-        try:
-            sender(channel if isinstance(channel, dict) else {})
-            deliveries.append(Delivery(name))
-        except (channels.ChannelError, SpecError, OSError) as e:
-            deliveries.append(Delivery(name, masked(str(e), read)))
-        except (ValueError, KeyError, TypeError) as e:
-            # also a token file that is not UTF-8: its text quotes the
-            # bytes, so only its kind is said
-            deliveries.append(Delivery(name, channels.reason(e)))
+        for label, channel in targets(name, settings.get(name)):
+            try:
+                sender(channel)
+                deliveries.append(Delivery(label))
+            except (channels.ChannelError, SpecError, OSError) as e:
+                deliveries.append(Delivery(label, masked(str(e), read)))
+            except (ValueError, KeyError, TypeError) as e:
+                # also a token file that is not UTF-8: its text quotes
+                # the bytes, so only its kind is said
+                deliveries.append(Delivery(label, channels.reason(e)))
     return deliveries
+
+
+def targets(name: str, channel: object) -> list[tuple[str, dict]]:
+    """What one channel of the settings sends to: a label and a mapping
+
+    The ntfy channel may hold a list of servers (decision 0063). Each
+    one is a target of its own, numbered from 1, so its line says which
+    server failed and never its URL. Any other value is one target.
+    """
+    if not channel:
+        return []
+    if name == "ntfy" and isinstance(channel, list):
+        return [(f"{name} {number}", one if isinstance(one, dict) else {})
+                for number, one in enumerate(channel, 1)]
+    return [(name, channel if isinstance(channel, dict) else {})]
 
 
 def masked(text: str, secrets: list[str]) -> str:

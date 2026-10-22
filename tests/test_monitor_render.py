@@ -457,6 +457,16 @@ class TestReadBack(unittest.TestCase):
         self.assertEqual(found.source, self.SETTINGS)
         self.assertNotIn("ntfy.example.org", str(findings))
 
+    def test_a_list_of_ntfy_servers_is_read_back_as_a_list(self):
+        notify = {"ntfy": [
+            {"url": "https://ntfy-br1.pop.coop/keel",
+             "token": {"file": "/etc/keel/secrets/t1"}},
+            {"url": {"file": "/etc/keel/secrets/topic2"}}]}
+        section, findings = probe_monitor(self.conf(rendered()), MINUTE,
+                                          self.channels(notify))
+        self.assertEqual(section["notify"], {**notify, "details": False})
+        self.assertNotIn("pop.coop", str(findings))
+
     def test_one_channel_and_no_details(self):
         notify = {"ntfy": {"url": "https://ntfy.example.org/t"}}
         section, _ = probe_monitor(self.conf(rendered()), MINUTE,

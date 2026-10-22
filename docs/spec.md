@@ -852,8 +852,33 @@ monitor:
 | `monitor.notify.email` | system | `true` mails `security.alerts`' address through the local MTA. An error while `security.alerts` is `skip` or absent. Best effort: postfix needs disk to queue, so a full disk is what this channel cannot report |
 | `monitor.notify.telegram.chat_id`, `.token` | system | The Bot API's `sendMessage`. The chat id is a number (`-1001234567890`) or a channel name (`@keel_ops`); the token is a secret reference and must be a `file:` |
 | `monitor.notify.ntfy.url`, `.token` | system | One HTTPS POST to the topic URL, given as the URL or, since a public topic is its own credential, as a secret reference `{file: ...}` holding it; the token, optional, is sent as `Authorization: Bearer` and must be a `file:` |
+| `monitor.notify.ntfy` as a list | system | A list of 1 to 5 mappings, each with `url` and `token` as above (decision 0063). keel sends each alert to every server. Each server has its own line in the report, numbered from 1 (`ntfy 1: sent`). The alert counts as taken when at least one channel or server took it. The URLs must be different, and an error names the entry (`monitor.notify.ntfy[1].url`). One mapping, not a list, works as before |
 | `monitor.notify.webhook.url` | system | The URL, or a secret reference to a file holding it: a Slack or Discord webhook URL is a credential. One HTTPS POST whose JSON body is Slack compatible, `{"text": ...}`, plus the fields `host`, `address`, `check`, `target`, `direction`, `value`, `threshold`, `level`, `service` and `event`. Slack and Mattermost take it as it is; Discord at its webhook URL with `/slack` appended; Matrix through a bridge such as hookshot |
 | `monitor.notify.details` | system | `true` adds the three largest directories (disk, inodes) or processes (memory, swap, CPU, load) to the message. Default `false` |
+
+### Several ntfy servers
+
+The `ntfy` channel takes one server, or a list of servers. Use a list
+when each site has its own `keel-ntfy` server (decision 0063). keel sends
+each alert to all of them, and the phone app subscribes to the same topic
+on each. A server that is down does not stop the others.
+
+```yaml
+monitor:
+  enabled: true
+  notify:
+    ntfy:
+      - url: https://ntfy-br1.pop.coop/keel-blog
+        token: {file: /etc/keel/secrets/ntfy_br1_token}
+      - url: https://ntfy-br2.pop.coop/keel-blog
+        token: {file: /etc/keel/secrets/ntfy_br2_token}
+      - url: https://ntfy-br3.pop.coop/keel-blog
+        token: {file: /etc/keel/secrets/ntfy_br3_token}
+```
+
+Each server has its own token file. If one server fails, its line says so
+and the others still send. If every server and every other channel fail,
+`keel notify` uses its last resort: syslog and the mailbox of root.
 
 Every URL must be `https` and carry no user or password: a token is a
 secret reference of its own, never part of the spec. No error message

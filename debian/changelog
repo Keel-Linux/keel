@@ -1,3 +1,17 @@
+keel (0.23.51) unstable; urgency=medium
+
+  * The ntfy channel of monitor.notify takes a list of servers as well as
+    one (decision 0063, section 3). The list holds 1 to 5 servers with
+    different URLs, and each server has its own token file. keel sends
+    each alert to every server, in keel notify and in the alerts of keel
+    itself. Each server has its own line, numbered from 1, and a server
+    that fails does not stop the others. The alert counts as taken when
+    at least one channel or server took it. A validation error names the
+    entry, for example monitor.notify.ntfy[1].url. One mapping works as
+    before, and keel inspect reads a list back as a list.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Thu, 22 Oct 2026 21:00:00 +0000
+
 keel (0.23.49) unstable; urgency=medium
 
   * postgresql@.service stops with a fast shutdown and in at most 120 s
