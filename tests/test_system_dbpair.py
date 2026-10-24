@@ -128,6 +128,9 @@ class TestThePair(Pair):
                          ["fd00::1", "::1", "127.0.0.1", VIP])
         self.assertEqual(dbpair.role_text("replica", VIP),
                          f"role=replica\nreplicates=database\nvip={VIP}\n")
+        self.assertEqual(dbpair.role_text("primary", VIP, files=True),
+                         f"role=primary\nreplicates=database,files"
+                         f"\nvip={VIP}\n")
 
 
 class TestTheSharedCredential(Pair):

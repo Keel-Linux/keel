@@ -132,14 +132,24 @@ def watch(root: str, spec: str, out: Callable[[str], None],
     reading = semi_sync(root, pair, out, err)
     if not certificate(root, doc, spec, pair, out, err):
         code = exits.APPLY_FAILED
-    if reading is not None and needs_follow(root, pair, reading, doc):
+    from keel.system import filesync
+    mismatch = reading is not None and needs_follow(root, pair, reading, doc)
+    if mismatch or filesync.flip_pending(root, doc):
         from keel.system import dbfollow
         out("database watch: the server does not match the VIP's role;"
+            " keel database follow" if mismatch else
+            "database watch: the file replication flip is not done;"
             " keel database follow")
         found = dbfollow.Followed(lambda line: out(f"  {line}"))
         dbfollow.follow(root, spec, False, found)
         if found.problem:
             code = exits.APPLY_FAILED
+    from keel.system import filesync_watch
+    # one alert per change of the set of counts, and one when every
+    # folder is clean again (0050's amendment, point 8)
+    filesync_watch.watch_counts(
+        root, doc, out, lambda title, text, check, level: alerting.alert(
+            root, err, title, text, check, level))
     return code
 
 

@@ -175,14 +175,40 @@ def follow(root: str, spec: str, confirmed: bool, found: Followed,
                 alone)
 
 
+class Flip:
+    """What the file folders need from a follow, whichever way it ends:
+    the document and the pair once they are known, and the role once the
+    database proved it. A follow that proved no role pauses the folders
+    (0050's amendment, point 5), in one place, at every exit"""
+
+    def __init__(self):
+        self.doc: dict | None = None
+        self.pair = None
+        self.role: str | None = None
+
+
 def _follow(root: str, spec: str, confirmed: bool, found: Followed,
             runner, output, wait: float, sleep,
             alone: bool = False) -> None:
+    flip = Flip()
+    try:
+        _follow_proof(root, spec, confirmed, found, runner, output, wait,
+                      sleep, alone, flip)
+    finally:
+        if flip.doc is not None:
+            _filesync_flip(root, flip.doc, flip.pair, flip.role, found,
+                           runner, spec)
+
+
+def _follow_proof(root: str, spec: str, confirmed: bool, found: Followed,
+                  runner, output, wait: float, sleep, alone: bool,
+                  flip: Flip) -> None:
     try:
         doc = Node(root, spec).document()
     except (NodeError, ValueError) as e:
         found.fail(str(e))
         return
+    flip.doc = doc
     _learn(root, spec, doc, found, output)
     proof = _early_proof(root, doc, output, wait, sleep)
     state = observe_database(root, doc, start=proof is not False,
@@ -201,6 +227,7 @@ def _follow(root: str, spec: str, confirmed: bool, found: Followed,
         found.fail(NO_PAIR)
         return
     pair = state.pair
+    flip.pair = pair
     if state.down and proof is False:
         found.say(f"not started: this node's claim of {pair.vip} is not"
                   " proven (the VIP is not on wg0), so its server stays"
@@ -257,8 +284,25 @@ def _follow(root: str, spec: str, confirmed: bool, found: Followed,
                    f" declares {role or 'none'}")
         return
     if record_role and found.problem is None:
-        _write(root, dbpair.ROLE_FILE, dbpair.role_text(role, pair.vip),
-               0o644)
+        from keel.system import filesync
+        _write(root, dbpair.ROLE_FILE, dbpair.role_text(
+            role, pair.vip, files=filesync.replicates_files(root, doc)),
+            0o644)
+        flip.role = role
+    # else PostgreSQL unproven, or the engine's follow failed: flip.role
+    # stays None and the folders pause until a flip is proven, as the
+    # database does (0050's amendment, point 5)
+
+
+def _filesync_flip(root: str, doc: dict, pair, role: str | None, found,
+                   runner, spec: str) -> None:
+    """The file folders' direction with the database role's, in the same
+    operation (0050's amendment, point 5); `role` None pauses them, of
+    a node in doubt or not proven. A failure is said, never raised: the
+    database flip this rides on is never undone"""
+    from keel.system import filesync
+    filesync.follow_flip(root, doc, pair, role, found, runner,
+                         here=_here(root, spec))
 
 
 def _here(root: str, spec: str):
