@@ -55,7 +55,10 @@ syncthing gets the type and the pause through its REST API
 stays for a cold start. When the API gives no answer, syncthing is
 restarted and the result is read back. A flip that did not reach the
 wanted state is a follow problem, and the file `pending` makes the
-database watch follow again until it does. After a flip each executable
+database watch follow again until it does. A flip to primary first restores
+the application owner over the replicated paths, for an entry that a first
+batch left with the syncthing user (keel.system.filesync_owner, keel#225).
+After a flip each executable
 in /usr/lib/keel/roles.d/ runs with the role (keel.system.roles); a
 failing hook is a follow problem too.
 
@@ -67,6 +70,7 @@ import hashlib
 import json
 import os
 import posixpath
+import pwd
 import re
 import secrets
 import shutil
@@ -83,6 +87,7 @@ from keel.manifest.facts import gather
 from keel.manifest.fields import inside
 from keel.system import filesync_api as api
 from keel.system import filesync_io as io
+from keel.system import filesync_owner
 from keel.system import roles
 from keel.system.actions import Action, Note, Refuse, Run, WriteFile
 from keel.system.filesync_api import (  # noqa: F401  (the names callers use)
@@ -575,6 +580,8 @@ def _flip(root: str, doc: dict, application: dict, pair, role: str | None,
     peer = io.read(root, PEER_FILE)
     peer_address = pair.peer_address if pair else None
     target.settle(want, peer, peer_address)
+    if role == io.PRIMARY:
+        _restore_owner(root, paths, found)
     complete = True
     if role is not None and peer_address and here:
         asked = _ask_peer(here, pair.vip, peer_address, found)
@@ -602,6 +609,21 @@ def _flip(root: str, doc: dict, application: dict, pair, role: str | None,
         io.remove(root, PENDING)
     found.say(f"syncthing: {len(paths)} folder(s) "
               + (role if role else "paused"))
+
+
+def _restore_owner(root: str, paths: tuple[str, ...], found) -> None:
+    """The folders no longer receive: give the application owner back to
+    the entries that a first batch left with the syncthing user (keel#225),
+    before a role hook starts the application. An error is a follow
+    problem, which the database watch retries"""
+    uid = pwd.getpwnam(USER).pw_uid
+    total = 0
+    for path in paths:
+        total += filesync_owner.repair(
+            os.path.join(root, path.lstrip("/")), uid)
+    if total:
+        found.say(f"syncthing: the application owner restored on {total}"
+                  " replicated entries")
 
 
 def _pause_best_effort(root: str, doc: dict, runner, found) -> None:

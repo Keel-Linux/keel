@@ -110,6 +110,12 @@ class TestTheFilesOnAPoorNetwork(unittest.TestCase):
         self.assertGreater(link["rtt_min_ms"], low, link)
         self.assertLess(link["rtt_min_ms"], high, link)
         self.assertLess(link["rtt_median_ms"], high * 1.4, link)
+        # the legs are tuned as the profile says, whatever a sample saw
+        legs = found["legs"]
+        for leg in found["qdisc"]:
+            self.assertIn(f"delay {legs[0]}", leg)
+            if legs[2] != "0%":
+                self.assertIn(f"loss {legs[2]}", leg)
         self.assertGreaterEqual(link["loss"], loss_low, link)
         self.assertLessEqual(link["loss"], loss_high, link)
         return found
