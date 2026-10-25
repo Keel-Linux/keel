@@ -346,11 +346,15 @@ server again when it takes writes while the VIP is not on `wg0`. So
 with etcd not reachable at boot, or with no peer that answers, the node
 stays read only. One follow runs at a time
 (`/var/lib/keel/database/follow.lock`).
-Follow refuses to run, and changes nothing, when the appliance replicates
-files for the node's mode but the spec does not write
-`overlays.syncthing` out (keel#224, decisions 0027 and 0041). A manifest
-default is not enough: without the key the pair would form with the
-files not replicated. Write `enabled`, or `disabled` to turn it off. Follow waits up to 15 s for the address, because a promote
+`keel spec apply --system` refuses, and changes nothing, when the
+appliance replicates files for the node's mode but the spec does not
+write `overlays.syncthing` out (keel#224, decisions 0027 and 0041). A
+manifest default is not enough: without the key the pair would form with
+the files not replicated. Write `enabled`, or `disabled` to turn it off.
+`keel database follow` never refuses for this, because that would block
+a failover in an outage. It lets the role change run, says in its output
+that file replication is off, and sends one alert through the monitor
+channels while the condition lasts. Follow waits up to 15 s for the address, because a promote
 records its claim before it adds the VIP; when keel adds the VIP, it
 writes the VIP's state again, so `keel-database-follow.path` runs
 follow again. `keel database watch` runs follow again within 30 s if

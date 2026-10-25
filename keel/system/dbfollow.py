@@ -119,6 +119,11 @@ NO_PAIR = ("this node declares no appliance.vip: there is no VIP for the"
            " database to follow (keel spec apply converges a declared role)")
 NO_SERVER = ("this node declares no database.server: there is no server to"
              " follow the VIP")
+UNDECLARED_MARKER = "var/lib/keel/database/filesync-undeclared"
+UNDECLARED_TITLE = "file replication is off for this pair"
+UNDECLARED_TEXT = (
+    "{host}: the database role changed, but the files are not replicated:"
+    " {problem}. Fix the spec and run `keel spec apply --system-only`.")
 DIVERGED_TITLE = "the old primary diverged and stays read only"
 DIVERGED_TEXT = (
     "{host}: this node was the primary of {vip} and came back holding"
@@ -208,11 +213,7 @@ def _follow_proof(root: str, spec: str, confirmed: bool, found: Followed,
     except (NodeError, ValueError) as e:
         found.fail(str(e))
         return
-    from keel.system import filesync
-    problem = filesync.undeclared_problem(root, doc)
-    if problem:
-        found.fail(problem)
-        return
+    _warn_undeclared(root, doc, found)
     flip.doc = doc
     _learn(root, spec, doc, found, output)
     proof = _early_proof(root, doc, output, wait, sleep)
@@ -297,6 +298,27 @@ def _follow_proof(root: str, spec: str, confirmed: bool, found: Followed,
     # else PostgreSQL unproven, or the engine's follow failed: flip.role
     # stays None and the folders pause until a flip is proven, as the
     # database does (0050's amendment, point 5)
+
+
+def _warn_undeclared(root: str, doc: dict, found: Followed) -> None:
+    """The spec does not write overlays.syncthing out (keel#224): the
+    pair has its files not replicated. The database role change is never
+    blocked for it; it is said at each follow, and alerted once while
+    the condition lasts"""
+    from keel.system import filesync
+    marker = os.path.join(root, UNDECLARED_MARKER)
+    problem = filesync.undeclared_problem(root, doc)
+    if problem is None:
+        if os.path.exists(marker):
+            os.unlink(marker)
+        return
+    found.say(f"WARNING: file replication is off for this pair: {problem}")
+    if os.path.exists(marker):
+        return
+    _write(root, UNDECLARED_MARKER, "", 0o600)
+    alerting.alert(root, lambda line: found.say(line), UNDECLARED_TITLE,
+                   UNDECLARED_TEXT.format(host=os.uname().nodename,
+                                          problem=problem), CHECK)
 
 
 def _filesync_flip(root: str, doc: dict, pair, role: str | None, found,

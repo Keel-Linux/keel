@@ -610,6 +610,17 @@ class TestTheUndeclaredOverlay(SyncCase):
         self.assertIn("overlays.syncthing", problem)
         self.assertIn("0027", problem)
 
+    def test_apply_refuses_a_spec_without_the_overlay(self):
+        from keel import commands, exits
+        document = doc()
+        del document["overlays"]
+        with mock.patch("keel.commands.system.observe") as observed, \
+                mock.patch("keel.commands.error") as said:
+            code = commands.apply_system(document, self.root, True)
+        self.assertEqual(code, exits.SPEC_INVALID)
+        self.assertIn("overlays.syncthing", said.call_args.args[0])
+        observed.assert_not_called()
+
     def test_a_spec_that_declares_the_overlay_is_not_refused(self):
         self.assertIsNone(self.undeclared(doc()))
 
