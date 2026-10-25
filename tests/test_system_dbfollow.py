@@ -187,9 +187,11 @@ class FollowTestCase(Pair):
                                self.said[claim].append)
 
     def follow(self, index: int, server: Server, confirmed: bool = False,
-               live: bool = True, wait: float = 0.0) -> dbfollow.Followed:
+               live: bool = True, wait: float = 0.0,
+               nothing_without_vip: bool = False) -> dbfollow.Followed:
         here = self.all[index]
         found = dbfollow.Followed()
+        found.nothing_without_vip = nothing_without_vip
         with mock.patch("keel.inspect.constants.ROOT_DEFAULT", here.root), \
                 mock.patch("keel.inspect.collect.paths.ROOT_DEFAULT",
                            here.root), \
@@ -226,7 +228,7 @@ class TestThePrimary(FollowTestCase):
         found = self.follow(0, Server())
         self.assertIsNone(found.problem, found.lines)
         self.assertIn("unchanged (the primary, writable)", found.lines)
-        self.assertIn("role=primary", self.role_file(0))
+        self.assertIn("primary", self.role_file(0))
         # the drop-in keeps the server read only at its next boot too:
         # a crashed old primary takes no write before follow runs
         with open(os.path.join(self.all[0].root, mariadb.ROLE_DROPIN)) as f:
@@ -397,6 +399,15 @@ class TestTheReplica(FollowTestCase):
         os.remove(os.path.join(self.all[1].root, dbtls.KEY))
         found = self.follow(1, Server(schemas=""))
         self.assertIn("certificate is not in place", found.problem)
+
+    def test_a_node_with_no_vip_that_asks_for_it_has_nothing_to_follow(self):
+        """keel#211: the command and the unit are not a failure there; a
+        spec apply that declares a role still refuses (above)"""
+        self.nodes(vips=(None, None), paired=False)
+        found = self.follow(2, Server(), nothing_without_vip=True)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertTrue(any("nothing to follow" in line
+                            for line in found.lines), found.lines)
 
     def test_a_node_in_no_pair_or_with_no_claim_says_so(self):
         self.nodes(vips=(None, None), paired=False)
@@ -603,7 +614,7 @@ class TestTheOldPrimaryAtBoot(FollowTestCase):
         found = self.follow(0, server)
         self.assertIsNone(found.problem, found.lines)
         self.assertIn("SET GLOBAL read_only = OFF;\n", server.sent)
-        self.assertIn("role=primary", self.role_file(0))
+        self.assertIn("primary", self.role_file(0))
 
     def test_no_peer_answers_at_boot_it_stays_read_only(self):
         self.pair_nodes(mode="cloud_simple")
@@ -771,7 +782,7 @@ class TestNoClaimAndNoAddress(FollowTestCase):
         self.pair_nodes()
         a = self.all[0]
         self.follow(0, Server(read_only="ON"))
-        self.assertIn("role=primary", self.role_file(0))
+        self.assertIn("primary", self.role_file(0))
         pair = dbpair.observe_pair(a.root, a.node.document())
         doc = a.node.document()
         writable = Reading(role=Value("standalone"), read_only=Value(False))
@@ -874,6 +885,58 @@ class TestWatch(FollowTestCase):
             self.assertEqual(alerted.call_count, 1)
             self.assertIn("fell back", alerted.call_args.args[2])
 
+    def test_a_pending_file_flip_is_followed_again(self):
+        self.pair_nodes()
+        here = self.all[0]
+        with mock.patch("keel.system.dbwatch.certificate",
+                        return_value=True), \
+                mock.patch("keel.system.dbwatch.semi_sync",
+                           return_value=None), \
+                mock.patch("keel.system.filesync.flip_pending",
+                           return_value=True), \
+                mock.patch("keel.system.filesync_watch.watch_counts"), \
+                mock.patch.object(dbfollow, "follow") as followed:
+            code = dbwatch.watch(here.root, here.node.path, lambda x: None,
+                                 lambda x: None)
+        followed.assert_called_once()
+        self.assertEqual(code, 0)
+
+    def test_nothing_is_followed_when_nothing_is_pending(self):
+        self.pair_nodes()
+        here = self.all[0]
+        with mock.patch("keel.system.dbwatch.certificate",
+                        return_value=True), \
+                mock.patch("keel.system.dbwatch.semi_sync",
+                           return_value=None), \
+                mock.patch("keel.system.filesync.flip_pending",
+                           return_value=False), \
+                mock.patch("keel.system.filesync_watch.watch_counts"), \
+                mock.patch.object(dbfollow, "follow") as followed:
+            dbwatch.watch(here.root, here.node.path, lambda x: None,
+                          lambda x: None)
+        followed.assert_not_called()
+
+    def test_the_file_replication_alert_goes_through_the_channels(self):
+        self.pair_nodes()
+        here = self.all[0]
+
+        def watch_counts(root, doc, out, deliver):
+            self.assertTrue(deliver("title", "text", "filesync-counts",
+                                    "critical"))
+
+        with mock.patch("keel.system.dbwatch.certificate",
+                        return_value=True), \
+                mock.patch("keel.system.dbwatch.semi_sync",
+                           return_value=None), \
+                mock.patch("keel.system.filesync_watch.watch_counts",
+                           watch_counts), \
+                mock.patch("keel.monitor.alerting.alert",
+                           return_value=True) as alerted:
+            dbwatch.watch(here.root, here.node.path, lambda x: None,
+                          lambda x: None)
+        self.assertEqual(alerted.call_args.args[2:],
+                         ("title", "text", "filesync-counts", "critical"))
+
     def test_a_node_in_no_pair_has_nothing_to_watch(self):
         self.nodes(vips=(None, None), paired=False)
         said: list[str] = []
@@ -971,6 +1034,153 @@ class TestStatus(FollowTestCase):
         with mock.patch("keel.system.dbstatus.vip_lines", return_value=[]):
             lines = dbstatus.lines(self.all[2].root, self.all[2].node.path)
         self.assertIn("pair: none", lines[0])
+
+
+class TestTheFileFlip(FollowTestCase):
+    """0050's amendment, point 5: the file folders flip with the
+    database role, in the same operation. A core appliance replicates
+    no file: the flip is a no-op and the role file keeps
+    replicates=database"""
+
+    def test_a_spec_without_the_overlay_warns_and_follows(self):
+        self.pair_nodes()
+        text = "overlays.syncthing: not declared"
+        with mock.patch("keel.system.filesync.undeclared_problem",
+                        return_value=text), \
+                mock.patch("keel.system.dbfollow.alerting.alert") as alert:
+            found = self.follow(0, Server())
+        self.assertIsNone(found.problem, found.lines)
+        self.assertTrue(any("WARNING: file replication is off" in line
+                            and text in line for line in found.lines))
+        self.assertIn("primary", self.role_file(0))
+        self.assertEqual(alert.call_count, 1)
+
+    def test_the_alert_is_sent_once_while_the_spec_stays_undeclared(self):
+        self.pair_nodes()
+        with mock.patch("keel.system.filesync.undeclared_problem",
+                        return_value="x"), \
+                mock.patch("keel.system.dbfollow.alerting.alert") as alert:
+            self.follow(0, Server())
+            self.follow(0, Server())
+        self.assertEqual(alert.call_count, 1)
+
+    def test_the_primary_flip_flips_the_folders(self):
+        self.pair_nodes()
+        with mock.patch("keel.system.filesync.follow_flip") as flipped:
+            found = self.follow(0, Server())
+        self.assertIsNone(found.problem, found.lines)
+        self.assertEqual(flipped.call_count, 1)
+        self.assertEqual(flipped.call_args.args[3], "primary")
+        self.assertIn("replicates=database\n", self.role_file(0))
+
+    def test_a_replica_flip_flips_the_folders(self):
+        self.pair_nodes()
+        server = Server(replicating_from=address(0), read_only="ON")
+        with mock.patch("keel.system.filesync.follow_flip") as flipped:
+            found = self.follow(1, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertEqual(flipped.call_args.args[3], "replica")
+
+    def test_an_in_doubt_holder_pauses_the_folders(self):
+        from keel.mesh import vip as vipstate
+        self.pair_nodes()
+        vipstate.mark_unconfirmed(self.all[0].root, VIP, True)
+        with mock.patch("keel.system.filesync.follow_flip") as flipped:
+            found = self.follow(0, Server())
+        self.assertIsNone(found.problem, found.lines)
+        self.assertIsNone(flipped.call_args.args[3])
+        self.assertEqual(self.role_file(0), "")
+
+    def paused_once(self, flipped, found):
+        """Every exit that proved no role pauses the folders, once"""
+        self.assertEqual(flipped.call_count, 1)
+        self.assertIsNone(flipped.call_args.args[3])
+
+    def test_a_holder_that_does_not_answer_pauses_the_folders(self):
+        self.pair_nodes()
+        with mock.patch("keel.system.filesync.follow_flip") as flipped:
+            found = self.follow(1, Server(holder_down=True))
+        self.assertIsNotNone(found.problem)
+        self.paused_once(flipped, found)
+
+    def test_the_certificate_missing_pauses_the_folders(self):
+        self.pair_nodes()
+        os.remove(os.path.join(self.all[1].root, dbtls.KEY))
+        with mock.patch("keel.system.filesync.follow_flip") as flipped:
+            found = self.follow(1, Server(schemas=""))
+        self.assertIsNotNone(found.problem)
+        self.paused_once(flipped, found)
+
+    def test_a_node_in_no_pair_pauses_the_folders(self):
+        self.nodes(vips=(None, None), paired=False)
+        with mock.patch("keel.system.filesync.follow_flip") as flipped:
+            found = self.follow(2, Server())
+        self.assertIsNotNone(found.problem)
+        self.paused_once(flipped, found)
+        self.assertIsNone(flipped.call_args.args[2])
+
+    def test_a_node_without_a_vip_that_asks_nothing_pauses_them_too(self):
+        self.nodes(vips=(None, None), paired=False)
+        with mock.patch("keel.system.filesync.follow_flip") as flipped:
+            self.follow(2, Server(), nothing_without_vip=True)
+        self.paused_once(flipped, None)
+
+    def test_a_server_that_is_not_answering_pauses_the_folders(self):
+        import dataclasses
+        self.pair_nodes()
+        real = dbfollow.observe_database
+
+        def down(*args, **kwargs):
+            return dataclasses.replace(real(*args, **kwargs),
+                                       down="connection refused")
+
+        with mock.patch("keel.system.filesync.follow_flip") as flipped, \
+                mock.patch.object(dbfollow, "observe_database", down):
+            found = self.follow(0, Server())
+        self.assertIn("not answering", found.problem)
+        self.paused_once(flipped, found)
+
+    def test_a_pair_with_a_problem_pauses_the_folders(self):
+        import dataclasses
+        self.pair_nodes()
+        real = dbfollow.observe_database
+
+        def broken(*args, **kwargs):
+            state = real(*args, **kwargs)
+            return dataclasses.replace(state, pair=dataclasses.replace(
+                state.pair, problem="the pair record is damaged"))
+
+        with mock.patch("keel.system.filesync.follow_flip") as flipped, \
+                mock.patch.object(dbfollow, "observe_database", broken):
+            found = self.follow(0, Server())
+        self.assertIn("damaged", found.problem)
+        self.paused_once(flipped, found)
+
+    def test_a_server_that_cannot_be_asked_pauses_the_folders(self):
+        import dataclasses
+        self.pair_nodes()
+        real = dbfollow.observe_database
+
+        def mute(*args, **kwargs):
+            state = real(*args, **kwargs)
+            role = dataclasses.replace(state.reading.role, value=None,
+                                       problem="timed out")
+            return dataclasses.replace(
+                state, reading=dataclasses.replace(state.reading, role=role))
+
+        with mock.patch("keel.system.filesync.follow_flip") as flipped, \
+                mock.patch.object(dbfollow, "observe_database", mute):
+            found = self.follow(0, Server())
+        self.assertIn("could not be asked", found.problem)
+        self.paused_once(flipped, found)
+
+    def test_a_flip_that_raises_leaves_the_follow_result_alone(self):
+        self.pair_nodes()
+        with mock.patch("keel.system.filesync.follow_flip",
+                        side_effect=RuntimeError("boom")) as flipped:
+            with self.assertRaises(RuntimeError):
+                self.follow(0, Server())
+        flipped.assert_called_once()
 
 
 if __name__ == "__main__":

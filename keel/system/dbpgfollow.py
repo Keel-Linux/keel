@@ -14,15 +14,16 @@ The other rows:
 | held by this node's newest claim, not on wg0 | a primary is stopped: pg cannot be made read only while it runs, and a stopped server takes no writes; a standby refuses them already |
 | held by the other member | a standby of the holder left alone; a server that holds data and takes writes (an old primary) fenced first, a standby that follows nobody; then seeded from the holder, or reseeded once confirmed |
 
-The rejoin (0054, "rejoin after promotion = confirmed reseed", no
-pg_rewind this version): timelines answer whether the copy on disk is
+The rejoin (0054, amended 2026-10-18: pg_rewind when it can, else the
+confirmed reseed): timelines answer whether the copy on disk is
 the holder's history or one this node's own writes forked from — the
 holder's is asked with the replication protocol (IDENTIFY_SYSTEM, the
 replication privilege is enough for the pair's role) over TLS, this
 node's from its current WAL file's name. A node holding no user
 database is seeded without the confirmation: there is nothing of its
 own to lose. A node holding data is dumped first (pg_dumpall, the
-twin of the MariaDB twin's), and reseeds only on
+twin of the MariaDB twin's). Then keel.system.dbpgrewind tries
+pg_rewind against the holder. When it cannot, the node reseeds only on
 --destroy-local-database; until then the divergence is recorded, the
 way dbfollow's GTID errancy is, under the same path, so inspect and
 diff read either engine's record.
@@ -38,7 +39,8 @@ from keel.mesh import vip as vipstate
 from keel.monitor import alerting
 from keel.spec.constants import DEFAULT_PORTS
 from keel.spec.origins import canonical
-from keel.system import dbpair, dbpgpromote, dbpgseed, dbpostgres, dbtls
+from keel.system import dbpair, dbpgcost, dbpgkeep, dbpgpromote, \
+    dbpgrewind, dbpgseed, dbpostgres, dbtls
 from keel.system.actions import PromoteReplica
 from keel.system.database import DRAIN_TIMEOUT, REPLICA
 from keel.system.dbfollow import DIVERGED
@@ -79,21 +81,7 @@ FENCED_REFUSED = (
 )
 
 
-class PairSeed:
-    """The attributes dbpgseed reads, with the pair's slot
-
-    keel.system.actions is engine neutral on purpose (0054): SeedReplica
-    has no slot field, so the follow flow hands dbpgseed.seed a plain
-    object with the slot the pair streams from (the standby's
-    primary_slot_name, constant SLOT of keel.system.dbpostgres)
-    """
-
-    def __init__(self, host: str, port: int, password: str, tls: str):
-        self.host = host
-        self.port = port
-        self.password = password
-        self.tls = tls
-        self.slot = dbpostgres.SLOT
+PairSeed = dbpgseed.PairAction
 
 
 def follow(root: str, state: DatabaseState, server: dict, role: str,
@@ -156,7 +144,7 @@ def _primary(root: str, state: DatabaseState, found, runner,
                   " takes writes")
     elif state.reading.role.value == REPLICA:
         action = PromoteReplica(DRAIN_TIMEOUT, engine="postgresql")
-        problem = dbpgpromote.promote(root, action, runner)
+        problem = dbpgpromote.promote(root, action, runner, say=found.say)
         if problem:
             found.fail(problem)
             return
@@ -167,6 +155,7 @@ def _primary(root: str, state: DatabaseState, found, runner,
     _ensure_slot(found, runner)
     if found.problem is None:
         _alone(root, alone, found, runner)
+        _ensure_grants(found, runner)
     _forget_divergence(root)
 
 
@@ -385,6 +374,20 @@ def _ensure_slot(found, runner) -> None:
     problem = _run(runner, dbpostgres.CLIENT, text=statements.text)
     if problem:
         found.fail(f"{statements.summary} failed: {problem}")
+        return
+
+
+def _ensure_grants(found, runner) -> None:
+    """The grants that the rewind of an old primary reads through
+    (keel.system.dbpgrewind), which a holder of an older keel lacks.
+    They come after the commit alone: the writes of the new primary
+    resume before this statement (keel#148 bounds them at 5 s). They only
+    help a later rewind, which falls back to the reseed without them, so a
+    failure here never fails the follow"""
+    grants = dbpostgres.rewind_statements()
+    problem = _run(runner, dbpostgres.CLIENT, text=grants.text)
+    if problem:
+        found.say(f"{grants.summary} failed: {problem}")
 
 
 def _replica(root: str, server: dict, state: DatabaseState,
@@ -400,7 +403,11 @@ def _replica(root: str, server: dict, state: DatabaseState,
     if _following(state, host, port):
         found.say(f"unchanged (a standby of [{host}]:{port})")
         _forget_divergence(root)
+        _prune(root, found)
         _unfence(root, state, host, port, found, runner)
+        return
+    if dbpgrewind.broken(root) and not confirmed:
+        found.fail(dbpgrewind.unusable(root))
         return
     held = dbpostgres.user_databases((state.schemas.text or "").splitlines())
     if held and state.reading.role.value != REPLICA and \
@@ -437,13 +444,30 @@ def _replica(root: str, server: dict, state: DatabaseState,
             return
         found.say(f"a dump of what this node holds is kept at {kept}")
     if not confirmed:
+        chosen = _cheaper(root, host, port, state, own, theirs, found,
+                          runner)
+        if chosen == "reseed":
+            _auto_reseed(root, host, port, state, own, theirs, kept, found,
+                         runner, systems=(_own_system(runner),
+                                          identified[0]))
+            return
+        dbpgrewind.keep(root, kept)
+        outcome = dbpgrewind.rejoin(
+            root, host, port, state.credential.value,
+            dbtls.options_lines(root, "postgresql"), found, runner)
+        if outcome.halt:
+            return
+        if outcome.rejoined:
+            _forget_divergence(root)
+            _unfence(root, state, host, port, found, runner)
+            return
         _diverged(root, state, host, own, theirs, kept, found,
                   systems=(_own_system(runner), identified[0]))
         return
     found.say("confirmed with --destroy-local-database: what this node"
               f" holds is discarded (timeline {own or 'unknown'} against"
               f" the holder's {theirs})")
-    _seed(root, host, port, state, found, runner)
+    _seed(root, host, port, state, found, runner, keep=True)
     if found.problem is None:
         _unfence(root, state, host, port, found, runner)
 
@@ -462,7 +486,7 @@ def _unfence(root: str, state: DatabaseState, host: str, port: int,
     primary from claiming by itself (0049); after the confirmed reseed
     the node holds nothing the holder lacks. Caught up, not only
     streaming: the position the holder flushed, asked first, is at or
-    below what this standby received, so no commit the holder
+    below what this standby received or replayed, so no commit the holder
     acknowledged alone is missing here"""
     pair = state.pair
     if pair is None or not pair.fenced:
@@ -472,8 +496,13 @@ def _unfence(root: str, state: DatabaseState, host: str, port: int,
         if identified and len(identified) > 2 else None
     if flushed is None:
         return
-    _, _, received, problem = dbpgpromote.positions(runner)
-    if problem or received is None or received < flushed:
+    _, replayed, received, problem = dbpgpromote.positions(runner)
+    # what the node replayed is on the node whatever the walreceiver
+    # reports: after a rewind the receiver starts at the start of its
+    # segment and an idle holder sends nothing more
+    have = max((one for one in (replayed, received) if one is not None),
+               default=None)
+    if problem or have is None or have < flushed:
         return
     if vipstate.unfenced(root, pair.vip, pair.own_key):
         found.say(UNFENCED_SAID)
@@ -527,9 +556,11 @@ def _kept_dump(root: str) -> str | None:
         with open(os.path.join(root, DIVERGED)) as fob:
             recorded = json.load(fob)
     except (OSError, ValueError):
-        return None
+        return dbpgrewind.kept(root)
     path = recorded.get("dump") if isinstance(recorded, dict) else None
-    return path if isinstance(path, str) and os.path.isfile(path) else None
+    if isinstance(path, str) and os.path.isfile(path):
+        return path
+    return dbpgrewind.kept(root)
 
 
 def _following(state: DatabaseState, host: str, port: int) -> bool:
@@ -546,9 +577,10 @@ def _following(state: DatabaseState, host: str, port: int) -> bool:
 
 
 def _seed(root: str, host: str, port: int, state: DatabaseState, found,
-          runner) -> None:
+          runner, keep: bool = False) -> None:
     action = PairSeed(host, port, state.credential.value,
                       dbtls.options_lines(root, "postgresql"))
+    action.keep = keep
     problem = dbpgseed.seed(root, action, runner)
     if problem:
         found.fail(problem)
@@ -557,6 +589,89 @@ def _seed(root: str, host: str, port: int, state: DatabaseState, found,
               " TLS (the pair's slot keeps the primary's WAL while this"
               " node is away)")
     _forget_divergence(root)
+    if action.kept:
+        _kept_said(root, action.kept, host, found)
+    _prune(root, found)
+
+
+KEPT_TITLE = "the old data of this node is kept"
+KEPT_TEXT = (
+    "{host}: this node was reseeded from {holder}. Its old data directory"
+    " is kept at {path}. keel keeps the newest copy, and deletes the others"
+    " after 7 days or when the free space is low. Delete it by hand when"
+    " you do not need it."
+)
+KEPT_CHECK = "database-kept-copy"
+
+
+def _kept_said(root: str, path: str, holder: str, found) -> None:
+    found.say(f"the old data directory is kept at {path}")
+    alerting.alert(root, lambda line: found.say(line), KEPT_TITLE,
+                   KEPT_TEXT.format(host=os.uname().nodename, path=path,
+                                    holder=holder), KEPT_CHECK)
+
+
+def _prune(root: str, found) -> None:
+    try:
+        datadir = dbpostgres.cluster_paths(root)[3]
+    except FileNotFoundError:
+        return
+    for path in dbpgkeep.prune(datadir):
+        found.say(f"the kept copy {path} is deleted: it is old, or the"
+                  " free space is low")
+
+
+def _cheaper(root: str, host: str, port: int, state: DatabaseState,
+             own: str | None, theirs: str, found, runner):
+    """"reseed" when the estimate says it costs less than the rewind, else
+    "rewind"; the estimate rides in _ESTIMATES for the reseed"""
+    if own is None or not own.isdigit() or not theirs.isdigit():
+        return "rewind"
+    estimate = dbpgcost.measure(
+        root, host, port, state.credential.value,
+        dbtls.options_lines(root, "postgresql"), int(own), theirs, runner)
+    if estimate is None:
+        return "rewind"
+    chosen = dbpgcost.choose(estimate.rewind, estimate.reseed,
+                             estimate.speed)
+    if chosen == "rewind":
+        return "rewind"
+    seconds = estimate.rewind / estimate.speed
+    found.say(
+        f"the reseed is cheaper than the rewind: pg_rewind would copy"
+        f" about {estimate.rewind // 1048576} MB, which is"
+        f" {seconds:.0f} s at {estimate.speed / 1024:.0f} kB/s, and the"
+        f" reseed about {estimate.reseed // 1048576} MB")
+    _ESTIMATES[root] = estimate
+    return chosen
+
+
+_ESTIMATES: dict = {}
+
+
+def _auto_reseed(root, host, port, state, own, theirs, kept, found, runner,
+                 systems) -> None:
+    """The reseed that keel picks by the estimate, with no flag. The proof
+    is the one of the rewind: this node is a fenced standby that follows
+    nobody, and the holder answered over TLS as a primary and holds the
+    newest claim of the VIP. The old data is kept; with no room to keep it,
+    the flag is required"""
+    estimate = _ESTIMATES.pop(root)
+    datadir = dbpostgres.cluster_paths(root)[3]
+    if not state.pair.claimed:
+        found.say("no automatic reseed: the VIP has no claim that names the"
+                  " holder")
+    elif not dbpgkeep.can_keep(datadir, estimate.databases):
+        found.say("no automatic reseed: there is no room to keep the old"
+                  " data")
+    else:
+        found.say("reseeding with no flag: the holder holds the newest"
+                  " claim, this node is fenced, and its old data is kept")
+        _seed(root, host, port, state, found, runner, keep=True)
+        if found.problem is None:
+            _unfence(root, state, host, port, found, runner)
+        return
+    _diverged(root, state, host, own, theirs, kept, found, systems=systems)
 
 
 def _own_timeline(root: str, runner) -> str | None:
@@ -628,7 +743,22 @@ def _diverged(root: str, state: DatabaseState, holder: str, own: str | None,
                            theirs=theirs, backups=BACKUPS), CHECK)
 
 
+def for_reseed(root: str, state: DatabaseState, server: dict,
+               spec: str) -> DatabaseState:
+    """The state of a node whose server does not start, for the
+    confirmed reseed of a copy that pg_rewind half copied: the
+    credential and the certificate, which an observation of a server
+    that does not answer leaves out"""
+    from dataclasses import replace
+    from keel.system import dbstate
+    return replace(
+        state, credential=dbstate.credential(server, root, state.pair,
+                                             False, spec),
+        tls_ready=dbtls.present(root, "postgresql"))
+
+
 def _forget_divergence(root: str) -> None:
+    dbpgrewind.forget(root)
     try:
         os.remove(os.path.join(root, DIVERGED))
     except FileNotFoundError:

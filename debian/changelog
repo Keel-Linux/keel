@@ -1,3 +1,188 @@
+keel (0.23.55) unstable; urgency=medium
+
+  * File replication now resumes by itself after a node restarts
+    (keel#228, decision 0050). The start-paused edit of the syncthing
+    configuration paused the peer device as well as the folders, and the
+    first proven follow unpaused only the folders. The edit now changes
+    the folder entries only, and the follow also sets the peer device
+    to not paused through the syncthing API.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Sun, 25 Oct 2026 20:00:00 +0000
+
+keel (0.23.54) unstable; urgency=medium
+
+  * A spec without overlays.syncthing no longer gives a pair with the
+    files not replicated and no sign of it (keel#224, decisions 0027 and
+    0041). When the appliance replicates files for the node's mode,
+    keel spec apply --system refuses the spec and says what to write.
+    keel database follow never refuses for it, because that would block
+    a failover in an outage: the role change runs, the output says that
+    file replication is off, and one alert goes to the monitor channels
+    while the condition lasts.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Sun, 25 Oct 2026 18:00:00 +0000
+
+keel (0.23.53) unstable; urgency=medium
+
+  * A flip to primary restores the application owner over the replicated
+    paths (keel#225). In the first batch of a replication a directory
+    could be made before its parent got the application owner, and it
+    and all below it stayed owned by the syncthing user, so the promoted
+    application could not write there. After the folders stop receiving,
+    keel gives the owner of the replicated root to each entry that the
+    syncthing user owns, before a role hook starts the application. A
+    link is not followed. An error is a follow problem and is retried.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Sun, 25 Oct 2026 12:00:00 +0000
+
+keel (0.23.52) unstable; urgency=medium
+
+  * File replication with syncthing, one operation with the database
+    role's (0050 and its amendment of 2026-10-20): the appliance
+    manifest's state.replicate is one syncthing folder per path in
+    cloud simple and cloud advanced, send-only on the proven primary,
+    receive-only on the replica with simple versioning, paused while a
+    node is in doubt or not proven. state.exclude is the folder's
+    .stignore. The device ID is made on the node once and asked of the
+    pair's other member at each flip in a new signed `device` vipmsg
+    kind, answered only to the pair member, with and without etcd.
+    Every flip first writes the folders' state (paused, primary or
+    replica) to /run/keel/filesync/state; apply renders from that file
+    only, and a missing file means paused, so apply never sends again
+    what a flip paused. The state does not survive a reboot, and the
+    unit's drop-in has an ExecStartPre that pauses every folder in
+    config.xml when there is no state, so a node that was primary at
+    shutdown sends nothing before a follow proves it. A follow that proves no role pauses the
+    folders at every exit. A running syncthing gets the type and the
+    pause through its REST API and keeps running; the configuration
+    file stays for a cold start. Where the API gives no answer,
+    syncthing restarts and keel reads the folders back. A flip or a
+    role hook that fails is a follow problem, and keel database watch
+    follows again until it is done. The API key goes in a request
+    header, never in a command line. Manifest paths are checked before
+    they reach the configuration, the unit's drop-in or a .stignore.
+    The GUI and the REST API listen on the loopback with an API key
+    root only; the unit's drop-in grants write access to the home and
+    the replicated paths only, each with the "-" prefix. After the flip
+    each executable of /usr/lib/keel/roles.d/ runs with the role, with
+    a minimal environment. keel diff shows the direction, the state and
+    the peer of each folder and the counts receiveOnlyChangedFiles and
+    needFiles; one alert goes out for each change of the set of counts
+    (needFiles after three runs in a row). A node that replicates no
+    path sees no change: no identity, no ask, no diff rows.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Thu, 22 Oct 2026 23:00:00 +0000
+
+keel (0.23.51) unstable; urgency=medium
+
+  * The ntfy channel of monitor.notify takes a list of servers as well as
+    one (decision 0063, section 3). The list holds 1 to 5 servers with
+    different URLs, and each server has its own token file. keel sends
+    each alert to every server, in keel notify and in the alerts of keel
+    itself. Each server has its own line, numbered from 1, and a server
+    that fails does not stop the others. The alert counts as taken when
+    at least one channel or server took it. A validation error names the
+    entry, for example monitor.notify.ntfy[1].url. One mapping works as
+    before, and keel inspect reads a list back as a list.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Thu, 22 Oct 2026 21:00:00 +0000
+
+keel (0.23.49) unstable; urgency=medium
+
+  * postgresql@.service stops with a fast shutdown and in at most 120 s
+    (keel#219): a drop-in, keel-stop.conf, sets KillSignal=SIGINT and
+    TimeoutStopSec=120s. A stop that arrives while the start still runs does
+    not run ExecStop, and systemd sent SIGTERM to the postmaster: a smart
+    shutdown, which waits for every client. An idle client (the poll of
+    Odoo's serve.py, a psql of keel) held it for TimeoutStopSec, 1 h in
+    Debian's unit; one bootstrap of a pair waited 15 minutes. Measured on a
+    real standby with one idle client: SIGTERM, the postmaster alive after
+    12 s; SIGINT, gone in under 5 s. SIGINT is a fast shutdown, safe for
+    committed data, and the final SIGKILL after 120 s is crash safe because
+    PostgreSQL recovers from WAL at the next start.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Mon, 19 Oct 2026 07:00:00 +0000
+
+keel (0.23.48) unstable; urgency=medium
+
+  * The stall that ends the drain of a PostgreSQL promotion is 2 s, not 5 s
+    (keel#215, keel 0.23.46). The cost of a cut that ends the stream inside
+    a record was 5 s: the first database write came 6.79 s after the VIP.
+    The condition did not change: the drain ends by stall only when neither
+    the replayed nor the received position moved for the whole stall, so a
+    replay that still moves never ends it. Replay is local, and only the
+    received position can stall because of the network; a received position
+    that stands still while replay moves keeps the wait. Tests with random
+    positions, run with 5 s and with 2 s, check that. If replay stands still
+    for 2 s with whole records pending (a query that blocks it on a
+    standby), pg_promote() still replays them before it ends recovery.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Mon, 19 Oct 2026 03:00:00 +0000
+
+keel (0.23.47) unstable; urgency=medium
+
+  * Before the rejoin of an old PostgreSQL primary, keel estimates what
+    pg_rewind would copy (the WAL files of the holder from the segment of
+    the fork, and the WAL that the old primary wrote after it) and what
+    a base backup would copy, and times the link. A rewind that takes 120 s
+    or less is taken. Otherwise keel picks the smaller one (handbook
+    decision 0054, second amendment of 2026-10-18). On a link of 250 ms and
+    1.5 % loss the rewind of a small cluster took 21 minutes and the
+    reseed 2.4 minutes.
+  * The reseed that keel picks needs no --destroy-local-database when the
+    holder holds the newest claim of the VIP and this node is fenced. With
+    no room to keep a copy of the old data, the flag is required.
+  * A reseed keeps the old data directory as <datadir>.keel-kept-<stamp>,
+    says the path and sends an alert. keel keeps the newest copy and
+    deletes the others after 7 days or when the free space is low.
+  * keel sends an alert when pg_rewind fails after it began to copy
+    (keel#214).
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Sun, 18 Oct 2026 23:30:00 +0000
+
+keel (0.23.46) unstable; urgency=medium
+
+  * The drain of a PostgreSQL promotion ends when neither the replayed
+    nor the received position has moved for 5 s (keel#215). A cut can end
+    the stream inside a record: the walreceiver flushes the bytes that
+    arrived, replay stands at the end of the last whole record, and the two
+    positions never meet. On a real pair the standby that took the VIP
+    waited 417 s (received 0/7EC8000, replayed 0/7EC7A58, one TCP segment
+    apart). pg_promote() replays every whole record that is in pg_wal
+    before it ends recovery, so only the unfinished record is left behind,
+    and no standby can apply that. A standby whose positions still move
+    keeps its wait, and a standby that receives nothing is still refused.
+    Follow says how many bytes it left behind.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Sun, 18 Oct 2026 23:45:00 +0000
+
+keel (0.23.45) unstable; urgency=medium
+
+  * An old PostgreSQL primary rejoins with pg_rewind against the new
+    primary when it can, and no longer needs a full reseed (handbook
+    decision 0054, amendment of 2026-10-18). Follow dumps the fenced
+    node, stops it, runs pg_rewind, and starts it as a standby on the
+    new timeline. If pg_rewind refuses before the copy begins, nothing
+    changes and the confirmed reseed stays the fallback. A rewind that
+    fails halfway marks the copy unusable until the reseed. There is no
+    dry run: it reads as much as the run does.
+  * The pair drop-in adds wal_keep_size = 256MB. An apply of the older
+    drop-in writes it and reloads the server; it never restarts it.
+  * The holder grants the replication role the four functions that
+    pg_rewind reads files through, in the postgres database only.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Sun, 18 Oct 2026 17:10:00 +0000
+
+keel (0.23.44) unstable; urgency=medium
+
+  * keel database follow, which keel-database-follow.service runs, says
+    "nothing to follow" and exits 0 on a node with no appliance.vip, the
+    witness of a pair. It exited 16, and the unit stayed failed
+    (keel#211). keel spec apply that declares a role on such a node still
+    refuses.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Sun, 18 Oct 2026 17:00:00 +0000
+
 keel (0.23.43) unstable; urgency=medium
 
   * keel mesh join names the failed step when the apply fails on a step

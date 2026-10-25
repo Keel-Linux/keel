@@ -13,6 +13,7 @@ from keel import exits, layers, manifest, spec
 from keel import diff as drift
 from keel import inspect as inspection
 from keel import system
+from keel.system import filesync
 from keel.monitor import channelfile
 from keel.monitor import notify as notifier
 from keel.network import confirm as netconfirm
@@ -242,6 +243,10 @@ def apply_system(
     """
     facts = manifest_facts(doc, root)
     declared = doc
+    problem = filesync.undeclared_problem(root, doc)
+    if problem:
+        error(problem)
+        return exits.SPEC_INVALID
     doc, _ = with_defaults(doc, facts)
     state = system.observe(root, doc, start=not dry_run, spec=spec_path)
     plan = system.plan(doc, state, confirmed, defer_certificate,
@@ -496,6 +501,7 @@ def database_follow(args) -> int:
         return exits.APPLY_NEEDS_ROOT
     found = dbfollow.Followed(lambda line: print(
         f"database.server.role: {line}"))
+    found.nothing_without_vip = True
     dbfollow.follow(os.path.abspath(root), args.spec,
                     getattr(args, "destroy_local_database", False), found)
     return exits.APPLY_FAILED if found.problem else exits.OK

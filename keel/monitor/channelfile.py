@@ -46,6 +46,14 @@ def reference(value, name: str) -> dict:
     return {name: str(value)}
 
 
+def ntfy_server(server: dict) -> dict:
+    """One ntfy server as the file holds it: the URL, and a token path"""
+    found = reference(server["url"], "url")
+    if server.get("token"):
+        found["token_file"] = str(server["token"]["file"])
+    return found
+
+
 def build(doc: dict) -> dict:
     """The file's content, from a spec that has passed validation"""
     notify = (doc.get("monitor") or {}).get("notify") or {}
@@ -64,9 +72,9 @@ def build(doc: dict) -> dict:
                              "token_file": str(telegram["token"]["file"])}
     if "ntfy" in channels:
         ntfy = notify["ntfy"]
-        found["ntfy"] = reference(ntfy["url"], "url")
-        if ntfy.get("token"):
-            found["ntfy"]["token_file"] = str(ntfy["token"]["file"])
+        # one mapping stays a mapping, so a file from before 0063 is valid
+        found["ntfy"] = ([ntfy_server(one) for one in ntfy]
+                         if isinstance(ntfy, list) else ntfy_server(ntfy))
     if "webhook" in channels:
         found["webhook"] = reference(notify["webhook"]["url"], "url")
     return found
@@ -81,9 +89,21 @@ def secret_paths(settings: dict) -> list[str]:
     return [
         str(channel[key])
         for name in ("telegram", "ntfy", "webhook")
-        for channel in [settings.get(name) or {}]
+        for channel in servers(settings.get(name))
         for key in ("url_file", "token_file") if channel.get(key)
     ]
+
+
+def servers(channel) -> list[dict]:
+    """The servers a channel holds: a mapping is one, a list is its entries
+
+    Anything else, a file edited by hand, holds none.
+    """
+    if isinstance(channel, dict):
+        return [channel] if channel else []
+    if isinstance(channel, list):
+        return [one for one in channel if isinstance(one, dict)]
+    return []
 
 
 def written_by_keel(text: str | None) -> bool:

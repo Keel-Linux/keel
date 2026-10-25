@@ -75,7 +75,7 @@ from keel.mesh.node import Node, NodeError
 from keel.monitor import alerting
 from keel.network import live, wireguard
 from keel.spec.constants import DEFAULT_PORTS
-from keel.system import dbgtid, dbpair, dbreadonly, dbseed, dbtls
+from keel.system import dbgtid, dbpair, dbpgrewind, dbreadonly, dbseed, dbtls
 from keel.system import dbmariadb as mariadb
 from keel.system.actions import PromoteReplica, SeedReplica
 from keel.system.database import DRAIN_TIMEOUT, PRIMARY, REPLICA
@@ -119,6 +119,11 @@ NO_PAIR = ("this node declares no appliance.vip: there is no VIP for the"
            " database to follow (keel spec apply converges a declared role)")
 NO_SERVER = ("this node declares no database.server: there is no server to"
              " follow the VIP")
+UNDECLARED_MARKER = "var/lib/keel/database/filesync-undeclared"
+UNDECLARED_TITLE = "file replication is off for this pair"
+UNDECLARED_TEXT = (
+    "{host}: the database role changed, but the files are not replicated:"
+    " {problem}. Fix the spec and run `keel spec apply --system-only`.")
 DIVERGED_TITLE = "the old primary diverged and stays read only"
 DIVERGED_TEXT = (
     "{host}: this node was the primary of {vip} and came back holding"
@@ -137,6 +142,11 @@ class Followed:
         self.lines: list[str] = []
         self.out = out
         self.problem: str | None = None
+        # keel database follow, run by keel-database-follow.service, sets
+        # this: a node with no appliance.vip, the witness of a pair, has
+        # nothing to follow, and that is no failure (keel#211). A spec apply
+        # that declares a role leaves it off, and still refuses.
+        self.nothing_without_vip = False
 
     def say(self, line: str) -> None:
         self.lines.append(line)
@@ -170,35 +180,73 @@ def follow(root: str, spec: str, confirmed: bool, found: Followed,
                 alone)
 
 
+class Flip:
+    """What the file folders need from a follow, whichever way it ends:
+    the document and the pair once they are known, and the role once the
+    database proved it. A follow that proved no role pauses the folders
+    (0050's amendment, point 5), in one place, at every exit"""
+
+    def __init__(self):
+        self.doc: dict | None = None
+        self.pair = None
+        self.role: str | None = None
+
+
 def _follow(root: str, spec: str, confirmed: bool, found: Followed,
             runner, output, wait: float, sleep,
             alone: bool = False) -> None:
+    flip = Flip()
+    try:
+        _follow_proof(root, spec, confirmed, found, runner, output, wait,
+                      sleep, alone, flip)
+    finally:
+        if flip.doc is not None:
+            _filesync_flip(root, flip.doc, flip.pair, flip.role, found,
+                           runner, spec)
+
+
+def _follow_proof(root: str, spec: str, confirmed: bool, found: Followed,
+                  runner, output, wait: float, sleep, alone: bool,
+                  flip: Flip) -> None:
     try:
         doc = Node(root, spec).document()
     except (NodeError, ValueError) as e:
         found.fail(str(e))
         return
+    _warn_undeclared(root, doc, found)
+    flip.doc = doc
     _learn(root, spec, doc, found, output)
     proof = _early_proof(root, doc, output, wait, sleep)
     state = observe_database(root, doc, start=proof is not False,
                              spec=spec)
     if state is None:
         declared = (doc.get("appliance") or {}).get("vip")
+        if not declared and found.nothing_without_vip:
+            found.say(f"nothing to follow: {NO_PAIR}")
+            return
         found.fail(NO_SERVER if declared else NO_PAIR)
         return
     if state.pair is None:
+        if found.nothing_without_vip:
+            found.say(f"nothing to follow: {NO_PAIR}")
+            return
         found.fail(NO_PAIR)
         return
     pair = state.pair
+    flip.pair = pair
     if state.down and proof is False:
         found.say(f"not started: this node's claim of {pair.vip} is not"
                   " proven (the VIP is not on wg0), so its server stays"
                   " stopped until the VIP decides")
         return
-    if state.down:
+    # a copy that pg_rewind half copied may not start: only the confirmed
+    # reseed replaces it, and it needs no answer from the server
+    reseed_down = bool(state.down) and confirmed and \
+        state.engine == "postgresql" and dbpgrewind.broken(root)
+    if state.down and not reseed_down:
         found.fail(f"the server is not answering ({state.down})")
         return
-    if not state.reading.role.known:
+    if not reseed_down and not state.reading.role.known:
         found.fail(f"the server could not be asked what it is"
                    f" ({state.reading.role.problem})")
         return
@@ -209,6 +257,9 @@ def _follow(root: str, spec: str, confirmed: bool, found: Followed,
     server = declared_server(doc)
     role = dbpair.role_of(pair, str(server.get("role") or ""))
     record_role = True
+    if reseed_down:
+        from keel.system import dbpgfollow
+        state = dbpgfollow.for_reseed(root, state, server, spec)
     if state.engine == "postgresql":
         # the engine's rows (0054): read_only, the role drop-in, the
         # root lock and GTID errancy are MariaDB's; a standby's
@@ -239,8 +290,46 @@ def _follow(root: str, spec: str, confirmed: bool, found: Followed,
                    f" declares {role or 'none'}")
         return
     if record_role and found.problem is None:
-        _write(root, dbpair.ROLE_FILE, dbpair.role_text(role, pair.vip),
-               0o644)
+        from keel.system import filesync
+        _write(root, dbpair.ROLE_FILE, dbpair.role_text(
+            role, pair.vip, files=filesync.replicates_files(root, doc)),
+            0o644)
+        flip.role = role
+    # else PostgreSQL unproven, or the engine's follow failed: flip.role
+    # stays None and the folders pause until a flip is proven, as the
+    # database does (0050's amendment, point 5)
+
+
+def _warn_undeclared(root: str, doc: dict, found: Followed) -> None:
+    """The spec does not write overlays.syncthing out (keel#224): the
+    pair has its files not replicated. The database role change is never
+    blocked for it; it is said at each follow, and alerted once while
+    the condition lasts"""
+    from keel.system import filesync
+    marker = os.path.join(root, UNDECLARED_MARKER)
+    problem = filesync.undeclared_problem(root, doc)
+    if problem is None:
+        if os.path.exists(marker):
+            os.unlink(marker)
+        return
+    found.say(f"WARNING: file replication is off for this pair: {problem}")
+    if os.path.exists(marker):
+        return
+    _write(root, UNDECLARED_MARKER, "", 0o600)
+    alerting.alert(root, lambda line: found.say(line), UNDECLARED_TITLE,
+                   UNDECLARED_TEXT.format(host=os.uname().nodename,
+                                          problem=problem), CHECK)
+
+
+def _filesync_flip(root: str, doc: dict, pair, role: str | None, found,
+                   runner, spec: str) -> None:
+    """The file folders' direction with the database role's, in the same
+    operation (0050's amendment, point 5); `role` None pauses them, of
+    a node in doubt or not proven. A failure is said, never raised: the
+    database flip this rides on is never undone"""
+    from keel.system import filesync
+    filesync.follow_flip(root, doc, pair, role, found, runner,
+                         here=_here(root, spec))
 
 
 def _here(root: str, spec: str):

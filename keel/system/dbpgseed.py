@@ -49,7 +49,7 @@ import subprocess
 import time
 from contextlib import contextmanager
 
-from keel.system import dbpostgres
+from keel.system import dbpgkeep, dbpostgres
 from keel.system.dbseed import DISK_MARGIN, KEPT, Reach, _run, spool
 
 # pg_database_size() needs CONNECT on the database (or the role
@@ -147,6 +147,22 @@ def seed(root: str, action, runner=subprocess.run,
         # not KEPT: the error may come after the data directory moved
         return f"cannot seed from [{action.host}]:{action.port}:" \
             f" {e.strerror or e}"
+
+
+class PairAction:
+    """The attributes write_follow reads: the holder, the pair's
+    password and TLS, and the slot the standby streams from"""
+
+    def __init__(self, host: str, port: int, password: str, tls: str):
+        self.host = host
+        self.port = port
+        self.password = password
+        self.tls = tls
+        self.slot = dbpostgres.SLOT
+        # keep the old data directory when there is room (decision 0054,
+        # second amendment of 2026-10-18); `kept` is where it went
+        self.keep = False
+        self.kept = ""
 
 
 def write_pgpass(directory: str, host: str, port: int, password: str) -> str:
@@ -248,7 +264,10 @@ def _seed(
     if problem:
         shutil.rmtree(fresh, ignore_errors=True)
         return f"{problem}; {KEPT}"
-    problem = _swap(dropdir, datadir, aside, fresh, action, runner, unit)
+    keep = bool(getattr(action, "keep", False)) \
+        and dbpgkeep.can_keep(datadir, found["size"])
+    problem = _swap(dropdir, datadir, aside, fresh, action, runner, unit,
+                    keep)
     if problem:
         return problem
     problem = _run(runner, ("systemctl", "start", unit))
@@ -385,12 +404,20 @@ def _basebackup(fresh: str, pgpass: str, action, runner) -> str:
 
 
 def _swap(dropdir: str, datadir: str, aside: str, fresh: str,
-          action, runner, unit: str) -> str:
+          action, runner, unit: str, keep: bool = False) -> str:
     """Move the copy in; undo every failure before the old copy goes"""
     os.rename(datadir, aside)
     problem = _standby_in_place(dropdir, datadir, fresh, action)
     if problem:
         return _undo(runner, datadir, aside, problem, unit)
+    if keep:
+        kept = dbpgkeep.kept_name(datadir)
+        try:
+            os.rename(aside, kept)
+            action.kept = kept
+            return ""
+        except OSError:
+            pass
     shutil.rmtree(aside)
     return ""
 
@@ -406,6 +433,11 @@ def _standby_in_place(dropdir: str, datadir: str, fresh: str,
     primary.
     """
     os.rename(fresh, datadir)
+    return write_follow(dropdir, action)
+
+
+def write_follow(dropdir: str, action) -> str:
+    """The follow drop-in of the standby; the reason it failed, if so"""
     try:
         os.makedirs(dropdir, exist_ok=True)
         follow = os.path.join(dropdir, dbpostgres.FOLLOW_DROPIN_NAME)
