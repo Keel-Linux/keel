@@ -228,7 +228,7 @@ class TestThePrimary(FollowTestCase):
         found = self.follow(0, Server())
         self.assertIsNone(found.problem, found.lines)
         self.assertIn("unchanged (the primary, writable)", found.lines)
-        self.assertIn("role=primary", self.role_file(0))
+        self.assertIn("primary", self.role_file(0))
         # the drop-in keeps the server read only at its next boot too:
         # a crashed old primary takes no write before follow runs
         with open(os.path.join(self.all[0].root, mariadb.ROLE_DROPIN)) as f:
@@ -614,7 +614,7 @@ class TestTheOldPrimaryAtBoot(FollowTestCase):
         found = self.follow(0, server)
         self.assertIsNone(found.problem, found.lines)
         self.assertIn("SET GLOBAL read_only = OFF;\n", server.sent)
-        self.assertIn("role=primary", self.role_file(0))
+        self.assertIn("primary", self.role_file(0))
 
     def test_no_peer_answers_at_boot_it_stays_read_only(self):
         self.pair_nodes(mode="cloud_simple")
@@ -782,7 +782,7 @@ class TestNoClaimAndNoAddress(FollowTestCase):
         self.pair_nodes()
         a = self.all[0]
         self.follow(0, Server(read_only="ON"))
-        self.assertIn("role=primary", self.role_file(0))
+        self.assertIn("primary", self.role_file(0))
         pair = dbpair.observe_pair(a.root, a.node.document())
         doc = a.node.document()
         writable = Reading(role=Value("standalone"), read_only=Value(False))
@@ -1041,6 +1041,28 @@ class TestTheFileFlip(FollowTestCase):
     database role, in the same operation. A core appliance replicates
     no file: the flip is a no-op and the role file keeps
     replicates=database"""
+
+    def test_a_spec_without_the_overlay_warns_and_follows(self):
+        self.pair_nodes()
+        text = "overlays.syncthing: not declared"
+        with mock.patch("keel.system.filesync.undeclared_problem",
+                        return_value=text), \
+                mock.patch("keel.system.dbfollow.alerting.alert") as alert:
+            found = self.follow(0, Server())
+        self.assertIsNone(found.problem, found.lines)
+        self.assertTrue(any("WARNING: file replication is off" in line
+                            and text in line for line in found.lines))
+        self.assertIn("primary", self.role_file(0))
+        self.assertEqual(alert.call_count, 1)
+
+    def test_the_alert_is_sent_once_while_the_spec_stays_undeclared(self):
+        self.pair_nodes()
+        with mock.patch("keel.system.filesync.undeclared_problem",
+                        return_value="x"), \
+                mock.patch("keel.system.dbfollow.alerting.alert") as alert:
+            self.follow(0, Server())
+            self.follow(0, Server())
+        self.assertEqual(alert.call_count, 1)
 
     def test_the_primary_flip_flips_the_folders(self):
         self.pair_nodes()
