@@ -1,3 +1,16 @@
+keel (0.23.54) unstable; urgency=medium
+
+  * A spec without overlays.syncthing no longer gives a pair with the
+    files not replicated and no sign of it (keel#224, decisions 0027 and
+    0041). When the appliance replicates files for the node's mode,
+    keel spec apply --system refuses the spec and says what to write.
+    keel database follow never refuses for it, because that would block
+    a failover in an outage: the role change runs, the output says that
+    file replication is off, and one alert goes to the monitor channels
+    while the condition lasts.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Sun, 25 Oct 2026 18:00:00 +0000
+
 keel (0.23.53) unstable; urgency=medium
 
   * A flip to primary restores the application owner over the replicated
