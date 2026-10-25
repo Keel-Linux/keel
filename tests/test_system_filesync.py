@@ -188,6 +188,40 @@ class TestTheRender(SyncCase):
             " -/var/www/blog/media\n"
             f"ExecStartPre=+{filesync.START_PAUSED}\n"))
 
+    def test_the_start_pause_edits_the_folders_and_not_the_devices(self):
+        # keel#228: a paused peer device never connects again
+        import tempfile
+        text = (
+            '<configuration>\n'
+            '    <folder id="a" path="/x">\n'
+            '        <device id="D1"></device>\n'
+            '        <paused>false</paused>\n'
+            '    </folder>\n'
+            '    <folder id="b" path="/y">\n'
+            '        <paused>false</paused>\n'
+            '    </folder>\n'
+            '    <device id="D1" name="keel">\n'
+            '        <paused>false</paused>\n'
+            '    </device>\n'
+            '    <device id="D2" name="keel-peer">\n'
+            '        <paused>false</paused>\n'
+            '    </device>\n'
+            '</configuration>\n')
+        with tempfile.TemporaryDirectory() as tmp:
+            config = os.path.join(tmp, "config.xml")
+            with open(config, "w") as handle:
+                handle.write(text)
+            command = filesync.START_PAUSED.replace(
+                "/" + filesync.CONFIG, config).replace(
+                "/" + filesync.STATE_FILE, os.path.join(tmp, "none"))
+            subprocess.run(command, shell=True, check=True)
+            with open(config) as handle:
+                result = handle.read()
+        self.assertEqual(result.count("<paused>true</paused>"), 2)
+        self.assertEqual(result.count("<paused>false</paused>"), 2)
+        self.assertIn('<device id="D2" name="keel-peer">\n'
+                      '        <paused>false</paused>', result)
+
     def test_a_path_that_is_not_there_yet_does_not_stop_the_unit(self):
         # systemd skips a "-" path that is missing; without the prefix
         # the unit fails with 226/NAMESPACE

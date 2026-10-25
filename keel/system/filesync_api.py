@@ -88,6 +88,7 @@ def apply_folders(key: str, paths: tuple[str, ...], target: str,
     if peer and target != io.PAUSED:
         device_body = {"deviceID": peer, "name": "keel-peer",
                        "compression": "metadata",
+                       "paused": False,
                        "addresses": ([f"tcp://[{peer_address}]:{PORT}"]
                                      if peer_address else ["dynamic"])}
         request(key, "PUT", f"/rest/config/devices/{peer}", device_body)

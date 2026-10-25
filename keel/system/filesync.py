@@ -118,12 +118,14 @@ BAD_CHARS = re.compile(r"[\s\x00-\x1f\x7f*?\[\]{}\\]")
 
 
 # Before syncthing reads its configuration: with no state (a boot, as
-# /run is empty), every folder starts paused, whatever the file says. The
+# /run is empty), every folder starts paused, whatever the file says. Only
+# the folder entries: a paused device never connects again (keel#228). The
 # first proven follow unpauses. "+" runs it as root (the state directory
 # is for root alone); sed -i keeps the owner of the file when root runs it.
 START_PAUSED = (
     "/bin/sh -c 'test -e /{state} || ! test -f /{config} || sed -i -e"
-    " \"s|<paused>false</paused>|<paused>true</paused>|\" /{config}'"
+    " \"/<folder /,/<.folder>/s|<paused>false</paused>|"
+    "<paused>true</paused>|\" /{config}'"
 ).format(state=STATE_FILE, config=CONFIG)
 
 
