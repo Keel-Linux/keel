@@ -81,6 +81,11 @@ PROFILES = {
 }
 LIMITS = {"ideal": (30, 30), "regional": (60, 60),
           "design": (180, 120), "lossy": (300, 180)}
+PINGS = 100
+LOSSY_PINGS = 300
+# the folders must report no missing file within this time of the trees
+# being equal (the counters follow the index exchange)
+COUNTS_S = 60
 PIDS: list[int] = []
 CHILDREN: list[subprocess.Popen] = []
 AGENTS: dict[str, subprocess.Popen] = {}
@@ -288,6 +293,22 @@ def wait_until(test, seconds: float, step: float = 0.5) -> float | None:
     return None
 
 
+def clean_counts(name: str, timeout: float) -> dict:
+    """The counters of node `name`, read until the content folder needs
+    no file and holds no local change, or until `timeout`; the last
+    answer either way, so a counter that stays up still fails the test"""
+    answer: dict = {}
+
+    def settled() -> bool:
+        nonlocal answer
+        answer = agent_send(name, "counts", 60)
+        counts = (answer.get("counts") or {}).get(CONTENT) or {}
+        return counts.get("needFiles") == 0 and \
+            counts.get("receiveOnlyChangedFiles") == 0
+    wait_until(settled, timeout, 1.0)
+    return answer
+
+
 def agent_send(name: str, line: str, timeout: float = 300) -> dict:
     """One command to a node's agent, and its JSON answer"""
     process = AGENTS[name]
@@ -338,7 +359,12 @@ def scenario(report: dict, name: str, profile: list[str], extra: bool,
     etcd_netns.LEG = list(profile)
     for n in (1, 2):
         etcd_netns.leg(f"to{n}")
-    etcd_netns.PINGS = 100
+    # a count that a lossy link cannot pass with no loss seen: two legs
+    # of 2% lose 4% of the round trips, and 100 pings saw none one run
+    # in 60 (0.96 ** 100); 300 do so one run in 200000
+    etcd_netns.PINGS = LOSSY_PINGS if profile[2] != "0%" else PINGS
+    found["qdisc"] = [sh("tc", "qdisc", "show", "dev", f"to{n}").strip()
+                      for n in (1, 2)]
     found["link"] = measured(PIDS[1], OVERLAY.format(n=1))
     # the identity exchange over the members' channel alone: B first,
     # its ask refused (A holds no identity yet), then A, then B again
@@ -353,7 +379,7 @@ def scenario(report: dict, name: str, profile: list[str], extra: bool,
                        for folder in ("content", "media")}
     found["b_cache"] = os.path.exists(os.path.join(
         ROOTS[1], "var/www/blog/content/cache/tracker.txt"))
-    found["b_counts"] = agent_send("B", "counts", 60)
+    found["b_counts"] = clean_counts("B", COUNTS_S)
     # the flip a `keel database promote` does: A replica, B primary
     found["a_back"] = flip("A", "replica")
     found["b_primary"] = flip("B", "primary")
@@ -437,7 +463,7 @@ def partition(report: dict, sync_s: float) -> None:
     found["cut_s"] = round(time.monotonic() - cut_at, 2)
     found["heal_sync_s"] = wait_until(in_sync, sync_s)
     found["a_counts"] = agent_send("A", "counts", 60)
-    found["b_counts"] = agent_send("B", "counts", 60)
+    found["b_counts"] = clean_counts("B", COUNTS_S)
     report["partition"] = found
 
 
