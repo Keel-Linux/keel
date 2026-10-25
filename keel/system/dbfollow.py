@@ -208,6 +208,11 @@ def _follow_proof(root: str, spec: str, confirmed: bool, found: Followed,
     except (NodeError, ValueError) as e:
         found.fail(str(e))
         return
+    from keel.system import filesync
+    problem = filesync.undeclared_problem(root, doc)
+    if problem:
+        found.fail(problem)
+        return
     flip.doc = doc
     _learn(root, spec, doc, found, output)
     proof = _early_proof(root, doc, output, wait, sleep)

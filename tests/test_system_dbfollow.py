@@ -1042,6 +1042,15 @@ class TestTheFileFlip(FollowTestCase):
     no file: the flip is a no-op and the role file keeps
     replicates=database"""
 
+    def test_a_spec_without_the_overlay_refuses_the_follow(self):
+        self.pair_nodes()
+        text = "overlays.syncthing: not declared"
+        with mock.patch("keel.system.filesync.undeclared_problem",
+                        return_value=text):
+            found = self.follow(0, Server())
+        self.assertIn(text, found.problem)
+        self.assertEqual(self.role_file(0), "")
+
     def test_the_primary_flip_flips_the_folders(self):
         self.pair_nodes()
         with mock.patch("keel.system.filesync.follow_flip") as flipped:

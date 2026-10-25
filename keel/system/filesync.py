@@ -508,6 +508,25 @@ def applies(doc: dict, resolved) -> bool:
     return bool(_wanted(application, _mode(doc)))
 
 
+def undeclared_problem(root: str, doc: dict) -> str | None:
+    """Why a follow is refused: the appliance replicates files for this
+    node's mode, but the spec does not write `overlays.syncthing` out.
+    A manifest default is not enough (0027, 0041): without the key the
+    pair forms with the files off, and the one-writer rule is not kept
+    for them (keel#224). A spec that says `disabled` is a choice"""
+    if OVERLAY in (doc.get("overlays") or {}):
+        return None
+    resolved = _resolved(root, doc)
+    if not applies({**doc, "overlays": {**(doc.get("overlays") or {}),
+                                        OVERLAY: "enabled"}}, resolved):
+        return None
+    return (f"overlays.{OVERLAY}: not declared in the spec, and the"
+            f" appliance replicates files for {_mode(doc)}: write"
+            f" `overlays.{OVERLAY}: enabled` (or `disabled`) in the spec"
+            " (decisions 0027, 0041), or the pair forms with the files"
+            " off")
+
+
 def _resolved(root: str, doc: dict):
     appliance = doc.get("appliance")
     if not isinstance(appliance, dict):
