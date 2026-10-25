@@ -130,6 +130,15 @@ class TestTheFolders(unittest.TestCase):
         self.assertEqual(len(api.methods("PATCH")), 2)
         self.assertEqual(len(api.methods("GET")), 2)
 
+    def test_apply_unpauses_the_peer_device(self):
+        # a cold start pauses the config.xml; the peer must not stay so
+        # (keel#228)
+        api = FakeApi()
+        with mock.patch("keel.system.filesync_api.request", api):
+            filesync_api.apply_folders("k", (CONTENT,), "replica", DEVICE,
+                                       PEER, "fd42::1")
+        self.assertIs(api.devices[PEER]["paused"], False)
+
     def test_apply_without_a_peer_address_uses_dynamic(self):
         api = FakeApi()
         with mock.patch("keel.system.filesync_api.request", api):
