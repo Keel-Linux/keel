@@ -1,3 +1,16 @@
+keel (0.23.53) unstable; urgency=medium
+
+  * A flip to primary restores the application owner over the replicated
+    paths (keel#225). In the first batch of a replication a directory
+    could be made before its parent got the application owner, and it
+    and all below it stayed owned by the syncthing user, so the promoted
+    application could not write there. After the folders stop receiving,
+    keel gives the owner of the replicated root to each entry that the
+    syncthing user owns, before a role hook starts the application. A
+    link is not followed. An error is a follow problem and is retried.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Sun, 25 Oct 2026 12:00:00 +0000
+
 keel (0.23.52) unstable; urgency=medium
 
   * File replication with syncthing, one operation with the database
