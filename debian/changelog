@@ -1,3 +1,16 @@
+keel (0.23.56) unstable; urgency=medium
+
+  * The manifest validator now lets a base layer declare application
+    sections (state, services, workers, web) that the top of the chain
+    inherits. A base such as web can set state.replicate paths, and
+    every child (lnmp, lnpp, ntfy) inherits them without repeating the
+    declaration. When more than one manifest declares application
+    sections, only the top may have them (the existing rule). This
+    unblocks the stable-1 build where keel-web 0.3.6 declares
+    state.replicate for decision 0068 and lnmp/lnpp/ntfy inherit it.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Sun, 26 Oct 2026 00:00:00 +0000
+
 keel (0.23.55) unstable; urgency=medium
 
   * File replication now resumes by itself after a node restarts

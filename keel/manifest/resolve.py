@@ -250,19 +250,26 @@ class _Builder:
 
 def _application(chain: list[dict], top: str,
                  builder: _Builder) -> tuple[Owned | None, list[str]]:
-    """Rules 19, 21 and 23 for the application of the chain, if any"""
+    """Rules 19, 21 and 23 for the application of the chain, if any
+
+    When exactly one manifest in the chain declares application sections,
+    the top inherits them regardless of where they are declared: a base
+    layer such as web can set state that every child inherits.  When more
+    than one manifest declares them, only the topmost one is accepted and
+    the others are an error (a child overrides, it does not merge).
+    """
     owners = [doc for doc in chain if application_of(doc)]
     if not owners:
         return None, []
-    names = [doc["name"] for doc in owners]
     if len(owners) > 1:
-        return None, [f"application sections: declared by"
-                      f" {' and by '.join(names)}; a chain has one"
-                      " application, at its top"]
-    if names[0] != top:
-        return None, [f"application sections: declared by {names[0]}, which"
-                      f" is not the top of the chain of {top}"]
-    doc = owners[0]
+        names = [doc["name"] for doc in owners]
+        non_top = [n for n in names if n != top]
+        if non_top:
+            return None, [f"application sections: declared by"
+                          f" {' and by '.join(names)}; only the top of"
+                          f" the chain ({top}) may declare them when"
+                          " more than one manifest has them"]
+    doc = owners[-1] if owners[-1]["name"] == top else owners[0]
     errors = _embedded_errors(doc.get("services") or {}, builder.overlays)
     errors.extend(_state_data_errors(doc.get("state"), builder.overlays))
     return Owned(application_of(doc), top), errors
