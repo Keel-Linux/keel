@@ -230,6 +230,12 @@ class Pair(unittest.TestCase):
                              return_value=True)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # the peers outside the pair told before a promote returns, so a
+        # test reads them right after it; tests/test_mesh_vipmove.py
+        # turns the background on for keel#137's own tests
+        patcher = mock.patch("keel.mesh.vippromote.BACKGROUND", False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.all: list[Here] = []
         self.nets: list[FakeNet] = []
         self.said: dict[int, list[str]] = {}
