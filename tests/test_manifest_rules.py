@@ -639,14 +639,16 @@ class Rule19ApplicationOnce(ManifestCase):
         self.edit("appliances", "web", "overlays:",
                   "web: {root: /var/www/html}\noverlays:")
         self.refused("blog", "application sections: declared by web and by"
-                     " blog; a chain has one application, at its top")
+                     " blog; only the top of the chain (blog) may declare"
+                     " them when more than one manifest has them")
 
-    def test_the_application_is_at_the_top(self):
+    def test_a_base_application_is_inherited_by_the_top(self):
         self.edit("appliances", "web", "overlays:",
-                  "web: {root: /var/www/html}\noverlays:")
+                  "state:\n  replicate:\n    - /var/www/keel-default\noverlays:")
         self.put("appliances", "shop", appliance("shop", "web"))
-        self.refused("shop", "application sections: declared by web, which"
-                     " is not the top of the chain of shop")
+        code, out, err = self.cli("manifest", "validate", "shop")
+        self.assertEqual(code, 0, err)
+        self.assertIn("shop: resolved along core, web, shop", out)
 
 
 class Rule20SharedSecrets(ManifestCase):
