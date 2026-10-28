@@ -219,6 +219,22 @@ class TestLiveInterface(unittest.TestCase):
         self.assertEqual(found[1].argv,
                          ("systemctl", "enable", "wg-quick@wg0"))
 
+    def test_a_live_mtu_that_is_not_the_file_s_is_set_live(self):
+        """keel#139: the file kept, wg0 still at 1420 after the upgrade"""
+        found = actions(plan_overlay(state(current=RENDERED, enabled=True,
+                                           up=True, live_mtu=1420),
+                                     True, ALL, 120))
+        self.assertEqual(found[1].argv, ("ip", "link", "set", "dev", "wg0",
+                                         "mtu", "1280"))
+        self.assertIn("drift: wg0 has MTU 1420 and its file says 1280; set"
+                      " it live, with no restart", found[1].describe())
+        for kept in (1280, None):
+            found = actions(plan_overlay(state(current=RENDERED,
+                                               enabled=True, up=True,
+                                               live_mtu=kept),
+                                         True, ALL, 120))
+            self.assertEqual([type(one) for one in found], [Note])
+
     def test_an_overlay_never_confirmed_here_comes_up_under_the_window(self):
         found = actions(plan_overlay(state(current=RENDERED, up=False),
                                      True, ALL, 120))

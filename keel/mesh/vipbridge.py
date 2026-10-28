@@ -54,7 +54,7 @@ from keel.network.marker import path as rooted
 UNIT = "keel-vip-control"
 CREDENTIALS = 3
 OPS = ("facts", "held", "take", "sign", "hold", "carry", "drop", "carried",
-       "bounded")
+       "bounded", "doubt")
 
 
 def unit_name(root: str) -> str:
@@ -146,7 +146,8 @@ def answered(ops: Ops, data: bytes) -> dict:
                             None if lease is None else str(lease))
             return {"ok": base64.b64encode(made.raw).decode()}
         if op == "hold":
-            ops.hold(raw(found), str(found["lease"]))
+            ops.hold(raw(found), str(found["lease"]),
+                     bool(found.get("expired")))
             return {"ok": None}
         if op == "carry":
             return {"ok": ops.carry(str(found["vip"]),
@@ -159,6 +160,9 @@ def answered(ops: Ops, data: bytes) -> dict:
             return {"ok": None}
         if op == "bounded":
             return {"ok": ops.bounded(str(found["vip"]))}
+        if op == "doubt":
+            ops.doubt(str(found["vip"]), bool(found["on"]))
+            return {"ok": None}
         return {"ok": ops.carried(str(found["vip"]))}
     except (ValueError, KeyError, TypeError, AttributeError,
             binascii.Error, ProtocolError, VipError, NodeError,
@@ -213,9 +217,10 @@ class Remote(Ops):
         return vipmsg.claim_of(base64.b64decode(
             self.ask("sign", vip=vip, epoch=epoch, lease=lease)))
 
-    def hold(self, raw_claim: bytes, lease: str) -> None:
+    def hold(self, raw_claim: bytes, lease: str,
+             expired: bool = False) -> None:
         self.ask("hold", raw=base64.b64encode(raw_claim).decode(),
-                 lease=lease)
+                 lease=lease, expired=expired)
 
     def carry(self, vip: str, age: float) -> bool:
         return bool(self.ask("carry", vip=vip, age=age))
@@ -223,6 +228,9 @@ class Remote(Ops):
     def drop(self, vip: str, fence: bool, why: str,
              lease: str | None = None) -> None:
         self.ask("drop", vip=vip, fence=fence, why=why, lease=lease)
+
+    def doubt(self, vip: str, on: bool) -> None:
+        self.ask("doubt", vip=vip, on=on)
 
     def carried(self, vip: str) -> bool | None:
         return self.ask("carried", vip=vip)

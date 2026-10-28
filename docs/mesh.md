@@ -591,7 +591,9 @@ yet, both reverted, and each then left the other out for an hour, at
 different times, so they never met. Now the first keeps the second,
 and the handshake comes once the second has the first too. Until then
 `keel mesh status` names the member on a `drift:` line, and `keel diff`
-has `network.overlay.wireguard.peers.<key>.handshake` as drift. A
+has `network.overlay.wireguard.peers.<key>.handshake` as drift. A last
+handshake older than 180 s is drift too, and both say the member does
+not answer: it is unreachable (keel#140). A
 change that removes a peer, changes `[Interface]`, or bounces the
 interface still waits for a handshake in its window. One sync runs at a
 time
@@ -1070,6 +1072,20 @@ losses back to back double it; 0050's bench, at 3 s, still re-elected
 under loss. 5 s is about 17 heartbeats and 20 round trips; a dead leader
 is seen in 5 to 10 s, which beside DNS's one to five minutes (0020)
 costs nothing. Pre-vote stays on (etcd 3.5's default).
+
+A peer connection that loses its segments in a cut doubles its
+retransmission timeout each time, up to the kernel's 120 s. etcd goes
+on writing raft's messages to it and sees no error, so the messages
+wait for the next retransmission, also after the heal (keel#167): on
+real nodes etcd had no leader for 111 s, and in the netns harness a
+follower rejoined 19 to 51 s after the heal. keel therefore writes
+`/etc/sysctl.d/90-keel-etcd.conf` with `net.ipv4.tcp_retries2 = 5` and
+sets it live. The kernel ends such a connection after about 14 s of
+retransmissions, and etcd dials again: the harness then measured a
+rejoin 6 to 16 s after the heal and a new leader 8 to 13 s after a cut.
+The value holds for every TCP connection of the node, IPv6 included.
+At 2% loss, 6 losses of one segment in a row come once in 10^10
+segments, so a working connection is not ended.
 
 Two members are never formed by a join; they are left by a removal or
 a failure, and `keel mesh status` and `remove` say that a majority of

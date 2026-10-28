@@ -60,6 +60,11 @@ INTERFACE_KEYS = ("address", "listenport", "postup", "privatekey")
 # the minimum MTU of IPv6 (RFC 8200), with the IPv6, UDP and WireGuard
 # headers (80 bytes) under every path of 1360 bytes or more (keel#119)
 OVERLAY_MTU = 1280
+# every peer's keepalive when the spec gives none (the coordinator's
+# decision of 2026-10-10 on keel#140): a packet every 25 s keeps the
+# NAT and firewall state open between sites, and the handshake renewed,
+# so a last handshake older than 180 s means the member is unreachable
+DEFAULT_KEEPALIVE = 25
 PEER_KEYS = ("publickey", "endpoint", "allowedips", "persistentkeepalive")
 ULA_PREFIX = 0xFD
 GLOBAL_ID_BYTES = 5
@@ -187,10 +192,13 @@ def render(overlay: dict) -> str:
         if peer.get("endpoint"):
             lines.append(f"Endpoint = {peer['endpoint']}")
         lines.append(f"AllowedIPs = {', '.join(allowed(peer))}")
-        if peer.get("persistent_keepalive"):
-            lines.append(
-                f"PersistentKeepalive = {peer['persistent_keepalive']}")
+        lines.append(f"PersistentKeepalive = {keepalive(peer)}")
     return "\n".join(lines) + "\n"
+
+
+def keepalive(peer: dict) -> int:
+    """The peer's keepalive: the spec's, else DEFAULT_KEEPALIVE"""
+    return int(peer.get("persistent_keepalive") or DEFAULT_KEEPALIVE)
 
 
 @dataclass(frozen=True)

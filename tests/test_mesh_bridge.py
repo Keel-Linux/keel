@@ -128,6 +128,9 @@ class TestTheWholePath(Case):
     def ended(self, started, running):
         running.join(10)
         self.assertFalse(running.is_alive())
+        # the bridge ends when the listener closes its socket; the
+        # listener's thread then still has to return its code (keel#177)
+        started.thread.join(10)
         self.assertEqual(started.codes, [exits.OK])
         self.assertTrue(started.stopped)
         self.assertFalse(os.path.exists(bridge.socket_path(

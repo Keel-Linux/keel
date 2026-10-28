@@ -28,7 +28,7 @@ from layers_helpers import (
 )
 
 from keel.layers import CACHE_ENV, LAYERS_ENV  # noqa: E402
-from keel.layers.verify import SIGNATURE_PRESENT  # noqa: E402
+from keel.layers.verify import SIGNATURE_UNKNOWN  # noqa: E402
 
 import keel  # noqa: E402
 from keel import commands, exits  # noqa: E402
@@ -280,9 +280,11 @@ class TestVerify(CLITestCase):
     def test_signed_hash_file_exits_signature_unverified(self):
         write(join(self.layers, "lamp.tar.zst.hash"),
               hash_text("lamp", self.fields["lamp"]["sha256"], signed=True))
+        # The keyrings of the roles are tried, and the fake signature is
+        # good by none of them, or there is no keyring on this machine.
         code, out, _ = self.verify()
         self.assertEqual(code, exits.SIGNATURE_UNVERIFIED)
-        self.assertIn(f"lamp: unverified: {SIGNATURE_PRESENT}", out)
+        self.assertIn(f"lamp: unverified: {SIGNATURE_UNKNOWN}", out)
 
     def test_tarballs_dir_points_at_the_tarballs(self):
         tarballs = join(self.tmpdir, "tarballs")

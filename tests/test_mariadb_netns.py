@@ -219,8 +219,10 @@ class TestAMariadbPairOnAPoorNetwork(unittest.TestCase):
         # follow does not lag the VIP (keel#118: 7.5 s on real nodes)
         self.assertLess(found["writable_after_carried_s"], 3.0, found)
         # with etcd the old primary's lease must expire before the claim
-        # (0049); after the VIP lands, the writes resume within 3 s
-        self.assertLess(found["first_ok_after_s"] - found["carried_s"], 3.0,
+        # (0049); after the VIP lands, the writes resume within 5 s, the
+        # most the maintainer tolerates (keel#148): the client's part adds
+        # its sample interval and one TCP retransmission on the lossy link
+        self.assertLess(found["first_ok_after_s"] - found["carried_s"], 5.0,
                         found)
 
     def test_a_planned_promote_s_write_gap_is_under_3_s(self):

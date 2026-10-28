@@ -165,6 +165,17 @@ class TestMembers(Case):
         named = etcdclient.Member("1", "", ("https://host:2380",), (), True)
         self.assertIsNone(named.address)
 
+    def test_a_member_of_the_first_cluster_that_never_ran_is_unstarted(self):
+        """keel#199: etcd lists each member of ETCD_INITIAL_CLUSTER with
+        its name, also one that never ran; such a member has published
+        no client URL (seen on real nodes, 2026-10-16)"""
+        self.ctl.answer("member list", {"members": [
+            {"ID": 1, "name": "keel-fd00--3",
+             "peerURLs": ["https://[fd00::3]:2380"]}]})
+        (found,) = self.client.members()
+        self.assertEqual(found.name, "keel-fd00--3")
+        self.assertFalse(found.started)
+
     def test_add_a_learner_promote_remove(self):
         self.ctl.answer("member add", {"member": {
             "ID": 16334501404808820146,

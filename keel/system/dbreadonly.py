@@ -36,6 +36,7 @@ import fcntl
 import io
 import os
 import subprocess
+import threading
 import time
 from collections.abc import Iterator
 
@@ -76,6 +77,39 @@ KILLING = "Killing slave"
 SHOWN_WAIT = 5.0
 SHOWN_POLL = 0.1
 STOP_WAIT = 60
+
+# the fence of a node that lost the VIP (keel#186): read_only on, set in
+# a client of its own, while every client connection is killed. SET
+# GLOBAL read_only waits for the backup lock behind a write that waits
+# for the replica's ACK, and such a write returns OK when the
+# semi-synchronous timeout ends; killed, its client gets an error. A
+# fenced node serves no replica either: a dump thread to a cut replica
+# stays, and when that replica connects again with the same server id,
+# MariaDB 11.8.6 ends the old thread and takes no connection after it
+# (keel#193); ended by a KILL, it ends cleanly. The server's own
+# threads, this node's own replication threads and the setting itself
+# are not ended.
+FENCE = "SET GLOBAL read_only = ON"
+CLIENTS_QUESTION = QUIET + (
+    "SELECT ID FROM information_schema.PROCESSLIST"
+    " WHERE ID <> CONNECTION_ID()"
+    " AND COMMAND NOT IN ('Daemon', 'Slave_IO', 'Slave_SQL',"
+    " 'Slave_worker')"
+    " AND USER NOT IN ('system user', 'event_scheduler')"
+    " AND COALESCE(INFO, '') <> 'SET GLOBAL read_only = ON'",
+)
+# whether the setting is in the server: before its statement shows, its
+# connection is a client like the others, and the kills would end it
+FENCE_SHOWN = QUIET + (
+    "SELECT COUNT(*) FROM information_schema.PROCESSLIST"
+    " WHERE INFO = 'SET GLOBAL read_only = ON'",
+)
+# --force: a connection that ended meanwhile does not stop the others
+KILL_CLIENT = mariadb.AS_MYSQL + ("mariadb", "--batch", "--force")
+FENCE_WAIT = 30.0
+FENCE_POLL = 0.1
+# a setting that the kills ended anyway (it showed late) is sent again
+FENCE_TRIES = 3
 
 NOT_REPLICATING = (
     "this server replicates from nowhere, so there is nothing to promote."
@@ -259,19 +293,125 @@ def quiesce(runner=subprocess.run) -> str | None:
     return None
 
 
+def fence(runner=subprocess.run, spawn=None, clock=time.monotonic,
+          sleep=time.sleep) -> str | None:
+    """read_only on, and no client told after it that a write is stored
+    (keel#186); None, or why not
+
+    `spawn` is Popen's seam; with a runner that is not subprocess.run
+    (a test's), the kills run first and the setting to its end after."""
+    if spawn is None and runner is not REAL_RUN:
+        _kill_clients(runner)
+        return _send(runner, FENCE + ";\n") or None
+    problem = None
+    for _ in range(FENCE_TRIES):
+        problem, again = _fence_once(runner, spawn or subprocess.Popen,
+                                     clock, sleep)
+        if not again:
+            return problem
+    return problem
+
+
+def _fence_once(runner, spawn, clock, sleep) -> tuple[str | None, bool]:
+    """One setting and the kills around it: why it failed, if it did,
+    and whether to send it again (it ended with an error, which a kill
+    of its own connection gives)"""
+    try:
+        setting = spawn(list(QUIET) + [FENCE], stdout=subprocess.DEVNULL,
+                        stderr=subprocess.PIPE, text=True)
+    except OSError as e:
+        return f"cannot run {mariadb.CLIENT[0]}: {e.strerror}", False
+    deadline = clock() + FENCE_WAIT
+    shown_by = clock() + SHOWN_WAIT
+    shown = False
+    listed = ""
+    while setting.poll() is None:
+        shown = shown or clock() >= shown_by or _fence_shown(runner)
+        if shown:
+            listed = _kill_clients(runner) or listed
+        if setting.poll() is not None:
+            break
+        if clock() >= deadline:
+            setting.kill()
+            return (f"{FENCE} did not end within {FENCE_WAIT:g} s"
+                    + (f" (the client connections: {listed})"
+                       if listed else "")), False
+        sleep(FENCE_POLL)
+    if setting.returncode != 0:
+        said = setting.stderr.read() if setting.stderr else ""
+        return ((said or "").strip()
+                or f"{FENCE} exited {setting.returncode}"), True
+    # a setting that waited for nothing ended before any kill: the
+    # connections that were there are ended now, read_only already on
+    _kill_clients(runner)
+    return None, False
+
+
+def _fence_shown(runner) -> bool:
+    out, problem = _ask(runner, FENCE_SHOWN)
+    return not problem and out.strip() not in ("", "0")
+
+
+def _kill_clients(runner) -> str:
+    """KILL CONNECTION of every client connection; why they could not
+    be listed, or an empty string"""
+    out, problem = _ask(runner, CLIENTS_QUESTION)
+    if problem:
+        return f"cannot list them: {problem}"
+    ids = [one.strip() for one in out.splitlines() if one.strip().isdigit()]
+    if ids:
+        # an error here is a connection that ended meanwhile (--force)
+        _run(runner, KILL_CLIENT, "".join(f"KILL CONNECTION {one};\n"
+                                          for one in ids))
+    return ""
+
+
+# the locks this thread holds, by path, and how many times it took each
+_HELD = threading.local()
+
+
+def _held() -> dict:
+    found = getattr(_HELD, "paths", None)
+    if found is None:
+        found = _HELD.paths = {}
+    return found
+
+
 @contextlib.contextmanager
 def replication_locked(root: str) -> Iterator[None]:
     """One writer of the replication's statements at a time: keel
     database follow, keel database watch's follow and spec apply's
-    replication actions (keel#118)"""
+    replication actions (keel#118), and a PostgreSQL start (keel#153)
+
+    Reentrant in one thread: the follow holds it and its observation
+    starts the server under it. flock locks an open file description,
+    so a second open of the file in the same thread would wait for the
+    first one forever. Another thread or process waits."""
     path = os.path.join(root, REPLICATION_LOCK)
+    held = _held()
+    if held.get(path):
+        held[path] += 1
+        try:
+            yield
+        finally:
+            held[path] -= 1
+        return
     os.makedirs(os.path.dirname(path), exist_ok=True)
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
+        held[path] = 1
+        try:
+            yield
+        finally:
+            del held[path]
     finally:
         os.close(fd)
+
+
+def holds_replication_lock(root: str) -> bool:
+    """Whether this thread holds the lock of the replication"""
+    return bool(_held().get(os.path.join(root, REPLICATION_LOCK)))
 
 
 class _Ran:

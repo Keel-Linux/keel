@@ -15,6 +15,8 @@ from unittest import mock
 
 from helpers import spec  # noqa: F401
 
+from test_network_wireguard import with_keepalive
+
 from keel.diff import DRIFT, NOT_COMPARED, NOT_DECLARED, SAME, compare
 from keel.inspect import inspect_root
 from keel.inspect.collect import overlay_section
@@ -61,7 +63,8 @@ class TestProbe(unittest.TestCase):
         section, findings = probe_overlay(
             [conf(wireguard.render(OVERLAY))], public, NO_MODULE_INFO)
         self.assertEqual(section, {"wireguard": {
-            "interface": "wg0", **OVERLAY, "listen_port": 51820,
+            "interface": "wg0", **with_keepalive(OVERLAY),
+            "listen_port": 51820,
             "private_key": {"file": "/etc/wireguard/wg0.key"}}})
         found = by_field(findings)
         self.assertEqual(found["network.overlay.wireguard.public_key"].value,
@@ -174,7 +177,7 @@ class TestCollect(RootCase):
                         return_value=(PUBLIC, None)):
             inspection = inspect_root(self.root)
         self.assertEqual(inspection.spec["network"]["overlay"]["wireguard"]
-                         ["peers"], OVERLAY["peers"])
+                         ["peers"], with_keepalive(OVERLAY)["peers"])
 
 
 def declared(**wg):
@@ -205,6 +208,19 @@ class TestDiff(RootCase):
         self.assertEqual(
             found["network.overlay.wireguard.private_key.file"].status,
             NOT_DECLARED)
+
+    def test_a_file_without_the_keepalive_is_drift(self):
+        """the keepalive keel renders for every peer (keel#140): a file
+        written before it is drift until apply writes it"""
+        key = f"network.overlay.wireguard.peers.{OTHER_KEY}"
+        self.assertEqual(self.diff(declared())[
+            f"{key}.persistent_keepalive"].status, SAME)
+        self.put("etc/wireguard/wg0.conf", wireguard.render(OVERLAY).replace(
+            "AllowedIPs = fd00:1::3/128\nPersistentKeepalive = 25\n",
+            "AllowedIPs = fd00:1::3/128\n"))
+        found = self.diff(declared())[f"{key}.persistent_keepalive"]
+        self.assertEqual((found.status, found.declared, found.observed),
+                         (DRIFT, 25, None))
 
     def test_peers_compare_by_key_whatever_their_order(self):
         doc = declared(peers=[

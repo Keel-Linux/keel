@@ -294,11 +294,13 @@ def member_request(root: str) -> str:
 
 
 def database_grant(root: str, csr: str, address: str, vip: str | None,
-                   public_key: str | None = None) -> Grant:
+                   public_key: str | None = None,
+                   engine: str = "mariadb") -> Grant:
     """On the root's holder: the database leaf of the member at
-    `address`, kind database, named after the member with ` mariadb`,
-    its SANs the address and `vip`; recorded for revocation with the
-    member's. Raises StateError off the holder"""
+    `address`, kind database, named after the member with ` <engine>`
+    (`mariadb` or `postgresql`), its SANs the address and `vip`;
+    recorded for revocation with the member's. Raises StateError off
+    the holder"""
     if not holds_root(root):
         raise StateError("only the node that holds the mesh's root CA signs"
                          " a database certificate")
@@ -307,16 +309,18 @@ def database_grant(root: str, csr: str, address: str, vip: str | None,
     sans = (at,) + ((str(ipaddress.IPv6Address(vip)),) if vip else ())
     try:
         made = etcdpki.issue(etcdpki.DATABASE, path(root, ROOT_KEY), issuer,
-                             csr, database_name(at), sans)
+                             csr, database_name(at, engine), sans)
         record_issued(root, at, made, public_key, DATABASE_LEAF)
     except PkiError as e:
         raise StateError(f"the request cannot be signed: {e}") from None
     return Grant(made, (), issuer, read(root, CRL), holder(root))
 
 
-def database_name(address: str) -> str:
-    """The CN of a member's database leaf: never an etcd user"""
-    return name(address) + " mariadb"
+def database_name(address: str, engine: str = "mariadb") -> str:
+    """The CN of a member's database leaf: never an etcd user; the
+    engine word keeps one engine's certificate from naming another's
+    identity on this mesh (0054)"""
+    return name(address) + " " + engine
 
 
 def grant_for(root: str, csr: str, address: str,

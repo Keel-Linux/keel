@@ -53,6 +53,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -94,6 +95,16 @@ def leg(device: str, loss: str | None = None) -> None:
        delay, jitter, "loss", loss or lost)
 
 
+def tune(pid: int) -> None:
+    """keel's sysctl file for etcd (keel.mesh.etcdconf.sysctl), set in
+    a member's namespace, as systemd-sysctl and keel apply set it on a
+    node: tcp_retries2 is a setting of each network namespace"""
+    for line in etcdconf.sysctl().splitlines():
+        if "=" in line and not line.startswith("#"):
+            key, value = (one.strip() for one in line.split("=", 1))
+            sh("sysctl", "-q", "-w", f"{key}={value}", pid=pid)
+
+
 def child(index: int) -> int:
     found = subprocess.Popen(["unshare", "-n", "sleep", "3600"],
                              stdout=subprocess.DEVNULL,
@@ -114,6 +125,7 @@ def child(index: int) -> int:
                  ("ip", "-6", "route", "add", "default", "via", f"{net}::1",
                   "dev", "uplink")):
         sh(*argv, pid=found.pid)
+    tune(found.pid)
     leg(f"to{n}")
     return found.pid
 
@@ -290,6 +302,30 @@ def summary(found: list[dict]) -> dict:
             "unhealthy": sum(1 for one in found if not one.get("healthy"))}
 
 
+def peer_backoffs(pid: int) -> list[int]:
+    """The retransmission backoff of each etcd peer connection in a
+    member's namespace, as `ss -ti` shows it (0 when none)"""
+    said = sh("ss", "-tinH", "state", "established",
+              f"( sport = :{etcdstate.PEER_PORT} or dport ="
+              f" :{etcdstate.PEER_PORT} )", pid=pid, check=False)
+    return [int(found.group(1)) if found else 0 for found in (
+        re.search(r"backoff:(\d+)", line) for line in said.splitlines()
+        if line.startswith("\t"))]
+
+
+def backoff_watch(pids: list[int], out: dict,
+                  stop: threading.Event) -> None:
+    """keel#167: the highest backoff of any etcd peer connection, per
+    member, sampled each second. A connection in a deep backoff holds
+    raft's messages until its next retransmission, up to 120 s"""
+    while not stop.is_set():
+        for name, pid in zip(NAMES, pids):
+            found = peer_backoffs(pid)
+            if found and max(found) > out.get(name, 0):
+                out[name] = max(found)
+        stop.wait(1)
+
+
 def driver() -> None:
     sh("ip", "link", "set", "lo", "up")
     with open("/proc/sys/net/ipv6/conf/all/forwarding", "w") as fob:
@@ -317,6 +353,10 @@ def driver() -> None:
         start_etcd(pid, roots[index], environment(
             roots[index], OVERLAY.format(n=index + 1), cluster))
     paths = [os.path.join(root, "watch.jsonl") for root in roots]
+    backoffs: dict = {}
+    stop = threading.Event()
+    threading.Thread(target=backoff_watch, args=(pids, backoffs, stop),
+                     daemon=True).start()
     for index, pid in enumerate(pids):
         WATCHERS.append(subprocess.Popen(
             ["nsenter", "-t", str(pid), "-n", sys.executable, __file__,
@@ -329,6 +369,8 @@ def driver() -> None:
     if formed is None:
         report["etcd_log_tail"] = open(os.path.join(
             roots[0], "etcd.log")).read()[-3000:]
+        stop.set()
+        report["peer_backoff_max"] = dict(backoffs)
         print("RESULT " + json.dumps(report), flush=True)
         return
     report["leader_at_formation"] = agreed(paths, began)
@@ -421,6 +463,8 @@ def driver() -> None:
     for root in roots[1:]:
         etcdstate.take_crl(root, found)
     report["c_reaches_a_after"] = reaches(pids[2], roots[2])
+    stop.set()
+    report["peer_backoff_max"] = dict(backoffs)
     print("RESULT " + json.dumps(report), flush=True)
 
 

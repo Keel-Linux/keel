@@ -14,15 +14,18 @@ import unittest
 from unittest import mock
 
 from helpers import spec  # noqa: F401
+from helpers_database import postgresql_reading
 
+from keel.inspect.dbengines import POSTGRESQL_SQL
 from keel.inspect.tree import File
-from keel.system import dbready, dbseed
+from keel.system import dbpgseed, dbpostgres, dbready, dbseed
 from keel.system.dbmariadb import PING
 from keel.system.dbstate import (
     Credential,
     credential,
     declared_server,
     needs_copy,
+    needs_pg_copy,
     observe_database,
 )
 
@@ -293,6 +296,226 @@ class TestTheCopyIsAskedForOnlyWhenOneWouldBeMade(unittest.TestCase):
         self.assertFalse(self.needs("", replication={}))
 
 
+
+PG_DROPIN = "etc/postgresql/17/main/conf.d/99-keel-database.conf"
+# not conf.d: that directory is swept as GUC, and the hba is not GUC
+PG_HBA = "etc/postgresql/17/main/keel-pg_hba.conf"
+
+
+class TestPostgreSQLIsStartedBeforeItIsAsked(unittest.TestCase):
+    """The same first-boot race as MariaDB's, probed the engine's way"""
+
+    def live(self):
+        root = self.enterContext(
+            __import__("tempfile").TemporaryDirectory()
+        )
+        binary = "usr/lib/postgresql/17/bin/postgres"
+        os.makedirs(os.path.join(root, os.path.dirname(binary)))
+        open(os.path.join(root, binary), "w").close()
+        confd = os.path.join(root, "etc/postgresql/17/main/conf.d")
+        os.makedirs(confd)
+        with open(os.path.join(confd, dbpostgres.DROPIN_NAME), "w") as fob:
+            fob.write("listen_addresses = '*'\n")
+        with open(os.path.join(root, PG_HBA), "w") as fob:
+            fob.write("# the whole authorization surface\n")
+        with open(os.path.join(root, "etc/machine-id"), "w") as fob:
+            fob.write("abc\n")
+        self.enterContext(
+            mock.patch("keel.inspect.constants.ROOT_DEFAULT", root)
+        )
+        doc = {"database": {"server": {"engine": "postgresql",
+                                       "role": "replica"}}}
+        self.enterContext(mock.patch.dict(os.environ))
+        os.environ.pop(dbpostgres.SERVICE_ENV, None)
+        return root, doc
+
+    def test_whether_it_starts_at_boot_is_asked_of_the_umbrella(self):
+        """postgresql-common's generator wires the cluster into the
+        umbrella postgresql.service, which is the unit that is enabled"""
+        root, doc = self.live()
+        with mock.patch.object(dbready, "ready", return_value=""), \
+                mock.patch.object(dbready, "enabled",
+                                  return_value="enabled") as enabled, \
+                mock.patch.object(subprocess, "run",
+                                  return_value=answer("")):
+            observe_database(root, doc, start=True)
+        enabled.assert_called_once_with("postgresql")
+
+    def test_the_start_waits_for_a_seed_that_runs(self):
+        """A start that takes no lock started the old server again in the
+        middle of the watch's reseed (keel#153): the start holds the
+        lock that the seed and the follow hold"""
+        from keel.system import dbreadonly
+        root, doc = self.live()
+        held = []
+
+        def ready(*args):
+            held.append(dbreadonly.holds_replication_lock(root))
+            return ""
+
+        with mock.patch.object(dbready, "ready", side_effect=ready), \
+                mock.patch.object(subprocess, "run",
+                                  return_value=answer("")):
+            observe_database(root, doc, start=True)
+            observe_database(root, doc, start=False)
+        self.assertEqual(held, [True, False])
+
+    def test_a_server_that_does_not_come_up_is_asked_nothing_else(self):
+        root, doc = self.live()
+        with mock.patch.object(dbready, "ready",
+                               return_value="postgresql is failed") as ready, \
+                mock.patch.object(subprocess, "run") as run:
+            found = observe_database(root, doc, start=True)
+        # the cluster's own unit: the umbrella postgresql is active while
+        # the cluster is down, and starting it starts nothing (keel#153)
+        ready.assert_called_once_with(
+            "postgresql@17-main", ("pg_isready",), True,
+            dbready.READY_TIMEOUT
+        )
+        run.assert_not_called()
+        self.assertEqual(found.down, "postgresql is failed")
+        self.assertFalse(found.reading.role.known)
+        self.assertEqual(found.dropin.path, PG_DROPIN)
+        self.assertEqual(found.dropin.text, "listen_addresses = '*'\n")
+        self.assertEqual(found.hba.path, PG_HBA)
+        self.assertEqual(found.hba.text,
+                         "# the whole authorization surface\n")
+
+    def test_an_up_server_is_asked_the_engines_own_questions(self):
+        root, doc = self.live()
+        with mock.patch.object(dbready, "ready", return_value=""), \
+                mock.patch.object(subprocess, "run",
+                                  return_value=answer("")) as run:
+            found = observe_database(root, doc)
+        asked = [call.args[0] for call in run.call_args_list]
+        questions = [argv for argv in asked
+                     if "--command" in argv or "-c" in argv]
+        self.assertTrue(any("SELECT datname FROM pg_database" in argv
+                            for argv in questions))
+        self.assertIn("SELECT datname FROM pg_database",
+                      found.schemas.path)
+
+    def test_a_root_with_no_cluster_reads_empty_files_with_the_reason(self):
+        root = self.enterContext(
+            __import__("tempfile").TemporaryDirectory()
+        )
+        binary = "usr/lib/postgresql/17/bin/postgres"
+        os.makedirs(os.path.join(root, os.path.dirname(binary)))
+        open(os.path.join(root, binary), "w").close()
+        doc = {"database": {"server": {"engine": "postgresql",
+                                       "role": "standalone"}}}
+        with mock.patch.object(subprocess, "run",
+                               return_value=answer("")):
+            found = observe_database(root, doc)
+        self.assertFalse(found.dropin.readable)
+        self.assertIn("no PostgreSQL cluster", found.dropin.problem)
+        self.assertFalse(found.hba.readable)
+
+
+class TestThePgCopyIsAskedForOnlyWhenOneWouldBeMade(unittest.TestCase):
+    """The twin of the MariaDB cases, over the walreceiver's reading"""
+
+    SERVER = {
+        "engine": "postgresql", "role": "replica",
+        "replication": {"primary": {"host": "2001:db8:1::10"}},
+    }
+    STREAMING = (
+        "user=repl host=2001:db8:1::10 port=5432 password=********"
+        " sslmode=prefer\n"
+    )
+
+    def reading(self, receiver: str):
+        return postgresql_reading(
+            {"state": "t\t0\t5432\n", "receiver": receiver,
+             "standby": "\n", "hba": "local\t\t\n"}, "")
+
+    def test_a_node_that_streams_from_nowhere_needs_one(self):
+        self.assertTrue(needs_pg_copy(
+            dict(self.SERVER), self.reading("")))
+
+    def test_a_healthy_standby_of_the_declared_primary_does_not(self):
+        self.assertFalse(needs_pg_copy(
+            dict(self.SERVER), self.reading(self.STREAMING)))
+
+    def test_a_standby_of_another_primary_does(self):
+        self.assertTrue(needs_pg_copy(
+            dict(self.SERVER),
+            self.reading(self.STREAMING.replace("::10", "::20"))))
+
+    def test_another_port_is_another_primary(self):
+        self.assertTrue(needs_pg_copy(
+            dict(self.SERVER),
+            self.reading(self.STREAMING.replace("port=5432",
+                                                "port=5433"))))
+
+    def test_a_primary_or_a_standalone_never_does(self):
+        self.assertFalse(needs_pg_copy(
+            dict(self.SERVER, role="primary"), self.reading("")))
+        self.assertFalse(needs_pg_copy(
+            dict(self.SERVER, role="standalone"), self.reading("")))
+
+    def test_a_replica_with_no_primary_declared_does_not(self):
+        self.assertFalse(needs_pg_copy(
+            dict(self.SERVER, replication={}), self.reading("")))
+
+
+class TestThePgPrimaryIsAskedOnTheLiveSystem(unittest.TestCase):
+    SERVER = {
+        "engine": "postgresql", "role": "replica",
+        "replication": {"primary": {"host": "2001:db8:1::10"}},
+    }
+
+    def observe(self, receiver: str, secret: bool = True):
+        root = self.enterContext(
+            __import__("tempfile").TemporaryDirectory()
+        )
+        binary = "usr/lib/postgresql/17/bin/postgres"
+        os.makedirs(os.path.join(root, os.path.dirname(binary)))
+        open(os.path.join(root, binary), "w").close()
+        path = os.path.join(root, "secret")
+        with open(path, "w") as fob:
+            # codeql[py/clear-text-storage-sensitive-data] a fixture: a made-up password in a 0600 file of a TemporaryDirectory
+            fob.write(PASSWORD)
+        os.chmod(path, 0o600)
+        server = dict(self.SERVER)
+        if secret:
+            server["replication"] = dict(
+                server["replication"], secret={"file": path}
+            )
+
+        def ran(argv, **kwargs):
+            if "-c" in argv and \
+                    argv[argv.index("-c") + 1] == POSTGRESQL_SQL["receiver"]:
+                return answer(receiver)
+            return answer("")
+
+        with mock.patch("keel.inspect.constants.ROOT_DEFAULT", root), \
+                mock.patch.object(subprocess, "run", side_effect=ran), \
+                mock.patch.object(
+                    dbpgseed, "reach",
+                    return_value=dbseed.Reach("refused")) as reach:
+            found = observe_database(root, {"database": {"server": server}})
+        return found, reach, root
+
+    def test_a_node_about_to_be_seeded_asks_the_primary(self):
+        found, reach, root = self.observe("")
+        reach.assert_called_once_with(
+            os.path.abspath(root), "2001:db8:1::10", 5432, PASSWORD
+        )
+        self.assertEqual(found.reach, "refused")
+        self.assertEqual(found.shared, ())
+
+    def test_a_healthy_standby_asks_nobody(self):
+        found, reach, _ = self.observe(
+            "user=repl host=2001:db8:1::10 port=5432"
+            " password=******** sslmode=prefer\n")
+        reach.assert_not_called()
+        self.assertEqual(found.reach, "")
+
+    def test_no_credential_asks_nobody(self):
+        found, reach, _ = self.observe("", secret=False)
+        reach.assert_not_called()
+
 class TestThePrimaryIsAskedOnTheLiveSystem(unittest.TestCase):
     def observe(self, status: str, secret: bool = True):
         root = self.enterContext(
@@ -302,6 +525,7 @@ class TestThePrimaryIsAskedOnTheLiveSystem(unittest.TestCase):
         open(os.path.join(root, "usr/sbin/mariadbd"), "w").close()
         path = os.path.join(root, "secret")
         with open(path, "w") as fob:
+            # codeql[py/clear-text-storage-sensitive-data] a fixture: a made-up password in a 0600 file of a TemporaryDirectory
             fob.write(PASSWORD)
         os.chmod(path, 0o600)
         server = dict(TestTheCopyIsAskedForOnlyWhenOneWouldBeMade.SERVER)

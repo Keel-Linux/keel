@@ -173,8 +173,10 @@ with 409 and the epoch known.
 State, never the spec, one file per VIP under `/var/lib/keel/vip`,
 root's and 0600: the newest claim taken, verbatim; whether this node is
 **fenced** (it lost the VIP without letting it go: cut off, or away
-while another took it; it never claims it again by itself, only a
-promote here clears it); whether it **released** it when asked (a
+while another took it; it never claims it again by itself; a promote
+here clears it, and so does keel database follow on a PostgreSQL
+standby that is the holder's copy and caught up with it, after the
+confirmed reseed, keel#166); whether it **released** it when asked (a
 replica, not fenced); and with etcd the lease of its own claim. When the
 lease was last renewed is never kept: a time of one boot means nothing
 in the next.
@@ -230,8 +232,11 @@ steps 2 and 4 waits at most 1.5 s (`keel.mesh.vipnode.GONE_BOUND`) and
 does not hold up the other peers, the wait for its lease does not
 change, and the ask goes on after the bound: the promote waits for it
 before it returns, so a live old primary that is slow still gets the
-release and the claim. A dead node cost the members' channel's 10 s
-timeout each time, 30.5 s on a real pair (keel#108). **Without etcd**
+release and the claim. `keel database promote` makes the database
+follow the VIP before that wait, not after it: the wait for a dead node
+is the channel's 10 s connect timeout, and the writes came back 12 s
+after the VIP on a real pair (keel#169). A dead node cost the members'
+channel's 10 s timeout each time, 30.5 s on a real pair (keel#108). **Without etcd**
 nothing fences a live old primary, so every ask of it waits the
 channel's full timeout, as before. Without etcd, an old primary that is
 alive but cannot be reached keeps the VIP on its `wg0` and stays
@@ -244,6 +249,16 @@ address at once and is fenced. That it then turns read only, catches up
 and rejoins as a replica is the database's part of 0049:
 `keel-database-follow.path` runs `keel database follow` when the VIP's
 state changes ([docs/replication.md](replication.md)).
+
+`keel-vip-check.timer` is part of `keel-vip.service`, which needs etcd.
+So on a pair without etcd, nothing ran `keel vip check` (keel#154). On a
+node that declares `database.server`, `keel database follow` does the
+check of the pair's VIP now: at boot, at each VIP change and at each
+watch run. It asks the other members only when its newest claim is its
+own and the VIP is not on `wg0`. A newer claim is taken, and the server
+follows the holder in the same run. If a peer answers and none knows a
+newer claim, the holder carries the VIP again. A node without
+`database.server` still learns only from `keel vip check`.
 
 ## With etcd: the lease is the fence
 
@@ -327,11 +342,11 @@ cluster, split as keel#75 splits an invite:
     the 2 s a call may take. A call that fails or prints anything but
     etcd's JSON is no renewal;
   - **the holder renews its lease every 2 s, and carries the address
-    only while the last renewal the majority confirmed is under 10 s
+    only while the last renewal the majority confirmed is under 15 s
     old**, counted from the renewal's send on CLOCK_BOOTTIME (suspend
     counts), kept in the controller's memory, and **enforced by the
     kernel**: each confirmed renewal gives the address the rest of the
-    10 s as its lifetime, so it is gone by then whatever becomes of the
+    15 s as its lifetime, so it is gone by then whatever becomes of the
     controller, stopped, restarting, crashed or frozen. A controller
     that starts after a restart leaves an address a previous one gave a
     lifetime to the kernel and extends it only once it renewed the same
@@ -346,7 +361,14 @@ cluster, split as keel#75 splits an invite:
   - the other node of the pair claims as above: 0020's automatic
     failover, which etcd's three voters make possible. It announces the
     claim on the channel for the nodes that are not cloud advanced
-    (third round, point 4).
+    (third round, point 4). When the lease expired at its due time, and
+    the controller saw it alive before, the claim also states that the
+    old primary is gone (`/var/lib/keel/vip/old-primary-gone`, with
+    the epoch of the claim, in the state directory that the unit may
+    write, keel#178). Then a PostgreSQL primary commits
+    alone, as after `--old-primary-gone` (keel#165,
+    `docs/replication-postgresql.md`). A revoked lease, or one that the
+    controller never saw alive, states nothing.
 
 `--stopped`, the unit's `ExecStopPost`, drops every VIP the node
 carries, **except while the unit restarts**: a restart job of the unit
@@ -357,23 +379,50 @@ time unless the next controller renews the lease. A `systemctl stop`, the
 overlay disabled by `keel spec apply`, or a shutdown drops it at once.
 The unit has no start limit, so it is never left stopped for good.
 
-**The TTL is 20 s, the release 10 s.** etcd cannot expire a lease before
+**The TTL is 20 s, the release 15 s.** etcd cannot expire a lease before
 TTL seconds after the last renewal it answered, so a holder cut off from
-the majority has dropped the VIP 10 s before any other node can win it.
+the majority has dropped the VIP at least 5 s before any other node can
+win it.
 Against etcd's 5 s election timeout ([docs/mesh.md](mesh.md),
 "Timeouts"): a re-election in the majority takes 5 to 10 s, during which
 renewals fail, but etcd gives every lease its full TTL again on a leader
-change, so 10 s rides out one re-election without a move. etcd's leader
+change, so 15 s rides out one re-election without a move. The release
+was 10 s before keel#167: the kernel then ended the address about 8 s
+after the last confirmed renewal, and a cut of the site of etcd's
+leader took 7.4 s to a new leader on real nodes. The holder dropped the
+VIP for 2 to 4 s, and its database stopped. etcd's leader
 renews a lease by itself, without the majority, so a leader cut off
 would answer renewals until it steps down, up to two election timeouts;
 it cannot answer the linearizable read. The cut off holder so drops the
-VIP at most 14 s after the last renewal the majority confirmed (one
+VIP at most 19 s after the last renewal the majority confirmed (one
 renewal period and a call's timeout late), and the lease expires no
 sooner than 20 s after it (25 s when the majority elects a new leader,
 which gives the lease an election timeout more). The address's lifetime
-makes the kernel drop it sooner still, by 10 s after that renewal, also
+makes the kernel drop it sooner, by 14 s after that renewal, also
 for a frozen process (a stopped container), which no controller can
 cover: `tests/test_vip_upgrade_netns.py` (d).
+
+### The holder's doubt (keel#195)
+
+The holder renews its lease every 2 s. When its last renewal that the
+majority confirmed is 6 s old (`DOUBT`), the controller marks its
+doubt: its root half writes `/var/lib/keel/vip/<vip>.unconfirmed`.
+The holder keeps the VIP, as before, until the release at 15 s. At
+the next confirmed renewal the mark goes. A mark that an earlier
+controller left goes at the first renewal that the new one confirms,
+so a stale mark only keeps the node read only, never writable.
+
+The mark is for the database: `keel database follow` turns a MariaDB
+holder read only while the mark is there, with the fence of keel#186,
+and `keel database watch` does not lift it
+([docs/replication.md](replication.md)). On a cut MariaDB holder, a
+write that waits for the replica returns OK when the dump thread to
+the cut replica ends. With `net.ipv4.tcp_retries2 = 5` that is about
+12.6 s after the cut, before the release. 6 s is above the longest
+normal gap between two confirmed renewals (a renewal period and a
+call, 4 s). An etcd re-election that stops renewals for more than 6 s
+turns the MariaDB holder read only for the rest of it. That costs
+writes for some seconds, and it loses no acknowledged write.
 
 ### The margin between the two holders (keel#126)
 
@@ -396,19 +445,19 @@ the majority confirmed:
 
 | Event | When, at the latest or at the earliest |
 | --- | --- |
-| the holder's controller drops the address | s + 10 s + one turn (0.2 s) + one call to the helper |
-| the kernel removes the address | s + 10 s at the latest: the lifetime is int(10 - age) - 1 s, and the kernel can be 0.25 s late (EXPIRY_SLACK, 1 s, covers that and a busy work queue) |
+| the holder's controller drops the address | s + 15 s + one turn (0.2 s) + one call to the helper |
+| the kernel removes the address | s + 15 s at the latest: the lifetime is int(15 - age) - 1 s, and the kernel can be 0.25 s late (EXPIRY_SLACK, 1 s, covers that and a busy work queue) |
 | etcd's leader gets that renewal | r, not before s |
 | the lease expires | r + 20 s, not before s + 20 s (an election in the majority adds an election timeout) |
 | the other node claims | when etcd shows -1: not before the expiry |
 
-The old holder's address is gone at s + 10 s. A claim is possible at
-s + 20 s at the earliest. The margin is 10 s or more.
+The old holder's address is gone at s + 15 s. A claim is possible at
+s + 20 s at the earliest. The margin is 5 s or more.
 
 On the design case (250 ms ±25 ms, 2% loss on each leg), a renewal gets
 to the leader at about s + 0.16 s (half a round trip and the start of
 etcdctl). The lease thus expires at about s + 20.16 s, and the margin is
-about 10.2 s. Delay and loss move r later, or make the renewal fail,
+about 5.2 s. Delay and loss move r later, or make the renewal fail,
 which is no renewal: they make the margin larger, never smaller. This
 is also true on a loaded runner (a round trip of 2.1 s was seen). The
 two hosts' clocks measure intervals only; a rate error of 100 ppm is 2

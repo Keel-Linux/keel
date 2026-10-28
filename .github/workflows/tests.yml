@@ -1,28 +1,22 @@
-# Coverage gate for the keel library and CLI: 95 percent (decision 0003,
-# project-authored code). The check is "tests / coverage". Raise only.
+# Light CI on GitHub-hosted runners, for pull requests on the GitHub mirror
+# (decision 0056). The full CI is .forgejo/workflows on git.pop.coop, and
+# .forgejo/workflows/tests.yml has the notes on each job.
 #
-# The package also ships one shell file, the firstboot hook
-# firstboot.d/10keel-system, which is tested with bats (tests/hook.bats).
-# tests/test_hook_bats.py runs that suite from pytest so the repository
-# keeps one required check, and fails instead of skipping when bats is
-# missing in CI; hence bats and shellcheck here.
+# Jobs on Forgejo only (no GitHub-hosted version): etcd, etcd-auth, mariadb, mariadb-simple, mesh, postgres, vip, vip-upgrade.
 name: tests
+
 on:
   pull_request:
-  push:
-    branches: [main]
+
+permissions:
+  contents: read
+
 jobs:
   tests:
-    uses: keel-linux/.github/.github/workflows/test-python.yml@main
+    uses: keel-linux/.github/.github/workflows/github-test-python.yml@main
     with:
       threshold: 95
       package: keel
-      # gnupg and gpgv are what the channel tests sign and verify
-      # with. Named rather than assumed: without them those tests
-      # skip, and a skipped suite would pass the coverage gate on
-      # code nothing ran. wireguard-tools is the real wg and wg-quick
-      # the overlay tests hand keel's key and file to (tests/wgtools.py);
-      # in CI they fail rather than skip without it.
       apt-packages: bats shellcheck gnupg gpgv wireguard-tools
   # keel mesh end to end (decision 0048) in a Debian trixie system
   # container, the release keel ships on: three network namespaces,
@@ -219,5 +213,4 @@ jobs:
   # bin/require-changelog of the .github repository. The check is
   # "package / changelog"; it runs on pull requests only.
   package:
-    if: github.event_name == 'pull_request'
-    uses: keel-linux/.github/.github/workflows/require-changelog.yml@main
+    uses: keel-linux/.github/.github/workflows/github-require-changelog.yml@main

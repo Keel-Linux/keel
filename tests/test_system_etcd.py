@@ -76,7 +76,11 @@ class TestObserve(Root):
                    if isinstance(one, WriteFile)}
         self.assertEqual(set(written), {
             etcdconf.ENVIRONMENT, etcdconf.MEMBER_CERT, etcdconf.MEMBER_KEY,
-            etcdconf.TRUSTED, etcdconf.CRL, etcdconf.DROP_IN})
+            etcdconf.TRUSTED, etcdconf.CRL, etcdconf.DROP_IN,
+            etcdconf.SYSCTL})
+        self.assertIn("net.ipv4.tcp_retries2 = 5\n",
+                      written[etcdconf.SYSCTL].content)
+        self.assertEqual(written[etcdconf.SYSCTL].mode, 0o644)
         self.assertIn("ETCD_PEER_CRL_FILE=/etc/etcd/keel/crl.pem",
                       written[etcdconf.ENVIRONMENT].content)
         self.assertEqual(written[etcdconf.MEMBER_KEY].owner, "etcd")
@@ -102,6 +106,50 @@ class TestObserve(Root):
         etcdstate.write(self.root, etcdstate.STARTED, "started\n")
         actions, _ = etcd.plan_etcd(self.observed(), True)
         self.assertNotIsInstance(actions[0], Refuse)
+
+    def test_an_apply_that_starts_etcd_for_the_cluster_marks_it(self):
+        """keel#188: an apply that starts etcd for the cluster of
+        cluster.json records that keel started it, or every later apply
+        refused the member as one keel never started"""
+        self.formed()
+        os.remove(os.path.join(self.root, etcdstate.STARTED))
+        actions, _ = etcd.plan_etcd(self.observed(), True)
+        marks = [one for one in actions if isinstance(one, WriteFile)
+                 and one.path == etcdstate.STARTED]
+        self.assertEqual(len(marks), 1)
+        # under a root nothing starts, so nothing is marked
+        actions, _ = etcd.plan_etcd(self.observed(), False)
+        self.assertFalse(any(isinstance(one, WriteFile)
+                             and one.path == etcdstate.STARTED
+                             for one in actions))
+        # a member keel never started is still refused
+        os.makedirs(os.path.join(self.root, etcd.INITIALIZED))
+        actions, _ = etcd.plan_etcd(self.observed(), True)
+        self.assertIsInstance(actions[0], Refuse)
+
+    def test_a_live_value_other_than_5_is_set_now(self):
+        """keel#167: the kernel reads tcp_retries2 at each
+        retransmission, so the value is set at once, with no restart"""
+        self.formed()
+        live = os.path.join(self.root, etcdconf.TCP_RETRIES2_LIVE)
+        os.makedirs(os.path.dirname(live))
+        with open(live, "w") as fob:
+            fob.write("15\n")
+        found = self.observed()
+        self.assertEqual(found.retries_live, "15")
+        actions, _ = etcd.plan_etcd(found, True)
+        runs = [one.argv for one in actions if isinstance(one, Run)]
+        self.assertIn(("sysctl", "-q", "-w", "net.ipv4.tcp_retries2=5"),
+                      runs)
+        # under --root, nothing runs
+        actions, _ = etcd.plan_etcd(found, False)
+        self.assertNotIn(Run, [type(one) for one in actions])
+        with open(live, "w") as fob:
+            fob.write("5\n")
+        actions, _ = etcd.plan_etcd(self.observed(), True)
+        self.assertNotIn(("sysctl", "-q", "-w", "net.ipv4.tcp_retries2=5"),
+                         [one.argv for one in actions
+                          if isinstance(one, Run)])
 
     def test_under_root_no_daemon_reload(self):
         self.formed()

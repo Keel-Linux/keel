@@ -26,6 +26,8 @@ import unittest
 import wgtools
 from test_etcd_netns import etcd_dir
 
+from keel.mesh.vip import RELEASE_AFTER
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DRIVER = os.path.join(REPO, "tests", "vip_netns.py")
 
@@ -84,7 +86,7 @@ class TestTheVipOnAPoorNetwork(unittest.TestCase):
 
     def test_the_lease_is_the_decided_one(self):
         self.assertEqual((self.found["ttl_s"],
-                          self.found["release_after_s"]), (20, 10.0))
+                          self.found["release_after_s"]), (20, 15.0))
         self.assertIsNotNone(self.found["etcd_formed_s"], self.found)
 
     def test_a_the_vip_is_reached_at_the_primary(self):
@@ -120,7 +122,7 @@ class TestTheVipOnAPoorNetwork(unittest.TestCase):
         # B drops it RELEASE_AFTER after its last renewal the majority
         # confirmed, a renewal period and a call's timeout late at most,
         # leader or not: within the TTL
-        self.assertLess(dropped, 10 + 2 + 2 + 1, found)
+        self.assertLess(dropped, RELEASE_AFTER + 2 + 2 + 1, found)
         self.assertLess(dropped, found["ttl_s"], found)
         # never before B dropped it: the lease outlives the release
         self.assertGreater(carried, dropped, found)
