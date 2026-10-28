@@ -14,6 +14,7 @@ the same questions.
 """
 
 from dataclasses import dataclass, field
+import os
 
 from keel.inspect import constants as paths
 from keel.inspect.collect import run_command
@@ -29,7 +30,8 @@ from keel.spec.constants import DEFAULT_PORTS
 from keel.spec.errors import SpecError
 from keel.spec.origins import canonical
 from keel.spec.secretstore import resolve_secret
-from keel.system import dbpair, dbready, dbsecret, dbseed, dbtls
+from keel.system import dbpair, dbpgseed, dbpostgres, dbready, dbsecret, \
+    dbseed, dbtls
 from keel.system.actions import READ_ONLY_RECORD
 from keel.system.dbmariadb import (
     DROPIN,
@@ -78,6 +80,14 @@ class DatabaseState:
     schemas: File = field(default_factory=lambda: File(""))
     machine_id: File = field(default_factory=lambda: File(MACHINE_ID))
     dropin: File = field(default_factory=lambda: File(""))
+    # PostgreSQL's whole authorization surface (0054), written beside the
+    # drop-in and pointed at by its hba_file line; empty for other engines
+    hba: File = field(default_factory=lambda: File(""))
+    # PostgreSQL's pair drop-in and the user name map it points at
+    # (0054): the synchronous commit policy, and the map of the hba
+    # lines' cert method; empty for other engines
+    pair_dropin: File = field(default_factory=lambda: File(""))
+    ident: File = field(default_factory=lambda: File(""))
     credential: Credential = field(default_factory=Credential)
     # SHOW REPLICA STATUS as the server printed it, for the one thing the
     # reading does not keep: whether the SQL thread still runs.
@@ -116,7 +126,9 @@ def endpoint(server: dict) -> tuple[str, int]:
     """The declared primary of a replica, as a host and a port"""
     primary = (server.get("replication") or {}).get("primary") or {}
     host = str(primary.get("host") or "")
-    return host, int(primary.get("port") or DEFAULT_PORTS["mariadb"])
+    name = str(server.get("engine") or "mariadb")
+    return host, int(primary.get("port")
+                     or DEFAULT_PORTS.get(name, DEFAULT_PORTS["mariadb"]))
 
 
 def sql_stopped(status: File) -> str | None:
@@ -156,6 +168,28 @@ def needs_copy(server: dict, status: File) -> bool:
     return sql_stopped(status) is not None
 
 
+def needs_pg_copy(server: dict, reading: Reading) -> bool:
+    """Whether apply would seed this node from its primary (PostgreSQL)
+
+    The twin of needs_copy: a declared replica that streams from nowhere
+    or from another endpoint. There is no stopped thread to catch the
+    way MariaDB's SQL thread stops: a walreceiver that fails retries
+    forever, and a standby that diverged is the pair flow's concern
+    (keel.system.dbfollow), not a reason to reseed.
+    """
+    if str(server.get("role") or "") != "replica":
+        return False
+    host, port = endpoint(server)
+    if not host:
+        return False
+    primary = reading.primary.value
+    if not isinstance(primary, dict):
+        return True
+    was_host = str(primary.get("host") or "")
+    was_port = int(primary.get("port") or 0)
+    return not (canonical(was_host) == canonical(host) and was_port == port)
+
+
 def declared_server(doc: dict) -> dict:
     """The database.server mapping of a description, or an empty one"""
     return ((doc.get("database") or {}).get("server")) or {}
@@ -185,25 +219,32 @@ def observe_database(
     name = str(server.get("engine") or "")
     engine = _engine(name)
     live = tree.root == paths.ROOT_DEFAULT
-    pair = dbpair.observe_pair(root, doc) if name == "mariadb" else None
+    pair = dbpair.observe_pair(root, doc) \
+        if name in ("mariadb", "postgresql") else None
     if engine is None:
         return DatabaseState(engine=name, live=live, pair=pair)
 
     binary = engine.installed(tree.glob)
     enabled = ""
-    if live and binary is not None and name == "mariadb":
-        down = dbready.ready(service(), PING, start, dbready.READY_TIMEOUT)
+    dropin, hba, pair_dropin, ident = _database_files(name, tree)
+    probe = _probe(name, root)
+    if live and binary is not None and probe is not None:
+        down = _ready(name, root, probe, start)
         if down:
             return DatabaseState(
                 engine=name,
                 live=live,
                 binary=tree.path(binary),
                 machine_id=tree.read(MACHINE_ID),
-                dropin=tree.read(DROPIN),
+                dropin=dropin,
+                hba=hba,
+                pair_dropin=pair_dropin,
+                ident=ident,
                 down=down,
                 pair=pair,
             )
-        enabled = dbready.enabled(service())
+        enabled = dbready.enabled(
+            dbpostgres.boot_unit() if name == "postgresql" else probe[0])
     answers = {} if binary is None else {
         key: run_command(tree, argv)
         for key, argv in engine.questions.items()
@@ -212,22 +253,26 @@ def observe_database(
         tree, paths.LISTENING_COMMAND
     )
     status = answers.get("status", File(""))
+    reading = Reading() if binary is None else engine.read(answers, sockets)
     secret = credential(server, root, pair, live and start,
                         spec or tree.path(SPEC_DEFAULT))
     found = _reach(
-        tree, server, status, secret,
-        live and bool(binary) and name == "mariadb", pair,
+        tree, server, status, reading, secret,
+        live and bool(binary) and name in ("mariadb", "postgresql"), pair,
     )
     return DatabaseState(
         engine=name,
         live=live,
         binary="" if binary is None else tree.path(binary),
-        reading=Reading() if binary is None else engine.read(answers, sockets),
+        reading=reading,
         schemas=File("") if binary is None else run_command(
-            tree, SCHEMAS_QUESTION
+            tree, _schemas_question(name)
         ),
         machine_id=tree.read(MACHINE_ID),
-        dropin=tree.read(DROPIN),
+        dropin=dropin,
+        hba=hba,
+        pair_dropin=pair_dropin,
+        ident=ident,
         revoked=tree.read(READ_ONLY_RECORD),
         credential=secret,
         status=status,
@@ -237,13 +282,92 @@ def observe_database(
         pair=pair,
         role_dropin=tree.read(ROLE_DROPIN),
         nonlocal_bind=tree.read(NONLOCAL_BIND_LIVE),
-        tls_ready=dbtls.present(root),
-        tls_issuer=dbtls.issuer_name(root) if pair is not None else "",
+        tls_ready=dbtls.present(root, name)
+        if pair is not None else False,
+        tls_issuer=dbtls.issuer_name(root, name) if pair is not None else "",
     )
 
 
+def _database_files(name: str, tree: Tree) -> tuple[File, File, File, File]:
+    """The engine's drop-in, and PostgreSQL's pair files, off the tree
+
+    PostgreSQL's paths carry the installed version, so they are resolved
+    from the cluster directories (keel.system.dbpostgres); they are
+    carried relative to the root, the way plans carry paths, because the
+    planner writes these files and has no root of its own: the drop-in,
+    the hba file of its hba_file line, the pair drop-in, and the user
+    name map that one points at. A root with no cluster installed reads
+    as empty files with the reason, never an exception into the observer.
+    """
+    if name != "postgresql":
+        empty = File("")
+        return tree.read(DROPIN), empty, empty, empty
+    try:
+        _, conf, dropdir, _ = dbpostgres.cluster_paths(tree.root)
+    except FileNotFoundError as e:
+        return (File("", problem=str(e)), File("", problem=str(e)),
+                File("", problem=str(e)), File("", problem=str(e)))
+    dropin = dbpostgres.rel(
+        os.path.join(dropdir, dbpostgres.DROPIN_NAME), tree.root)
+    pair_dropin = dbpostgres.rel(
+        os.path.join(dropdir, dbpostgres.PAIR_DROPIN_NAME), tree.root)
+    hba = dbpostgres.rel(
+        os.path.join(conf, dbpostgres.HBA_NAME), tree.root)
+    ident = dbpostgres.rel(
+        os.path.join(conf, dbpostgres.IDENT_NAME), tree.root)
+    return (_read_as(tree, dropin),
+            _read_as(tree, hba),
+            _read_as(tree, pair_dropin), _read_as(tree, ident))
+
+
+def _read_as(tree: Tree, relative: str) -> File:
+    """The file read, with its path as plans carry it, not as it was read"""
+    found = tree.read(relative)
+    return File(relative, found.text, found.problem)
+
+
+def _probe(name: str, root: str = "/") -> tuple[str, tuple[str, ...]] | None:
+    """The readiness probe of an engine keel configures, or None
+
+    Only an engine the planner converges is made to answer before it is
+    asked anything (keel.system.dbready); another engine's server is
+    left alone, the way a Redis is today. PostgreSQL's unit is the
+    cluster's own (keel.system.dbpostgres.service): the umbrella is
+    active while the cluster is down.
+    """
+    if name == "mariadb":
+        return service(), PING
+    if name == "postgresql":
+        return dbpostgres.service(root), dbpostgres.PING
+    return None
+
+
+def _ready(name: str, root: str, probe: tuple, start: bool) -> str:
+    """keel.system.dbready.ready; a PostgreSQL start under the lock of
+    the replication
+
+    A start that takes no lock started the old server again while the
+    watch's follow reseeded the node (keel#153). The seed and the follow
+    hold this lock, so a start waits for them. The lock is reentrant in
+    one thread: the follow observes, and may start, while it holds it.
+    """
+    if not (start and name == "postgresql"):
+        return dbready.ready(probe[0], probe[1], start, dbready.READY_TIMEOUT)
+    from keel.system import dbreadonly
+    with dbreadonly.replication_locked(root):
+        return dbready.ready(probe[0], probe[1], start, dbready.READY_TIMEOUT)
+
+
+def _schemas_question(name: str) -> tuple[str, ...]:
+    """The question whose answer lists the databases the server holds"""
+    if name == "postgresql":
+        return dbpostgres.schemas_question()
+    return SCHEMAS_QUESTION
+
+
 def _reach(
-    tree: Tree, server: dict, status: File, secret: Credential, asks: bool,
+    tree: Tree, server: dict, status: File, reading: Reading,
+    secret: Credential, asks: bool,
     pair: PairState | None = None,
 ) -> dbseed.Reach:
     """Ask the declared primary whether it can be copied from, if it would be
@@ -255,6 +379,11 @@ def _reach(
     address (keel.system.dbpair); a paired node that would rejoin rather
     than seed (keel.system.dbfollow) is not asked here.
     """
+    if str(server.get("engine") or "") == "postgresql":
+        if not (asks and secret.known and needs_pg_copy(server, reading)):
+            return dbseed.Reach()
+        host, port = endpoint(server)
+        return dbpgseed.reach(tree.root, host, port, secret.value)
     if pair is not None:
         role = dbpair.role_of(pair, str(server.get("role") or ""))
         host = dbpair.primary_host(pair, server)

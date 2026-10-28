@@ -516,8 +516,21 @@ was:
    `RESET SLAVE ALL`) and the databases `--destroy-local-database`
    confirmed are dropped.
 7. **Load and start.** The copy is loaded through the local client, the
-   accounts are aligned, `gtid_slave_pos` is set to the dump's position,
-   and replication starts.
+   accounts are aligned, the node's binary log starts at the history of
+   the copy, `gtid_slave_pos` is set to the dump's position, and
+   replication starts.
+
+**The binary log starts at the history of the copy** (keel#202). The copy
+holds the effect of every transaction the primary logged, the ones of
+its first boot too: the hook that sets the administrative password
+writes before the pair exists, under another server id. The replica does
+not log the load, so after it the node runs `RESET MASTER` and sets
+`gtid_binlog_state` to the primary's GTIDs under other server ids than
+the dump's position names, then the position. Without this, the first
+primary came back from every cut as diverged. A server can take this
+state only while it writes a binary log, so on a pair `keel database
+follow` waits until `@@log_bin` is on, and the apply copies the holder
+after the restart that turns it on.
 
 A failure while loading leaves an incomplete copy and no replication; the
 next run sees databases it did not make and asks for
@@ -1068,6 +1081,7 @@ overlay enabled, apply writes from that state:
 | --- | --- |
 | `/etc/default/etcd` | the environment trixie's `etcd.service` reads: peers on `https://[overlay]:2380`, clients on `https://[overlay]:2379` and `https://[::1]:2379`, never a wildcard; client certificates required of both, TLS 1.3; the JSON gateway off (keel asks over gRPC with etcdctl, keel#83); `/health` and `/metrics` alone on a plain listener, `http://[::1]:2381`, for Monit; the initial cluster and its token; heartbeat 300 ms, election timeout 5000 ms. 0644 |
 | `/etc/etcd/keel/member.crt`, `member.key`, `ca.crt`, `crl.pem` | this member's certificate with its chain, its key, the mesh's root, and the root's CRL (`ETCD_PEER_CRL_FILE`, `ETCD_CLIENT_CRL_FILE`), which etcd reads at each handshake. 0600, owned by `etcd` |
+| `/etc/sysctl.d/90-keel-etcd.conf` | `net.ipv4.tcp_retries2 = 5`: the kernel ends a peer connection that a cut stalled after about 14 s, and etcd dials again (keel#167); apply also sets it live with `sysctl -w`, with no restart. 0644 |
 | `/etc/systemd/system/etcd.service.d/keel.conf` | after `wg-quick@<interface>`, restarted on failure, `TimeoutStartSec=infinity` (etcd reports ready only with a quorum), and systemd's sandbox: no capability, `ProtectSystem=strict` with `/var/lib/etcd` writable, the kernel and namespace protections, `@system-service` system calls. Then `systemctl daemon-reload`. 0644 |
 
 etcd is started with `systemctl start --no-block`, and restarted
@@ -1431,7 +1445,18 @@ goes through the same window, marker, lock, timers and boot unit, with
   interface's own prefixes (wg-quick routes it, `wg set` does not), a
   listen port that is not the file's, an interface that is not up, and
   a `wg set` that fails. The line says which way ran: `done with wg
-  set, live` or `done with wg-quick down, then up` (keel#120). A change
+  set, live` or `done with wg-quick down, then up` (keel#120).
+  **The MTU** of the file (`MTU = 1280`, keel#119) is read by `wg-quick
+  up` alone, so an interface up before the line came keeps its old MTU.
+  The live path sets it with `ip link set dev <interface> mtu N`, with no
+  restart, and a kept file whose interface has another MTU gets the same
+  action, said as drift (keel#139). The package's postinst runs `keel
+  network mtu`, which does the same for each WireGuard interface that is
+  up, so an upgrade needs no reboot. Every peer gets
+  `PersistentKeepalive = 25` when the spec gives none (keel#140), set
+  live with `wg set`; a change that only sets a peer's keepalive cannot
+  cut the node off either, and keel mesh keeps it with no handshake, as
+  an addition. A change
   that only added peers live is marked so in the window's marker, and
   keel mesh keeps it with no handshake (mesh.md). A change is dated on the clock a session's
   start time is read on (the start of a thread, in seconds since the

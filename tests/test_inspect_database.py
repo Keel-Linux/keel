@@ -238,6 +238,15 @@ class TestPostgreSQL(unittest.TestCase):
         reading = postgresql_reading(answered, SOCKETS)
         self.assertEqual(reading.primary.value, {"host": "2001:db8:1::10"})
 
+    def test_a_sender_on_this_machine_is_not_a_replica(self):
+        # keel#201: pg_receivewal of postgresql-common streams from the
+        # local socket, so its row has no client address
+        from keel.inspect import dbengines
+        sql = dbengines.POSTGRESQL_SQL["state"]
+        self.assertIn(
+            "(SELECT count(*) FROM pg_stat_replication"
+            " WHERE client_addr IS NOT NULL)", sql)
+
     def test_a_streaming_replica_makes_it_a_primary(self):
         answered = dict(PG_STANDALONE, state="f\t1\t5432\n")
         reading = postgresql_reading(answered, SOCKETS)

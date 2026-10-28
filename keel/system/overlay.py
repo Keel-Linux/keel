@@ -24,7 +24,8 @@ is started again; a right file that was never brought up here is brought
 up under the window, like a change.
 """
 
-from keel.network import marker
+from keel.network import marker, wireguard
+from keel.network.mtu import set_mtu
 from keel.network.wireguard import conf_path
 from keel.system.actions import (
     Action,
@@ -111,7 +112,9 @@ def kept(state: OverlayState, live: bool) -> tuple[Action, ...]:
     """The file says what the spec renders; the interface may not
 
     A confirmed overlay (its unit enabled) that is down is drift, and is
-    started again; an overlay that is up may still lack its boot unit.
+    started again; an overlay that is up may still lack its boot unit,
+    or have another MTU than its file says, which is set live with no
+    restart (keel#139).
     """
     note = Note(f"unchanged (/{conf_path(state.iface)} says what the spec"
                 " declares)")
@@ -123,10 +126,24 @@ def kept(state: OverlayState, live: bool) -> tuple[Action, ...]:
                     f"drift: {state.iface} is down, though its file says"
                     f" what the spec declares and its change was"
                     f" confirmed; start {unit}"),)
+    found: tuple[Action, ...] = (note,) + mtu_actions(state)
     if state.enabled:
-        return (note,)
-    return (note, Run(("systemctl", "enable", unit),
-                      f"enable {unit}, so the overlay comes up at boot"))
+        return found
+    return found + (Run(("systemctl", "enable", unit),
+                        f"enable {unit}, so the overlay comes up at boot"),)
+
+
+def mtu_actions(state: OverlayState) -> tuple[Action, ...]:
+    """`ip link set mtu` when the live interface has another MTU than
+    its file says (keel#139): an interface up before the MTU line came
+    kept its old one, since only wg-quick up reads the line"""
+    wanted = wireguard.parse(state.current or "").mtu
+    if wanted is None or state.live_mtu is None or \
+            state.live_mtu == wanted:
+        return ()
+    return (Run(set_mtu(state.iface, wanted),
+                f"drift: {state.iface} has MTU {state.live_mtu} and its"
+                f" file says {wanted}; set it live, with no restart"),)
 
 
 def change(state: OverlayState, live: bool, window: int,

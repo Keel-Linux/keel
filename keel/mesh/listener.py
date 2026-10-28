@@ -18,8 +18,10 @@ Against someone scanning or holding the port:
 - at most SLOTS connections are read at once, and OVERLAY_SLOTS more
   are kept for connections to this node's overlay address, which only
   the mesh's peers reach, so a join's confirmation is never starved;
-  and one source has one connection at a time (PER_SOURCE), so no one
-  address fills the slots;
+  and one source has one connection read or decided at a time
+  (PER_SOURCE), so no one address fills the slots. The slot is free
+  when the answer leaves: the answer is small and each write has
+  READ_TIMEOUT, so the thread ends soon after (keel#177);
 - the request line and headers are capped (MAX_HEADERS), the body by
   the protocol (MAX_BODY);
 - a source refused MAX_REFUSED times within PERIOD is not answered
@@ -228,11 +230,19 @@ class Capped:
 
 @dataclass
 class Connection:
-    """What a handler needs of the connection it serves"""
+    """What a handler needs of the connection it serves
+
+    `release` frees the connection's slot and its source's count; it may
+    be called more than once. The handler calls it before the answer
+    leaves (keel#177): a source that has its answer may ask again at
+    once, and it must find its slot free, also when this thread closes
+    the connection late.
+    """
 
     listener: Listener
     local: str
     read: threading.Timer
+    release: Callable[[], None]
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -256,6 +266,7 @@ class Handler(BaseHTTPRequestHandler):
         found = self.server.listener.handle(
             self.command, self.path, self.headers.get(protocol.SIGNATURE),
             body, self.server.local, self.client_address[0])
+        self.server.release()
         self.send_response(found.status)
         self.send_header("Content-Type", protocol.CONTENT_TYPE)
         self.send_header("Content-Length", str(len(found.body)))
@@ -295,21 +306,40 @@ def bound(host: str, port: int) -> socket.socket:
     return server
 
 
+def once(release: Callable[[], None]) -> Callable[[], None]:
+    """`release`, done the first time only"""
+    left = [release]
+    guard = threading.Lock()
+
+    def found() -> None:
+        with guard:
+            todo = left[:]
+            left.clear()
+        for one in todo:
+            one()
+    return found
+
+
 def serve_one(listener: Listener, context, raw: socket.socket, source: str,
               local: str, release: Callable[[], None]) -> None:
+    release = once(release)
     held = [raw]
     read = threading.Timer(REQUEST_DEADLINE, shut, (held,))
     read.start()
     try:
         raw.settimeout(READ_TIMEOUT)
         held.append(context.wrap_socket(raw, server_side=True))
-        Handler(held[-1], (source, 0), Connection(listener, local, read))
+        Handler(held[-1], (source, 0),
+                Connection(listener, local, read, release))
     except (OSError, ValueError):
         pass
     finally:
         read.cancel()
-        held[-1].close()
+        # free first: a client that sees the close may ask again at once,
+        # and it must find its slot free (keel#177), also when the
+        # handshake failed and the handler never ran
         release()
+        held[-1].close()
 
 
 def run(server: socket.socket, listener: Listener, context,

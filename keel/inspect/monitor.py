@@ -186,16 +186,25 @@ def read_notify(settings: File) -> tuple[dict | None, Finding]:
                               "token": {"file": telegram.get("token_file")}}
     for name in ("ntfy", "webhook"):
         channel = found.get(name)
-        if not isinstance(channel, dict):
-            continue
-        url = channel.get("url")
-        notify[name] = {"url": url if url is not None
-                        else {"file": channel.get("url_file")}}
-        if channel.get("token_file"):
-            notify[name]["token"] = {"file": channel["token_file"]}
+        if isinstance(channel, list) and name == "ntfy":
+            # decision 0063: a list of servers comes back as a list
+            notify[name] = [read_server(one) for one in channel
+                            if isinstance(one, dict)]
+        elif isinstance(channel, dict):
+            notify[name] = read_server(channel)
     notify["details"] = found.get("details") is True
     names = ", ".join(name for name in notify if name != "details")
     return notify, inferred(field, names, settings.path)
+
+
+def read_server(channel: dict) -> dict:
+    """One ntfy server or webhook as the spec wrote it"""
+    url = channel.get("url")
+    found = {"url": url if url is not None
+             else {"file": channel.get("url_file")}}
+    if channel.get("token_file"):
+        found["token"] = {"file": channel["token_file"]}
+    return found
 
 
 def read_services(text: str) -> list[Service]:

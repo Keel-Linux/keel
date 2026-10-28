@@ -17,6 +17,16 @@ PYTHONPATH=. pytest
 PYTHONPATH=. python3 -m unittest discover tests
 ```
 
+To run the suite on several processes, install `pytest-xdist` and add
+`-n 4`. Each test makes its own temporary directory, and each process has
+its own environment. CI runs with four workers. The coverage of the
+workers needs `pytest-cov`:
+
+```
+PYTHONPATH=. pytest -n 4 --cov=keel --cov-branch --cov-report=
+coverage report --fail-under=95
+```
+
 Measure and check the coverage. The threshold and the branch setting live
 in `pyproject.toml` (`[tool.coverage.run]` and `[tool.coverage.report]`),
 so the third command exits non zero when the package falls under the bar:

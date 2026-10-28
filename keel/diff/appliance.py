@@ -42,6 +42,11 @@ DIFFERS = "a file that differs from it"
 NO_UNIT = "runs no unit, so nothing in systemd says whether it is on"
 NO_CLUSTER = ("waits for its cluster (the third cloud advanced member's"
               " join, or keel mesh etcd form): apply starts nothing before")
+NO_VIP_CLUSTER = (
+    "keel-vip.service starts with etcd's cluster (cluster.json), and"
+    " apply starts nothing before; without etcd, keel vip check"
+    " (keel-vip-check.timer) does its work (keel#106)"
+)
 NO_MONITOR = ("no monitor section: the include is left as an earlier apply"
               " set it")
 RULESET = "the ruleset apply renders from the manifests"
@@ -88,6 +93,10 @@ def appliance_fields(declared: dict, root: str) -> list[FieldDiff]:
             fields.append(FieldDiff(key, NOT_COMPARED, wanted, None,
                                     NO_CLUSTER))
             continue
+        if name == "vip" and wanted == "enabled" and \
+                not tree.exists(etcdstate.CLUSTER):
+            fields.append(vip_waiting(key, [units[unit] for unit in owned]))
+            continue
         value, why = overlay_state([units[unit] for unit in owned])
         if name in defaulted:
             fields.append(defaulted_field(key, wanted, value or why,
@@ -98,6 +107,15 @@ def appliance_fields(declared: dict, root: str) -> list[FieldDiff]:
     return (fields + monit_fields(declared, resolved, states, tree)
             + firewall_fields(declared, resolved, states, tree)
             + etcd_fields(states, tree))
+
+
+def vip_waiting(key: str, units: list) -> FieldDiff:
+    """The VIP overlay before etcd's cluster exists: enabled is every
+    unit enabled, running or not, since its start condition holds it"""
+    if all(unit.is_enabled or unit.is_fixed for unit in units):
+        return FieldDiff(key, SAME, "enabled", "enabled", NO_VIP_CLUSTER)
+    return FieldDiff(key, DRIFT, "enabled", ", ".join(
+        unit.describe() for unit in units), NO_VIP_CLUSTER)
 
 
 def vip_fields(declared: dict, root: str) -> list[FieldDiff]:

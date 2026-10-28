@@ -308,11 +308,51 @@ class TestStartAndPromote(Mesh):
         a.node.apply.code = 16
         self.assertFalse(etcd.start(a))
         self.assertIn("apply exited 16", self.text(0))
-        with mock.patch("keel.mesh.etcdstate.credentials",
-                        return_value=False):
-            self.assertFalse(etcd.start(a))
-        self.assertIn("not started: this node holds no certificate",
-                      self.text(0))
+        self.assertIn("etcd may not run", self.text(0))
+
+    def test_an_etcd_step_that_failed_is_still_blamed(self):
+        a, = self.members(1)
+        etcd.created(a)
+        a.node.apply.code = 16
+        a.node.apply.lines = (
+            "overlays.etcd: start etcd.service: failed: no unit",)
+        self.assertFalse(etcd.start(a))
+        self.assertIn("etcd may not run", self.text(0))
+
+    def test_a_failed_step_that_is_not_etcd_does_not_blame_etcd(self):
+        # keel#198: a database replica that joins before its pair exists
+        # has one refused step; the steps of etcd passed
+        a, = self.members(1)
+        etcd.created(a)
+        a.node.apply.code = 16
+        a.node.apply.lines = (
+            "overlays.etcd: write /var/lib/keel/etcd/started: done",
+            "database.server.replication.primary: refused: the secret is"
+            " not declared",
+        )
+        self.assertFalse(etcd.start(a))
+        text = self.text(0)
+        self.assertIn("apply exited 16", text)
+        self.assertIn("database.server.replication.primary", text)
+        self.assertNotIn("may not run", text)
+
+    def test_the_start_enables_wireguard_that_etcd_requires(self):
+        """keel#188: after keel mesh join the spec holds network.overlay
+        and overlays.wireguard: disabled from the first boot; etcd
+        requires wireguard, so a start that enabled etcd alone wrote a
+        spec that does not validate, and etcd never started"""
+        import yaml
+        a, = self.members(1)
+        etcd.created(a)
+        doc = a.node.document()
+        doc["overlays"] = {**(doc.get("overlays") or {}),
+                           "wireguard": "disabled", "etcd": "disabled"}
+        with open(a.node.path, "w") as fob:
+            yaml.safe_dump(doc, fob)
+        self.assertTrue(etcd.start(a))
+        found = yaml.safe_load(open(a.node.path))["overlays"]
+        self.assertEqual((found["wireguard"], found["etcd"]),
+                         ("enabled", "enabled"))
 
     def test_promote_tries_then_hands_over(self):
         fake = FakeEtcd()
@@ -345,8 +385,10 @@ class TestTend(Mesh):
     def test_learners_promoted_or_removed_and_leaves_renewed(self):
         etcdstate.save_cluster(self.a.root, Cluster("new", (
             Member(KEYS[0], address(0)),), MESH.hex()))
-        started = EtcdMember("5", "keel-x", ("https://[fd00::5]:2380",), (),
-                             True)
+        # a learner that started named itself and published its client
+        # URLs (keel#199)
+        started = EtcdMember("5", "keel-x", ("https://[fd00::5]:2380",),
+                             ("https://[fd00::5]:2379",), True)
         never = EtcdMember("6", "", ("https://[fd00::6]:2380",), (), True)
         self.fake.members_ = [voter(0), started, never]
         self.assertEqual(etcdcare.tend(self.a), exits.OK)

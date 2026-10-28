@@ -18,6 +18,8 @@ from keel.inspect import ROOT_DEFAULT, SECRETS_DIR_DEFAULT
 from keel.layers import (
     CACHE_DEFAULT,
     CACHE_ENV,
+    IMAGE_KEYRINGS_DEFAULT,
+    IMAGE_KEYRINGS_ENV,
     CHANNELS,
     KEYRING_DEFAULT,
     KEYRING_ENV,
@@ -194,6 +196,16 @@ def build_parser() -> argparse.ArgumentParser:
     add_common_options(watch_parser)
     add_root_option(watch_parser, "watch the database of")
     watch_parser.set_defaults(handler=commands.database_watch)
+    guard_parser = database_actions.add_parser(
+        "guard",
+        help="the ExecStartPre of the PostgreSQL unit on a pair (keel#156):"
+        " a start as a primary only on the node whose claim of the VIP is"
+        " proven, a start as a standby on the other member; exits non-zero"
+        " to refuse the start (root)",
+    )
+    add_common_options(guard_parser)
+    add_root_option(guard_parser, "guard the database of")
+    guard_parser.set_defaults(handler=commands.database_guard)
     status_parser = database_actions.add_parser(
         "status",
         help="the role from the VIP and from the server, semi-synchronous"
@@ -232,6 +244,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_root_option(revert_parser, "revert the change of")
     revert_parser.set_defaults(handler=commands.network_revert)
+    mtu_parser = network_actions.add_parser(
+        "mtu",
+        help="set the MTU of each WireGuard interface that is up to the"
+        " one its file says, live, with no restart (keel#139); what the"
+        " package runs when it is upgraded",
+    )
+    add_root_option(mtu_parser, "read the WireGuard files of")
+    mtu_parser.set_defaults(handler=commands.network_mtu)
     add_wireguard_parser(network_actions)
     mesh_options = mesh_parser.Options(
         add_common_options, add_root_option, port_number, window_seconds)
@@ -269,6 +289,7 @@ def build_parser() -> argparse.ArgumentParser:
         commands.verify,
     )
     add_layer_options(verify_parser)
+    add_verify_options(verify_parser)
 
     pull_parser = _add_command(
         subparsers, "pull",
@@ -391,6 +412,29 @@ def add_layer_options(parser: argparse.ArgumentParser) -> None:
         metavar="DIR",
         help="directory of layer tarballs and hash files (default: the"
         " layers directory)",
+    )
+
+
+def add_verify_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--keyring",
+        dest="keyrings",
+        action="append",
+        default=None,
+        metavar="FILE",
+        help="an OpenPGP keyring that a layer .hash file or a release"
+        " MANIFEST is verified against, armored or binary; repeat it for"
+        " more than one. A signature by a key of any of them is good."
+        f" (default: ${IMAGE_KEYRINGS_ENV}, paths split by ':', else"
+        f" {' and '.join(IMAGE_KEYRINGS_DEFAULT)}; a missing file is"
+        " skipped)",
+    )
+    parser.add_argument(
+        "--release-manifest",
+        default=None,
+        metavar="FILE",
+        help="verify this release MANIFEST against FILE.asc, then each"
+        " listed file that is present, instead of the layers",
     )
 
 

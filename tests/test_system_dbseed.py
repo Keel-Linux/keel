@@ -65,7 +65,14 @@ LOCAL_GRANTS = (
     " PASSWORD '*R'\n"
     "GRANT ALL PRIVILEGES ON `wordpress`.* TO `wordpress`@`localhost`\n"
 )
+# The primary's binary log state holds the GTIDs of its first boot, under
+# a server id it no longer has (keel#202); the dump position names only
+# the last one.
+FIRST_BOOT = "0-161129940-6"
+PRIMARY_STATE = f"{FIRST_BOOT},{POSITION}\n"
 ANSWERS = {
+    "history": PRIMARY_STATE,
+    "binlog": "1\n",
     "probe": GRANTED,
     "accounts": PRIMARY_ACCOUNTS,
     "local-accounts": REPLICA_ACCOUNTS,
@@ -121,6 +128,10 @@ class Runner:
         if argv[0] == "mariadb-dump":
             return "dump"
         asked = argv[-1] if "--execute" in argv else ""
+        if "@@gtid_binlog_state" in asked:
+            return "history"
+        if "@@log_bin" in stdin:
+            return "binlog"
         if any(one.startswith("--defaults-") for one in argv):
             if "USER_PRIVILEGES" in asked:
                 return "probe"
@@ -170,7 +181,7 @@ class TestTheCopy(SeedTestCase):
         self.assertEqual(order, [
             "probe", "accounts", "definitions", "dump",
             "accounts", "definitions", "local-accounts", "local-grants",
-            "stop", "load", "copy", "start",
+            "binlog", "history", "stop", "load", "copy", "start",
         ])
 
     def test_the_dump_is_one_consistent_snapshot_with_its_gtid(self):
@@ -194,6 +205,55 @@ class TestTheCopy(SeedTestCase):
         self.assertIn(f"MASTER_HOST='{HOST}'", start)
         self.assertLess(start.index("gtid_slave_pos"),
                         start.index("START SLAVE"))
+
+    def test_the_replica_takes_the_binary_log_history_of_the_copy(self):
+        # keel#202: the copy holds the effect of every transaction the
+        # primary logged, the ones of its first boot too. The replica
+        # does not log the load, so its binary log state must say it has
+        # them, or the primary comes back from a cut as diverged.
+        runner = Runner()
+        self.seed(runner)
+        start = runner.named("start")[0]["stdin"]
+        self.assertIn("RESET MASTER", start)
+        self.assertIn(
+            f"SET GLOBAL gtid_binlog_state = '{FIRST_BOOT},{POSITION}'",
+            start)
+        self.assertLess(start.index("RESET MASTER"),
+                        start.index("gtid_binlog_state"))
+        self.assertLess(start.index("gtid_binlog_state"),
+                        start.index("gtid_slave_pos"))
+
+    def test_the_history_is_read_from_the_primary_not_from_the_dump(self):
+        runner = Runner()
+        self.seed(runner)
+        call = runner.named("history")[0]
+        self.assertIn("--defaults-extra-file", " ".join(call["argv"]))
+        self.assertEqual(call["argv"][0], "mariadb")
+
+    def test_a_write_after_the_dump_does_not_move_the_history_ahead(self):
+        # The primary logged 0-1112879276-120 after the dump at 117. The
+        # replica must not claim it: strict mode would refuse the
+        # events 118 to 120.
+        runner = Runner(answers={
+            "history": (0, f"{FIRST_BOOT},0-1112879276-120\n".encode(), b"")})
+        self.seed(runner)
+        start = runner.named("start")[0]["stdin"]
+        self.assertIn(
+            f"SET GLOBAL gtid_binlog_state = '{FIRST_BOOT},{POSITION}'",
+            start)
+        self.assertNotIn("-120", start)
+
+    def test_a_server_without_a_binary_log_has_no_history_to_keep(self):
+        runner = Runner(answers={"binlog": (0, b"0\n", b"")})
+        self.assertIsNone(self.seed(runner))
+        start = runner.named("start")[0]["stdin"]
+        self.assertNotIn("RESET MASTER", start)
+        self.assertNotIn("gtid_binlog_state", start)
+
+    def test_a_primary_whose_history_cannot_be_read_drops_nothing(self):
+        runner = Runner(answers={"history": (1, b"", b"denied")})
+        self.assertIn("denied", self.seed(runner))
+        self.assertEqual(runner.named("stop"), [])
 
     def test_local_data_is_dropped_only_after_the_copy_is_in_hand(self):
         runner = Runner()

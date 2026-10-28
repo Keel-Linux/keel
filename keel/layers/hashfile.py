@@ -4,9 +4,9 @@
 The file is prose for a human with two digest lines in it, of the
 sha256sum and sha512sum form, and may be wrapped in a clear signature.
 Only the digest lines and the presence of a signature are read here.
-Checking that signature needs the key it was made with, which is not the
-channel keyring `keel pull` verifies a pointer against, and no caller
-passes one, so nothing in this module claims to verify anything.
+keel.layers.verify checks the signature against the keyrings of the main
+and the images roles, and gives this module the text that the signature
+covers. Nothing in this module claims to verify anything.
 """
 
 import re

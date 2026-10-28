@@ -170,6 +170,27 @@ class TestChannel(Served):
         memberlink.touch("::1", "lo", free_port())
 
 
+class TestAnsweredSourceAsksAgain(Served):
+    """keel#177: a source's slot is free before its answer leaves, also
+    when the thread closes its connection late, as on a loaded machine"""
+
+    def setUp(self):
+        finish = memberlink.Handler.finish
+
+        def late(handler):
+            threading.Event().wait(0.5)
+            finish(handler)
+        patcher = mock.patch.object(memberlink.Handler, "finish", late)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        super().setUp()
+
+    def test_the_next_requests_at_once_are_answered(self):
+        for _ in range(memberlink.PER_SOURCE + 2):
+            self.assertEqual(memberlink.fetch("::1", "lo", self.port),
+                             ROSTER)
+
+
 class TestDeadline(unittest.TestCase):
     def test_a_request_read_too_slowly_is_dropped(self):
         with mock.patch("keel.mesh.memberlink.REQUEST_DEADLINE", 0.3):

@@ -88,6 +88,8 @@ Every command accepts the same three options, so a caller never has to branch:
 | --- | --- |
 | `--layers-dir DIR` | Directory of layer manifests. Default: `$KEEL_LAYERS_DIR`, else `/var/lib/keel/layers` |
 | `--tarballs-dir DIR` | Directory of the tarballs and `.hash` files. Default: the layers directory |
+| `--keyring FILE` | A keyring that a `.hash` file or a release MANIFEST is verified against; repeat it for more than one. A signature by a key of any of them is good. Default: `$KEEL_IMAGE_KEYRINGS`, paths split by `:`, else `/usr/share/keyrings/keel-archive-keyring.gpg` and `/usr/share/keyrings/keel-images-keyring.gpg` (decision 0055); a missing file is skipped |
+| `--release-manifest FILE` | Verify this release MANIFEST against `FILE.asc`, then each listed file that is present, instead of the layers ([docs/layers.md](docs/layers.md)) |
 
 `keel inspect` accepts:
 
@@ -140,7 +142,7 @@ Defined in one place, `keel/exits.py`, and reproduced here.
 | 5 | `CONF_ERROR` | The conf file, or the spec or report `inspect` writes, cannot be written |
 | 6 | `MANIFEST_INVALID` | A layer manifest cannot be read or fails validation; every problem is printed |
 | 7 | `LAYER_MISMATCH` | A layer tarball, parent chain or `.hash` digest does not match its manifest |
-| 8 | `SIGNATURE_UNVERIFIED` | Every layer matches, but a `.hash` file is present whose signature was not verified (no trusted key is configured yet) |
+| 8 | `SIGNATURE_UNVERIFIED` | Every layer matches, but a `.hash` file is present with no good signature by a key of the keyrings; or a release MANIFEST has no good signature |
 | 9 | `NOT_IMPLEMENTED` | The command is a documented stub, or the part of it that is (`verify` exits 9 after the layers pass, because packages are not checked yet) |
 | 10 | `LAYER_UNAVAILABLE` | `pull` could not fetch a manifest or tarball from the source or write the cache; `assemble` found a layer of the chain missing from the cache |
 | 11 | `ASSEMBLE_NEEDS_ROOT` | `assemble` was run by a user other than root; nothing was written |
