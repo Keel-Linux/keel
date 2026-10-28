@@ -57,7 +57,8 @@ do is also bounded by what each node checks, as defence in depth:
   node can win it. Against etcd's 5 s election timeout
   (keel.mesh.etcdconf): a re-election in the majority takes 5 to 10 s,
   during which renewals fail, but etcd gives every lease its TTL again
-  on a leader change, so 10 s rides out one re-election without a move.
+  on a leader change, so RELEASE_AFTER (15 s) rides out one re-election
+  without a move (keel#167: 10 s did not, under loss).
   This is 0020's automatic failover, which etcd's three voters make
   possible;
 - every node follows the counter, and only the counter, and takes a
@@ -87,6 +88,12 @@ from keel.network.wireguard import same_key
 __all__ = ["RELEASE_AFTER", "TTL"]
 
 RENEW = 2.0
+# a holder with no renewal the majority confirmed for this long marks its
+# doubt, and keel database follow turns a MariaDB holder read only until
+# a renewal is confirmed (keel#195): after the longest normal gap (a
+# renewal period and a call), well before a dump thread to a cut replica
+# ends (tcp_retries2 = 5: about 12.6 s) or the release (RELEASE_AFTER)
+DOUBT = 6.0
 # one call to this member's etcd: a renewal that takes longer is not
 # one the holder can count on
 CALL_TIMEOUT = 2.0
@@ -99,6 +106,8 @@ EARLY = 2.0
 # confirmed renewal (RELEASE_AFTER), a renewal period and a call late
 GRACE = RELEASE_AFTER + RENEW + CALL_TIMEOUT
 EPOCH, HOLDER = "epoch", "holder"
+EXPIRED_SAID = (" (expired at its due time: the old primary is gone, so a"
+                " PostgreSQL primary commits alone, decision 0054)")
 # what a turn of the controller survives, said: a spec being edited, a
 # damaged state file, a key not readable for a moment, the root half
 # gone a moment
@@ -357,15 +366,40 @@ class Ops:
             raise VipError(f"epoch {epoch} is not above {held.epoch}")
         return vipnode.signed_claim(self.here, vip, epoch, lease)
 
-    def hold(self, raw: bytes, lease: str) -> None:
-        """This node's own claim, as etcd took it, recorded with its lease"""
+    def hold(self, raw: bytes, lease: str, expired: bool = False) -> None:
+        """This node's own claim, as etcd took it, recorded with its
+        lease. `expired` is the controller's word that it claimed because
+        the lease of the newest claim expired (keel#165): the statement
+        that the old primary is gone is written first, so the follow that
+        the claim starts reads it. The root half cannot ask etcd again,
+        so it trusts the word of its own helper for this one statement,
+        and checks the claim: verified, this node's own, the epoch above
+        the one it held (decision 0054, amendment of 2026-10-15)"""
         found = vipmsg.claim_of(raw)
         if not same_key(found.holder, self.here.own_key()):
             raise VipError("not this node's claim")
         problem = vipnode.verified(self.here, found)
         if problem:
             raise VipError(problem)
+        if expired:
+            self.state_gone(found)
         vipnode.hold(self.here, found, False, lease)
+
+    def state_gone(self, found: Claim) -> None:
+        """The statement of keel#165, when the claim is above the epoch
+        held and the previous holder another node; one that cannot be
+        written is said, and the claim stands all the same (keel#178)"""
+        before = vipnode.current(self.here, found.vip)
+        if found.epoch <= before.epoch or before.claim is None or \
+                same_key(before.claim.holder, found.holder):
+            return
+        try:
+            vipstate.state_gone(self.here.root, before.epoch, found.epoch)
+        except OSError as e:
+            self.here.err(f"vip {found.vip}: the statement that the old"
+                          f" primary is gone could not be written ({e});"
+                          " the claim stands, and its commits wait for a"
+                          " standby or for the operator")
 
     def carry(self, vip: str, age: float) -> bool:
         return vipnode.carry_held(self.here, vip, age)
@@ -385,6 +419,20 @@ class Ops:
 
     def carried(self, vip: str) -> bool | None:
         return vipnet.carried(self.here.iface(), vip, self.here.node.output)
+
+    def doubt(self, vip: str, on: bool) -> None:
+        """The doubt of the lease of this node's own claim, marked or
+        cleared (keel#195); only for this node's own VIP"""
+        if vipstate.address(vip) != self.facts().vip:
+            raise VipError(f"{vip} is not this node's appliance.vip")
+        if vipstate.mark_unconfirmed(self.here.root, vip, on):
+            self.here.err(
+                f"vip {vip}: no renewal the majority confirmed for"
+                f" {DOUBT:g} s: this node may be cut off, and a MariaDB"
+                " server here acknowledges no write until one is (keel#195)"
+                if on else
+                f"vip {vip}: a renewal is confirmed again: the doubt is"
+                " cleared (keel#195)")
 
     def bounded(self, vip: str) -> bool | None:
         return vipnet.bounded(self.here.iface(), vip, self.here.node.output)
@@ -415,6 +463,14 @@ class Controller:
         self.reclaim: set[str] = set()
         # the renewal each VIP's address last took its lifetime from
         self.lifted: dict[str, float] = {}
+        # the VIPs whose doubt this process marked, and those whose mark
+        # it cleared since (a mark an earlier process left goes at the
+        # first renewal this one has confirmed, keel#195)
+        self.doubted: set[str] = set()
+        self.cleared: set[str] = set()
+        # when this process first saw each claim of its own that it has
+        # not renewed yet: a controller that starts cut off doubts too
+        self.began: dict[str, float] = {}
 
     def own(self, facts: Facts) -> list[Held]:
         """The VIPs this node holds by its own claim on a lease"""
@@ -424,7 +480,12 @@ class Controller:
     def holding(self) -> None:
         """One turn of the holder's duty, for each VIP it holds"""
         facts = self.ops.facts()
-        for held in self.own(facts):
+        owned = self.own(facts)
+        # a mark goes with the claim: a node that no longer holds it does
+        # not start a later claim read only
+        for vip in sorted(self.doubted - {one.vip for one in owned}):
+            self.mark(vip, False)
+        for held in owned:
             vip = held.vip
             if vip in self.reclaim:
                 continue
@@ -436,8 +497,13 @@ class Controller:
             base = self.renewed.get(vip)
             if base is None:
                 self.started_with(vip)
+                began = self.began.setdefault(vip, self.clock())
+                if self.clock() - began >= DOUBT:
+                    self.doubt(vip, self.clock() - began)
                 continue
+            self.began.pop(vip, None)
             age = self.clock() - base
+            self.doubt(vip, age)
             if not 0 <= age < RELEASE_AFTER:
                 if self.ops.carried(vip):
                     self.ops.drop(vip, False, (
@@ -450,6 +516,31 @@ class Controller:
                     self.ops.carried(vip) is False:
                 if self.ops.carry(vip, age):
                     self.lifted[vip] = base
+
+    def doubt(self, vip: str, age: float) -> None:
+        """The holder's doubt marked once its last confirmed renewal is
+        DOUBT s old, cleared once a renewal is confirmed again"""
+        if not 0 <= age < DOUBT:
+            if vip not in self.doubted:
+                self.mark(vip, True)
+            return
+        if vip in self.doubted or vip not in self.cleared:
+            self.mark(vip, False)
+
+    def mark(self, vip: str, on: bool) -> None:
+        """The mark of the doubt, best effort: a mark that cannot be
+        written is said, and never stops the release (keel#195)"""
+        try:
+            self.ops.doubt(vip, on)
+        except FAILURES as e:
+            self.err(f"vip {vip}: doubt not marked: {e}")
+            return
+        if on:
+            self.doubted.add(vip)
+            self.cleared.discard(vip)
+        else:
+            self.doubted.discard(vip)
+            self.cleared.add(vip)
 
     def started_with(self, vip: str) -> None:
         """Before this controller's first renewal: an address a previous
@@ -538,11 +629,13 @@ class Controller:
             self.alive[lease] = moment + ttl
             return
         expected = self.alive.get(lease)
-        if expected is None or moment < expected - EARLY:
-            first = self.gone.setdefault(lease, moment)
-            if moment - first < GRACE:
-                return
-        self.claimed(facts, client, now, held)
+        first = self.gone.setdefault(lease, moment)
+        # expired: first seen gone at its due time, not before it; a
+        # lease gone early stays revoked however long this node waits
+        expired = expected is not None and first >= expected - EARLY
+        if not expired and moment - first < GRACE:
+            return
+        self.claimed(facts, client, now, held, expired)
 
     def claim_again(self, facts: Facts, client: Client,
                     keys: dict[str, Seen]) -> None:
@@ -564,7 +657,11 @@ class Controller:
                 self.reclaim.discard(vip)
 
     def claimed(self, facts: Facts, client: Client, now: Seen,
-                held: Held) -> bool:
+                held: Held, expired: bool = False) -> bool:
+        """A claim at the next epoch; `expired` when the lease of `held`
+        ran out at its due time, seen alive before: that states the old
+        primary gone (keel#165), never a revoked lease or one of an
+        unknown end"""
         vip = held.vip
         try:
             made = claim(client, facts.mesh_id, vip, now, held.epoch,
@@ -574,11 +671,12 @@ class Controller:
             return False
         if made is None:
             return False
-        self.ops.hold(made[0].raw, made[1])
+        self.ops.hold(made[0].raw, made[1], expired)
         self.renewed[vip] = made[2]
         self.tried[vip] = made[2]
         self.err(f"vip {vip}: claimed at epoch {made[0].epoch}: the"
-                 f" lease of epoch {held.epoch} is gone")
+                 f" lease of epoch {held.epoch} is gone"
+                 f"{EXPIRED_SAID if expired else ''}")
         threading.Thread(target=self.announce, args=(facts, made[0]),
                          daemon=True).start()
         return True

@@ -10,6 +10,9 @@ Webmin and keel all expect (Keel-Linux/common, packages/README.md).
 CrowdSec's identity is made on its first enable (keel.system.crowdsec).
 etcd's configuration is rendered from the mesh's state, and etcd waits
 for its cluster before anything is started (keel.system.etcd).
+Syncthing's configuration is rendered from the manifest and the pair's
+role, its folders send-only or receive-only with the database's
+(0050's amendment, keel.system.filesync).
 An overlay's state hooks, Coraza's for one, which has no unit, run after
 its units come up and before they go down (keel.system.hooks).
 
@@ -45,14 +48,22 @@ from keel.system.appstate import (
     ApplianceState,
     overlay_units,
 )
+from keel.system import anubiskey, filesync
 from keel.system.crowdsec import OVERLAY as CROWDSEC
 from keel.system.crowdsec import plan_identity
 from keel.system.etcd import OVERLAY as ETCD
 from keel.system.etcd import plan_etcd, waiting
+from keel.system.filesync import plan_filesync
 from keel.system.hooks import plan_hooks
 from keel.system.monitor import NOTIFY, reload
 
 MONIT_FIELD = "derived.monit"
+VIP = "vip"
+VIP_WAITS = (
+    "keel-vip.service waits for etcd's cluster (cluster.json): it starts"
+    " once etcd forms; without etcd, keel vip check (keel-vip-check.timer)"
+    " does its work (keel#106)"
+)
 MODE = 0o600
 ENABLED = "enabled"
 DISABLED = "disabled"
@@ -129,25 +140,54 @@ def plan_overlay(name: str, wanted: str | None, units: tuple[str, ...],
         identity = plan_identity(state.crowdsec, live, available)
         actions += identity
     made = any(not isinstance(action, Note) for action in identity)
+    if on and name == anubiskey.OVERLAY and state.anubis_key is not None:
+        key = state.anubis_key
+        if key.problem:
+            return Step(field, (Refuse(key.problem),))
+        if key.value is None:
+            # nothing starts: the key unit would refuse to make one
+            return Step(field, (Note(key.waiting),))
+        if key.dangling:
+            actions.append(RemoveFile(
+                anubiskey.KEY, f"remove /{anubiskey.KEY}, a link whose"
+                " target is gone, so the key is not written through it"))
+        actions.append(WriteFile(
+            anubiskey.KEY, key.value + "\n", anubiskey.MODE, None,
+            f"write /{anubiskey.KEY}, the pair's Anubis key asked of the"
+            " other member (decision 0041, Keel-Linux/common#56)"))
+        made = True
     if on and name == ETCD and state.etcd is not None:
         rendered, made = plan_etcd(state.etcd, live)
         if waiting(state.etcd) or any(isinstance(action, Refuse)
                                       for action in rendered):
             return Step(field, tuple(rendered))
         actions += rendered
+    if on and name == filesync.OVERLAY and state.filesync is not None:
+        rendered, restart = plan_filesync(state.filesync, live)
+        if any(isinstance(action, Refuse) for action in rendered):
+            return Step(field, tuple(rendered))
+        actions += rendered
+        made = made or restart
     if not on:
         # what reacts to the overlay lets go of it before its units stop
         actions += hooked
+    waits = on and name == VIP and state.vip_waits
     for unit in (units if on else tuple(reversed(units))):
         found = state.units[unit]
-        if on:
+        if waits:
+            # enabled, never started: its start condition is etcd's
+            # cluster, so a start does nothing (keel#106)
+            actions += start(systemctl, unit, found, False, False)
+        elif on:
             actions += start(systemctl, unit, found, live, made,
-                             name == ETCD)
+                             name in (ETCD, filesync.OVERLAY))
         else:
             actions += stop(systemctl, unit, found, live)
     if on:
         actions += hooked
-    if all(isinstance(action, Note) for action in actions):
+    if waits and live:
+        actions.append(Note(VIP_WAITS))
+    if all(isinstance(action, Note) for action in actions) and not waits:
         # under --root a hook was not run, which is not "unchanged"
         listed = units + tuple(hook.path for hook in hooks.hooks
                                if live) if hooks else units

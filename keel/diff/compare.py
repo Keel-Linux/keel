@@ -278,10 +278,10 @@ def diverged(declared: dict, inspection: Inspection) -> list[FieldDiff]:
     """An old primary that came back holding what the new one lacks"""
     if not paired(declared) or not inspection.diverged:
         return []
-    errant = ", ".join(str(one) for one in
-                       inspection.diverged.get("errant") or [])
-    return [FieldDiff(DIVERGED_FIELD, DRIFT, "none", errant or "unknown",
-                      note=DIVERGED_NOTE.format(errant=errant or "unknown"))]
+    from keel.system.dbfollow import described
+    errant = described(inspection.diverged)
+    return [FieldDiff(DIVERGED_FIELD, DRIFT, "none", errant,
+                      note=DIVERGED_NOTE.format(errant=errant))]
 
 
 def read_only(declared: dict, inspection: Inspection) -> list[FieldDiff]:
@@ -390,8 +390,9 @@ def with_slaac_default(network: dict) -> dict:
 
 
 def with_overlay_defaults(network: dict) -> dict:
-    """The overlay's interface and port as apply renders them when the
-    spec leaves them out, so a machine carrying them is not drift. A copy.
+    """The overlay's interface and port, and each peer's keepalive, as
+    apply renders them when the spec leaves them out, so a machine
+    carrying them is not drift, and one without the keepalive is. A copy.
     """
     overlay = network.get("overlay")
     wg = overlay.get("wireguard") if isinstance(overlay, dict) else None
@@ -399,6 +400,10 @@ def with_overlay_defaults(network: dict) -> dict:
         return network
     wg = {"interface": wireguard.DEFAULT_INTERFACE,
           "listen_port": wireguard.DEFAULT_PORT, **wg}
+    if isinstance(wg.get("peers"), list):
+        wg["peers"] = [
+            {"persistent_keepalive": wireguard.DEFAULT_KEEPALIVE, **peer}
+            if isinstance(peer, dict) else peer for peer in wg["peers"]]
     return {**network, "overlay": {**overlay, "wireguard": wg}}
 
 

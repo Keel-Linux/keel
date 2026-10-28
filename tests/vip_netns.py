@@ -57,6 +57,7 @@ import ipaddress
 import json
 import os
 import re
+import select
 import shutil
 import subprocess
 import sys
@@ -75,6 +76,7 @@ from etcd_netns import (
     measured,
     sh,
     start_etcd,
+    tune,
     utcnow,
 )
 
@@ -141,6 +143,7 @@ def child(index: int) -> int:
                  ("ip", "-6", "route", "add", "default", "via", f"{net}::1",
                   "dev", "uplink")):
         sh(*argv, pid=found.pid)
+    tune(found.pid)
     leg(f"to{n}")
     return found.pid
 
@@ -282,12 +285,22 @@ def first(samples: list[dict], since: float, test) -> float | None:
 
 
 def agent_send(name: str, line: str, timeout: float = 180) -> dict:
-    """One command to a node's agent, and its JSON answer"""
+    """One command to a node's agent, and its JSON answer
+
+    The read is bounded by select, not by readline alone: an agent that
+    never answers (its server hangs on a synchronous commit that waits
+    for a standby that never connected — found by this test on the
+    lossy link) leaves readline blocked past the deadline, and the
+    driver waits forever instead of failing this command"""
     process = AGENTS[name]
     process.stdin.write(line + "\n")
     process.stdin.flush()
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
+        wait = max(0.0, deadline - time.monotonic())
+        ready, _, _ = select.select([process.stdout], [], [], wait)
+        if not ready:
+            break
         said = process.stdout.readline()
         if not said:
             break
@@ -467,8 +480,23 @@ def tended(index: int, pid: int, root: str, spec: str) -> None:
     HELPERS.append(unit)
     scratch = os.path.join(root, "tmp")
     os.makedirs(scratch, mode=0o700, exist_ok=True)
+    state = os.path.join(root, "var/lib/keel/vip")
+    os.makedirs(state, mode=0o700, exist_ok=True)
+    wgdir = os.path.join(root, "etc/wireguard")
+    os.makedirs(wgdir, exist_ok=True)
+    writable = " ".join((state, wgdir, scratch))
     command = (sys.executable, "-m", "keel", "vip", "tend", "--root", root,
                "--spec", spec)
+    # the unit's name is the node's, host-global: a generation whose
+    # driver was killed (a pytest timeout) leaves it loaded against the
+    # old root, and systemd-run then fails with "already loaded", one
+    # helper per generation piling up (found by this test's run on the
+    # lossy link, where a hang let the runner's kill leak the units)
+    subprocess.run(["systemctl", "stop", f"{unit}.service"],
+                   capture_output=True, check=False)
+    # daemon-reload is what collects the stopped transient, so the
+    # systemd-run below starts against a clean unit name
+    sh("systemctl", "daemon-reload")
     sh("systemd-run", f"--unit={unit}", "--collect", "--quiet",
        f"--setenv=TMPDIR={scratch}",
        # keel-vip.service's: what runs once the helper stopped, and its
@@ -476,7 +504,10 @@ def tended(index: int, pid: int, root: str, spec: str) -> None:
        f"--property=ExecStopPost={' '.join(command)} --stopped",
        "--property=Restart=always", "--property=RestartSec=2",
        f"--property=NetworkNamespacePath=/proc/{pid}/ns/net",
-       f"--property=ReadWritePaths={root}",
+       # keel-vip.service's: the VIP's state and wg0's configuration
+       # alone, so a write anywhere else fails here as on a machine
+       # (keel#178: the statement of keel#165 under /var/lib/keel/database)
+       f"--property=ReadWritePaths={writable}",
        *(f"--property={one}" for one in HELPER_PROPERTIES),
        f"--setenv=PYTHONPATH={LISTENER_HOME}",
        f"--setenv=PATH={TOOLS}:{os.environ.get('PATH', '')}",

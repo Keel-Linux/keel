@@ -13,6 +13,7 @@ from keel import exits, layers, manifest, spec
 from keel import diff as drift
 from keel import inspect as inspection
 from keel import system
+from keel.system import filesync
 from keel.monitor import channelfile
 from keel.monitor import notify as notifier
 from keel.network import confirm as netconfirm
@@ -242,6 +243,10 @@ def apply_system(
     """
     facts = manifest_facts(doc, root)
     declared = doc
+    problem = filesync.undeclared_problem(root, doc)
+    if problem:
+        error(problem)
+        return exits.SPEC_INVALID
     doc, _ = with_defaults(doc, facts)
     state = system.observe(root, doc, start=not dry_run, spec=spec_path)
     plan = system.plan(doc, state, confirmed, defer_certificate,
@@ -314,6 +319,24 @@ def network_revert(args) -> int:
     else:
         error(line)
     return exits.OK if worked else exits.APPLY_FAILED
+
+
+def network_mtu(args) -> int:
+    """Each WireGuard interface up whose MTU is not its file's, set live
+    (keel#139); what the package's postinst runs, so an upgrade needs no
+    reboot. Only on the live system"""
+    root = getattr(args, "root", inspection.ROOT_DEFAULT)
+    refusal = system.needs_root(root, "network mtu")
+    if refusal:
+        error(refusal)
+        return exits.APPLY_NEEDS_ROOT
+    from keel.network import mtu
+    failed = False
+    for line in mtu.converge(root):
+        bad = "failed" in line or "cannot be read" in line
+        failed = failed or bad
+        (error if bad else print)(line)
+    return exits.APPLY_FAILED if failed else exits.OK
 
 
 def network_wireguard_key(args) -> int:
@@ -436,19 +459,36 @@ def database_promote(args) -> int:
         if refusal:
             error(refusal)
             return exits.APPLY_NEEDS_ROOT
-    code = promote_vip(args, doc, root, dry_run)
-    if code != exits.OK:
-        return code
-    state = system.observe(root, doc, start=not dry_run, spec=args.spec)
-    plan = system.Plan(tuple(system.plan_promote(doc, state.database,
-                                                 args.spec)))
-    outcome = system.execute(
-        plan, system.Effects(root), dry_run, "database promote"
-    )
-    for line in outcome.lines:
-        print(line)
-    print(outcome.summary())
-    return exits.APPLY_FAILED if outcome.failed else exits.OK
+    gone = getattr(args, "old_primary_gone", False)
+    engine = (((doc.get("database") or {}).get("server") or {})
+              .get("engine"))
+    if gone and not dry_run and engine == "postgresql":
+        # the operator's statement, for the follow the claim starts
+        # (keel.system.dbpgfollow.ALONE_MARK, 0054's one exception)
+        from keel.system import dbpgfollow
+        dbpgfollow.mark_alone(root)
+    reached: list[bool] = []
+
+    def database_step() -> int:
+        # run by the VIP's promote once the VIP moved, before it joins
+        # the late asks of a gone old primary (keel#169)
+        reached.append(True)
+        state = system.observe(root, doc, start=not dry_run,
+                               spec=args.spec)
+        plan = system.Plan(tuple(system.plan_promote(
+            doc, state.database, args.spec, gone)))
+        outcome = system.execute(
+            plan, system.Effects(root), dry_run, "database promote"
+        )
+        for line in outcome.lines:
+            print(line)
+        print(outcome.summary())
+        return exits.APPLY_FAILED if outcome.failed else exits.OK
+
+    code = promote_vip(args, doc, root, dry_run, database_step)
+    if not reached and gone and not dry_run and engine == "postgresql":
+        dbpgfollow.unmark_alone(root)
+    return code
 
 
 def database_follow(args) -> int:
@@ -461,9 +501,23 @@ def database_follow(args) -> int:
         return exits.APPLY_NEEDS_ROOT
     found = dbfollow.Followed(lambda line: print(
         f"database.server.role: {line}"))
+    found.nothing_without_vip = True
     dbfollow.follow(os.path.abspath(root), args.spec,
                     getattr(args, "destroy_local_database", False), found)
     return exits.APPLY_FAILED if found.problem else exits.OK
+
+
+def database_guard(args) -> int:
+    """The PostgreSQL unit's ExecStartPre on a pair (keel.system.dbpgguard)"""
+    from keel.system import dbpgguard
+    root = getattr(args, "root", inspection.ROOT_DEFAULT)
+    refusal = system.needs_root(root, "database guard")
+    if refusal:
+        error(refusal)
+        return exits.APPLY_NEEDS_ROOT
+    return dbpgguard.guard(os.path.abspath(root), args.spec,
+                           lambda line: print(f"keel database guard: {line}",
+                                              file=sys.stderr))
 
 
 def database_watch(args) -> int:
@@ -481,7 +535,8 @@ def database_status(args) -> int:
     return dbstatus.main(args)
 
 
-def promote_vip(args, doc: dict, root: str, dry_run: bool) -> int:
+def promote_vip(args, doc: dict, root: str, dry_run: bool,
+                then=lambda: exits.OK) -> int:
     """The pair's VIP first, when the spec declares one (decision 0049,
     third round): the old primary releases it before this node's
     database takes writes. With --old-primary-gone the release is not
@@ -494,14 +549,14 @@ def promote_vip(args, doc: dict, root: str, dry_run: bool) -> int:
     from keel.mesh import vipcli, vippromote
     appliance = doc.get("appliance")
     if not isinstance(appliance, dict) or not appliance.get("vip"):
-        return exits.OK
+        return then()
     if dry_run:
         print(f"would move the VIP {appliance['vip']} to this node first"
               " (keel vip promote)")
-        return exits.OK
+        return then()
     return vippromote.promote(vipcli.here_of(args),
                               getattr(args, "old_primary_gone", False),
-                              print)
+                              print, then)
 
 
 def manifest_validate(args) -> int:
@@ -653,6 +708,8 @@ def verify(args) -> int:
     section 5.4) does not exist yet, and verify never claims more than
     it checked.
     """
+    if getattr(args, "release_manifest", None):
+        return verify_release_manifest(args)
     code = verify_layers(args)
     if code != exits.OK:
         return code
@@ -664,8 +721,31 @@ def verify(args) -> int:
     )
 
 
+def image_keyrings(args) -> tuple[str, ...]:
+    """The keyrings a .hash file or a release MANIFEST is verified with"""
+    named = getattr(args, "keyrings", None)
+    if named is None:
+        named = os.environ.get(layers.IMAGE_KEYRINGS_ENV, "").split(":")
+        named = [path for path in named if path] or list(
+            layers.IMAGE_KEYRINGS_DEFAULT
+        )
+    return tuple(named)
+
+
+def verify_release_manifest(args) -> int:
+    """keel verify --release-manifest: one line, then one per file"""
+    report = layers.verify_release_manifest(
+        args.release_manifest, image_keyrings(args)
+    )
+    for line in report.lines():
+        print(line)
+    return report.code
+
+
 def verify_layers(args) -> int:
-    report = layers.verify_layers(args.layers_dir, args.tarballs_dir)
+    report = layers.verify_layers(
+        args.layers_dir, args.tarballs_dir, image_keyrings(args)
+    )
     if not report.results:
         print(
             f"{args.layers_dir}: no layer manifests found", file=sys.stderr

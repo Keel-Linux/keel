@@ -38,6 +38,14 @@ OVERLAY = {
 }
 
 
+
+def with_keepalive(overlay: dict) -> dict:
+    """`overlay` as its file reads back: each peer with the keepalive
+    keel renders when the spec gives none"""
+    return {**overlay, "peers": [
+        {**peer, "persistent_keepalive": wireguard.keepalive(peer)}
+        for peer in overlay.get("peers") or []]}
+
 class TestNames(unittest.TestCase):
     def test_defaults(self):
         self.assertEqual(wireguard.interface({}), "wg0")
@@ -125,7 +133,16 @@ class TestRender(unittest.TestCase):
             "\n[Peer]\n"
             f"PublicKey = {OTHER_KEY}\n"
             "AllowedIPs = fd00:1::3/128\n"
+            # every peer has a keepalive, 25 s unless the spec gives one
+            "PersistentKeepalive = 25\n"
         ))
+
+    def test_every_peer_has_a_keepalive(self):
+        """keel#140: a 180 s old handshake means the member is
+        unreachable only when each peer sends a keepalive"""
+        self.assertEqual(wireguard.keepalive({}), 25)
+        self.assertEqual(wireguard.keepalive({"persistent_keepalive": 10}),
+                         10)
 
     def test_no_private_key_in_the_file(self):
         self.assertNotIn("PrivateKey", wireguard.render(OVERLAY))
@@ -149,7 +166,7 @@ class TestRender(unittest.TestCase):
 class TestParse(unittest.TestCase):
     def test_the_rendered_file_reads_back_as_the_spec(self):
         parsed = wireguard.parse(wireguard.render(OVERLAY))
-        self.assertEqual(parsed.section, OVERLAY)
+        self.assertEqual(parsed.section, with_keepalive(OVERLAY))
         self.assertFalse(parsed.inline_key)
         self.assertEqual(parsed.problems, ())
 

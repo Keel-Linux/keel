@@ -603,3 +603,50 @@ class TestEffects(ReadOnlyTestCase):
         self.assertIn(dbreadonly.RECORD, LockReplica(()).describe())
         self.assertIn("READ_ONLY ADMIN back", UnlockAccounts().describe())
         self.assertIn("wait up to 60 s", PromoteReplica(60).describe())
+
+
+class TestReplicationLock(unittest.TestCase):
+    """One writer of the replication at a time, across processes; the
+    same thread may take it again (keel#153: follow holds it, and its
+    observation starts the server under it)"""
+
+    def setUp(self):
+        import tempfile
+        self.root = self.enterContext(tempfile.TemporaryDirectory())
+
+    def test_the_holder_may_take_the_lock_again(self):
+        import threading
+        seen = []
+
+        def nested():
+            with dbreadonly.replication_locked(self.root):
+                with dbreadonly.replication_locked(self.root):
+                    seen.append(dbreadonly.holds_replication_lock(self.root))
+                seen.append(dbreadonly.holds_replication_lock(self.root))
+            seen.append(dbreadonly.holds_replication_lock(self.root))
+
+        # in a thread with a bound: a lock that is not reentrant hangs
+        thread = threading.Thread(target=nested, daemon=True)
+        thread.start()
+        thread.join(5)
+        self.assertFalse(thread.is_alive(), "the second take hung")
+        self.assertEqual(seen, [True, True, False])
+
+    def test_another_thread_waits_for_the_holder(self):
+        import threading
+        order = []
+        inside = threading.Event()
+
+        def other():
+            inside.wait(5)
+            with dbreadonly.replication_locked(self.root):
+                order.append("other")
+
+        thread = threading.Thread(target=other)
+        thread.start()
+        with dbreadonly.replication_locked(self.root):
+            inside.set()
+            thread.join(0.3)
+            order.append("holder")
+        thread.join(5)
+        self.assertEqual(order, ["holder", "other"])

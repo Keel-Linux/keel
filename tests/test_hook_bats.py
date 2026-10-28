@@ -19,6 +19,8 @@ from os.path import abspath, dirname, join
 
 HERE = dirname(abspath(__file__))
 SUITE = join(HERE, "hook.bats")
+# the package's postinst (keel#139)
+POSTINST_SUITE = join(HERE, "postinst.bats")
 HOOK = join(dirname(HERE), "firstboot.d", "10keel-system")
 
 
@@ -39,3 +41,15 @@ class TestHookSuite(unittest.TestCase):
         )
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertIn("ok 1 ", done.stdout)
+
+    def test_bats_reports_every_postinst_test_passing(self):
+        bats = shutil.which("bats")
+        if bats is None:
+            if os.environ.get("CI"):
+                self.fail("bats is not installed in CI: the postinst suite"
+                          " would not run, see .github/workflows/tests.yml")
+            self.skipTest("bats is not installed")
+        done = subprocess.run([bats, POSTINST_SUITE], capture_output=True,
+                              text=True, check=False)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("ok 3 ", done.stdout)

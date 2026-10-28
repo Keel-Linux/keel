@@ -43,7 +43,8 @@ DESCRIPTIONS = {
     " written",
     MANIFEST_INVALID: "a layer manifest cannot be read or fails validation",
     LAYER_MISMATCH: "a layer does not match its manifest",
-    SIGNATURE_UNVERIFIED: "a layer hash file could not be verified",
+    SIGNATURE_UNVERIFIED: "a layer hash file or a release MANIFEST could"
+    " not be verified",
     NOT_IMPLEMENTED: "command is a documented stub, not implemented yet",
     LAYER_UNAVAILABLE: "a layer could not be fetched into the cache, or is"
     " not in it",

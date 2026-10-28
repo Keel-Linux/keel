@@ -131,6 +131,14 @@ class TestThreeMembersOnAPoorNetwork(unittest.TestCase):
                 self.assertGreater(seen["puts"], 0, seen)
                 terms.update(seen["terms"])
         self.assertIsNotNone(self.found["rejoined_s"], self.found)
+        # keel#167: a stream that waits for its next retransmission held
+        # the rejoin 19 to 51 s after the heal in CI.
+        # test_no_peer_connection_waits_in_a_deep_backoff checks that
+        # cause itself. With the fix (tcp_retries2 = 5) CI measured 6.0 s,
+        # and 20.1 s and 21.1 s with the deepest backoff at 4 and 5.25 %
+        # loss on the link: raft's catch-up under loss, not a stalled
+        # stream. 30 s keeps the long stalls out and the loss in.
+        self.assertLess(self.found["rejoined_s"], 30, self.found)
         self.assertEqual(self.found["leader_after_heal"],
                          self.found["leader_at_formation"])
         # pre-vote: the member that came back raised no term
@@ -144,11 +152,25 @@ class TestThreeMembersOnAPoorNetwork(unittest.TestCase):
         self.assertEqual(found["record_problems"], [None, None, None])
         self.assertIsNotNone(found["new_leader_s"], found)
         # an election timeout, randomised in [5 s, 10 s), and its rounds
-        # over a lossy link
-        self.assertLess(found["new_leader_s"], 60, found)
+        # over a lossy link. keel#167: this cut comes just after the
+        # follower's rejoin, and a stream to it that still waited for a
+        # retransmission held the votes: 48 to 51 s in 8 of 33 CI runs
+        self.assertLess(found["new_leader_s"], 30, found)
         self.assertIsNotNone(found["writes_resumed_s"], found)
         self.assertIsNotNone(found["old_leader_rejoined_s"], found)
         self.assertTrue(found["old_leader_follows"], found)
+
+    def test_no_peer_connection_waits_in_a_deep_backoff(self):
+        """keel#167: a peer connection of etcd that lost its segments in
+        a cut doubles its retransmission timeout up to 120 s. etcd goes
+        on writing raft's messages to it, and they wait for the next
+        retransmission, also after the heal. The kernel must end such a
+        connection after 5 retransmissions, so that etcd dials again"""
+        backoffs = self.found["peer_backoff_max"]
+        self.assertEqual(sorted(backoffs), ["A", "B", "C"], backoffs)
+        for name, highest in backoffs.items():
+            with self.subTest(member=name):
+                self.assertLessEqual(highest, 5, backoffs)
 
     def test_a_revoked_member_no_longer_reaches_etcd(self):
         self.assertTrue(self.found["c_reaches_a_before"].startswith("ok"),

@@ -61,6 +61,26 @@ class TestTheRootSide(Pair):
         self.assertIs(self.ask(ops, op="carry", vip=VIP, age=60.0)["ok"],
                       False)
 
+    def test_the_doubt_of_the_lease_is_marked_and_cleared(self):
+        """keel#195: the controller says when its lease has no renewal
+        the majority confirmed for DOUBT s, and when it has one again;
+        the root half marks it in the VIP's state directory, and refuses
+        anything that is not a VIP"""
+        from keel.mesh import vip as vipstate
+        self.nodes()
+        ops = vipetcd.Ops(self.all[0])
+        root = self.all[0].root
+        self.assertIsNone(self.ask(ops, op="doubt", vip=VIP, on=True)["ok"])
+        self.assertTrue(vipstate.unconfirmed(root, VIP))
+        self.assertIsNone(self.ask(ops, op="doubt", vip=VIP, on=False)["ok"])
+        self.assertFalse(vipstate.unconfirmed(root, VIP))
+        self.assertIn("error", self.ask(ops, op="doubt", vip="../../etc/x",
+                                        on=True))
+        # only this node's own VIP
+        self.assertIn("error", self.ask(ops, op="doubt",
+                                        vip="fd00:6b65:1::ffff:9", on=True))
+        self.assertFalse(os.path.exists(os.path.join(root, "etc/x")))
+
 
 class TestTheBridge(Pair):
     def test_the_controller_asks_the_root_side_over_its_socket(self):

@@ -37,7 +37,8 @@ from keel.system.actions import (
     WriteFile,
 )
 from keel.network import marker, switch, wgkeys
-from keel.system import crowdsec, dbreadonly, dbseed, fwinstall
+from keel.system import crowdsec, dbpgpromote, dbpgseed, dbreadonly, \
+    dbseed, fwinstall
 
 NOT_RUNNABLE = 127
 LIVE_ADDED = "done with wg set, live: peers added, no other peer touched"
@@ -85,6 +86,8 @@ class Effects:
                                     self.tree.path(action.path.lstrip("/")))
             if isinstance(action, SeedReplica):
                 with dbreadonly.replication_locked(self.tree.root):
+                    if action.engine == "postgresql":
+                        return dbpgseed.seed(self.tree.root, action)
                     return dbseed.seed(self.tree.root, action)
             if isinstance(action, LockReplica):
                 return dbreadonly.lock(self.tree.root)
@@ -92,13 +95,15 @@ class Effects:
                 return dbreadonly.unlock(self.tree.root)
             if isinstance(action, PromoteReplica):
                 with dbreadonly.replication_locked(self.tree.root):
+                    if action.engine == "postgresql":
+                        return dbpgpromote.promote(self.tree.root, action)
                     return dbreadonly.promote(self.tree.root, action)
             if isinstance(action, EnsureDatabaseTls):
                 return self.database_tls(action)
             if isinstance(action, FollowVip):
                 from keel.system import dbfollow
                 return dbfollow.followed(self.tree.root, action.spec,
-                                         action.confirmed)
+                                         action.confirmed, alone=action.alone)
             return self.symlink(action)
         except OSError as e:
             return f"{e.strerror or e}"
