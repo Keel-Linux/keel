@@ -57,6 +57,18 @@ database:
   `replication.primary` (the holder's own overlay address, never the
   VIP: 0029), and the replication credential (below). The three stay
   accepted in the spec and must agree with the record when declared.
+- **Anubis's key comes from the pair too** (0041, `shared: true`;
+  Keel-Linux/common#56), on a MariaDB or a PostgreSQL pair. The primary
+  makes `/etc/anubis/keel.key` at its first start of Anubis. On the
+  node whose spec says `role: replica`, with Anubis enabled, no key
+  file and no `secrets.anubis_signing_key` declared, `keel spec apply`
+  asks the other member of the pair record for the key, with the same
+  signed `secret` message as the replication credential, and writes it
+  with mode 0600 before Anubis starts. Before the pair record exists,
+  while the primary has no key yet, or while it does not answer, the
+  apply starts nothing for Anubis, says why, and a later apply asks
+  again. An answer that is no key refuses the step. A key that is there
+  is never replaced.
 - **Clients connect to the VIP**, the embedded WordPress of 0047 among
   them later. The VIP is never on the replica.
 - **Both nodes carry the same drop-in**, whatever their role:
@@ -89,7 +101,7 @@ Built into MariaDB 11.8, no plugin to install. On both nodes:
 rpl_semi_sync_master_enabled = ON
 rpl_semi_sync_slave_enabled = ON
 rpl_semi_sync_master_wait_point = AFTER_SYNC
-rpl_semi_sync_master_timeout = 10000
+rpl_semi_sync_master_timeout = 30000
 rpl_semi_sync_master_wait_no_slave = OFF
 slave_net_timeout = 10
 ```
@@ -102,7 +114,7 @@ found). A node with no replica connected does not wait
 replica's own SQL thread a master with no slave, and it waited the 10 s
 on the first transaction it applied ("Waiting for semi-sync ACK from
 slave" for 9.9 s, the end to end test's trace); a connected replica that
-does not answer still costs the primary the 10 s, which is the fallback
+does not answer still costs the primary the 30 s, which is the fallback
 below. A replica that hears nothing for 10 s reconnects (heartbeats every
 5 s) instead of MariaDB's 60.
 
@@ -112,7 +124,7 @@ nobody until it is promoted; a primary with `slave_enabled` replicates
 from nobody. A commit on the primary returns once the replica has
 *received* it (not applied), one round trip, 250 ms in the design case.
 
-**The fallback.** With no acknowledgement within 10 s the primary
+**The fallback.** With no acknowledgement within 30 s the primary
 commits asynchronously (`Rpl_semi_sync_master_status: OFF`) and stays
 so until the replica is back and caught up, when MariaDB turns it on
 again by itself. Writes continue (the maintainer's answer). keel reports
@@ -128,14 +140,50 @@ it:
   records the state in `/var/lib/keel/database/semi-sync` so a lasting
   fallback alerts once, not every 30 s.
 
-**What the fallback means at a failover.** A write that was waiting for
-the replica when the link broke commits on the old primary after the
-10 s, before or around the moment the VIP's fence (the lease's 10 s
-release, 0049) takes it read-only; it never reached the replica and is
-an errant transaction. So an old primary cut off *while clients were
-writing* usually comes back diverged and waits for the operator (below),
-and one cut off while idle rejoins by itself. Both are measured in the
-test, and docs say so.
+**The timeout is longer than the VIP's release** (keel#186). Until
+keel 0.23.36 it was 10 s, the maintainer's answer of 2026-10-03. The
+VIP's release is 15 s since keel#174 (0049, amendment of 2026-10-15).
+So on a cut primary, a write that waited for the replica returned OK
+after 10 s, and the next writes returned OK at once, until the old
+primary dropped the VIP at about 15 s. These writes never reached the
+replica, and the new primary did not have them: acknowledged writes
+were lost. The timeout is now 30 s. Since keel#195 the fence comes
+earlier than the release, at the doubt of the lease: on real nodes,
+6.1 s to 8.8 s after a cut (the cross-site rehearsal of 2026-10-16).
+10 s would leave 1.2 s in the worst case measured; 30 s leaves room.
+A replica that is lost while the primary keeps the VIP still gives the
+fallback, 30 s after the last acknowledgement in place of 10 s.
+
+**The fence starts when the lease is in doubt** (keel#195). A cut
+holder that keeps the VIP until the release (15 s) cannot wait for it:
+a write that waits for the cut replica returns OK when the dump thread
+to that replica ends (`wait_no_slave = OFF`). With
+`net.ipv4.tcp_retries2 = 5` that is about 12.6 s after the cut. So
+when the holder's lease has had no renewal that the majority confirmed
+for 6 s, the controller marks its doubt ([docs/vip.md](vip.md), "The
+holder's doubt"). `keel-database-follow.path` starts follow, which
+fences the server as below and leaves the role as it is. The server
+takes writes again at the next confirmed renewal. `wait_no_slave = ON`
+does not help: a new primary has no replica yet, and its first write
+would wait for the whole timeout.
+
+**The fence ends the client connections** (keel#186). `SET GLOBAL
+read_only = ON` waits for the backup lock behind a write that waits for
+the replica's acknowledgement, and that write returns OK when the
+timeout ends. So when follow turns a node read only that took writes
+(the VIP released or fenced, or a claim that is not proven), it sets
+`read_only` in a client of its own and, while that waits, kills every
+client connection: not the server's own threads, not this node's own
+replication threads. A write that waited gets an error, not OK. The
+dump threads of its replicas end too, because a fenced node serves no
+replica (keel#193): a dump thread to a cut replica stays, and when
+that replica connects again with the same server id, MariaDB 11.8.6
+ends the old thread and then takes no connection. Ended by a `KILL`,
+the thread ends cleanly. Its row stays on
+the old primary as an errant transaction, so an old primary cut off
+*while clients were writing* comes back diverged and waits for the
+operator's confirmed reseed (below). One cut off while idle rejoins by
+itself.
 
 ## The replica serves nothing (0031, 0049)
 
@@ -153,8 +201,12 @@ test, and docs say so.
 - The replica's server listens on its own overlay address (for its pair
   peer: replication and the rejoin's comparison), `::1`, and the VIP it
   never receives. Clients are configured with the VIP, so they never
-  reach it; in cloud advanced the derived firewall accepts 3306 on `wg0`
-  from the pair peer and for the VIP only.
+  reach it. In cloud advanced the derived firewall accepts 3306 on
+  `wg0` only, never on the uplink (0041: a `mesh` port), from every
+  member of the mesh, as for every `mesh` port. The accounts decide
+  who logs in: `repl` needs the pair's certificate (below). The real
+  test of 2026-10-16 found that this text said "from the pair peer and
+  for the VIP only", which the firewall does not do.
 - `database.client.replicas` keeps its meaning for a client that reads
   from replicas it names; a paired set names none (0031, "0013, Several
   replicas").
@@ -293,7 +345,16 @@ the proof there is weaker (keel#113). `keel database watch` follows a
 server again when it takes writes while the VIP is not on `wg0`. So
 with etcd not reachable at boot, or with no peer that answers, the node
 stays read only. One follow runs at a time
-(`/var/lib/keel/database/follow.lock`). Follow waits up to 15 s for the address, because a promote
+(`/var/lib/keel/database/follow.lock`).
+`keel spec apply --system` refuses, and changes nothing, when the
+appliance replicates files for the node's mode but the spec does not
+write `overlays.syncthing` out (keel#224, decisions 0027 and 0041). A
+manifest default is not enough: without the key the pair would form with
+the files not replicated. Write `enabled`, or `disabled` to turn it off.
+`keel database follow` never refuses for this, because that would block
+a failover in an outage. It lets the role change run, says in its output
+that file replication is off, and sends one alert through the monitor
+channels while the condition lasts. Follow waits up to 15 s for the address, because a promote
 records its claim before it adds the VIP; when keel adds the VIP, it
 writes the VIP's state again, so `keel-database-follow.path` runs
 follow again. `keel database watch` runs follow again within 30 s if
@@ -303,10 +364,22 @@ So in cloud advanced the controller's failover promotes the database on
 the new holder within seconds of the claim, and the old primary turns
 read only the moment it drops the address (its lease's release, 10 s);
 in cloud simple a promote by hand on the replica does the first, and the
-old primary does the second at its next `keel vip check` (boot, then
-every minute) once it hears the newer claim. The path unit is the seam
+old primary does the second once it hears the newer claim: without
+etcd, its `keel database follow` asks the other members at boot and at
+each watch run (keel#154, [docs/vip.md](vip.md)). The path unit is the seam
 between the VIP's helper, which holds `CAP_NET_ADMIN` alone and cannot
 run `runuser`, and the database, which needs root.
+
+**The VIP fence after a rejoin or a reseed** (keel#192, the twin of
+keel#166 for PostgreSQL). A node that lost the VIP while it was cut
+off is fenced: it takes the VIP again only by `keel vip promote` there
+(0049). After it rejoined by GTID, or after the confirmed reseed, it
+holds nothing that the holder lacks. When it replicates from the
+holder, with its SQL thread running, and it applied the newest
+sequence that the holder logged in each GTID domain, `keel database
+follow` clears the fence. `keel database watch` runs follow on a fenced
+replica that replicates, so the fence goes within 2 watch runs. Before,
+a MariaDB pair failed over by itself once only.
 
 ## The old primary coming back (0049)
 

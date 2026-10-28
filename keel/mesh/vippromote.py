@@ -75,8 +75,14 @@ def with_etcd(here: Here) -> bool:
         return False
 
 
-def promote(here: Here, gone: bool, out: Callable[[str], None]) -> int:
-    """`keel vip promote`: this node becomes the VIP's holder"""
+def promote(here: Here, gone: bool, out: Callable[[str], None],
+            then: Callable[[], int] | None = None) -> int:
+    """`keel vip promote`: this node becomes the VIP's holder. `then`
+    runs once the promote succeeded, before the late asks of a gone old
+    primary are joined: keel database promote makes the database
+    writable there, not after the members' channel's timeout (keel#169)"""
+    def after(code: int) -> int:
+        return then() if then is not None and code == exits.OK else code
     try:
         vip = vipstate.declared(here.node.document())
         if vip is None:
@@ -89,12 +95,12 @@ def promote(here: Here, gone: bool, out: Callable[[str], None]) -> int:
             out(problem)
             return exits.MESH_REFUSED
         if not with_etcd(here):
-            return promoted(here, vip, gone, out)
+            return after(promoted(here, vip, gone, out))
         if not gone:
-            return promoted_etcd(here, vip, gone, out)
+            return after(promoted_etcd(here, vip, gone, out))
         here = without_waiting(here, vip)
         try:
-            return promoted_etcd(here, vip, gone, out)
+            return after(promoted_etcd(here, vip, gone, out))
         finally:
             if vipnode.finished(here):
                 out("an ask of the old primary is still running after the"

@@ -7,6 +7,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 from keel.system import dbpostgres
 
@@ -68,6 +69,44 @@ class TestClusterPaths(unittest.TestCase):
         self.assertEqual(
             dbpostgres.rel(os.path.join(self.root, "etc/x"), self.root),
             "etc/x")
+
+
+class TestUnits(unittest.TestCase):
+    """The cluster's own unit for every stop and start (keel#153)
+
+    On Debian, postgresql@17-main.service is PartOf= and Before= the
+    umbrella postgresql.service. A stop of the umbrella returns before
+    the cluster stops, and a start of the active umbrella starts
+    nothing: the old server wrote its pg_control into the new copy of a
+    reseed (found on real nodes, keel 0.23.18)."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root)
+        env = mock.patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop(dbpostgres.SERVICE_ENV, None)
+
+    def test_the_server_unit_is_the_cluster_s_own(self):
+        os.makedirs(os.path.join(self.root, "etc/postgresql/17/main"))
+        self.assertEqual(dbpostgres.service(self.root),
+                         "postgresql@17-main")
+
+    def test_the_boot_unit_stays_the_umbrella(self):
+        """the generator of postgresql-common wires the cluster into the
+        umbrella, so enable and is-enabled ask the umbrella"""
+        os.makedirs(os.path.join(self.root, "etc/postgresql/17/main"))
+        self.assertEqual(dbpostgres.boot_unit(), "postgresql")
+
+    def test_no_cluster_names_the_umbrella(self):
+        self.assertEqual(dbpostgres.service(self.root), "postgresql")
+
+    def test_the_environment_names_the_unit_of_a_test(self):
+        os.makedirs(os.path.join(self.root, "etc/postgresql/17/main"))
+        os.environ[dbpostgres.SERVICE_ENV] = "postgresql-keel-a"
+        self.assertEqual(dbpostgres.service(self.root), "postgresql-keel-a")
+        self.assertEqual(dbpostgres.boot_unit(), "postgresql-keel-a")
 
 
 class TestDropinText(unittest.TestCase):
@@ -228,6 +267,52 @@ class TestSlotStatements(unittest.TestCase):
             "SET synchronous_commit = local;\n"), made.text)
 
 
+class TestThePairKeepsWalForTheRewind(unittest.TestCase):
+    def test_the_pair_dropin_keeps_wal_and_hints(self):
+        text = dbpostgres.pair_dropin_text("/etc/p/ident")
+        self.assertIn("wal_log_hints = on\n", text)
+        self.assertIn("wal_keep_size = 256MB\n", text)
+
+    def test_the_older_text_has_no_keep_size(self):
+        older = dbpostgres.pair_dropin_text("/etc/p/ident", legacy=True)
+        self.assertIn("wal_log_hints = on\n", older)
+        self.assertNotIn("wal_keep_size", older)
+        self.assertIn("ident_file = '/etc/p/ident'\n", older)
+
+
+class TestRewindStatements(unittest.TestCase):
+    def test_the_role_may_call_the_four_functions_of_pg_rewind(self):
+        made = dbpostgres.rewind_statements()
+        self.assertEqual(len(dbpostgres.REWIND_FUNCTIONS), 4)
+        for name in dbpostgres.REWIND_FUNCTIONS:
+            self.assertIn(
+                f"GRANT EXECUTE ON FUNCTION {name}"
+                f" TO {dbpostgres.REPLICATION_USER};", made.text)
+        self.assertIn(f"rolname = '{dbpostgres.REPLICATION_USER}'",
+                      made.text)
+        self.assertIn("pg_rewind", made.summary)
+
+    def test_the_grants_are_refused_on_no_standby_and_commit_alone(self):
+        """A grant is refused in recovery, and under the pair's
+        synchronous commit it would wait for a standby that may not
+        exist yet, the way slot_statements has it"""
+        made = dbpostgres.rewind_statements()
+        self.assertTrue(made.text.startswith(
+            "SET synchronous_commit = local;\n"), made.text)
+        self.assertIn("IF pg_is_in_recovery() THEN", made.text)
+        self.assertLess(made.text.index("RETURN"),
+                        made.text.index("GRANT"))
+
+    def test_the_grants_wait_for_the_role(self):
+        """The follow of a new primary runs before the apply that makes
+        the role: a grant to a role that is not there fails (found by
+        the pair's network-namespace test)"""
+        text = dbpostgres.rewind_statements().text
+        guard = text.index("IF NOT EXISTS (SELECT FROM pg_roles"
+                           " WHERE rolname = 'repl')")
+        self.assertLess(guard, text.index("GRANT"))
+
+
 class TestSysctlText(unittest.TestCase):
     def test_the_pair_binds_the_vip_on_both_nodes(self):
         text = dbpostgres.sysctl_text()
@@ -354,6 +439,27 @@ class TestRoleStatements(unittest.TestCase):
         found = dbpostgres.role_statements("x")
         self.assertTrue(found.text.startswith(
             "SET synchronous_commit = local;\n"), found.text)
+
+    def test_on_a_standby_the_role_block_does_nothing(self):
+        """The role arrives with the primary's copy, and a standby
+        refuses ALTER ROLE: the block returns before it on a standby,
+        or every apply on a standby fails once the client stops at an
+        error"""
+        text = dbpostgres.role_statements("x").text
+        guard = text.index("IF pg_is_in_recovery() THEN")
+        self.assertLess(guard, text.index("CREATE ROLE"))
+        self.assertIn("RETURN;", text[guard:text.index("CREATE ROLE")])
+
+
+class TestTheClient(unittest.TestCase):
+    def test_a_failed_statement_fails_the_client(self):
+        """Without ON_ERROR_STOP psql goes on after an error on standard
+        input and exits 0: a refused pg_promote() read as done"""
+        self.assertIn("--set=ON_ERROR_STOP=1", dbpostgres.CLIENT)
+
+    def test_the_answers_have_one_tab_between_the_columns(self):
+        self.assertIn("--no-align", dbpostgres.CLIENT)
+        self.assertIn("--field-separator=\t", dbpostgres.CLIENT)
 
 
 class TestQuestions(unittest.TestCase):

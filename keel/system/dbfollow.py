@@ -34,6 +34,17 @@ PROOF_WAIT for it, since a promote records its claim before it carries
 the VIP; keel.mesh.vipnode.carry_held writes the VIP's state again when
 it carries the address, so follow runs again then.
 
+Without etcd, nothing else ran keel vip check: keel-vip-check.timer is
+part of keel-vip.service, which needs etcd (keel#154: a returned old
+primary never learned the newer claim). So follow asks the other members
+first, the way keel vip check does, when this node's newest claim is
+its own and the VIP is not on wg0: a newer claim is taken, and the node
+follows the holder in the same run. When a peer answers and none knows
+a newer claim, the holder carries the VIP again. With etcd, the
+controller tells, and follow asks nobody. A PostgreSQL server of a claim
+that stays unproven is not started: follow would stop it again (a
+primary takes writes until the stop).
+
 The rejoin (0049, "The old primary coming back", MariaDB): the node's
 `@@gtid_binlog_state` against the holder's, read over the overlay as the
 replication account under TLS (keel.system.dbgtid). None errant: a dump
@@ -58,12 +69,13 @@ from datetime import datetime, timezone
 
 from keel.inspect.dbreading import field_lines
 from keel.inspect.tree import File
+from keel.mesh import vip as vipstate
 from keel.mesh import vipnet
 from keel.mesh.node import Node, NodeError
 from keel.monitor import alerting
 from keel.network import live, wireguard
 from keel.spec.constants import DEFAULT_PORTS
-from keel.system import dbgtid, dbpair, dbreadonly, dbseed, dbtls
+from keel.system import dbgtid, dbpair, dbpgrewind, dbreadonly, dbseed, dbtls
 from keel.system import dbmariadb as mariadb
 from keel.system.actions import PromoteReplica, SeedReplica
 from keel.system.database import DRAIN_TIMEOUT, PRIMARY, REPLICA
@@ -81,7 +93,21 @@ BACKUPS = "var/backups/keel/mariadb"
 DROPIN_MODE = 0o644
 GTID_QUESTION = mariadb.QUIET_CLIENT + (
     "--execute", "SELECT @@gtid_binlog_state, @@gtid_binlog_pos")
+LOG_BIN_QUESTION = mariadb.QUIET_CLIENT + ("--execute", "SELECT @@log_bin")
+WAITS_FOR_BINARY_LOG = (
+    "this server writes no binary log yet, so the copy of the holder waits:"
+    " keel spec apply writes the pair's configuration and then copies it"
+)
 HOLDER_GTID_SQL = "SELECT @@gtid_binlog_state, @@gtid_slave_pos"
+# what this replica applied: its binary log (log_slave_updates) and its
+# slave position, which a reseed sets from the dump (keel#192)
+APPLIED_QUESTION = mariadb.QUIET_CLIENT + (
+    "--execute", "SELECT @@gtid_binlog_state, @@gtid_slave_pos")
+UNFENCED_SAID = (
+    "the VIP fence is cleared: this replica applied everything the holder"
+    " logged, so it may take the VIP again when the lease of the holder"
+    " expires (keel#192)"
+)
 CHECK = "database-rejoin"
 # how long follow waits for this node's own claim to be proven, the VIP
 # on wg0, before it leaves the server read only: keel vip promote's own
@@ -91,6 +117,13 @@ PROOF_WAIT = 15.0
 PROOF_POLL = 0.2
 NO_PAIR = ("this node declares no appliance.vip: there is no VIP for the"
            " database to follow (keel spec apply converges a declared role)")
+NO_SERVER = ("this node declares no database.server: there is no server to"
+             " follow the VIP")
+UNDECLARED_MARKER = "var/lib/keel/database/filesync-undeclared"
+UNDECLARED_TITLE = "file replication is off for this pair"
+UNDECLARED_TEXT = (
+    "{host}: the database role changed, but the files are not replicated:"
+    " {problem}. Fix the spec and run `keel spec apply --system-only`.")
 DIVERGED_TITLE = "the old primary diverged and stays read only"
 DIVERGED_TEXT = (
     "{host}: this node was the primary of {vip} and came back holding"
@@ -109,6 +142,11 @@ class Followed:
         self.lines: list[str] = []
         self.out = out
         self.problem: str | None = None
+        # keel database follow, run by keel-database-follow.service, sets
+        # this: a node with no appliance.vip, the witness of a pair, has
+        # nothing to follow, and that is no failure (keel#211). A spec apply
+        # that declares a role leaves it off, and still refuses.
+        self.nothing_without_vip = False
 
     def say(self, line: str) -> None:
         self.lines.append(line)
@@ -121,39 +159,94 @@ class Followed:
 
 
 def followed(root: str, spec: str, confirmed: bool = False,
-             out: Callable[[str], None] | None = None) -> str | None:
-    """Carry out a FollowVip; None on success, else what went wrong"""
+             out: Callable[[str], None] | None = None,
+             alone: bool = False) -> str | None:
+    """Carry out a FollowVip; None on success, else what went wrong.
+    `alone` is keel database promote --old-primary-gone (PostgreSQL)"""
     found = Followed(out or (lambda line: print(
         f"database.server.role: {line}", file=sys.stderr)))
-    follow(root, spec, confirmed, found)
+    follow(root, spec, confirmed, found, alone=alone)
     return found.problem
 
 
 def follow(root: str, spec: str, confirmed: bool, found: Followed,
            runner=subprocess.run, output=live.output,
-           wait: float = PROOF_WAIT, sleep=time.sleep) -> None:
+           wait: float = PROOF_WAIT, sleep=time.sleep,
+           alone: bool = False) -> None:
     """One run at a time: keel-database-follow.service and keel database
     watch never interleave between the proof and SET read_only OFF"""
     with dbreadonly.replication_locked(root):
-        _follow(root, spec, confirmed, found, runner, output, wait, sleep)
+        _follow(root, spec, confirmed, found, runner, output, wait, sleep,
+                alone)
+
+
+class Flip:
+    """What the file folders need from a follow, whichever way it ends:
+    the document and the pair once they are known, and the role once the
+    database proved it. A follow that proved no role pauses the folders
+    (0050's amendment, point 5), in one place, at every exit"""
+
+    def __init__(self):
+        self.doc: dict | None = None
+        self.pair = None
+        self.role: str | None = None
 
 
 def _follow(root: str, spec: str, confirmed: bool, found: Followed,
-            runner, output, wait: float, sleep) -> None:
+            runner, output, wait: float, sleep,
+            alone: bool = False) -> None:
+    flip = Flip()
+    try:
+        _follow_proof(root, spec, confirmed, found, runner, output, wait,
+                      sleep, alone, flip)
+    finally:
+        if flip.doc is not None:
+            _filesync_flip(root, flip.doc, flip.pair, flip.role, found,
+                           runner, spec)
+
+
+def _follow_proof(root: str, spec: str, confirmed: bool, found: Followed,
+                  runner, output, wait: float, sleep, alone: bool,
+                  flip: Flip) -> None:
     try:
         doc = Node(root, spec).document()
     except (NodeError, ValueError) as e:
         found.fail(str(e))
         return
-    state = observe_database(root, doc, start=True, spec=spec)
-    if state is None or state.pair is None:
+    _warn_undeclared(root, doc, found)
+    flip.doc = doc
+    _learn(root, spec, doc, found, output)
+    proof = _early_proof(root, doc, output, wait, sleep)
+    state = observe_database(root, doc, start=proof is not False,
+                             spec=spec)
+    if state is None:
+        declared = (doc.get("appliance") or {}).get("vip")
+        if not declared and found.nothing_without_vip:
+            found.say(f"nothing to follow: {NO_PAIR}")
+            return
+        found.fail(NO_SERVER if declared else NO_PAIR)
+        return
+    if state.pair is None:
+        if found.nothing_without_vip:
+            found.say(f"nothing to follow: {NO_PAIR}")
+            return
         found.fail(NO_PAIR)
         return
     pair = state.pair
-    if state.down:
+    flip.pair = pair
+    if state.down and proof is False:
+        found.say(f"not started: this node's claim of {pair.vip} is not"
+                  " proven (the VIP is not on wg0), so its server stays"
+                  " stopped until the VIP decides")
+        return
+    # a copy that pg_rewind half copied may not start: only the confirmed
+    # reseed replaces it, and it needs no answer from the server
+    reseed_down = bool(state.down) and confirmed and \
+        state.engine == "postgresql" and dbpgrewind.broken(root)
+    if state.down and not reseed_down:
         found.fail(f"the server is not answering ({state.down})")
         return
-    if not state.reading.role.known:
+    if not reseed_down and not state.reading.role.known:
         found.fail(f"the server could not be asked what it is"
                    f" ({state.reading.role.problem})")
         return
@@ -164,6 +257,9 @@ def _follow(root: str, spec: str, confirmed: bool, found: Followed,
     server = declared_server(doc)
     role = dbpair.role_of(pair, str(server.get("role") or ""))
     record_role = True
+    if reseed_down:
+        from keel.system import dbpgfollow
+        state = dbpgfollow.for_reseed(root, state, server, spec)
     if state.engine == "postgresql":
         # the engine's rows (0054): read_only, the role drop-in, the
         # root lock and GTID errancy are MariaDB's; a standby's
@@ -171,7 +267,14 @@ def _follow(root: str, spec: str, confirmed: bool, found: Followed,
         from keel.system import dbpgfollow
         record_role = dbpgfollow.follow(
             root, state, server, role, confirmed, found, runner,
-            proven=lambda: _proven(root, doc, output, wait, sleep))
+            proven=lambda: proof if proof is not None else _proven(
+                root, doc, output, wait, sleep),
+            alone=alone)
+    elif role == PRIMARY and vipstate.unconfirmed(root, pair.vip):
+        # the holder's doubt (keel#195): read only and fenced until a
+        # renewal of its lease is confirmed; the role file is left
+        _in_doubt(root, state, pair.vip, found, runner)
+        return
     elif role == PRIMARY and not _proven(root, doc, output, wait, sleep):
         # a paired node (it has a pair record: the other member is known)
         # with no claim at all is not proven either: its state file may have
@@ -187,8 +290,99 @@ def _follow(root: str, spec: str, confirmed: bool, found: Followed,
                    f" declares {role or 'none'}")
         return
     if record_role and found.problem is None:
-        _write(root, dbpair.ROLE_FILE, dbpair.role_text(role, pair.vip),
-               0o644)
+        from keel.system import filesync
+        _write(root, dbpair.ROLE_FILE, dbpair.role_text(
+            role, pair.vip, files=filesync.replicates_files(root, doc)),
+            0o644)
+        flip.role = role
+    # else PostgreSQL unproven, or the engine's follow failed: flip.role
+    # stays None and the folders pause until a flip is proven, as the
+    # database does (0050's amendment, point 5)
+
+
+def _warn_undeclared(root: str, doc: dict, found: Followed) -> None:
+    """The spec does not write overlays.syncthing out (keel#224): the
+    pair has its files not replicated. The database role change is never
+    blocked for it; it is said at each follow, and alerted once while
+    the condition lasts"""
+    from keel.system import filesync
+    marker = os.path.join(root, UNDECLARED_MARKER)
+    problem = filesync.undeclared_problem(root, doc)
+    if problem is None:
+        if os.path.exists(marker):
+            os.unlink(marker)
+        return
+    found.say(f"WARNING: file replication is off for this pair: {problem}")
+    if os.path.exists(marker):
+        return
+    _write(root, UNDECLARED_MARKER, "", 0o600)
+    alerting.alert(root, lambda line: found.say(line), UNDECLARED_TITLE,
+                   UNDECLARED_TEXT.format(host=os.uname().nodename,
+                                          problem=problem), CHECK)
+
+
+def _filesync_flip(root: str, doc: dict, pair, role: str | None, found,
+                   runner, spec: str) -> None:
+    """The file folders' direction with the database role's, in the same
+    operation (0050's amendment, point 5); `role` None pauses them, of
+    a node in doubt or not proven. A failure is said, never raised: the
+    database flip this rides on is never undone"""
+    from keel.system import filesync
+    filesync.follow_flip(root, doc, pair, role, found, runner,
+                         here=_here(root, spec))
+
+
+def _here(root: str, spec: str):
+    """This node on the members' channel (keel.mesh.vipnode.Here)"""
+    from keel.mesh.vipnode import Here
+    return Here(Node(root, spec), lambda: datetime.now(timezone.utc),
+                lambda line: print(line, file=sys.stderr))
+
+
+def _learn(root: str, spec: str, doc: dict, found: Followed,
+           output) -> None:
+    """keel vip check for the pair's VIP, without etcd, when this node's
+    newest claim is its own and the VIP is not on wg0 (keel#154)
+
+    Each peer that does not answer costs the channel's timeout, so the
+    other members are asked only then: a holder that carries the VIP,
+    and a node that knows another node's claim, ask nobody."""
+    pair = dbpair.observe_pair(root, doc)
+    if pair is None or pair.role != PRIMARY:
+        return
+    overlay = ((doc.get("network") or {}).get("overlay") or {}).get(
+        "wireguard") or {}
+    if vipnet.carried(wireguard.interface(overlay), pair.vip,
+                      output) is not False:
+        return
+    from keel.mesh import vippromote
+    from keel.mesh.vipnode import VipError
+    try:
+        here = _here(root, spec)
+        if vippromote.with_etcd(here):
+            return
+        vippromote.checked(here, pair.vip, False, found.say)
+    except (VipError, NodeError, ValueError, OSError) as e:
+        found.say(f"the other members could not be asked for a newer"
+                  f" claim of {pair.vip}: {e}")
+
+
+def _early_proof(root: str, doc: dict, output, wait: float,
+                 sleep) -> bool | None:
+    """For a PostgreSQL primary, whether its claim is proven, asked
+    before the server is started; None for every other node
+
+    A PostgreSQL server cannot be read only while it runs, so the follow
+    of an unproven claim stops it. A start before that stop let it take
+    writes for the time between (keel#154: each watch run did it)."""
+    server = declared_server(doc)
+    if str(server.get("engine") or "") != "postgresql":
+        return None
+    pair = dbpair.observe_pair(root, doc)
+    if pair is None or \
+            dbpair.role_of(pair, str(server.get("role") or "")) != PRIMARY:
+        return None
+    return _proven(root, doc, output, wait, sleep)
 
 
 def _proven(root: str, doc: dict, output, wait: float, sleep) -> bool:
@@ -210,6 +404,20 @@ def _proven(root: str, doc: dict, output, wait: float, sleep) -> bool:
     return False
 
 
+def _in_doubt(root: str, state: DatabaseState, vip: str, found: Followed,
+              runner) -> None:
+    """The holder's lease has had no renewal the majority confirmed for
+    keel.mesh.vipetcd.DOUBT s: read only, every client connection ended
+    (the fence of keel#186), until one is confirmed. A write that waits
+    for a cut replica would otherwise return OK when the dump thread to
+    it ends, about 12.6 s after the cut, before the release (keel#195)"""
+    if not _read_only(root, state, found, runner):
+        return
+    found.say(f"read only: the lease of {vip} has had no renewal the"
+              " majority confirmed, so this node may be cut off; it takes"
+              " writes again once a renewal is confirmed (keel#195)")
+
+
 def _unproven(root: str, state: DatabaseState, found: Followed,
               runner) -> None:
     """This node's own claim, not proven: read only and locked, and
@@ -224,16 +432,24 @@ def _unproven(root: str, state: DatabaseState, found: Followed,
               " newer claim makes it a replica")
 
 
+FENCED = (
+    "; every client connection was ended, so no write that waited for"
+    " the replica is acknowledged after this (keel#186)"
+)
+
+
 def _read_only(root: str, state: DatabaseState, found: Followed,
                runner) -> bool:
     """read_only on, the drop-in, the root lock; whether all went"""
     if state.reading.read_only.value is not True:
+        # the fence (keel#186): read_only while the client connections
+        # are killed, so a write that waits for the ACK gets no OK
         statements = mariadb.set_read_only(True)
-        problem = _send(runner, statements.text)
+        problem = dbreadonly.fence(runner)
         if problem:
             found.fail(f"{statements.summary} failed: {problem}")
             return False
-        found.say(statements.summary)
+        found.say(statements.summary + FENCED)
     _write(root, mariadb.ROLE_DROPIN, mariadb.role_dropin_text(),
            DROPIN_MODE)
     problem = dbreadonly.lock(root, runner)
@@ -294,6 +510,7 @@ def _replica(root: str, doc: dict, server: dict, state: DatabaseState,
         if error is None:
             found.say(f"unchanged (a replica of [{host}]:{port})")
             _forget_divergence(root)
+            _unfence(root, host, port, state, found, runner)
             return
         if not confirmed:
             found.fail(f"this node replicates from [{host}]:{port} and its"
@@ -315,8 +532,49 @@ def _replica(root: str, doc: dict, server: dict, state: DatabaseState,
     _rejoin(root, host, port, state, held, confirmed, found, runner)
 
 
+def _unfence(root: str, host: str, port: int, state: DatabaseState,
+             found: Followed, runner) -> None:
+    """The VIP fence of this node's old loss cleared once it replicates
+    from the holder and applied everything the holder logged (keel#192,
+    the twin of keel#166 for PostgreSQL). The fence keeps an old primary
+    from claiming by itself (0049); a rejoined or reseeded replica holds
+    nothing the holder lacks. Caught up, per GTID domain: the newest
+    sequence the holder logged is at or below what this node applied,
+    in its binary log or its slave position (gtid_strict_mode keeps the
+    sequences of a domain in order on both nodes)"""
+    pair = state.pair
+    if pair is None or not pair.fenced:
+        return
+    theirs = _holder_gtid(root, host, port, state, runner)
+    mine = _ask(runner, APPLIED_QUESTION)
+    if theirs is None or mine is None:
+        return
+    try:
+        holder = dbgtid.newest(theirs.strip().partition("\t")[0])
+        applied = dbgtid.newest(",".join(
+            part for part in mine.strip().split("\t") if part))
+    except ValueError:
+        return
+    if any(applied.get(domain, 0) < sequence
+           for domain, sequence in holder.items()):
+        return
+    if vipstate.unfenced(root, pair.vip, pair.own_key):
+        found.say(UNFENCED_SAID)
+
+
 def _seed(root: str, host: str, port: int, state: DatabaseState,
           drop: tuple[str, ...], found: Followed, runner) -> None:
+    # The copy must carry the primary's binary log history, or the old
+    # primary comes back as diverged by the GTIDs of its first boot
+    # (keel#202), and a server can take that history only while it writes
+    # a binary log. The follow that the VIP's promotion starts on a new
+    # replica runs before keel spec apply has written the pair's
+    # configuration: the apply seeds it, after the restart that turns the
+    # log on.
+    logged = _ask(runner, LOG_BIN_QUESTION)
+    if logged is not None and logged.strip() == "0":
+        found.say(WAITS_FOR_BINARY_LOG)
+        return
     action = SeedReplica(host, port, state.credential.value, drop,
                          dbtls.options_lines(root), dbtls.master_options(root))
     problem = dbseed.seed(root, action, runner)
@@ -410,6 +668,19 @@ def diverged(root: str) -> dict | None:
     except (OSError, ValueError):
         return None
     return found if isinstance(found, dict) else None
+
+
+def described(record: dict) -> str:
+    """What a recorded divergence holds, either engine's record: the
+    errant GTIDs of MariaDB, or the two timelines of PostgreSQL (0054),
+    which has no transaction ids to list"""
+    errant = ", ".join(str(one) for one in record.get("errant") or [])
+    if errant:
+        return errant
+    if record.get("holder_timeline") is not None:
+        return (f"timeline {record.get('own_timeline') or 'unknown'}"
+                f" against the holder's {record.get('holder_timeline')}")
+    return "unknown"
 
 
 def _holder_gtid(root: str, host: str, port: int, state: DatabaseState,

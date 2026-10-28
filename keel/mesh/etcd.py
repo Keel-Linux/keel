@@ -549,6 +549,21 @@ def stray(etcd: Etcd) -> None:
              " mesh's cluster")
 
 
+OVERLAY_FIELD = "overlays.etcd"
+FAILED_MARKS = (": refused: ", ": failed: ")
+
+
+def failed_fields(lines: tuple[str, ...]) -> list[str]:
+    """The fields of the apply lines that say refused or failed, in order"""
+    found: list[str] = []
+    for line in lines:
+        field, sep, rest = line.partition(": ")
+        if sep and any(mark in line for mark in FAILED_MARKS) \
+                and field not in found:
+            found.append(field)
+    return found
+
+
 def start(etcd: Etcd) -> bool:
     """`overlays.etcd: enabled` in this node's own spec, applied, once it
     holds its certificate: apply renders etcd's configuration and starts
@@ -561,13 +576,25 @@ def start(etcd: Etcd) -> bool:
         doc = etcd.node.document()
         overlays = dict(doc.get("overlays") or {})
         overlays[OVERLAY] = ENABLED
+        # etcd requires wireguard (keel#188): the join wrote the overlay,
+        # and a first boot spec may still say disabled
+        overlays["wireguard"] = ENABLED
         change = etcd.node.change({**doc, "overlays": overlays})
     except (StateError, NodeError, OSError) as e:
         etcd.err(f"etcd: not started: {e}")
         return False
     if change.code != 0:
         change.shown(etcd.err)
-        etcd.err(f"etcd: apply exited {change.code}; etcd may not run")
+        # the apply has other steps than etcd's (a database replica that
+        # joins before its pair exists has one refused, keel#198): name
+        # the failed steps, and blame etcd only when one of them is its own
+        others = failed_fields(change.lines)
+        if others and not any(one.startswith(OVERLAY_FIELD)
+                              for one in others):
+            etcd.err(f"etcd: apply exited {change.code}; the failed step"
+                     f" is not etcd's: {', '.join(others)}")
+        else:
+            etcd.err(f"etcd: apply exited {change.code}; etcd may not run")
         return False
     etcdstate.write(etcd.root, etcdstate.STARTED, "started\n")
     return True

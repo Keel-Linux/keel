@@ -292,7 +292,7 @@ AFTER_PG = (
 
 
 def plan_promote(doc: dict, state: DatabaseState | None,
-                 spec: str | None = None) -> list[Step]:
+                 spec: str | None = None, alone: bool = False) -> list[Step]:
     """Make this replica a primary, which apply is never allowed to do
 
     Its own operation because it is its own decision. Replication in Keel
@@ -315,7 +315,7 @@ def plan_promote(doc: dict, state: DatabaseState | None,
         return [Step(PROMOTE_FIELD, (
             Note(f"the VIP {state.pair.vip} decides the role; the database"
                  " follows it"),
-            FollowVip(spec or "/etc/keel/instance.yaml"),
+            FollowVip(spec or "/etc/keel/instance.yaml", alone=alone),
             Note(AFTER_PAIR)))]
     refusal = _cannot_act(state, REPLICA)
     if refusal:
@@ -660,7 +660,7 @@ def _pg_configuration(server: dict, state: DatabaseState, role: str) -> Step:
     if names:
         notes.append(Note(NAME_ORIGIN.format(names=", ".join(names))))
     if state.enabled == "disabled":
-        notes.append(Run(("systemctl", "enable", dbpostgres.service()),
+        notes.append(Run(("systemctl", "enable", dbpostgres.boot_unit()),
                          ENABLE))
     if dropin_kept and hba_kept:
         return Step(FIELD, tuple(notes) + (
@@ -672,7 +672,7 @@ def _pg_configuration(server: dict, state: DatabaseState, role: str) -> Step:
             Note(PG_UNCHANGED.format(path=state.dropin.path, role=role)),
             WriteFile(state.hba.path, hba_wanted, DROPIN_MODE, None,
                       f"write {state.hba.path}: {role}"),
-            Run(("systemctl", "reload", dbpostgres.service()),
+            Run(("systemctl", "reload", dbpostgres.boot_unit()),
                 "reload the server, which is how hba rules take effect"),
         ))
     actions: list[Action] = list(notes) + [
@@ -680,7 +680,7 @@ def _pg_configuration(server: dict, state: DatabaseState, role: str) -> Step:
                   f"write {state.dropin.path}: {role}"),
         WriteFile(state.hba.path, hba_wanted, DROPIN_MODE, None,
                   f"write {state.hba.path}: {role}"),
-        Run(("systemctl", "restart", dbpostgres.service()),
+        Run(("systemctl", "restart", dbpostgres.boot_unit()),
             "restart the server, which is the only way these take effect"),
     ]
     return Step(FIELD, tuple(actions))

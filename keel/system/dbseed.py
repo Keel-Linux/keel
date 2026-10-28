@@ -29,8 +29,10 @@ The order is what makes it safe to run against a machine holding data:
    they changed, and read the replica's own;
 5. only then stop replication, forget the old primary and drop the
    local databases the operator confirmed;
-6. load the copy, align the accounts, set `gtid_slave_pos` to that
-   position and start.
+6. load the copy, align the accounts, start this node's binary log at
+   the history of the copy (`RESET MASTER`, then `gtid_binlog_state`: the
+   copy holds what the primary logged at its first boot too, keel#202),
+   set `gtid_slave_pos` to the position and start.
 
 A failure in steps 1 to 4 leaves the machine as it was. The password
 reaches the clients in an options file (`--defaults-extra-file`) of mode
@@ -49,6 +51,7 @@ from dataclasses import dataclass
 from contextlib import contextmanager
 
 from keel.system import dbaccounts
+from keel.system import dbgtid
 from keel.system import dbmariadb as mariadb
 
 SPOOL = "var/tmp"
@@ -94,6 +97,11 @@ DATADIR = "var/lib/mysql"
 # the dump leaves the server room to work while it does.
 DISK_MARGIN = 2
 
+LOG_BIN_SQL = "SELECT @@log_bin;\n"
+STATE_SQL = "SELECT @@gtid_binlog_state"
+HISTORY_UNREADABLE = (
+    "the binary log state of the primary cannot be read ({detail})"
+)
 KEPT = "nothing was dropped and replication was not started"
 UNREACHABLE = (
     "the primary [{host}]:{port} did not answer as '{user}' ({detail})"
@@ -214,6 +222,9 @@ def _seed(
     copy, problem = _alignment(before, runner)
     if problem:
         return f"{problem}; {KEPT}"
+    history, problem = _history(options, position, runner)
+    if problem:
+        return f"{problem}; {KEPT}"
 
     stop = mariadb.stop_replicating().text
     if action.drop:
@@ -234,10 +245,39 @@ def _seed(
     start = mariadb.replicate_from(
         action.host, action.port, action.password, position, action.tls
     )
-    problem = _run(runner, LOCAL_CLIENT, text=start.text)
+    problem = _run(runner, LOCAL_CLIENT, text=history + start.text)
     if problem:
         return START_FAILED.format(detail=problem, **where)
     return None
+
+
+def _history(options: str, position: str, runner) -> tuple[str, str]:
+    """The statements that start this node's binary log at the copy's
+    history, or why they cannot be made; empty when it keeps no log
+
+    The primary's binary log state is asked after the dump and used only
+    for the GTIDs under other server ids than the position's, which no
+    later write of the primary can change (keel.system.dbgtid.carried).
+    """
+    logged = {}
+    problem = _run(runner, LOCAL_CLIENT + READ, text=LOG_BIN_SQL,
+                   output=logged)
+    if problem:
+        return "", ACCOUNTS_UNREADABLE.format(where="this server",
+                                              detail=problem)
+    if logged["stdout"].strip() != "1":
+        return "", ""
+    remote = REMOTE + (f"--defaults-extra-file={options}", CONNECT_TIMEOUT)
+    answer = {}
+    problem = _run(runner, remote + READ + ("--execute", STATE_SQL),
+                   output=answer)
+    if problem:
+        return "", HISTORY_UNREADABLE.format(detail=problem)
+    try:
+        state = dbgtid.carried(answer["stdout"].strip(), position)
+    except ValueError as e:
+        return "", HISTORY_UNREADABLE.format(detail=str(e))
+    return mariadb.keep_history(state).text, ""
 
 
 def _privileges(options: str, host: str, port: int, runner) -> str:

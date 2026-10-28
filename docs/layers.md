@@ -146,18 +146,22 @@ checked, in name order:
 4. When `<tarball>.hash` exists: it carries a sha256 line, that digest
    equals the manifest, and the file name on the line is the tarball.
    The sha512 line is not recomputed. If the file is clear signed, the
-   signature is detected and reported, and nothing more.
+   signature is verified against the keyrings of the main and the images
+   roles (decision 0055, below), and the digest lines are read from the
+   text that the signature covers.
 
 Then the command says that packages are not checked, because that half
 of brief section 5.4 is not implemented yet, and exits accordingly.
 
 ### What it refuses to claim
 
-- A signature is never reported as verified. The project has no trusted
-  release key yet; until one is configured, a signed `.hash` file is
-  reported as `signature present, not verified (no trusted key
-  configured)` and an unsigned one as `hash file present, not signed`.
-  Either way the layer is `unverified` and the exit code says so.
+- A signed `.hash` file is `ok` only with a good signature by a key of
+  the keyrings, and the line names the key:
+  `lamp: ok: hash file signed by <fingerprint>`. A signature by no key of
+  the keyrings gives `signature present, not verified: <reason>`. An
+  unsigned file gives `hash file present, not signed`. Either way the
+  layer is `unverified` and the exit code says so. A signature that does
+  not match the file (`BADSIG`) is a `mismatch`.
 - Layers that all pass do not make `verify` exit 0. Packages are not
   checked, and the command never claims more than it checked, so it
   exits 9 after printing the layer results. When the packages check
@@ -188,6 +192,60 @@ does not get the images key. A verifier of the `.hash` signature or of the
 `MANIFEST` comes later, and it must accept the main key and the images
 key, each from its own keyring file.
 
+### The keyrings: main or images
+
+Decision 0055 moves the signatures of the image artifacts to the images
+key: the layer `.hash` files, the release `MANIFEST`, the template
+`.sha512` files and the Proxmox `aplinfo.dat`. Every verifier must trust
+the images key before anything is signed with it alone. Until then the
+publisher signs with main and images both, in 1 file.
+
+`keel verify` reads 2 keyrings, which keel-archive-keyring 0.3.0
+installs: `/usr/share/keyrings/keel-archive-keyring.gpg` (main) and
+`/usr/share/keyrings/keel-images-keyring.gpg` (images). The files stay
+separate. A signature by a key of either one is good. A missing file is
+skipped, so a machine with an older keyring package verifies with main
+alone. `--keyring FILE`, given 1 or more times, replaces the 2 files.
+`$KEEL_IMAGE_KEYRINGS`, paths split by `:`, does the same.
+
+gpgv exits 2 for a file with 2 signatures when one of the keys is in no
+keyring. So keel reads gpgv's status lines one signature at a time, as
+`keel-release` does for `aplinfo.dat`:
+
+- one `BADSIG` refuses the file;
+- a signature is good when it has `GOODSIG` and `VALIDSIG`, and no line
+  of a revoked or expired key;
+- the file is good when at least one signature is good.
+
+This is not the channel pointer. `keel pull --channel` verifies the
+pointer against the channel keyring, which holds the staging key
+(decision 0016, below). `keel pull` copies a `.hash` file into the cache,
+and `keel verify --layers-dir CACHE` verifies it.
+
+### A release MANIFEST
+
+`keel verify --release-manifest DIR/MANIFEST` verifies the signature in
+`DIR/MANIFEST.asc` with the same keyrings, and reads nothing in the
+MANIFEST before that. Then it checks the size and sha256 of each listed
+file that is present under `DIR`. A file that is not present is reported
+and not checked, so a MANIFEST that was fetched alone verifies too. A
+path that is absolute or goes up out of `DIR` is refused.
+
+```
+# keel verify --release-manifest 2026-10-11/MANIFEST \
+    --keyring /usr/share/keyrings/keel-images-keyring.gpg
+2026-10-11/MANIFEST: signed by E71DB9C3CA6AC18075395CC3ED3A709C4F3E2F3C
+images/debian-13-keel-core_19.0-9_amd64.tar.zst: not present, not checked
+pve/aplinfo.dat: ok
+```
+
+| Exit | When |
+| --- | --- |
+| 0 | The signature is good and every file that is present matches |
+| 6 `MANIFEST_INVALID` | The MANIFEST cannot be read, or a line or a path is refused |
+| 7 `LAYER_MISMATCH` | A listed file does not match its size or sha256 |
+| 8 `SIGNATURE_UNVERIFIED` | `MANIFEST.asc` is missing, or has no good signature by a key of the keyrings |
+
 ## Output
 
 One line per layer on stdout, `name: status[: detail; detail]`, then a
@@ -208,7 +266,7 @@ The statuses, worst first, and the exit code each one sets:
 | `invalid` | 6 `MANIFEST_INVALID` | The manifest cannot be read, or fails validation; every problem is listed |
 | `mismatch` | 7 `LAYER_MISMATCH` | The tarball, the parent chain or the `.hash` digest does not match the manifest |
 | `unverified` | 8 `SIGNATURE_UNVERIFIED` | Everything matches and a `.hash` file is present, but its signature was not (or cannot be) verified |
-| `ok` | 0 | Everything matches and there is no `.hash` file to speak for |
+| `ok` | 0 | Everything matches, and there is no `.hash` file or its signature is good |
 
 The exit code of the command is the worst status of any layer; when
 every layer is `ok`, it is 9 (`NOT_IMPLEMENTED`) for the packages half,

@@ -110,6 +110,9 @@ class TestThePair(Pair):
         b = dbpair.observe_pair(self.all[1].root, self.all[1].node.document())
         self.assertEqual((a.role, b.role), ("primary", "replica"))
         self.assertEqual(b.holder_address, address(0))
+        # keel#155, item 2: on the holder, the primary is this node, not
+        # the other member
+        self.assertEqual(a.holder_address, address(0))
         self.assertEqual(dbpair.primary_host(b, {}), address(0))
         # the planned move: A released, and its own claim is still the
         # newest it knows until B's comes: the other member is the primary
@@ -125,6 +128,9 @@ class TestThePair(Pair):
                          ["fd00::1", "::1", "127.0.0.1", VIP])
         self.assertEqual(dbpair.role_text("replica", VIP),
                          f"role=replica\nreplicates=database\nvip={VIP}\n")
+        self.assertEqual(dbpair.role_text("primary", VIP, files=True),
+                         f"role=primary\nreplicates=database,files"
+                         f"\nvip={VIP}\n")
 
 
 class TestTheSharedCredential(Pair):
@@ -495,7 +501,7 @@ class TestThePairPlan(unittest.TestCase):
                      "rpl_semi_sync_master_enabled = ON",
                      "rpl_semi_sync_slave_enabled = ON",
                      "rpl_semi_sync_master_wait_point = AFTER_SYNC",
-                     "rpl_semi_sync_master_timeout = 10000",
+                     "rpl_semi_sync_master_timeout = 30000",
                      "rpl_semi_sync_master_wait_no_slave = OFF",
                      "slave_net_timeout = 10",
                      f"bind-address = {address(0)},::1,{VIP}",

@@ -363,6 +363,11 @@ def take(here: Here, claim: Claim) -> bool:
             if problem:
                 here.err(f"vip {claim.vip}: cannot drop it: {problem}")
         after = replace(held, claim=claim, released=False)
+        if mine and claim.lease:
+            # this node's own claim, which etcd holds but the state
+            # missed: with the lease signed into it, so the controller
+            # renews it and carries the VIP (keel#178)
+            after = replace(after, lease=claim.lease)
         if lost:
             after = vipstate.fenced(after)
         vipstate.write(here.root, after)

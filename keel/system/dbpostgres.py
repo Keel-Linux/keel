@@ -85,17 +85,29 @@ HBA_BASE = (
 # keel's own statements go through the unix socket as the postgres OS
 # user, the way keel.inspect.dbengines' psql_argv does. runuser keeps
 # the environment, so the tests point PGHOST at a socket of the node's
-# own.
+# own. The answers are unaligned with a tab between the columns, the
+# way keel.inspect.dbengines' psql_argv asks them: keel's readers split
+# a row on the tab, and psql's aligned default pads the columns with
+# spaces and a bar, so no row split into its columns (found when the
+# pair's cases (b) to (e) were built: every promote read "not in
+# recovery"). ON_ERROR_STOP makes a failed statement on standard input
+# fail the client: without it psql goes on to the next statement and
+# exits 0, so a refused pg_promote() or role statement read as done.
 AS_POSTGRES = ("runuser", "-u", "postgres", "--")
-CLIENT = AS_POSTGRES + ("psql", "--no-psqlrc", "--tuples-only")
+CLIENT = AS_POSTGRES + ("psql", "--no-psqlrc", "--tuples-only",
+                        "--no-align", "--field-separator=\t",
+                        "--set=ON_ERROR_STOP=1")
 QUIET_CLIENT = CLIENT
 # Whether the server answers at all, asked before anything else
 # (keel.system.dbready): no credential, only the socket.
 PING = ("pg_isready",)
 SERVICE_DEFAULT = "postgresql"
-# the unit's name: postgresql, or what KEEL_POSTGRES_SERVICE says (the
-# tests run a cluster per node in one container, each its own unit)
+# what KEEL_POSTGRES_SERVICE says replaces both unit names (the tests
+# run a cluster per node in one container, each its own unit)
 SERVICE_ENV = "KEEL_POSTGRES_SERVICE"
+# the cluster the appliance ships, as postgresql-common names its unit
+# (postgresql@<version>-<cluster>.service)
+CLUSTER = "main"
 # The role both ends of a pair name, a constant for the reason
 # keel.system.dbmariadb gives (0013: every screen stays on its own
 # machine; a field each operator could set differently is how two
@@ -120,14 +132,50 @@ PRIMARY_LINES = (
 # The pair's lines, on both nodes whatever the role (0054): the
 # primary confirms a commit only after the standby of application_name
 # `keel` received and flushed it, with no timeout — while the replica
-# is away the primary stops committing; wal_log_hints is the revisit
-# path for pg_rewind, not used in this version.
+# is away the primary stops committing; wal_log_hints is what lets the
+# old primary rejoin with pg_rewind (0054, amendment of 2026-10-18).
 SLOT = "keel"
-PAIR_LINES = (
-    f"synchronous_standby_names = 'FIRST 1 ({SLOT})'\n"
-    "synchronous_commit = on\n"
+SYNC_LINE = f"synchronous_standby_names = 'FIRST 1 ({SLOT})'\n"
+LEGACY_PAIR_LINES = (
+    SYNC_LINE
+    + "synchronous_commit = on\n"
     "wal_log_hints = on\n"
 )
+# pg_rewind reads the old primary's WAL back to its last checkpoint
+# before the fork. The server recycles WAL older than its shutdown
+# checkpoint (the pair's slot keeps only what the standby lacks), so
+# the pair keeps the last 256 MB. A server takes wal_keep_size on a
+# reload; the older keel wrote LEGACY_PAIR_LINES, and an apply of the
+# new text reloads and never restarts (keel.system.dbpgpairplan).
+KEEP_LINE = "wal_keep_size = 256MB\n"
+PAIR_LINES = LEGACY_PAIR_LINES + KEEP_LINE
+# The one exception to the rule above (0054, amended 2026-10-14): when
+# the operator promotes with --old-primary-gone, the new primary has no
+# standby, and with the line above every commit would wait until the
+# old primary is reseeded. The operator's flag says the old primary is
+# gone, so the new primary commits alone: the line is replaced by this
+# one and the server reloads (no restart). keel writes the line back
+# once a standby streams again (keel.system.dbpgfollow.synchronous_again).
+ALONE_LINES = (
+    "# keel database promote --old-primary-gone: this primary commits\n"
+    "# alone until a standby streams again; keel then writes the pair's\n"
+    "# synchronous line back (0054)\n"
+    "synchronous_standby_names = ''\n"
+)
+
+
+def alone_text(text: str) -> str:
+    """The pair drop-in's text with the primary committing alone"""
+    return text.replace(SYNC_LINE, ALONE_LINES)
+
+
+def synchronous_text(text: str) -> str:
+    """The pair drop-in's text with the pair's synchronous line back"""
+    return text.replace(ALONE_LINES, SYNC_LINE)
+
+
+def commits_alone(text: str) -> bool:
+    return ALONE_LINES in text
 # The user name map of pg_ident.conf: a replication connection's
 # certificate CN is `<member> postgresql`, never the database user
 # `repl`, so the cert method needs this map, the twin of MariaDB's
@@ -158,8 +206,35 @@ class Statements:
     summary: str
 
 
-def service() -> str:
-    """The server's unit"""
+def service(root: str = "/") -> str:
+    """The cluster's own unit, which every stop and start names
+
+    On Debian, postgresql@17-main.service is PartOf= and Before= the
+    umbrella postgresql.service, a oneshot that stays active. A stop of
+    the umbrella returns before the cluster stops, and a start of the
+    active umbrella starts nothing (keel#153: a reseed moved the copy in
+    under the running server, and the old server's shutdown wrote its
+    pg_control into the copy). The umbrella is named only when no
+    cluster is found.
+    """
+    named = os.environ.get(SERVICE_ENV)
+    if named:
+        return named
+    try:
+        version = cluster_paths(root)[0]
+    except FileNotFoundError:
+        return SERVICE_DEFAULT
+    return f"postgresql@{version}-{CLUSTER}"
+
+
+def boot_unit() -> str:
+    """The unit that is enabled, restarted and reloaded: the umbrella
+
+    postgresql-common's generator makes the umbrella want each cluster,
+    so the umbrella is what starts at boot. A restart and a reload of
+    the umbrella reach the cluster (PartOf=, ReloadPropagatedFrom=), and
+    a restart returns after the cluster started again (Before=).
+    """
     return os.environ.get(SERVICE_ENV) or SERVICE_DEFAULT
 
 
@@ -302,12 +377,14 @@ def ident_text(cns: list[str]) -> str:
     return "".join(lines)
 
 
-def pair_dropin_text(ident: str = "") -> str:
+def pair_dropin_text(ident: str = "", legacy: bool = False) -> str:
     """The pair drop-in, on both nodes whatever the role: the
     synchronous commit policy and wal_log_hints (0054). `ident` is the
     ident file's path, set only by the pair (hba_text's verify lines
-    consult the map it holds), as a GUC beside the others"""
-    return (DROPIN_HEADER + PAIR_LINES
+    consult the map it holds), as a GUC beside the others. `legacy` is
+    the text that keel before 0.23.44 wrote, which an apply replaces
+    with a reload"""
+    return (DROPIN_HEADER + (LEGACY_PAIR_LINES if legacy else PAIR_LINES)
             + (f"ident_file = '{ident}'\n" if ident else ""))
 
 
@@ -330,6 +407,60 @@ def slot_statements() -> Statements:
         " pg_is_in_recovery() AND NOT EXISTS (SELECT 1 FROM"
         f" pg_replication_slots WHERE slot_name = '{SLOT}');\n",
         "ensure the replication slot of the pair exists on the primary",
+    )
+
+
+# The functions pg_rewind calls on its source server, which the manual
+# names for a role that is not a superuser (pg_rewind, "Description").
+# They read files of the holder as the server user, so the grant is
+# made in the postgres database only, and the replication role, which
+# copies the whole cluster already, is the one that holds it (0054,
+# amendment of 2026-10-18).
+REWIND_FUNCTIONS = (
+    "pg_catalog.pg_ls_dir(text, boolean, boolean)",
+    "pg_catalog.pg_stat_file(text, boolean)",
+    "pg_catalog.pg_read_binary_file(text)",
+    "pg_catalog.pg_read_binary_file(text, bigint, bigint, boolean)",
+)
+
+
+# written out in full, with no splice: nothing here is built from a value
+REWIND_SQL = (
+    "SET synchronous_commit = local;\n"
+    "DO $keel$\n"
+    "BEGIN\n"
+    "   IF pg_is_in_recovery() THEN\n"
+    "      RETURN;\n"
+    "   END IF;\n"
+    "   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'repl') THEN\n"
+    "      RETURN;\n"
+    "   END IF;\n"
+    "   GRANT EXECUTE ON FUNCTION pg_catalog.pg_ls_dir(text, boolean,"
+    " boolean) TO repl;\n"
+    "   GRANT EXECUTE ON FUNCTION pg_catalog.pg_stat_file(text, boolean)"
+    " TO repl;\n"
+    "   GRANT EXECUTE ON FUNCTION pg_catalog.pg_read_binary_file(text)"
+    " TO repl;\n"
+    "   GRANT EXECUTE ON FUNCTION pg_catalog.pg_read_binary_file(text,"
+    " bigint, bigint, boolean) TO repl;\n"
+    "END\n"
+    "$keel$;\n"
+)
+
+
+def rewind_statements() -> Statements:
+    """The grants that let the old primary rewind against this server
+
+    Idempotent, and a no-op on a standby, where a grant is refused, and
+    where the role is not made yet: the follow of a new primary runs
+    before the apply that makes the role (found by the pair's
+    network-namespace test). The SET comes first for the reason
+    slot_statements gives.
+    """
+    return Statements(
+        REWIND_SQL,
+        "ensure the replication role may read the files that pg_rewind"
+        " reads",
     )
 
 
@@ -387,13 +518,19 @@ def role_statements(password: str) -> Statements:
     .dbstate.credential), so a value from a secret file is safe here.
     The SET comes first for the reason slot_statements gives: the
     block commits WAL, and the pair's synchronous commit must not
-    wait for the standby this role lets connect.
+    wait for the standby this role lets connect. On a standby the
+    block does nothing: the role arrives with the primary's copy, and
+    a standby refuses ALTER ROLE in its read-only transaction (an
+    apply on a standby failed once the client stopped at an error).
     """
     quoted = literal(password)
     return Statements(
         "SET synchronous_commit = local;\n"
         "DO $keel$\n"
         "BEGIN\n"
+        "   IF pg_is_in_recovery() THEN\n"
+        "      RETURN;\n"
+        "   END IF;\n"
         "   IF NOT EXISTS (SELECT FROM pg_roles"
         f" WHERE rolname = '{REPLICATION_USER}') THEN\n"
         f"      CREATE ROLE {REPLICATION_USER}"

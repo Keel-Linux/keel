@@ -122,6 +122,23 @@ VALIDSIG_RE = re.compile(
     r"(?:\s+\S+){8}\s+(?P<primary>[0-9A-Fa-f]{40})\s*$"
 )
 
+# The status lines that split gpgv's report into one part per signature,
+# and the one that says a signature does not match the document. A file
+# that main and images both signed gives gpgv exit 2 when only one key is
+# in the keyrings, so the verdict for those files comes from these lines.
+NEWSIG_RE = re.compile(r"^\[GNUPG:\] NEWSIG\b")
+BADSIG_RE = re.compile(r"^\[GNUPG:\] BADSIG\b")
+
+# The keyrings that keel-archive-keyring 0.3.0 installs for the 2 roles
+# that sign the image artifacts (decision 0055): the layer `.hash` files
+# and the release MANIFEST. A signature by either key is good. The files
+# stay separate, and a missing file is skipped.
+IMAGE_KEYRINGS_DEFAULT = (
+    "/usr/share/keyrings/keel-archive-keyring.gpg",
+    "/usr/share/keyrings/keel-images-keyring.gpg",
+)
+IMAGE_KEYRINGS_ENV = "KEEL_IMAGE_KEYRINGS"
+
 READ_CHUNK = 1 << 20
 
 URL_SCHEMES = ("http", "https")

@@ -59,9 +59,13 @@ VIP_RANGE_BITS = 112
 PRIMARY, REPLICA = "primary", "replica"
 # the etcd lease of a holder's claim, and how long after the last
 # renewal the majority confirmed the holder still carries the VIP
-# (decision 0049, third round; keel.mesh.vipetcd says why)
+# (decision 0049, third round; keel.mesh.vipetcd says why). 15 s, not
+# 10: a cut of the site of etcd's leader took 7.4 s to a new leader, and
+# the kernel ended the address about 8 s after the last renewal, so the
+# holder dropped the VIP for 2 to 4 s (keel#167). The release stays 5 s
+# inside the TTL, which etcd counts from its receipt of the renewal
 TTL = 20
-RELEASE_AFTER = 10.0
+RELEASE_AFTER = 15.0
 
 
 @dataclass(frozen=True)
@@ -171,9 +175,14 @@ def ensure(root: str) -> None:
 @contextlib.contextmanager
 def locked(root: str) -> Iterator[None]:
     """One writer at a time: the members' channel, the controller, a
-    promote and the check all change these files"""
+    promote and the check all change these files. The lock file is
+    opened read only: flock needs no write access, and the close of a
+    file opened for writing is an event for keel-database-follow.path
+    (PathChanged=/var/lib/keel/vip), which then started keel database
+    follow at each turn of the controller (keel#164). The path stays
+    the same, so a helper of the older version shares the lock"""
     ensure(root)
-    fd = os.open(path(root, LOCK), os.O_RDWR | os.O_CREAT, FILE_MODE)
+    fd = os.open(path(root, LOCK), os.O_RDONLY | os.O_CREAT, FILE_MODE)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield
@@ -249,6 +258,100 @@ def held_all(root: str) -> list[Held]:
         if one is not None:
             found.append(one)
     return found
+
+
+# the statement that the old primary is gone (decision 0054, the
+# amendments of 2026-10-14 and 2026-10-15): keel database promote
+# --old-primary-gone writes GONE_MARK with no epoch, before it claims;
+# the controller writes GONE_NOTE with the epoch of its claim when it
+# claims because the lease of the newest claim expired (keel#165). The
+# note is in the VIP's state directory: keel-vip.service writes only
+# there and in /etc/wireguard (ProtectSystem=strict, keel#178). keel
+# database follow reads each once, for a PostgreSQL primary only
+# (keel.system.dbpgfollow), and a statement of another epoch is stale
+GONE_MARK = "var/lib/keel/database/old-primary-gone"
+GONE_NOTE = f"{DIR}/old-primary-gone"
+GONE_EPOCH = "epoch="
+
+
+def gone_text(expired: int, epoch: int) -> str:
+    return (f"keel vip control: the lease of epoch {expired} expired\n"
+            f"{GONE_EPOCH}{epoch}\n")
+
+
+def gone_epoch(text: str | None) -> int | None:
+    """The epoch of the claim that a statement is for; None for a
+    statement with no epoch (the operator's)"""
+    for line in (text or "").splitlines():
+        if line.startswith(GONE_EPOCH):
+            try:
+                return int(line[len(GONE_EPOCH):])
+            except ValueError:
+                return -1
+    return None
+
+
+# the holder's doubt (keel#195): keel vip control marks, through its
+# root half, that the lease of its own claim has had no renewal the
+# majority confirmed for keel.mesh.vipetcd.DOUBT s, and removes the mark
+# at the next confirmed renewal. keel database follow turns a MariaDB
+# holder read only while the mark is there: a write that waits for a
+# cut replica would return OK when the dump thread to it ends, before
+# the release. Only the root half writes it, in the state directory, as
+# keel-vip.service may (keel#178); follow only reads it (keel#164)
+UNCONFIRMED_SUFFIX = ".unconfirmed"
+
+
+def unconfirmed_file(vip: str) -> str:
+    return f"{DIR}/{address(vip)}{UNCONFIRMED_SUFFIX}"
+
+
+def unconfirmed(root: str, vip: str) -> bool:
+    """Whether the holder marked the lease of `vip` as in doubt"""
+    try:
+        return os.path.exists(path(root, unconfirmed_file(vip)))
+    except ValueError:
+        return False
+
+
+def mark_unconfirmed(root: str, vip: str, on: bool) -> bool:
+    """The mark set or removed; whether anything changed. ValueError for
+    what is not a VIP, so no path comes from the controller unchecked"""
+    target = path(root, unconfirmed_file(vip))
+    if on:
+        if os.path.exists(target):
+            return False
+        ensure(root)
+        write_private(root, unconfirmed_file(vip),
+                      "keel vip control: no renewal the majority confirmed\n")
+        return True
+    try:
+        os.remove(target)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def state_gone(root: str, expired: int, epoch: int) -> None:
+    """The controller's statement, written before the claim it is for"""
+    ensure(root)
+    write_private(root, GONE_NOTE, gone_text(expired, epoch))
+
+
+def unfenced(root: str, vip: str, own_key: str | None) -> bool:
+    """The fence of this node's old loss cleared, while another node's
+    claim is the newest it holds; whether it changed. keel database
+    follow clears it once this node's database is the holder's copy
+    and caught up (keel#166): the node then holds nothing the holder
+    lacks, and the next failover may be automatic again. A node fenced
+    on its own claim (cut off as the holder) stays fenced"""
+    with locked(root):
+        held = read(root, vip)
+        if held is None or not held.fenced or held.claim is None or \
+                own_key is None or same_key(held.claim.holder, own_key):
+            return False
+        write(root, replace(held, fenced=False))
+    return True
 
 
 def fenced(held: Held) -> Held:

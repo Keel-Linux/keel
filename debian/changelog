@@ -1,3 +1,644 @@
+keel (0.23.56) unstable; urgency=medium
+
+  * The manifest validator now lets a base layer declare application
+    sections (state, services, workers, web) that the top of the chain
+    inherits. A base such as web can set state.replicate paths, and
+    every child (lnmp, lnpp, ntfy) inherits them without repeating the
+    declaration. When more than one manifest declares application
+    sections, only the top may have them (the existing rule). This
+    unblocks the stable-1 build where keel-web 0.3.6 declares
+    state.replicate for decision 0068 and lnmp/lnpp/ntfy inherit it.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Sun, 26 Oct 2026 00:00:00 +0000
+
+keel (0.23.55) unstable; urgency=medium
+
+  * File replication now resumes by itself after a node restarts
+    (keel#228, decision 0050). The start-paused edit of the syncthing
+    configuration paused the peer device as well as the folders, and the
+    first proven follow unpaused only the folders. The edit now changes
+    the folder entries only, and the follow also sets the peer device
+    to not paused through the syncthing API.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Sun, 25 Oct 2026 20:00:00 +0000
+
+keel (0.23.54) unstable; urgency=medium
+
+  * A spec without overlays.syncthing no longer gives a pair with the
+    files not replicated and no sign of it (keel#224, decisions 0027 and
+    0041). When the appliance replicates files for the node's mode,
+    keel spec apply --system refuses the spec and says what to write.
+    keel database follow never refuses for it, because that would block
+    a failover in an outage: the role change runs, the output says that
+    file replication is off, and one alert goes to the monitor channels
+    while the condition lasts.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Sun, 25 Oct 2026 18:00:00 +0000
+
+keel (0.23.53) unstable; urgency=medium
+
+  * A flip to primary restores the application owner over the replicated
+    paths (keel#225). In the first batch of a replication a directory
+    could be made before its parent got the application owner, and it
+    and all below it stayed owned by the syncthing user, so the promoted
+    application could not write there. After the folders stop receiving,
+    keel gives the owner of the replicated root to each entry that the
+    syncthing user owns, before a role hook starts the application. A
+    link is not followed. An error is a follow problem and is retried.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Sun, 25 Oct 2026 12:00:00 +0000
+
+keel (0.23.52) unstable; urgency=medium
+
+  * File replication with syncthing, one operation with the database
+    role's (0050 and its amendment of 2026-10-20): the appliance
+    manifest's state.replicate is one syncthing folder per path in
+    cloud simple and cloud advanced, send-only on the proven primary,
+    receive-only on the replica with simple versioning, paused while a
+    node is in doubt or not proven. state.exclude is the folder's
+    .stignore. The device ID is made on the node once and asked of the
+    pair's other member at each flip in a new signed `device` vipmsg
+    kind, answered only to the pair member, with and without etcd.
+    Every flip first writes the folders' state (paused, primary or
+    replica) to /run/keel/filesync/state; apply renders from that file
+    only, and a missing file means paused, so apply never sends again
+    what a flip paused. The state does not survive a reboot, and the
+    unit's drop-in has an ExecStartPre that pauses every folder in
+    config.xml when there is no state, so a node that was primary at
+    shutdown sends nothing before a follow proves it. A follow that proves no role pauses the
+    folders at every exit. A running syncthing gets the type and the
+    pause through its REST API and keeps running; the configuration
+    file stays for a cold start. Where the API gives no answer,
+    syncthing restarts and keel reads the folders back. A flip or a
+    role hook that fails is a follow problem, and keel database watch
+    follows again until it is done. The API key goes in a request
+    header, never in a command line. Manifest paths are checked before
+    they reach the configuration, the unit's drop-in or a .stignore.
+    The GUI and the REST API listen on the loopback with an API key
+    root only; the unit's drop-in grants write access to the home and
+    the replicated paths only, each with the "-" prefix. After the flip
+    each executable of /usr/lib/keel/roles.d/ runs with the role, with
+    a minimal environment. keel diff shows the direction, the state and
+    the peer of each folder and the counts receiveOnlyChangedFiles and
+    needFiles; one alert goes out for each change of the set of counts
+    (needFiles after three runs in a row). A node that replicates no
+    path sees no change: no identity, no ask, no diff rows.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Thu, 22 Oct 2026 23:00:00 +0000
+
+keel (0.23.51) unstable; urgency=medium
+
+  * The ntfy channel of monitor.notify takes a list of servers as well as
+    one (decision 0063, section 3). The list holds 1 to 5 servers with
+    different URLs, and each server has its own token file. keel sends
+    each alert to every server, in keel notify and in the alerts of keel
+    itself. Each server has its own line, numbered from 1, and a server
+    that fails does not stop the others. The alert counts as taken when
+    at least one channel or server took it. A validation error names the
+    entry, for example monitor.notify.ntfy[1].url. One mapping works as
+    before, and keel inspect reads a list back as a list.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Thu, 22 Oct 2026 21:00:00 +0000
+
+keel (0.23.49) unstable; urgency=medium
+
+  * postgresql@.service stops with a fast shutdown and in at most 120 s
+    (keel#219): a drop-in, keel-stop.conf, sets KillSignal=SIGINT and
+    TimeoutStopSec=120s. A stop that arrives while the start still runs does
+    not run ExecStop, and systemd sent SIGTERM to the postmaster: a smart
+    shutdown, which waits for every client. An idle client (the poll of
+    Odoo's serve.py, a psql of keel) held it for TimeoutStopSec, 1 h in
+    Debian's unit; one bootstrap of a pair waited 15 minutes. Measured on a
+    real standby with one idle client: SIGTERM, the postmaster alive after
+    12 s; SIGINT, gone in under 5 s. SIGINT is a fast shutdown, safe for
+    committed data, and the final SIGKILL after 120 s is crash safe because
+    PostgreSQL recovers from WAL at the next start.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Mon, 19 Oct 2026 07:00:00 +0000
+
+keel (0.23.48) unstable; urgency=medium
+
+  * The stall that ends the drain of a PostgreSQL promotion is 2 s, not 5 s
+    (keel#215, keel 0.23.46). The cost of a cut that ends the stream inside
+    a record was 5 s: the first database write came 6.79 s after the VIP.
+    The condition did not change: the drain ends by stall only when neither
+    the replayed nor the received position moved for the whole stall, so a
+    replay that still moves never ends it. Replay is local, and only the
+    received position can stall because of the network; a received position
+    that stands still while replay moves keeps the wait. Tests with random
+    positions, run with 5 s and with 2 s, check that. If replay stands still
+    for 2 s with whole records pending (a query that blocks it on a
+    standby), pg_promote() still replays them before it ends recovery.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Mon, 19 Oct 2026 03:00:00 +0000
+
+keel (0.23.47) unstable; urgency=medium
+
+  * Before the rejoin of an old PostgreSQL primary, keel estimates what
+    pg_rewind would copy (the WAL files of the holder from the segment of
+    the fork, and the WAL that the old primary wrote after it) and what
+    a base backup would copy, and times the link. A rewind that takes 120 s
+    or less is taken. Otherwise keel picks the smaller one (handbook
+    decision 0054, second amendment of 2026-10-18). On a link of 250 ms and
+    1.5 % loss the rewind of a small cluster took 21 minutes and the
+    reseed 2.4 minutes.
+  * The reseed that keel picks needs no --destroy-local-database when the
+    holder holds the newest claim of the VIP and this node is fenced. With
+    no room to keep a copy of the old data, the flag is required.
+  * A reseed keeps the old data directory as <datadir>.keel-kept-<stamp>,
+    says the path and sends an alert. keel keeps the newest copy and
+    deletes the others after 7 days or when the free space is low.
+  * keel sends an alert when pg_rewind fails after it began to copy
+    (keel#214).
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Sun, 18 Oct 2026 23:30:00 +0000
+
+keel (0.23.46) unstable; urgency=medium
+
+  * The drain of a PostgreSQL promotion ends when neither the replayed
+    nor the received position has moved for 5 s (keel#215). A cut can end
+    the stream inside a record: the walreceiver flushes the bytes that
+    arrived, replay stands at the end of the last whole record, and the two
+    positions never meet. On a real pair the standby that took the VIP
+    waited 417 s (received 0/7EC8000, replayed 0/7EC7A58, one TCP segment
+    apart). pg_promote() replays every whole record that is in pg_wal
+    before it ends recovery, so only the unfinished record is left behind,
+    and no standby can apply that. A standby whose positions still move
+    keeps its wait, and a standby that receives nothing is still refused.
+    Follow says how many bytes it left behind.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Sun, 18 Oct 2026 23:45:00 +0000
+
+keel (0.23.45) unstable; urgency=medium
+
+  * An old PostgreSQL primary rejoins with pg_rewind against the new
+    primary when it can, and no longer needs a full reseed (handbook
+    decision 0054, amendment of 2026-10-18). Follow dumps the fenced
+    node, stops it, runs pg_rewind, and starts it as a standby on the
+    new timeline. If pg_rewind refuses before the copy begins, nothing
+    changes and the confirmed reseed stays the fallback. A rewind that
+    fails halfway marks the copy unusable until the reseed. There is no
+    dry run: it reads as much as the run does.
+  * The pair drop-in adds wal_keep_size = 256MB. An apply of the older
+    drop-in writes it and reloads the server; it never restarts it.
+  * The holder grants the replication role the four functions that
+    pg_rewind reads files through, in the postgres database only.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Sun, 18 Oct 2026 17:10:00 +0000
+
+keel (0.23.44) unstable; urgency=medium
+
+  * keel database follow, which keel-database-follow.service runs, says
+    "nothing to follow" and exits 0 on a node with no appliance.vip, the
+    witness of a pair. It exited 16, and the unit stayed failed
+    (keel#211). keel spec apply that declares a role on such a node still
+    refuses.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Sun, 18 Oct 2026 17:00:00 +0000
+
+keel (0.23.43) unstable; urgency=medium
+
+  * keel mesh join names the failed step when the apply fails on a step
+    other than etcd's, and no longer says that etcd may not run
+    (keel#198). The 0.23.42 fix asked whether etcd was running, which
+    it is not yet at that point of a join.
+  * The follow of a new MariaDB replica waits until the server writes a
+    binary log, and keel spec apply then copies the holder (keel#202).
+    The VIP's promotion started the copy before the apply wrote the
+    pair's configuration. The server wrote no binary log then, so the
+    history of the primary's first boot did not reach it. The old
+    primary came back as diverged. Now it rejoins by GTID.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 16 Oct 2026 21:20:00 +0000
+
+keel (0.23.42) unstable; urgency=medium
+
+  * A seeded MariaDB replica starts its binary log at the history of the
+    copy (keel#202). The first primary wrote GTIDs at its first boot
+    under another server id; the replica never had them, so the primary
+    came back from every cut as diverged. After the load the replica
+    runs RESET MASTER and sets gtid_binlog_state.
+  * keel mesh join no longer says that etcd may not run when etcd runs
+    and another step of the apply failed (keel#198).
+  * keel diff does not count a PostgreSQL sender with no client address
+    as a replica (keel#201).
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 16 Oct 2026 20:00:00 +0000
+
+keel (0.23.41) unstable; urgency=medium
+
+  * Every overlay peer gets PersistentKeepalive = 25 (keel#140). The
+    keepalive keeps the NAT and firewall state open between sites, so
+    a node behind a filter that drops unsolicited inbound UDP stays
+    reachable when the mesh is idle. The release test of LNMP 19.0-3
+    found it: the root holder could not send the cluster to the member
+    on BR2 after 290 s with no traffic. keel spec apply sets it live;
+    keel diff takes 25 as the default of a peer that gives none.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 16 Oct 2026 16:28:02 +0000
+
+keel (0.23.40) unstable; urgency=medium
+
+  * keel mesh etcd form sends the cluster again to a member of the
+    first cluster that never ran (keel#199). etcd lists such a member
+    with its name and no client URL; keel took the name as proof that
+    it ran, so the member stayed out, and etcd ran with 2 of 3 voters.
+  * The invite's listener and the members' channel free the slot of a
+    connection that failed before they close it (keel#177). A client
+    that asked again at once found its slot taken.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 16 Oct 2026 16:36:14 +0000
+
+keel (0.23.39) unstable; urgency=medium
+
+  * A MariaDB holder whose lease is in doubt acknowledges no write
+    (keel#195). keel vip control marks the doubt once the last renewal
+    that the majority confirmed is 6 s old, and keel database follow
+    fences a MariaDB holder until a renewal is confirmed again. Before,
+    on a cut holder, a write that waited for the replica returned OK
+    when the dump thread to the cut replica ended, before the release.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 16 Oct 2026 12:06:06 +0000
+
+keel (0.23.38) unstable; urgency=medium
+
+  * The VIP fence of a MariaDB replica that rejoined or was reseeded is
+    cleared once it applied everything the holder logged (keel#192), as
+    keel#166 does for PostgreSQL. Before, a MariaDB pair failed over by
+    itself once only, and a second loss of the holder left both nodes
+    fenced and read only.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 16 Oct 2026 10:51:34 +0000
+
+keel (0.23.37) unstable; urgency=medium
+
+  * etcd that keel spec apply starts for the cluster of cluster.json is
+    recorded as started by keel (keel#188), and the start of etcd at a
+    join enables the wireguard overlay that etcd requires. Before, a
+    first boot spec with wireguard disabled left etcd not started at
+    the third join, and after the operator enabled both, every apply
+    refused the member as one keel never started.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 16 Oct 2026 10:24:15 +0000
+
+keel (0.23.36) unstable; urgency=medium
+
+  * A cut MariaDB primary no longer acknowledges writes that the new
+    primary never gets (keel#186). The fence of a node that loses the
+    VIP sets read_only while it kills every client connection, so a
+    write that waits for the replica's ACK gets an error and no OK.
+    rpl_semi_sync_master_timeout is 30 s (was 10 s), longer than the
+    VIP's release of 15 s, so the fence comes first.
+  * The fence also ends the dump threads of its replicas (keel#193). A
+    dump thread to a cut replica stayed, and when that replica connected
+    again with the same server id, MariaDB 11.8.6 took no connection
+    after it.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 16 Oct 2026 10:47:27 +0000
+
+keel (0.23.35) unstable; urgency=medium
+
+  * The VIP overlay waits for etcd's cluster, as etcd does (keel#106).
+    Before cluster.json exists, keel diff compares only whether
+    keel-vip.service is enabled and says why it does not run, and
+    keel spec apply enables it and does not start it. Before, a cloud
+    simple pair always reported overlays.vip as drift, and each apply
+    printed a start that did nothing.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 16 Oct 2026 10:12:04 +0000
+
+keel (0.23.34) unstable; urgency=medium
+
+  * The other member of a pair gets Anubis's signing key from the
+    primary (Keel-Linux/common#56, decision 0041). A node whose spec
+    makes it a database replica, with Anubis enabled and no key, asks
+    the other member over the members' channel, as for the replication
+    credential, and writes the key with mode 0600 before Anubis starts.
+    Before, nothing copied the key, and anubis@keel did not start on
+    the replica. Before the pair exists, the apply starts nothing for
+    Anubis and says why.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 16 Oct 2026 10:04:07 +0000
+
+keel (0.23.33) unstable; urgency=medium
+
+  * The reseed of a PostgreSQL standby works when the role repl has no
+    CONNECT on a database (keel#183). The probe of the primary measures
+    only the databases that repl may connect to, and a refusal for lack
+    of space says how many it left out. Before, an application database
+    with REVOKE CONNECT FROM PUBLIC stopped every reseed.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 16 Oct 2026 09:52:55 +0000
+
+keel (0.23.32) unstable; urgency=medium
+
+  * The invite's listener and the members' channel free the slot of a
+    source before the answer leaves (keel#177). Before, the thread
+    freed it only after it closed the connection. A source that asked
+    again at once, on a loaded machine, found its slot taken, and the
+    listener closed the new connection unread.
+  * CI: the 5 netns tests of the mesh run in the job "mesh / trixie"
+    alone. The unit test job skips them unless KEEL_MESH_NETNS is set.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Fri, 16 Oct 2026 01:30:00 +0000
+
+keel (0.23.31) unstable; urgency=medium
+
+  * etcd had no leader for 111 s on real nodes after a cut (keel#167).
+    A peer connection that lost its segments in a cut waited for its
+    next retransmission, up to 120 s, and etcd went on writing raft's
+    messages to it. keel now writes /etc/sysctl.d/90-keel-etcd.conf
+    with net.ipv4.tcp_retries2 = 5 and sets it live. The kernel ends
+    such a connection after about 14 s, and etcd dials again.
+  * The etcd netns test fails when an etcd peer connection reaches a
+    TCP backoff above 5, when a follower rejoins 20 s or more after
+    the heal, and when a leader cut has no new leader within 30 s.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Thu, 15 Oct 2026 23:45:00 +0000
+
+keel (0.23.30) unstable; urgency=medium
+
+  * keel database status shows a PostgreSQL server (keel#155, item 1).
+    It said "no MariaDB server installed here" on a PostgreSQL pair.
+    Now it shows the role of the server, the timeline, the synchronous
+    commit and synchronous_standby_names, each standby that streams from
+    the node (address, state, sync state, replay lag), each replication
+    slot (active or not, restart_lsn, wal_status), what a standby
+    receives and its replay lag, the certificate and a divergence. One
+    psql question as the postgres account, read only.
+  * On the VIP holder, keel database status and keel spec apply named
+    the other member as the primary's address (keel#155, item 2). The
+    holder is now its own primary. A node that released, or was fenced,
+    while its own claim is the newest it knows still names the other
+    member.
+  * A test finds a debian/changelog entry with no trailer line (keel#155,
+    item 3). dpkg-parsechangelog only warns about one, and the package
+    builds. The entries of 0.23.18 and 0.23.17 had none until 0.23.21.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Thu, 15 Oct 2026 23:30:00 +0000
+
+keel (0.23.29) unstable; urgency=medium
+
+  * With etcd, the automatic failover of a PostgreSQL pair left the VIP
+    on no node on real nodes (keel#178). The VIP controller wrote the
+    statement of keel#165 under /var/lib/keel/database, which the
+    sandbox of keel-vip.service makes read only. The write failed
+    before the claim was recorded, and the controller carries only a
+    claim with its lease. The statement now lives in
+    /var/lib/keel/vip/old-primary-gone. A statement that cannot be
+    written is said, and the claim stands all the same.
+  * A node that takes its own claim from etcd keeps the lease that is
+    signed into it, so the controller renews it and carries the VIP.
+  * The netns tests run the VIP helper with the write paths of
+    keel-vip.service.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Thu, 15 Oct 2026 19:05:00 +0000
+
+keel (0.23.28) unstable; urgency=medium
+
+  * keel verify checks the signature of a layer .hash file against the
+    keyrings of the main and the images roles, which
+    keel-archive-keyring 0.3.0 installs (decision 0055). A signature by
+    either key is good. A file that main and images both signed
+    verifies with only one of the 2 keyrings, because keel reads the
+    status lines of gpgv one signature at a time and not its exit code.
+    A good signature gives "ok: hash file signed by <fingerprint>", and
+    the digests come from the signed text. A BADSIG is a mismatch.
+  * keel verify --release-manifest FILE verifies a release MANIFEST
+    against FILE.asc with the same keyrings, then the size and sha256 of
+    each listed file that is present.
+  * keel verify --keyring FILE, which can repeat, and
+    $KEEL_IMAGE_KEYRINGS replace the 2 default keyrings.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Thu, 15 Oct 2026 17:00:00 +0000
+
+keel (0.23.27) unstable; urgency=medium
+
+  * A returned old PostgreSQL primary no longer takes writes for 3 to
+    4 s after a boot or a heal (keel#156). keel installs a drop-in for
+    postgresql@.service that runs keel database guard as root before
+    each start. On a VIP pair, the server starts as a primary only when
+    this node's claim is proven, with the VIP on wg0. When the newest
+    claim is the other member's, the guard writes standby.signal first,
+    so the server starts as a standby that follows nobody. When this
+    node's own claim is not proven (at boot), the start is refused, and
+    keel database follow starts the server once the VIP is proven. On a
+    node with no pair the guard does nothing.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Thu, 15 Oct 2026 15:00:00 +0000
+
+keel (0.23.26) unstable; urgency=medium
+
+  * The holder of a VIP with etcd now carries it for 15 s after its last
+    renewal that the majority confirmed, not 10 s (keel#167). A cut of
+    the site of etcd's leader took 7.4 s to a new leader on real nodes,
+    and the kernel ended the address about 8 s after the last renewal.
+    So the holder dropped the VIP for 2 to 4 s, and its database
+    stopped. The release stays 5 s inside the lease's TTL of 20 s.
+  * keel database watch now runs keel database follow on the holder
+    when its server does not answer (keel#168). The server was stopped
+    while the VIP was off wg0, and it stayed stopped after the VIP came
+    back, until keel database follow ran by hand. Follow starts it once
+    the VIP is on wg0.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Thu, 15 Oct 2026 14:30:00 +0000
+
+keel (0.23.25) unstable; urgency=medium
+
+  * With etcd, keel-database-follow.path started keel database follow
+    every 1 to 2 s, and on the replica it failed with
+    unit-start-limit-hit in a few seconds (keel#164). The VIP
+    controller takes the lock of the VIP's state at each turn, and the
+    lock file was opened for writing inside /var/lib/keel/vip. The
+    close of such a file is an event for PathChanged=, even when
+    nothing was written. The lock file is now opened read only. Its
+    path does not change, so a helper of the older version shares it
+    during the upgrade.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Thu, 15 Oct 2026 14:00:00 +0000
+
+keel (0.23.24) unstable; urgency=medium
+
+  * After the confirmed reseed, a PostgreSQL standby can take the VIP
+    again by itself, so an automatic failover repeats (keel#166). The
+    node stayed fenced in its VIP state after it lost the VIP, and a
+    fenced node never claims. keel database follow now clears that
+    fence when the node streams from the holder and received all that
+    the holder flushed. keel database watch runs follow on a fenced
+    standby that streams, so a node that is fenced now is cleared at
+    its next watch run. A node fenced on its own claim stays fenced.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Thu, 15 Oct 2026 13:30:00 +0000
+
+keel (0.23.23) unstable; urgency=medium
+
+  * keel database promote --old-primary-gone made the database writable
+    only 12 s after the VIP moved, on a real pair with etcd (keel#169).
+    The promote of the VIP joins its late asks of the gone old primary
+    before it returns, and a dead node costs the 10 s connect timeout of
+    the members' channel. The database step now runs once the VIP is
+    carried, before that join. The promote still waits for the asks
+    before it exits.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Thu, 15 Oct 2026 13:00:00 +0000
+
+keel (0.23.22) unstable; urgency=medium
+
+  * With etcd, an automatic failover of a PostgreSQL pair now gives a
+    writable primary with no operator (keel#165). The maintainer decided
+    it on 2026-10-15 (handbook 0054, amendment of 2026-10-15). When the
+    VIP controller claims because the lease of the old primary's claim
+    expired at its due time, it states that the old primary is gone,
+    the same as keel database promote --old-primary-gone. The new
+    primary then commits alone until a standby streams again. A revoked
+    lease, or a lease that the controller never saw alive, states
+    nothing, and the commits wait as before.
+  * The statement carries the epoch of its claim. keel database follow
+    removes a statement of another epoch unused.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Thu, 15 Oct 2026 12:30:00 +0000
+
+keel (0.23.21) unstable; urgency=medium
+
+  * In a VIP pair without etcd, nothing ran keel vip check (keel#154).
+    keel-vip-check.timer is part of keel-vip.service, which needs etcd.
+    So a returned old primary never learned the newer claim, and each
+    watch run started its PostgreSQL server for 17 s. keel database
+    follow now does the check of the pair's VIP: at boot, at each VIP
+    change and at each watch run. It asks the other members only when
+    its newest claim is its own, the VIP is not on wg0, and there is no
+    etcd. A newer claim is taken, and the server follows the holder in
+    the same run. If a peer answers and none knows a newer claim, the
+    holder carries the VIP again, as keel vip check does.
+  * keel database follow no longer starts the PostgreSQL server of a
+    claim that is not proven. It stopped that server again, and the
+    server took writes in the time between.
+  * keel-database-follow.service runs after wg-quick@wg0.service, so
+    the follow at boot can ask the other members over wg0.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Thu, 15 Oct 2026 11:00:00 +0000
+
+keel (0.23.20) unstable; urgency=medium
+
+  * A new PostgreSQL pair could stop with both servers fenced, and no
+    keel command made the VIP's holder writable (keel#152). The image
+    has a user database, so the watch fenced each new node while the
+    other member held the VIP. The holder then refused each promote:
+    a fenced standby receives nothing, so the drain cannot finish.
+    keel database follow now promotes a fenced holder with no drain
+    when this loses nothing of the pair: when the node never had a
+    role in the pair, or when its divergence record shows 2 system
+    identifiers (2 clusters that never shared a history). After
+    keel database promote --old-primary-gone, the operator says that
+    the other member is gone, and the fenced holder takes writes too.
+    Else the holder stays fenced, and the refusal says what to do.
+  * The divergence record of a PostgreSQL node now holds the system
+    identifiers of the node and of the holder.
+  * keel database follow on a node that declares appliance.vip and no
+    database.server said "this node declares no appliance.vip". It now
+    says that the node declares no database.server.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Thu, 15 Oct 2026 10:00:00 +0000
+
+keel (0.23.19) unstable; urgency=medium
+
+  * The reseed of a PostgreSQL standby stopped the umbrella unit
+    postgresql. On Debian, postgresql@17-main is PartOf= and Before=
+    that unit, so the stop returned before the cluster stopped. keel
+    then moved the copy in, and the old server wrote its pg_control
+    into the copy: the copy did not start (keel#153, 3 times in 3 tries
+    on real nodes). Each stop and start of keel now names the cluster's
+    own unit, postgresql@<version>-main. Enable, restart and reload
+    still name the umbrella, which reaches the cluster.
+  * The reseed now waits until the postmaster of the old data
+    directory is gone before it moves the directory. If the
+    postmaster runs 60 s after the stop, the reseed moves nothing and
+    removes its copy.
+  * The copy gets standby.signal before it moves into place, so a
+    server that starts at any time after the move is a standby. A
+    refusal after the copy removes the copy, and a copy that an
+    earlier run left behind is removed first: pg_basebackup refuses a
+    target that is not empty.
+  * keel starts a PostgreSQL server under the lock that the seed and
+    the follow hold. A start by spec apply ran during the reseed of
+    the watch's follow. The lock is reentrant in one thread, because
+    the follow starts the server while it holds the lock.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Thu, 15 Oct 2026 09:00:00 +0000
+
+keel (0.23.18) unstable; urgency=medium
+
+  * keel's PostgreSQL client asked psql for its aligned output. psql
+    pads the columns with spaces and a bar, and keel's readers split a
+    row on the tab, so no answer split into its columns: every keel
+    database promote read "not in recovery", the seed's probe could not
+    see a standby, and the holder's timeline was never read (found
+    when the pair's network-namespace test's cases (b) to (e) were
+    built; case (a) never asked these questions). The client
+    now asks for unaligned output with a tab between the columns, the
+    way inspect asks. It also stops at the first failed statement on
+    its standard input: psql went on and exited 0, so a refused
+    pg_promote() or role statement read as done. The replication
+    role's statement does nothing on a standby now, where the role
+    arrives with the copy and ALTER ROLE is refused.
+  * A promoted standby had no replication slot: pg_basebackup copies
+    no slot, and nothing made the pair's slot on the new primary. The
+    reseed of the old primary names that slot, so it never streamed.
+    keel database follow now makes the slot on the holder (the
+    statement does nothing when the slot is there, and commits without
+    the standby).
+  * An old PostgreSQL primary that came back holding data stayed a
+    writable primary: keel recorded its divergence and said "read
+    only", and the next follow started the server that the unproven
+    claim had stopped. keel database follow now fences it first: the
+    server becomes a standby that follows nobody (standby.signal, no
+    follow drop-in, a restart), so it refuses every write until the
+    confirmed reseed. Its timeline is read in recovery too, as a
+    number like the holder's, and the dump is taken once per
+    divergence: the record names it, and a fenced node takes no write
+    since. keel diff and keel database status show the two timelines
+    of a PostgreSQL divergence, where they said "unknown".
+  * keel database watch alerts while a PostgreSQL primary's commits
+    wait for the standby, as 0054 asks: when no standby streams from
+    it, or when a commit waited more than 10 s. It alerts once, and
+    once more when the standby acknowledges again. Before, the watch
+    said nothing for PostgreSQL, and a cut standby stopped every write
+    without a word.
+  * The seed of a PostgreSQL standby copies less: the primary
+    compresses the base backup (zstd), and pg_basebackup unpacks it.
+    A fresh cluster is about 40 MB raw and under 3 MB compressed, and
+    the design case's link carries about 50 kB/s on one connection. In
+    the pair's network-namespace test, B's first seed took about 12
+    minutes.
+  * The seed's copy took the standby's application name, keel. The
+    WAL stream of pg_basebackup reports what it flushed, so the primary
+    took the half-made copy for the pair's synchronous standby: during
+    the reseed of an old primary, the new primary acknowledged commits
+    that only the copy held (found by the pair's network-namespace
+    test, case (d)). keel's own replication connections are named
+    keel-seed now; only the standby is keel.
+  * keel database promote --old-primary-gone on a PostgreSQL standby
+    lets the new primary commit alone: the one exception to 0054's
+    no-fallback rule. The operator's flag says the old primary is
+    gone, so a commit has no second node to wait for, and without the
+    exception every write waited until the old primary was reseeded
+    (216 s in the pair's network-namespace test, case (c)). keel
+    empties synchronous_standby_names in the pair drop-in and reloads
+    the server (no restart); the watch alerts at each run while the
+    primary commits alone; and once a standby streams again, keel
+    writes FIRST 1 (keel) back. Without the flag nothing changes: a
+    planned promote and a cut replica keep the synchronous wait.
+  * The PostgreSQL pair's end to end test runs cases (b) to (e) of
+    docs/replication-postgresql.md under the design case (0050), in
+    the CI job "postgres / trixie": the replica cut off (a commit
+    waits, the watch alerts, the commit finishes after the heal), the
+    primary cut off and killed while the application writes (the
+    operator's promote, no acknowledged row lost, the downtime), the
+    old primary back (it acknowledges no write, it is fenced, dumped,
+    recorded and alerted once) and its confirmed reseed.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Wed, 14 Oct 2026 20:00:00 +0000
+
 keel (0.23.17) unstable; urgency=medium
 
   * keel's PostgreSQL client carried MariaDB's --batch, which psql has
@@ -96,6 +737,8 @@ keel (0.23.17) unstable; urgency=medium
     recovery, the other member's database leaf taken and its etcd leaf
     refused, keel diff clean on both. The failover, the rejoin and the
     diverged old primary are the follow-up pull request's.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Wed, 14 Oct 2026 12:00:00 +0000
 
 keel (0.23.16) unstable; urgency=medium
 

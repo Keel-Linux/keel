@@ -27,6 +27,9 @@ REPLICA_SPEC = {"engine": "mariadb", "role": "replica",
                 "listen": [address(1), "::1"]}
 
 
+REAL_RUN = subprocess.run
+
+
 class Server:
     """subprocess.run as one MariaDB server answers it: a status, GTID
     positions, what it holds, and what it was sent"""
@@ -37,7 +40,9 @@ class Server:
                  holder_state: str = "0-1-10,0-2-20", holder_pos: str = "",
                  sql_running: str = "Yes", holder_down: bool = False,
                  bypass: str = "'root'@'localhost'\n'admin'@'localhost'\n",
-                 dump_fails: bool = False):
+                 dump_fails: bool = False, slave_pos: str = "",
+                 log_bin: str = "1"):
+        self.log_bin = log_bin
         self.replicating_from = replicating_from
         self.read_only = read_only
         self.schemas = schemas
@@ -47,6 +52,7 @@ class Server:
         self.holder_down = holder_down
         self.bypass = bypass
         self.dump_fails = dump_fails
+        self.slave_pos = slave_pos
         self.sent: list[str] = []
         self.argv: list[list[str]] = []
 
@@ -66,6 +72,11 @@ class Server:
 
     def __call__(self, argv, **kwargs):
         argv = list(argv)
+        if argv[:1] == ["openssl"]:
+            # the members' channel signs with openssl: follow asks the
+            # other members (keel#154), and this fake is subprocess.run
+            # for the whole process
+            return REAL_RUN(argv, **kwargs)
         self.argv.append(argv)
         stdin = kwargs.get("input")
         if isinstance(stdin, bytes):
@@ -99,6 +110,10 @@ class Server:
                 out = "keel:account\n"
         elif "SHOW REPLICA STATUS" in asked:
             out = self.status()
+        elif asked == "SELECT @@log_bin":
+            out = f"{self.log_bin}\n"
+        elif "gtid_binlog_state, @@gtid_slave_pos" in asked:
+            out = f"{self.binlog_state}\t{self.slave_pos}\n"
         elif "gtid_binlog_state, @@gtid_binlog_pos" in asked:
             out = f"{self.binlog_state}\t{self.binlog_pos}\n"
         elif "SCHEMATA" in asked:
@@ -172,9 +187,11 @@ class FollowTestCase(Pair):
                                self.said[claim].append)
 
     def follow(self, index: int, server: Server, confirmed: bool = False,
-               live: bool = True, wait: float = 0.0) -> dbfollow.Followed:
+               live: bool = True, wait: float = 0.0,
+               nothing_without_vip: bool = False) -> dbfollow.Followed:
         here = self.all[index]
         found = dbfollow.Followed()
+        found.nothing_without_vip = nothing_without_vip
         with mock.patch("keel.inspect.constants.ROOT_DEFAULT", here.root), \
                 mock.patch("keel.inspect.collect.paths.ROOT_DEFAULT",
                            here.root), \
@@ -187,7 +204,10 @@ class FollowTestCase(Pair):
                 mock.patch("keel.system.dbseed.subprocess.run", server), \
                 mock.patch("keel.system.dbreadonly.subprocess.run", server), \
                 mock.patch.object(self.all[index].node, "overlay",
-                                  wraps=self.all[index].node.overlay):
+                                  wraps=self.all[index].node.overlay), \
+                mock.patch.object(dbfollow, "_here", return_value=here):
+            # _here: this node on the fixture's members' channel, never
+            # the real network (keel#154: follow asks the other members)
             dbfollow.follow(here.root, here.node.path, confirmed, found,
                             runner=server, output=self.nets[index].output,
                             wait=wait, sleep=self.sleep)
@@ -208,7 +228,7 @@ class TestThePrimary(FollowTestCase):
         found = self.follow(0, Server())
         self.assertIsNone(found.problem, found.lines)
         self.assertIn("unchanged (the primary, writable)", found.lines)
-        self.assertIn("role=primary", self.role_file(0))
+        self.assertIn("primary", self.role_file(0))
         # the drop-in keeps the server read only at its next boot too:
         # a crashed old primary takes no write before follow runs
         with open(os.path.join(self.all[0].root, mariadb.ROLE_DROPIN)) as f:
@@ -253,6 +273,22 @@ class TestThePrimary(FollowTestCase):
 
 
 class TestTheReplica(FollowTestCase):
+    def test_a_server_with_no_binary_log_is_not_seeded_yet(self):
+        # keel#202: the follow that the VIP's promotion starts on the
+        # replica runs before keel spec apply writes the pair's
+        # configuration. A copy loaded then cannot carry the binary log
+        # history of the primary, which the old primary needs to rejoin.
+        # The apply seeds it after the restart that turns the log on.
+        self.pair_nodes()
+        server = Server(schemas="", log_bin="0")
+        found = self.follow(1, server)
+        self.assertIsNone(found.problem, found.lines)
+        joined = "\n".join(found.lines)
+        self.assertIn("binary log", joined)
+        self.assertNotIn("seeded from", joined)
+        self.assertFalse(any(one[0] == "mariadb-dump" for one in server.argv))
+        self.assertFalse(any("CHANGE MASTER" in one for one in server.sent))
+
     def test_a_fresh_server_is_made_read_only_locked_and_seeded(self):
         self.pair_nodes()
         server = Server(schemas="")
@@ -364,6 +400,15 @@ class TestTheReplica(FollowTestCase):
         found = self.follow(1, Server(schemas=""))
         self.assertIn("certificate is not in place", found.problem)
 
+    def test_a_node_with_no_vip_that_asks_for_it_has_nothing_to_follow(self):
+        """keel#211: the command and the unit are not a failure there; a
+        spec apply that declares a role still refuses (above)"""
+        self.nodes(vips=(None, None), paired=False)
+        found = self.follow(2, Server(), nothing_without_vip=True)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertTrue(any("nothing to follow" in line
+                            for line in found.lines), found.lines)
+
     def test_a_node_in_no_pair_or_with_no_claim_says_so(self):
         self.nodes(vips=(None, None), paired=False)
         found = self.follow(2, Server())
@@ -384,6 +429,80 @@ class TestTheReplica(FollowTestCase):
         with mock.patch.object(dbfollow, "follow") as inner:
             self.assertIsNone(dbfollow.followed(here.root, here.node.path))
         inner.assert_called_once()
+
+
+class TestTheFenceOfACaughtUpReplica(FollowTestCase):
+    """keel#192: the VIP fence of a replica that rejoined or was reseeded
+    is cleared once it applied everything the holder logged, as keel#166
+    does for PostgreSQL; before, a MariaDB pair failed over once only"""
+
+    def fence_vip(self, index: int) -> None:
+        from dataclasses import replace
+
+        from keel.mesh import vip as vipstate
+        from keel.mesh import vipnode
+        held = vipnode.current(self.all[index], VIP)
+        vipstate.write(self.all[index].root, replace(held, fenced=True))
+
+    def fenced(self, index: int) -> bool:
+        from keel.mesh import vipnode
+        return vipnode.current(self.all[index], VIP).fenced
+
+    def test_a_replica_caught_up_with_the_holder_is_unfenced(self):
+        self.pair_nodes()
+        self.fence_vip(1)
+        # reseeded: the dump's position is the slave position, the
+        # holder's older GTIDs of another server id are not in the binlog
+        server = Server(replicating_from=address(0), read_only="ON",
+                        binlog_state="0-2-3", slave_pos="0-1-30",
+                        holder_state="0-2-7,0-1-30")
+        found = self.follow(1, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertFalse(self.fenced(1))
+        self.assertIn(dbfollow.UNFENCED_SAID, found.lines)
+
+    def test_a_replica_behind_the_holder_stays_fenced(self):
+        self.pair_nodes()
+        self.fence_vip(1)
+        server = Server(replicating_from=address(0), read_only="ON",
+                        binlog_state="0-2-3", slave_pos="0-1-29",
+                        holder_state="0-2-7,0-1-30")
+        found = self.follow(1, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertTrue(self.fenced(1))
+        self.assertNotIn(dbfollow.UNFENCED_SAID, found.lines)
+
+    def test_a_holder_that_does_not_answer_keeps_the_fence(self):
+        self.pair_nodes()
+        self.fence_vip(1)
+        server = Server(replicating_from=address(0), read_only="ON",
+                        slave_pos="0-1-30", holder_down=True)
+        found = self.follow(1, server)
+        self.assertTrue(self.fenced(1))
+
+    def test_a_replica_whose_sql_thread_stopped_stays_fenced(self):
+        self.pair_nodes()
+        self.fence_vip(1)
+        server = Server(replicating_from=address(0), read_only="ON",
+                        sql_running="No", slave_pos="0-1-30",
+                        holder_state="0-1-30")
+        self.follow(1, server)
+        self.assertTrue(self.fenced(1))
+
+    def test_the_watch_follows_a_fenced_replica_of_either_engine(self):
+        from keel.inspect.dbreading import Reading, Value
+        root = self.enterContext(__import__("tempfile").TemporaryDirectory())
+        os.makedirs(os.path.join(root, "var/lib/keel"))
+        with open(os.path.join(root, dbpair.ROLE_FILE), "w") as fob:
+            fob.write(dbpair.role_text("replica", VIP))
+        fenced = dbpair.PairState(VIP, KEYS[1], KEYS[0], address(0),
+                                  "replica", address(0), fenced=True)
+        replicates = Reading(role=Value("replica"), read_only=Value(True),
+                             primary=Value({"host": address(0),
+                                            "port": 3306}))
+        maria = {"database": {"server": {"engine": "mariadb"}}}
+        self.assertTrue(dbwatch.needs_follow(root, fenced, replicates,
+                                             maria))
 
 
 class TestTheOldPrimaryAtBoot(FollowTestCase):
@@ -414,6 +533,9 @@ class TestTheOldPrimaryAtBoot(FollowTestCase):
         # A boots: its file still says it holds epoch 1, unfenced
         self.down.discard(address(0))
         self.booted(0)
+        # no other member answers yet: follow asks them first without
+        # etcd (keel#154), and an answer with no newer claim proves it
+        self.down.update({address(1), address(2)})
         self.assertEqual(dbpair.observe_pair(a.root, a.node.document()).role,
                          dbpair.PRIMARY)
         server = Server(read_only="ON")
@@ -429,6 +551,7 @@ class TestTheOldPrimaryAtBoot(FollowTestCase):
         # it waited for a proof, polling, and none came
         self.assertGreaterEqual(self.monotonic(), 1003.0)
         # keel vip check learns epoch 2: A is fenced, then a replica of B
+        self.down.clear()
         vippromote.check(a, lambda line: None)
         self.assertFalse(self.carried(0))
         server = Server(read_only="ON", binlog_state="0-1-10",
@@ -441,9 +564,32 @@ class TestTheOldPrimaryAtBoot(FollowTestCase):
                       f" [{address(1)}]:3306", joined)
         self.assertIn("role=replica", self.role_file(0))
 
+    def test_without_etcd_follow_learns_the_newer_claim_by_itself(self):
+        """keel#154: without etcd nothing ran keel vip check, so the old
+        primary never learned the newer claim. Follow asks the other
+        members first and rejoins in the same run"""
+        self.pair_nodes(mode="cloud_simple")
+        self.down.add(address(0))
+        self.assertEqual(vippromote.promote(self.all[1], True,
+                                            lambda line: None), 0)
+        self.down.discard(address(0))
+        self.booted(0)
+        server = Server(read_only="ON", binlog_state="0-1-10",
+                        binlog_pos="0-1-10", holder_state="0-1-10,0-2-20")
+        found = self.follow(0, server, wait=3.0)
+        self.assertIsNone(found.problem, found.lines)
+        self.no_write_taken(server)
+        joined = "\n".join(found.lines)
+        self.assertIn("took epoch 2", joined)
+        self.assertNotIn("not proven", joined)
+        self.assertIn("role=replica", self.role_file(0))
+
     def test_a_server_found_writable_without_a_proof_is_made_read_only(self):
         self.pair_nodes(mode="cloud_simple")
         self.booted(0)
+        # no other member answers yet: follow asks them first without
+        # etcd (keel#154), and an answer with no newer claim proves it
+        self.down.update({address(1), address(2)})
         server = Server(read_only="OFF")
         found = self.follow(0, server)
         self.assertIsNone(found.problem, found.lines)
@@ -453,18 +599,22 @@ class TestTheOldPrimaryAtBoot(FollowTestCase):
     def test_the_holder_proven_again_after_its_boot_takes_writes(self):
         self.pair_nodes(mode="cloud_simple")
         self.booted(0)
+        # no other member answers yet: follow asks them first without
+        # etcd (keel#154), and an answer with no newer claim proves it
+        self.down.update({address(1), address(2)})
         server = Server(read_only="ON")
         self.follow(0, server)
         self.no_write_taken(server)
         # nobody promoted: a peer answers, none knows a newer claim, and
         # keel vip check carries the VIP again
+        self.down.clear()
         vippromote.check(self.all[0], lambda line: None)
         self.assertTrue(self.carried(0))
         server = Server(read_only="ON")
         found = self.follow(0, server)
         self.assertIsNone(found.problem, found.lines)
         self.assertIn("SET GLOBAL read_only = OFF;\n", server.sent)
-        self.assertIn("role=primary", self.role_file(0))
+        self.assertIn("primary", self.role_file(0))
 
     def test_no_peer_answers_at_boot_it_stays_read_only(self):
         self.pair_nodes(mode="cloud_simple")
@@ -538,6 +688,61 @@ class TestTheOldPrimaryAtBoot(FollowTestCase):
         self.assertIn("SET GLOBAL read_only = OFF;\n", server.sent)
 
 
+class TestTheHolderInDoubt(FollowTestCase):
+    """keel#195: a holder whose lease has no renewal the majority
+    confirmed for vipetcd.DOUBT s may be cut off; a write that waits for
+    the replica there returns OK when the dump thread to it ends, before
+    the release. So follow fences the server while the mark is there,
+    and the watch does not lift it"""
+
+    def mark(self, index: int, on: bool = True) -> None:
+        from keel.mesh import vip as vipstate
+        vipstate.mark_unconfirmed(self.all[index].root, VIP, on)
+
+    def test_a_writable_holder_in_doubt_is_fenced(self):
+        self.pair_nodes()
+        self.mark(0)
+        server = Server()
+        found = self.follow(0, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertIn("SET GLOBAL read_only = ON;\n", server.sent)
+        self.assertNotIn("SET GLOBAL read_only = OFF;\n", server.sent)
+        self.assertIn("keel#195", " ".join(found.lines))
+
+    def test_a_read_only_holder_in_doubt_stays_read_only(self):
+        self.pair_nodes()
+        self.mark(0)
+        server = Server(read_only="ON")
+        found = self.follow(0, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertNotIn("SET GLOBAL read_only = OFF;\n", server.sent)
+
+    def test_once_confirmed_the_holder_is_writable_again(self):
+        self.pair_nodes()
+        self.mark(0)
+        self.mark(0, False)
+        server = Server(read_only="ON")
+        found = self.follow(0, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertIn("SET GLOBAL read_only = OFF;\n", server.sent)
+
+    def test_the_watch_follows_a_writable_holder_in_doubt_only(self):
+        from keel.inspect.dbreading import Reading, Value
+        from keel.mesh import vip as vipstate
+        root = self.enterContext(__import__("tempfile").TemporaryDirectory())
+        os.makedirs(os.path.join(root, "var/lib/keel"))
+        with open(os.path.join(root, dbpair.ROLE_FILE), "w") as fob:
+            fob.write(dbpair.role_text("primary", VIP))
+        holder = dbpair.PairState(VIP, KEYS[0], KEYS[1], address(1),
+                                  "primary", address(0))
+        doc = {"database": {"server": {"engine": "mariadb"}}}
+        writable = Reading(role=Value("primary"), read_only=Value(False))
+        fenced = Reading(role=Value("primary"), read_only=Value(True))
+        vipstate.mark_unconfirmed(root, VIP, True)
+        self.assertTrue(dbwatch.needs_follow(root, holder, writable, doc))
+        self.assertFalse(dbwatch.needs_follow(root, holder, fenced, doc))
+
+
 class TestNoClaimAndNoAddress(FollowTestCase):
     """The security review of keel#104: no claim is no proof, a VIP gone
     from wg0 is followed again, and two runs never interleave"""
@@ -577,7 +782,7 @@ class TestNoClaimAndNoAddress(FollowTestCase):
         self.pair_nodes()
         a = self.all[0]
         self.follow(0, Server(read_only="ON"))
-        self.assertIn("role=primary", self.role_file(0))
+        self.assertIn("primary", self.role_file(0))
         pair = dbpair.observe_pair(a.root, a.node.document())
         doc = a.node.document()
         writable = Reading(role=Value("standalone"), read_only=Value(False))
@@ -588,6 +793,9 @@ class TestNoClaimAndNoAddress(FollowTestCase):
         self.nets[0].addresses.clear()
         self.assertTrue(dbwatch.needs_follow(a.root, pair, writable, doc,
                                              self.nets[0].output))
+        # no other member answers yet: follow asks them first without
+        # etcd (keel#154), and an answer with no newer claim proves it
+        self.down.update({address(1), address(2)})
         server = Server(read_only="OFF")
         self.follow(0, server)
         self.assertIn("SET GLOBAL read_only = ON;\n", server.sent)
@@ -677,6 +885,58 @@ class TestWatch(FollowTestCase):
             self.assertEqual(alerted.call_count, 1)
             self.assertIn("fell back", alerted.call_args.args[2])
 
+    def test_a_pending_file_flip_is_followed_again(self):
+        self.pair_nodes()
+        here = self.all[0]
+        with mock.patch("keel.system.dbwatch.certificate",
+                        return_value=True), \
+                mock.patch("keel.system.dbwatch.semi_sync",
+                           return_value=None), \
+                mock.patch("keel.system.filesync.flip_pending",
+                           return_value=True), \
+                mock.patch("keel.system.filesync_watch.watch_counts"), \
+                mock.patch.object(dbfollow, "follow") as followed:
+            code = dbwatch.watch(here.root, here.node.path, lambda x: None,
+                                 lambda x: None)
+        followed.assert_called_once()
+        self.assertEqual(code, 0)
+
+    def test_nothing_is_followed_when_nothing_is_pending(self):
+        self.pair_nodes()
+        here = self.all[0]
+        with mock.patch("keel.system.dbwatch.certificate",
+                        return_value=True), \
+                mock.patch("keel.system.dbwatch.semi_sync",
+                           return_value=None), \
+                mock.patch("keel.system.filesync.flip_pending",
+                           return_value=False), \
+                mock.patch("keel.system.filesync_watch.watch_counts"), \
+                mock.patch.object(dbfollow, "follow") as followed:
+            dbwatch.watch(here.root, here.node.path, lambda x: None,
+                          lambda x: None)
+        followed.assert_not_called()
+
+    def test_the_file_replication_alert_goes_through_the_channels(self):
+        self.pair_nodes()
+        here = self.all[0]
+
+        def watch_counts(root, doc, out, deliver):
+            self.assertTrue(deliver("title", "text", "filesync-counts",
+                                    "critical"))
+
+        with mock.patch("keel.system.dbwatch.certificate",
+                        return_value=True), \
+                mock.patch("keel.system.dbwatch.semi_sync",
+                           return_value=None), \
+                mock.patch("keel.system.filesync_watch.watch_counts",
+                           watch_counts), \
+                mock.patch("keel.monitor.alerting.alert",
+                           return_value=True) as alerted:
+            dbwatch.watch(here.root, here.node.path, lambda x: None,
+                          lambda x: None)
+        self.assertEqual(alerted.call_args.args[2:],
+                         ("title", "text", "filesync-counts", "critical"))
+
     def test_a_node_in_no_pair_has_nothing_to_watch(self):
         self.nodes(vips=(None, None), paired=False)
         said: list[str] = []
@@ -707,6 +967,49 @@ class TestWatch(FollowTestCase):
         self.assertFalse(dbwatch.needs_follow(
             root, dbpair.PairState(VIP, KEYS[0]), standalone, {}))
 
+    def test_needs_follow_on_a_stopped_server_that_carries_the_vip(self):
+        """keel#168: the holder's server was stopped while the VIP was
+        off wg0, and stayed stopped after the VIP came back: the watch
+        followed only a server that answered"""
+        from keel.inspect.dbreading import Reading, Value
+        root = self.enterContext(__import__("tempfile").TemporaryDirectory())
+        os.makedirs(os.path.join(root, "var/lib/keel"))
+        with open(os.path.join(root, dbpair.ROLE_FILE), "w") as fob:
+            fob.write(dbpair.role_text("primary", VIP))
+        primary = dbpair.PairState(VIP, KEYS[0], KEYS[1], address(1),
+                                   "primary", address(0))
+        stopped = Reading(role=Value(problem="no socket"))
+        writable = Reading(role=Value("primary"), read_only=Value(False))
+        doc = {"network": {"overlay": {"wireguard": {}}}}
+
+        def carried(argv):
+            return f"5: wg0    inet6 {VIP}/128 scope global\n"
+        self.assertTrue(dbwatch.needs_follow(root, primary, stopped, doc,
+                                             output=carried))
+        self.assertFalse(dbwatch.needs_follow(root, primary, writable, doc,
+                                              output=carried))
+
+    def test_needs_follow_on_a_fenced_postgresql_standby(self):
+        """keel#166: a fenced replica that streams is followed again, so
+        follow clears the fence once it caught up; one that follows
+        nobody is not"""
+        from keel.inspect.dbreading import Reading, Value
+        root = self.enterContext(__import__("tempfile").TemporaryDirectory())
+        os.makedirs(os.path.join(root, "var/lib/keel"))
+        with open(os.path.join(root, dbpair.ROLE_FILE), "w") as fob:
+            fob.write(dbpair.role_text("replica", VIP))
+        fenced = dbpair.PairState(VIP, KEYS[1], KEYS[0], address(0),
+                                  "replica", address(0), fenced=True)
+        streams = Reading(role=Value("replica"), read_only=Value(True),
+                          primary=Value({"host": address(0), "port": 5432}))
+        nobody = Reading(role=Value("replica"), read_only=Value(True))
+        pg = {"database": {"server": {"engine": "postgresql"}}}
+        maria = {"database": {"server": {"engine": "mariadb"}}}
+        self.assertTrue(dbwatch.needs_follow(root, fenced, streams, pg))
+        self.assertFalse(dbwatch.needs_follow(root, fenced, nobody, pg))
+        # a MariaDB replica too since keel#192
+        self.assertTrue(dbwatch.needs_follow(root, fenced, streams, maria))
+
 
 class TestStatus(FollowTestCase):
     def test_one_screen_for_the_operator(self):
@@ -731,6 +1034,153 @@ class TestStatus(FollowTestCase):
         with mock.patch("keel.system.dbstatus.vip_lines", return_value=[]):
             lines = dbstatus.lines(self.all[2].root, self.all[2].node.path)
         self.assertIn("pair: none", lines[0])
+
+
+class TestTheFileFlip(FollowTestCase):
+    """0050's amendment, point 5: the file folders flip with the
+    database role, in the same operation. A core appliance replicates
+    no file: the flip is a no-op and the role file keeps
+    replicates=database"""
+
+    def test_a_spec_without_the_overlay_warns_and_follows(self):
+        self.pair_nodes()
+        text = "overlays.syncthing: not declared"
+        with mock.patch("keel.system.filesync.undeclared_problem",
+                        return_value=text), \
+                mock.patch("keel.system.dbfollow.alerting.alert") as alert:
+            found = self.follow(0, Server())
+        self.assertIsNone(found.problem, found.lines)
+        self.assertTrue(any("WARNING: file replication is off" in line
+                            and text in line for line in found.lines))
+        self.assertIn("primary", self.role_file(0))
+        self.assertEqual(alert.call_count, 1)
+
+    def test_the_alert_is_sent_once_while_the_spec_stays_undeclared(self):
+        self.pair_nodes()
+        with mock.patch("keel.system.filesync.undeclared_problem",
+                        return_value="x"), \
+                mock.patch("keel.system.dbfollow.alerting.alert") as alert:
+            self.follow(0, Server())
+            self.follow(0, Server())
+        self.assertEqual(alert.call_count, 1)
+
+    def test_the_primary_flip_flips_the_folders(self):
+        self.pair_nodes()
+        with mock.patch("keel.system.filesync.follow_flip") as flipped:
+            found = self.follow(0, Server())
+        self.assertIsNone(found.problem, found.lines)
+        self.assertEqual(flipped.call_count, 1)
+        self.assertEqual(flipped.call_args.args[3], "primary")
+        self.assertIn("replicates=database\n", self.role_file(0))
+
+    def test_a_replica_flip_flips_the_folders(self):
+        self.pair_nodes()
+        server = Server(replicating_from=address(0), read_only="ON")
+        with mock.patch("keel.system.filesync.follow_flip") as flipped:
+            found = self.follow(1, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertEqual(flipped.call_args.args[3], "replica")
+
+    def test_an_in_doubt_holder_pauses_the_folders(self):
+        from keel.mesh import vip as vipstate
+        self.pair_nodes()
+        vipstate.mark_unconfirmed(self.all[0].root, VIP, True)
+        with mock.patch("keel.system.filesync.follow_flip") as flipped:
+            found = self.follow(0, Server())
+        self.assertIsNone(found.problem, found.lines)
+        self.assertIsNone(flipped.call_args.args[3])
+        self.assertEqual(self.role_file(0), "")
+
+    def paused_once(self, flipped, found):
+        """Every exit that proved no role pauses the folders, once"""
+        self.assertEqual(flipped.call_count, 1)
+        self.assertIsNone(flipped.call_args.args[3])
+
+    def test_a_holder_that_does_not_answer_pauses_the_folders(self):
+        self.pair_nodes()
+        with mock.patch("keel.system.filesync.follow_flip") as flipped:
+            found = self.follow(1, Server(holder_down=True))
+        self.assertIsNotNone(found.problem)
+        self.paused_once(flipped, found)
+
+    def test_the_certificate_missing_pauses_the_folders(self):
+        self.pair_nodes()
+        os.remove(os.path.join(self.all[1].root, dbtls.KEY))
+        with mock.patch("keel.system.filesync.follow_flip") as flipped:
+            found = self.follow(1, Server(schemas=""))
+        self.assertIsNotNone(found.problem)
+        self.paused_once(flipped, found)
+
+    def test_a_node_in_no_pair_pauses_the_folders(self):
+        self.nodes(vips=(None, None), paired=False)
+        with mock.patch("keel.system.filesync.follow_flip") as flipped:
+            found = self.follow(2, Server())
+        self.assertIsNotNone(found.problem)
+        self.paused_once(flipped, found)
+        self.assertIsNone(flipped.call_args.args[2])
+
+    def test_a_node_without_a_vip_that_asks_nothing_pauses_them_too(self):
+        self.nodes(vips=(None, None), paired=False)
+        with mock.patch("keel.system.filesync.follow_flip") as flipped:
+            self.follow(2, Server(), nothing_without_vip=True)
+        self.paused_once(flipped, None)
+
+    def test_a_server_that_is_not_answering_pauses_the_folders(self):
+        import dataclasses
+        self.pair_nodes()
+        real = dbfollow.observe_database
+
+        def down(*args, **kwargs):
+            return dataclasses.replace(real(*args, **kwargs),
+                                       down="connection refused")
+
+        with mock.patch("keel.system.filesync.follow_flip") as flipped, \
+                mock.patch.object(dbfollow, "observe_database", down):
+            found = self.follow(0, Server())
+        self.assertIn("not answering", found.problem)
+        self.paused_once(flipped, found)
+
+    def test_a_pair_with_a_problem_pauses_the_folders(self):
+        import dataclasses
+        self.pair_nodes()
+        real = dbfollow.observe_database
+
+        def broken(*args, **kwargs):
+            state = real(*args, **kwargs)
+            return dataclasses.replace(state, pair=dataclasses.replace(
+                state.pair, problem="the pair record is damaged"))
+
+        with mock.patch("keel.system.filesync.follow_flip") as flipped, \
+                mock.patch.object(dbfollow, "observe_database", broken):
+            found = self.follow(0, Server())
+        self.assertIn("damaged", found.problem)
+        self.paused_once(flipped, found)
+
+    def test_a_server_that_cannot_be_asked_pauses_the_folders(self):
+        import dataclasses
+        self.pair_nodes()
+        real = dbfollow.observe_database
+
+        def mute(*args, **kwargs):
+            state = real(*args, **kwargs)
+            role = dataclasses.replace(state.reading.role, value=None,
+                                       problem="timed out")
+            return dataclasses.replace(
+                state, reading=dataclasses.replace(state.reading, role=role))
+
+        with mock.patch("keel.system.filesync.follow_flip") as flipped, \
+                mock.patch.object(dbfollow, "observe_database", mute):
+            found = self.follow(0, Server())
+        self.assertIn("could not be asked", found.problem)
+        self.paused_once(flipped, found)
+
+    def test_a_flip_that_raises_leaves_the_follow_result_alone(self):
+        self.pair_nodes()
+        with mock.patch("keel.system.filesync.follow_flip",
+                        side_effect=RuntimeError("boom")) as flipped:
+            with self.assertRaises(RuntimeError):
+                self.follow(0, Server())
+        flipped.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 """keel database watch (keel.system.dbwatch): the semi-synchronous read
 is engine-aware, and a node with no server says so plainly"""
 
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -57,6 +58,110 @@ class TestSemiSync(unittest.TestCase):
         self.assertIsNone(self.ask([]))
         self.assertEqual(len(self.out), 1)
         self.assertIn("no database server", self.out[0])
+
+
+class TestSyncCommit(unittest.TestCase):
+    """0054: the pair's synchronous commit has no fallback, and the
+    watch alerts while the primary's commits wait, once each way (0054
+    asks for it; the watch said nothing while every commit waited for
+    a cut standby)"""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.out: list[str] = []
+        self.answer = "1\t0\t0\t1\n"
+        self.asked: list[list[str]] = []
+        self.primary = dbpair.PairState(VIP, "own-key", "peer-key",
+                                        "fd00:6b65:f1b::2", role="primary")
+        self.reading = dbreading.Reading(
+            role=dbreading.found("primary", "probe"))
+
+    def run_psql(self, argv, **kwargs):
+        self.asked.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, self.answer, "")
+
+    def ask(self, pair=None, reading=None):
+        with mock.patch.object(dbwatch, "Tree"), \
+                mock.patch.object(dbwatch, "database_servers",
+                                 return_value=[server(
+                                     "postgresql", reading or self.reading)]), \
+                mock.patch("keel.monitor.alerting.alert",
+                           return_value=True) as alerted:
+            dbwatch.semi_sync(self.root, pair or self.primary,
+                              self.out.append, self.out.append,
+                              runner=self.run_psql)
+        return alerted
+
+    def test_a_standby_that_acknowledges_alerts_nothing(self):
+        alerted = self.ask()
+        alerted.assert_not_called()
+        self.assertIn("synchronous commit flowing", self.out[-1])
+        self.assertIn(dbwatch.SYNC_SQL, self.asked[0])
+
+    def test_commits_that_wait_are_alerted_once_and_their_end_once(self):
+        self.answer = "1\t2\t0\t1\n"
+        alerted = self.ask()
+        self.assertEqual(alerted.call_count, 1)
+        self.assertEqual(alerted.call_args.args[2], dbwatch.SYNC_WAITS)
+        self.assertIn("2 commit(s) waited more than 10 s",
+                      alerted.call_args.args[3])
+        # the next watch, still waiting: no second alert
+        self.ask().assert_not_called()
+        self.answer = "1\t0\t0\t1\n"
+        alerted = self.ask()
+        self.assertEqual(alerted.call_count, 1)
+        self.assertEqual(alerted.call_args.args[2], dbwatch.SYNC_BACK)
+        self.assertEqual(alerted.call_args.args[5], "recovery")
+
+    def test_no_standby_at_all_is_a_wait(self):
+        """A new primary after a failover: no standby streams, so
+        every commit waits until the other node is reseeded"""
+        self.answer = "0\t0\t0\t0\n"
+        alerted = self.ask()
+        self.assertEqual(alerted.call_count, 1)
+        self.assertIn("no standby streams from it",
+                      alerted.call_args.args[3])
+
+    def test_a_primary_that_commits_alone_is_alerted_at_each_run(self):
+        """keel database promote --old-primary-gone: the new primary
+        commits alone (0054's one exception), and the watch says so at
+        every run, the way the wait is alerted"""
+        self.answer = "0\t0\t1\t0\n"
+        for _ in range(2):
+            alerted = self.ask()
+            self.assertEqual(alerted.call_count, 1)
+            self.assertEqual(alerted.call_args.args[2], dbwatch.SYNC_ALONE)
+            self.assertEqual(alerted.call_args.args[4], dbwatch.SYNC_CHECK)
+        self.assertIn("synchronous commit alone", self.out[-1])
+
+    def test_a_standby_that_streams_again_brings_the_line_back(self):
+        self.answer = "0\t0\t1\t0\n"
+        self.ask()
+        self.answer = "0\t0\t1\t1\n"
+        with mock.patch("keel.system.dbpgfollow.synchronous_again",
+                        return_value=("", True)) as again:
+            alerted = self.ask()
+        again.assert_called_once()
+        self.assertEqual(alerted.call_count, 1)
+        self.assertEqual(alerted.call_args.args[2], dbwatch.SYNC_BACK)
+
+    def test_the_question_names_the_pair_s_standby_and_the_wait(self):
+        from keel.system import dbpostgres
+        self.assertIn(f"application_name = '{dbpostgres.SLOT}'",
+                      dbwatch.SYNC_SQL)
+        self.assertIn(f"interval '{dbwatch.SYNC_WAIT_ALERT_S} seconds'",
+                      dbwatch.SYNC_SQL)
+
+    def test_a_standby_is_not_asked(self):
+        replica = dbpair.PairState(VIP, "own-key", "peer-key",
+                                   "fd00:6b65:f1b::2", role="replica")
+        self.ask(pair=replica).assert_not_called()
+        self.assertEqual(self.asked, [])
+
+    def test_an_answer_that_cannot_be_read_says_so(self):
+        self.answer = " 1 |  0\n"
+        self.ask().assert_not_called()
+        self.assertIn("not readable", self.out[-1])
 
 
 if __name__ == "__main__":

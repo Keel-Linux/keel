@@ -298,7 +298,7 @@ network:
 | `...peers[].public_key` | system | Required. The peer's key as `wg pubkey` prints it (44 characters of base64). Each key once, and never this node's own: with secret files checked, the public key of this node's private key file, when it exists, is refused as a peer's |
 | `...peers[].endpoint` | system | Optional: where to reach the peer, `host:port`. An IPv6 literal goes in brackets, `[2001:db8:2::20]:51820`, as wg writes it; a name or an IPv4 address without. Without it this node waits for the peer to reach it |
 | `...peers[].allowed_ips` | system | Required, at least one prefix: what is routed to this peer and accepted from it. For a node, its overlay address as a `/128` (and `/32`). A prefix with host bits set is an error, and so is a prefix given to two peers, since wg would silently keep it for the last one only. Each prefix must be inside the private ranges the overlay addresses use (`fc00::/7`; RFC 1918 or `100.64.0.0/10`): a `/0`, a public prefix (a `::/1` and `8000::/1` pair takes as much as `::/0`) and a prefix that overlaps the uplink or a peer's endpoint are refused (see "Routes" below). A prefix inside the overlay's VIP range is refused too: keel routes a VIP to its holder at runtime, never in the spec |
-| `...peers[].persistent_keepalive` | system | Optional, seconds between 1 and 65535: keeps a path through a NAT or a stateful firewall open. Leave it out for none |
+| `...peers[].persistent_keepalive` | system | Optional, seconds between 1 and 65535: keeps a path through a NAT or a stateful firewall open. Left out, keel writes 25 for every peer (keel#140): the state stays open between sites, and a last handshake older than 180 s means the member is unreachable. A file without it is drift in keel diff |
 
 **Joining with one command.** The peers and the address need not be
 typed: `keel mesh invite`, on a node already in the mesh, prints a `keel
@@ -852,8 +852,33 @@ monitor:
 | `monitor.notify.email` | system | `true` mails `security.alerts`' address through the local MTA. An error while `security.alerts` is `skip` or absent. Best effort: postfix needs disk to queue, so a full disk is what this channel cannot report |
 | `monitor.notify.telegram.chat_id`, `.token` | system | The Bot API's `sendMessage`. The chat id is a number (`-1001234567890`) or a channel name (`@keel_ops`); the token is a secret reference and must be a `file:` |
 | `monitor.notify.ntfy.url`, `.token` | system | One HTTPS POST to the topic URL, given as the URL or, since a public topic is its own credential, as a secret reference `{file: ...}` holding it; the token, optional, is sent as `Authorization: Bearer` and must be a `file:` |
+| `monitor.notify.ntfy` as a list | system | A list of 1 to 5 mappings, each with `url` and `token` as above (decision 0063). keel sends each alert to every server. Each server has its own line in the report, numbered from 1 (`ntfy 1: sent`). The alert counts as taken when at least one channel or server took it. The URLs must be different, and an error names the entry (`monitor.notify.ntfy[1].url`). One mapping, not a list, works as before |
 | `monitor.notify.webhook.url` | system | The URL, or a secret reference to a file holding it: a Slack or Discord webhook URL is a credential. One HTTPS POST whose JSON body is Slack compatible, `{"text": ...}`, plus the fields `host`, `address`, `check`, `target`, `direction`, `value`, `threshold`, `level`, `service` and `event`. Slack and Mattermost take it as it is; Discord at its webhook URL with `/slack` appended; Matrix through a bridge such as hookshot |
 | `monitor.notify.details` | system | `true` adds the three largest directories (disk, inodes) or processes (memory, swap, CPU, load) to the message. Default `false` |
+
+### Several ntfy servers
+
+The `ntfy` channel takes one server, or a list of servers. Use a list
+when each site has its own `keel-ntfy` server (decision 0063). keel sends
+each alert to all of them, and the phone app subscribes to the same topic
+on each. A server that is down does not stop the others.
+
+```yaml
+monitor:
+  enabled: true
+  notify:
+    ntfy:
+      - url: https://ntfy-br1.pop.coop/keel-blog
+        token: {file: /etc/keel/secrets/ntfy_br1_token}
+      - url: https://ntfy-br2.pop.coop/keel-blog
+        token: {file: /etc/keel/secrets/ntfy_br2_token}
+      - url: https://ntfy-br3.pop.coop/keel-blog
+        token: {file: /etc/keel/secrets/ntfy_br3_token}
+```
+
+Each server has its own token file. If one server fails, its line says so
+and the others still send. If every server and every other channel fail,
+`keel notify` uses its last resort: syslog and the mailbox of root.
 
 Every URL must be `https` and carry no user or password: a token is a
 secret reference of its own, never part of the spec. No error message

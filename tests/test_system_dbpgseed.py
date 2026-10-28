@@ -19,6 +19,8 @@ HOST = "2001:db8:1::10"
 PORT = 5432
 PASSWORD = "a-replication-password"
 WHERE = {"host": HOST, "port": PORT}
+# the cluster's own unit, never the umbrella postgresql (keel#153)
+UNIT = "postgresql@17-main"
 
 
 def answer(stdout: str = "", returncode: int = 0,
@@ -129,6 +131,21 @@ class TestReach(unittest.TestCase):
                                runner=lambda a, **k: answer("t\t2\t100\n"))
         self.assertIn("itself a standby", found.problem)
 
+    def test_the_probe_sums_only_the_databases_repl_may_connect_to(self):
+        """keel#183: pg_database_size() needs CONNECT, and an application
+        database with REVOKE CONNECT FROM PUBLIC stopped every reseed"""
+        sql = dbpgseed.PROBE_SQL
+        self.assertIn("has_database_privilege(oid, 'CONNECT')", sql)
+        self.assertIn("FILTER (WHERE has_database_privilege", sql)
+        self.assertIn(
+            "count(*) FILTER (WHERE NOT has_database_privilege", sql)
+
+    def test_a_database_left_out_does_not_stop_the_probe(self):
+        found = dbpgseed.reach(self.root(), HOST, PORT, PASSWORD,
+                               runner=lambda a, **k: answer(
+                                   "f\t3\t100\t1\n"))
+        self.assertEqual(found.problem, "")
+
     def recording(self, ran, stdout):
         def runner(argv, **kwargs):
             ran.append(list(argv))
@@ -152,6 +169,10 @@ class TestSeed(unittest.TestCase):
             fob.write("17\n")
         self.ran = []
         self.clock_at = [0.0]
+        env = mock.patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop(dbpostgres.SERVICE_ENV, None)
 
     def clock(self):
         return self.clock_at[0]
@@ -168,10 +189,33 @@ class TestSeed(unittest.TestCase):
         if "--command" in argv:
             sql = argv[argv.index("--command") + 1]
             if sql == dbpgseed.PROBE_SQL:
-                return answer("f\t2\t100\n")
+                return answer(getattr(self, "probe_answer", "f\t2\t100\n"))
             if sql == dbpgseed.STREAMING_QUESTION:
                 return answer("streaming\n")
         return answer()
+
+    def test_no_room_names_the_databases_the_size_left_out(self):
+        """keel#183: the free space check counts only what repl may
+        measure, so a refusal says how many databases it left out"""
+        self.probe_answer = "f\t3\t100\t2\n"
+        small = os.statvfs_result((4096, 4096, 10, 0, 0, 0, 0, 0, 0, 255))
+        with mock.patch.object(dbpgseed.os, "statvfs", return_value=small):
+            problem = dbpgseed.seed(self.root, SeedAction(), self.runner,
+                                    self.clock, lambda s: None,
+                                    lambda pid: False)
+        self.assertIn("needs 200 bytes free", problem)
+        self.assertIn("2 database(s)", problem)
+        self.assertIn("CONNECT", problem)
+
+    def test_no_room_says_nothing_of_left_out_databases_when_none_are(self):
+        self.probe_answer = "f\t3\t100\t0\n"
+        small = os.statvfs_result((4096, 4096, 10, 0, 0, 0, 0, 0, 0, 255))
+        with mock.patch.object(dbpgseed.os, "statvfs", return_value=small):
+            problem = dbpgseed.seed(self.root, SeedAction(), self.runner,
+                                    self.clock, lambda s: None,
+                                    lambda pid: False)
+        self.assertIn("needs 200 bytes free", problem)
+        self.assertNotIn("database(s)", problem)
 
     def test_the_happy_path_stops_swaps_starts_and_streams(self):
         self.assertIsNone(dbpgseed.seed(self.root, SeedAction(),
@@ -192,6 +236,30 @@ class TestSeed(unittest.TestCase):
         self.assertEqual(os.stat(follow).st_mode & 0o777, 0o600)
         self.assertNotIn(PASSWORD, " ".join(
             " ".join(str(a) for a in argv) for argv in self.ran))
+
+    def test_the_copy_is_compressed_by_the_primary(self):
+        """The design case's link carries about 50 kB/s: a 40 MB raw
+        copy took minutes, under 3 MB compressed takes seconds (found
+        by the pair's network-namespace test of this release)"""
+        self.assertIsNone(dbpgseed.seed(self.root, SeedAction(),
+                                        runner=self.runner,
+                                        clock=self.clock))
+        copy = next(argv for argv in self.ran if "pg_basebackup" in argv)
+        self.assertIn("--compress=server-zstd", copy)
+        self.assertIn("--format=plain", copy)
+
+    def test_the_copy_is_never_the_pair_s_synchronous_standby(self):
+        """The base backup's WAL stream reports what it flushed: under
+        the standby's name `keel` the primary acknowledged commits that
+        only the half-made copy held (found by the pair's
+        network-namespace test, case (d))"""
+        self.assertIsNone(dbpgseed.seed(self.root, SeedAction(),
+                                        runner=self.runner,
+                                        clock=self.clock))
+        copy = " ".join(next(argv for argv in self.ran
+                             if "pg_basebackup" in argv))
+        self.assertIn("application_name=keel-seed", copy)
+        self.assertNotIn(f"application_name={dbpostgres.SLOT} ", copy)
 
     def test_the_pair_streams_from_its_slot(self):
         action = SeedAction()
@@ -269,7 +337,7 @@ class TestSeed(unittest.TestCase):
             self.datadir, "PG_VERSION")))
         self.assertFalse(os.path.isdir(self.datadir
                                        + dbpgseed.ASIDE_SUFFIX))
-        self.assertIn(["systemctl", "start", "postgresql"], self.ran)
+        self.assertIn(["systemctl", "start", UNIT], self.ran)
 
     def test_a_server_that_does_not_start_reports_the_copy_in_place(self):
         def runner(argv, **kwargs):
@@ -299,6 +367,106 @@ class TestSeed(unittest.TestCase):
         self.assertIn("walreceiver", problem)
         self.assertGreater(self.clock_at[0], 0)
         self.assertIn("in place", problem)
+
+    def test_the_cluster_s_own_unit_is_stopped_and_started(self):
+        """keel#153: a stop of the umbrella postgresql returns before
+        the cluster stops (postgresql@17-main is PartOf= and Before= it),
+        and the old server then wrote its pg_control into the copy"""
+        self.assertIsNone(dbpgseed.seed(self.root, SeedAction(),
+                                        runner=self.runner,
+                                        clock=self.clock))
+        units = [argv for argv in self.ran if argv[:1] == ["systemctl"]]
+        self.assertEqual(units, [["systemctl", "stop", UNIT],
+                                 ["systemctl", "start", UNIT]])
+
+    def test_the_data_directory_moves_only_once_the_postmaster_is_gone(self):
+        """systemctl stop is not proof: the old server must have exited
+        before its data directory moves, or its shutdown writes into
+        the copy (keel#153)"""
+        self.write_pid(4242)
+        asked = []
+
+        def alive(pid):
+            # the data directory is still the old one while it runs
+            self.assertTrue(os.path.isfile(os.path.join(
+                self.datadir, "PG_VERSION")))
+            asked.append(pid)
+            return len(asked) < 3
+
+        def sleep(seconds):
+            self.clock_at[0] += seconds
+
+        self.assertIsNone(dbpgseed.seed(self.root, SeedAction(),
+                                        runner=self.runner,
+                                        clock=self.clock, sleep=sleep,
+                                        alive=alive))
+        self.assertEqual(asked, [4242, 4242, 4242])
+        self.assertFalse(os.path.isfile(os.path.join(
+            self.datadir, "PG_VERSION")))
+
+    def test_a_postmaster_that_outlives_the_stop_keeps_everything(self):
+        self.write_pid(4242)
+
+        def sleep(seconds):
+            self.clock_at[0] += seconds
+
+        problem = dbpgseed.seed(self.root, SeedAction(),
+                                runner=self.runner, clock=self.clock,
+                                sleep=sleep, alive=lambda pid: True)
+        self.assertIn("4242", problem)
+        self.assertIn("nothing was dropped", problem)
+        self.assertTrue(os.path.isfile(os.path.join(
+            self.datadir, "PG_VERSION")))
+        self.assertFalse(os.path.exists(self.datadir
+                                        + dbpgseed.FRESH_SUFFIX))
+        self.assertGreaterEqual(self.clock_at[0], dbpgseed.STOP_TIMEOUT)
+
+    def test_a_refusal_after_the_copy_removes_the_copy(self):
+        """a copy left beside the data directory made the next
+        pg_basebackup fail: its target was not empty"""
+        def runner(argv, **kwargs):
+            if argv[:2] == ["systemctl", "stop"]:
+                self.ran.append(list(argv))
+                return answer("", 1, "unit busy")
+            return self.runner(argv, **kwargs)
+        problem = dbpgseed.seed(self.root, SeedAction(), runner=runner,
+                                clock=self.clock)
+        self.assertIn("unit busy", problem)
+        self.assertFalse(os.path.exists(self.datadir
+                                        + dbpgseed.FRESH_SUFFIX))
+
+    def test_a_copy_left_by_an_earlier_run_is_removed_first(self):
+        leftover = self.datadir + dbpgseed.FRESH_SUFFIX
+        os.makedirs(leftover)
+        with open(os.path.join(leftover, "PG_VERSION"), "w") as fob:
+            fob.write("17\n")
+        self.assertIsNone(dbpgseed.seed(self.root, SeedAction(),
+                                        runner=self.runner,
+                                        clock=self.clock))
+        self.assertEqual(self.commands()[0], "pg_basebackup")
+
+    def test_the_copy_is_a_standby_before_it_takes_the_place(self):
+        """a server started between the move and standby.signal would
+        take writes on the copy: the signal goes into the copy first"""
+        fresh = self.datadir + dbpgseed.FRESH_SUFFIX
+        renames = []
+        real = os.rename
+
+        def rename(source, target):
+            if source == fresh:
+                renames.append(os.path.isfile(os.path.join(
+                    source, dbpostgres.STANDBY_SIGNAL)))
+            real(source, target)
+
+        with mock.patch.object(dbpgseed.os, "rename", rename):
+            self.assertIsNone(dbpgseed.seed(self.root, SeedAction(),
+                                            runner=self.runner,
+                                            clock=self.clock))
+        self.assertEqual(renames, [True])
+
+    def write_pid(self, pid: int) -> None:
+        with open(os.path.join(self.datadir, "postmaster.pid"), "w") as fob:
+            fob.write(f"{pid}\n{self.datadir}\n")
 
     def commands(self):
         found = []

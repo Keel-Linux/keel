@@ -1073,6 +1073,20 @@ under loss. 5 s is about 17 heartbeats and 20 round trips; a dead leader
 is seen in 5 to 10 s, which beside DNS's one to five minutes (0020)
 costs nothing. Pre-vote stays on (etcd 3.5's default).
 
+A peer connection that loses its segments in a cut doubles its
+retransmission timeout each time, up to the kernel's 120 s. etcd goes
+on writing raft's messages to it and sees no error, so the messages
+wait for the next retransmission, also after the heal (keel#167): on
+real nodes etcd had no leader for 111 s, and in the netns harness a
+follower rejoined 19 to 51 s after the heal. keel therefore writes
+`/etc/sysctl.d/90-keel-etcd.conf` with `net.ipv4.tcp_retries2 = 5` and
+sets it live. The kernel ends such a connection after about 14 s of
+retransmissions, and etcd dials again: the harness then measured a
+rejoin 6 to 16 s after the heal and a new leader 8 to 13 s after a cut.
+The value holds for every TCP connection of the node, IPv6 included.
+At 2% loss, 6 losses of one segment in a row come once in 10^10
+segments, so a working connection is not ended.
+
 Two members are never formed by a join; they are left by a removal or
 a failure, and `keel mesh status` and `remove` say that a majority of
 two is two. A member cut off from three cannot win a pre-vote, so it

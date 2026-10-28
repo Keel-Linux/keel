@@ -63,6 +63,15 @@ class TestEnvironment(unittest.TestCase):
             etcdconf.HEADER))
 
 
+class TestSysctl(unittest.TestCase):
+    def test_a_stalled_peer_connection_ends_after_5_retransmissions(self):
+        found = etcdconf.sysctl()
+        self.assertTrue(found.startswith(etcdconf.HEADER))
+        self.assertIn("keel#167", found)
+        self.assertTrue(found.endswith("net.ipv4.tcp_retries2 = 5\n"))
+        self.assertEqual(etcdconf.SYSCTL, "etc/sysctl.d/90-keel-etcd.conf")
+
+
 class TestDropIn(unittest.TestCase):
     def test_after_the_overlay_and_sandboxed(self):
         found = etcdconf.drop_in("wg7")

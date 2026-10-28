@@ -15,7 +15,7 @@ from vip_helpers import KEYS, VIP, address
 from keel.inspect import constants as paths
 from keel.inspect.tree import File
 from keel.mesh import etcdstate
-from keel.system import dbpair, dbpgpairplan, dbpostgres, dbtls
+from keel.system import dbpair, dbpgpairplan, dbpgrewind, dbpostgres, dbtls
 from keel.system.actions import (
     EnsureDatabaseTls,
     FollowVip,
@@ -58,7 +58,7 @@ def state(pair: PairState = PAIR, dropin: str | None = None,
           pair_dropin: str | None = None, hba: str | None = None,
           ident: str | None = None, nonlocal_bind: str = "0",
           credential_known: bool = True, binary: str = BINARY,
-          enabled: str = "enabled") -> DatabaseState:
+          enabled: str = "enabled", down: str = "") -> DatabaseState:
     return DatabaseState(
         engine="postgresql", live=True, binary=binary,
         reading=postgresql_reading(PG_STANDALONE, SOCKETS),
@@ -71,7 +71,7 @@ def state(pair: PairState = PAIR, dropin: str | None = None,
         credential=Credential(value=PASSWORD) if credential_known
         else Credential(problem="not held here yet"),
         pair=pair, nonlocal_bind=File("sysctl", nonlocal_bind),
-        enabled=enabled,
+        enabled=enabled, down=down,
     )
 
 
@@ -165,13 +165,26 @@ class TestThePairPlan(unittest.TestCase):
         runs = [one.argv for one in only(plan[0], Run)]
         self.assertIn(("sysctl", "-q", "-w",
                        "net.ipv6.ip_nonlocal_bind=1"), runs)
-        self.assertIn(("systemctl", "restart", dbpostgres.service()), runs)
+        self.assertIn(("systemctl", "restart", dbpostgres.boot_unit()), runs)
 
     def test_an_unchanged_node_restarts_nothing(self):
         dropin, pair_dropin, hba, ident = wanted_files(DOC, state())
         plan = plan_database(
             DOC, state(dropin=dropin, pair_dropin=pair_dropin, hba=hba,
                        ident=ident, nonlocal_bind="1"), False)
+        self.assertEqual(
+            [type(one) for one in plan[0].actions],
+            [EnsureDatabaseTls, Note])
+
+    def test_a_primary_that_commits_alone_is_not_drift(self):
+        """After keel database promote --old-primary-gone the empty
+        synchronous_standby_names is follow's runtime state (0054):
+        apply neither writes the line back nor restarts the server"""
+        dropin, pair_dropin, hba, ident = wanted_files(DOC, state())
+        plan = plan_database(
+            DOC, state(dropin=dropin,
+                       pair_dropin=dbpostgres.alone_text(pair_dropin),
+                       hba=hba, ident=ident, nonlocal_bind="1"), False)
         self.assertEqual(
             [type(one) for one in plan[0].actions],
             [EnsureDatabaseTls, Note])
@@ -183,8 +196,8 @@ class TestThePairPlan(unittest.TestCase):
                        hba="stale\n", ident=ident, nonlocal_bind="1"),
             False)
         runs = [one.argv for one in only(plan[0], Run)]
-        self.assertIn(("systemctl", "reload", dbpostgres.service()), runs)
-        self.assertNotIn(("systemctl", "restart", dbpostgres.service()),
+        self.assertIn(("systemctl", "reload", dbpostgres.boot_unit()), runs)
+        self.assertNotIn(("systemctl", "restart", dbpostgres.boot_unit()),
                          runs)
         written = [one.path for one in only(plan[0], WriteFile)]
         self.assertEqual(written, [PG_HBA])
@@ -195,8 +208,45 @@ class TestThePairPlan(unittest.TestCase):
             DOC, state(dropin=dropin, pair_dropin="stale\n", hba=hba,
                        ident=ident, nonlocal_bind="1"), False)
         runs = [one.argv for one in only(plan[0], Run)]
-        self.assertIn(("systemctl", "restart", dbpostgres.service()), runs)
-        self.assertNotIn(("systemctl", "reload", dbpostgres.service()),
+        self.assertIn(("systemctl", "restart", dbpostgres.boot_unit()), runs)
+        self.assertNotIn(("systemctl", "reload", dbpostgres.boot_unit()),
+                         runs)
+
+    def test_a_pair_dropin_of_an_older_keel_is_rewritten_and_reloaded(self):
+        """0.23.44 adds wal_keep_size, which the server takes on a
+        reload: the upgrade never restarts a primary that serves clients
+        (0054, amendment of 2026-10-18)"""
+        dropin, _, hba, ident = wanted_files(DOC, state())
+        ident_path = os.path.join(paths.ROOT_DEFAULT, state().ident.path)
+        older = dbpostgres.pair_dropin_text(ident_path, legacy=True)
+        self.assertNotIn("wal_keep_size", older)
+        plan = plan_database(
+            DOC, state(dropin=dropin, pair_dropin=older, hba=hba,
+                       ident=ident, nonlocal_bind="1"), False)
+        runs = [one.argv for one in only(plan[0], Run)]
+        self.assertIn(("systemctl", "reload", dbpostgres.boot_unit()), runs)
+        self.assertNotIn(("systemctl", "restart", dbpostgres.boot_unit()),
+                         runs)
+        written = {one.path: one.content
+                   for one in only(plan[0], WriteFile)}
+        self.assertEqual(list(written), [PG_PAIR])
+        self.assertIn("wal_keep_size = 256MB\n", written[PG_PAIR])
+        self.assertIn("synchronous_standby_names = 'FIRST 1", written[PG_PAIR])
+
+    def test_an_older_pair_dropin_that_commits_alone_stays_alone(self):
+        dropin, _, hba, ident = wanted_files(DOC, state())
+        ident_path = os.path.join(paths.ROOT_DEFAULT, state().ident.path)
+        older = dbpostgres.alone_text(
+            dbpostgres.pair_dropin_text(ident_path, legacy=True))
+        plan = plan_database(
+            DOC, state(dropin=dropin, pair_dropin=older, hba=hba,
+                       ident=ident, nonlocal_bind="1"), False)
+        written = {one.path: one.content
+                   for one in only(plan[0], WriteFile)}
+        self.assertIn("wal_keep_size = 256MB\n", written[PG_PAIR])
+        self.assertIn("synchronous_standby_names = ''", written[PG_PAIR])
+        runs = [one.argv for one in only(plan[0], Run)]
+        self.assertNotIn(("systemctl", "restart", dbpostgres.boot_unit()),
                          runs)
 
     def test_a_name_origin_gets_a_line_but_pins_no_certificate(self):
@@ -219,15 +269,48 @@ class TestThePairPlan(unittest.TestCase):
         self.assertIn("db.example.org", notes)
         self.assertIn("pins no certificate", notes)
 
-    def test_the_authorizations_send_the_slot_and_the_role(self):
+    def test_the_authorizations_send_the_slot_the_role_and_the_grants(self):
         plan = plan_database(DOC, state(), False)
         sent = only(plan[1], RunSql)
-        self.assertEqual(len(sent), 2)
+        self.assertEqual(len(sent), 3)
+        self.assertIn("GRANT EXECUTE ON FUNCTION pg_catalog.pg_ls_dir",
+                      sent[2].statements)
         self.assertEqual(sent[0].argv, dbpostgres.CLIENT)
         self.assertIn("pg_create_physical_replication_slot('keel')",
                       sent[0].statements)
         self.assertIn("CREATE ROLE repl", sent[1].statements)
         self.assertIn(PASSWORD.replace("'", "''"), sent[1].statements)
+
+    def test_a_server_down_after_a_failed_rewind_goes_to_the_reseed(self):
+        """pg_rewind failed halfway and the copy does not start: the
+        confirmed reseed replaces it and needs no answer from the
+        server (0054, amendment of 2026-10-18)"""
+        import tempfile
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as root:
+            mark = os.path.join(root, dbpgrewind.FAILED)
+            os.makedirs(os.path.dirname(mark))
+            with open(mark, "w") as fob:
+                fob.write("pg_rewind failed\n")
+            down = state(down="postgresql does not start")
+            with mock.patch("keel.system.dbpgpairplan.paths.ROOT_DEFAULT",
+                            root):
+                confirmed = plan_database(DOC, down, True, "/spec.yaml")
+                unconfirmed = plan_database(DOC, down, False, "/spec.yaml")
+        follows = [one for step in confirmed for one in step.actions
+                   if one.__class__.__name__ == "FollowVip"]
+        self.assertEqual(len(follows), 1, confirmed)
+        self.assertTrue(follows[0].confirmed)
+        self.assertEqual(len(confirmed), 1)
+        refused = [one for step in unconfirmed for one in step.actions
+                   if isinstance(one, Refuse)]
+        self.assertIn("not answering", refused[0].summary)
+
+    def test_a_server_down_with_no_failed_rewind_is_refused(self):
+        down = state(down="postgresql does not start")
+        plan = plan_database(DOC, down, True, "/spec.yaml")
+        refused = only(plan[0], Refuse)
+        self.assertIn("not answering", refused[0].summary)
 
     def test_a_missing_credential_refuses_the_authorizations(self):
         plan = plan_database(DOC, state(credential_known=False), False)
@@ -251,7 +334,7 @@ class TestThePairPlan(unittest.TestCase):
     def test_a_disabled_server_is_enabled(self):
         plan = plan_database(DOC, state(enabled="disabled"), False)
         runs = [one.argv for one in only(plan[0], Run)]
-        self.assertIn(("systemctl", "enable", dbpostgres.service()), runs)
+        self.assertIn(("systemctl", "enable", dbpostgres.boot_unit()), runs)
 
 
 class TestTheGates(unittest.TestCase):

@@ -29,10 +29,21 @@ and the VIP for the replication, and the application stays loopback,
 the way the appliance manifest has it) read on B, the synchronous
 commit cost measured (a commit is acknowledged once the standby
 received and flushed it: about one round trip), the replica refusing
-writes while it is in recovery, and `keel diff` clean on both. Cases
-(b) to (e), the fallback, the planned promote, the failover and
-rejoin, the diverged old primary and the replica's refusals, are the
-follow-up pull request's, with the rest of this harness.
+writes while it is in recovery, and `keel diff` clean on both. Then
+cases (b) to (e), the PostgreSQL wording of docs/replication.md's:
+
+- (b) the replica cut off: the primary keeps the VIP, a commit on it
+  waits (no timeout, no fallback: 0054), the primary's watch alerts,
+  and after the heal the commit is acknowledged and the end alerted;
+- (c) the primary cut off and killed while the application writes:
+  B's VIP controller claims once the lease of A's claim expired, and
+  B commits alone with no operator (keel#165), the downtime, and no
+  acknowledged row lost;
+- (e) the old primary back from its crash: never acknowledging a write,
+  fenced as a standby that follows nobody, dumped (the dump holds its
+  own unacknowledged rows), the divergence recorded and alerted once;
+- (d) the old primary's rejoin, the one path 0054 has: the confirmed
+  reseed, after which it streams from B and B's commits finish again.
 
 The result is one JSON line, `RESULT {...}`.
 """
@@ -47,11 +58,18 @@ import threading
 import time
 
 ROOT_PREFIX = "keel-vip-"
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WEBHOOK_PORT = 8099
 # the time between two watch runs in an agent (30 s on a machine)
 WATCH_EVERY = 10.0
 APP_USER, APP_PASSWORD, APP_DB = "app", "app-pw-1", "shop"
 PORT = 5432
+# how long the application's client waits for one write: a commit that
+# waits for an away standby has no end of its own (0054), so the
+# client is killed then, never cancelled — a cancelled wait answers
+# success with a warning that the commit is only local
+HANG_S = 30
+T0 = time.time()
 
 
 def binary_dir() -> str:
@@ -112,28 +130,23 @@ class Follower:
         self.thread = threading.Thread(target=self.run, daemon=True)
         self.thread.start()
 
-    def stamp(self) -> float:
-        found = 0.0
-        directory = os.path.join(self.root, "var/lib/keel/vip")
-        try:
-            for name in os.listdir(directory):
-                found = max(found, os.stat(os.path.join(directory,
-                                                        name)).st_mtime)
-        except OSError:
-            pass
-        return found
-
     def run(self) -> None:
-        last = self.stamp()
+        """keel-database-follow.path is PathChanged=/var/lib/keel/vip:
+        systemd's inotify mask, so an open for writing that writes
+        nothing starts follow as on a machine (keel#164; the mtime that
+        this loop read before missed it)"""
+        from pathwatch import PathChanged
+        directory = os.path.join(self.root, "var/lib/keel/vip")
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        watch = PathChanged(directory)
         watched = time.monotonic()
-        while not self.stop.wait(0.5):
-            now = self.stamp()
-            if now != last and now:
-                last = now
+        while not self.stop.is_set():
+            if watch.events(0.5):
                 self.follow("the VIP's state changed")
             if time.monotonic() - watched >= WATCH_EVERY:
                 watched = time.monotonic()
                 self.watch()
+        watch.close()
 
     def follow(self, why: str) -> dict:
         from keel.system import dbfollow
@@ -323,8 +336,25 @@ def database_command(here, words: list[str]) -> dict | None:
                 contextlib.redirect_stderr(out):
             code = cli.main(["diff", "--spec", path, "--root", root])
         return {"code": code, "out": out.getvalue().splitlines()}
+    if words[:1] == ["dbpromote"]:
+        import contextlib
+        import io
+        from keel import cli
+        out = io.StringIO()
+        started = time.monotonic()
+        # not under LOCK: on a machine keel-database-follow.path runs
+        # follow while the promote goes on (when the claim is written),
+        # and follow's own lock orders the two runs (keel#118)
+        with contextlib.redirect_stdout(out), \
+                contextlib.redirect_stderr(out):
+            code = cli.main(["database", "promote", "--spec", path, "--root",
+                             root] + (["--old-primary-gone"]
+                                      if "gone" in words else []))
+        return {"code": code, "out": out.getvalue().splitlines(),
+                "took_s": round(time.monotonic() - started, 2)}
     if words[:1] == ["followlog"]:
-        return {"log": FOLLOWER.log[-20:], "runs": FOLLOWER.runs}
+        return {"log": FOLLOWER.log[-20:], "runs": FOLLOWER.runs,
+                "follows": [one for one in FOLLOWER.log if " follow (" in one]}
     if words[:1] == ["role-file"]:
         try:
             with open(os.path.join(root, "var/lib/keel/role")) as fob:
@@ -449,7 +479,7 @@ def server(index: int, pid: int, root: str) -> str:
     # them (keel.inspect.dbengines' installed check)
     os.makedirs(os.path.join(root, "usr/lib/postgresql", version, "bin"),
                 exist_ok=True)
-    for tool in ("postgres", "pg_ctl"):
+    for tool in ("postgres", "pg_ctl", "pg_rewind"):
         target = os.path.join(root, "usr/lib/postgresql", version, "bin",
                               tool)
         if not os.path.exists(target):
@@ -460,6 +490,13 @@ def server(index: int, pid: int, root: str) -> str:
        "-D", datadir,
        "-E", "UTF8", "--auth-local=peer", "--auth-host=scram-sha-256",
        "--no-sync",
+       # pg_rewind copies the WAL segments of the new primary in full,
+       # 16 MB each by default: at 50 kB/s on the design case's link
+       # that is 5 minutes for one, and a node has three to copy. The
+       # test is about what keel decides, not about that cost, which the
+       # release test on real nodes measures (0054, amendment of
+       # 2026-10-18)
+       "--wal-segsize=1",
        env={**os.environ, "TMPDIR": os.path.join(root, "var/tmp")})
     # the cluster's configuration, under the root the way Debian's
     # layout has it: the data directory, the port, the loopback and the
@@ -480,6 +517,9 @@ Description=PostgreSQL of the test node {name}
 Type=simple
 User=postgres
 Group=postgres
+# keel's drop-in for postgresql@.service, as the package installs it
+# (keel#156): the start as a primary only on the proven holder
+ExecStartPre=+/usr/bin/env PYTHONPATH={REPO} KEEL_POSTGRES_SERVICE={unit} {sys.executable} -m keel database guard --root {root} --spec {root}/instance.yaml
 ExecStart={bindir}/postgres -D {datadir} -c config_file={conf}/postgresql.conf
 # the readiness production's Type=notify gives: apply runs its SQL the
 # moment a restart returns, so the restart must not return first
@@ -561,7 +601,8 @@ def count_rows(agent, name: str) -> int | None:
         return None
 
 
-def apply_with_cert_ask_retry(name: str, upto_s: float = 300) -> dict:
+def apply_with_cert_ask_retry(name: str, upto_s: float = 300,
+                              destroy: bool = False) -> dict:
     """`keel apply` on a paired database node, retrying while the only
     failure is the certificate ask over the members' channel (keel#131):
     that ask is one message, which can die on the lossy link ("did not
@@ -572,7 +613,10 @@ def apply_with_cert_ask_retry(name: str, upto_s: float = 300) -> dict:
     tries = 0
     while True:
         tries += 1
-        said = agent_send(name, "apply", 900)
+        started = time.monotonic()
+        said = agent_send(name, "apply destroy" if destroy else "apply",
+                          900)
+        said["took_s"] = round(time.monotonic() - started, 2)
         if not said.get("failed") or time.monotonic() >= deadline or not \
                 any("did not sign the database certificate" in line
                     for line in said.get("lines") or []):
@@ -632,6 +676,10 @@ def play(report: dict, pids: list[int], pairs, roots: list[str],
             (f"CREATE DATABASE {APP_DB}", None),
             (f"CREATE USER {APP_USER} WITH PASSWORD '{APP_PASSWORD}'", None),
             (f"GRANT ALL ON DATABASE {APP_DB} TO {APP_USER}", None),
+            # as the keel-lnpp check database had it: repl may not
+            # connect, and the reseed of case (d) must still work
+            # (keel#183)
+            (f"REVOKE CONNECT ON DATABASE {APP_DB} FROM PUBLIC", None),
             (f"GRANT USAGE ON SCHEMA public TO {APP_USER}", APP_DB),
             (f"CREATE TABLE t (id SERIAL PRIMARY KEY, v TEXT,"
              " at DOUBLE PRECISION)", APP_DB),
@@ -648,9 +696,12 @@ def play(report: dict, pids: list[int], pairs, roots: list[str],
         if found.get("code"):
             report["setup_error"] = found
             return
+    mark(report, "setup")
     # then apply on each, as its first boot would
     report["a_apply"] = apply_with_cert_ask_retry("A", 600)
+    mark(report, "a_apply")
     report["b_apply"] = apply_with_cert_ask_retry("B", 900)
+    mark(report, "b_apply")
     report["b_follow_log"] = agent_send("B", "followlog")
 
     # (a) the standby streams from the primary over TLS, a write on the
@@ -718,6 +769,18 @@ def play(report: dict, pids: list[int], pairs, roots: list[str],
     report["b_streaming_after_restart_s"] = wait_until(
         lambda: agent_send("B", "wstatus").get("status") == "streaming",
         120, 1)
+    mark(report, "case_a")
+    # a steady pair starts no follow by keel-database-follow.path
+    # (keel#164: with etcd, every 1 to 2 s until the start limit)
+    before = {name: agent_send(name, "followlog").get("runs")
+              for name in ("A", "B")}
+    time.sleep(20)
+    report["a_quiet_follow_runs"] = {
+        name: (agent_send(name, "followlog").get("runs") or 0)
+        - (before[name] or 0) for name in ("A", "B")}
+    replica_cut(report, pids, roots)
+    mark(report, "case_b")
+    crashed(report, pids, roots)
     report["alerts"] = [one.get("text", "")[:160] for one in HOOKS["alerts"]]
     for process in vip_netns.AGENTS.values():
         try:
@@ -725,6 +788,453 @@ def play(report: dict, pids: list[int], pairs, roots: list[str],
             process.stdin.close()
         except OSError:
             pass
+
+
+def mark(report: dict, phase: str) -> None:
+    """When a phase ended, in seconds from the driver's start: the CI
+    job's budget is read from these"""
+    report.setdefault("phase_s", {})[phase] = round(time.time() - T0, 1)
+
+
+def pg_ask(root: str, statement: str, database: str | None = None,
+           timeout: float = 10) -> str:
+    """One question to a node's server by its socket, from the driver,
+    so the node's agent stays free for the command in flight; the
+    answer, or "down" """
+    argv = ["runuser", "-u", "postgres", "--", "psql", "--no-psqlrc",
+            "--tuples-only", "--no-align", "--field-separator=\t",
+            "--host", socket_dir(root), "--port", str(PORT)]
+    if database:
+        argv += ["--dbname", database]
+    try:
+        done = subprocess.run(argv + ["--command", statement],
+                              capture_output=True, text=True, check=False,
+                              timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return "timed out"
+    return done.stdout.strip() if done.returncode == 0 else "down"
+
+
+def sync_standbys(root: str) -> str:
+    return pg_ask(root, "SELECT count(*) FROM pg_stat_replication WHERE"
+                  " application_name = 'keel' AND sync_state = 'sync'")
+
+
+def app_write(pid: int, value: str, timeout: float = HANG_S) -> dict:
+    """One INSERT by the application on a node, through its loopback
+    (on a pair the application is co-located: 0054); acknowledged only
+    by its own answer"""
+    started = time.time()
+    try:
+        one = subprocess.run(
+            ["nsenter", "-t", str(pid), "-n", "psql", "--no-psqlrc",
+             "--tuples-only",
+             f"host=::1 port={PORT} user={APP_USER} dbname={APP_DB}"
+             " connect_timeout=2",
+             "--command", f"INSERT INTO t (v, at) VALUES ('{value}',"
+             f" {started:.3f})"],
+            capture_output=True, text=True, check=False, timeout=timeout,
+            env={**os.environ, "PGPASSWORD": APP_PASSWORD})
+        # a cancelled wait for the standby answers success with this
+        # warning: the commit is local only, and nobody may count on it
+        ok = one.returncode == 0 and "committed locally" not in one.stderr
+        err = one.stderr.strip()[-80:]
+    except subprocess.TimeoutExpired:
+        ok, err = False, f"no answer within {timeout:.0f} s"
+    return {"t": round(started, 3), "end": round(time.time(), 3), "ok": ok,
+            "err": err}
+
+
+def alerted(name: str, title: str, since: int) -> list[dict]:
+    """The alerts of node `name` with this title, from index `since`"""
+    return [one for one in HOOKS["alerts"][since:]
+            if str(one.get("text", "")).startswith(f"[{name}] {title}")]
+
+
+def replica_cut(report: dict, pids: list[int], roots: list[str]) -> None:
+    """(b): the replica B cut off, both ways. A keeps the VIP (its lease
+    is renewed through C, the majority); with etcd nothing is fenced,
+    since B holds no lease. A commit on A waits for B, with no timeout
+    and no fallback to asynchronous (0054): A's watch alerts, and once
+    the link heals the commit is acknowledged, the end alerted"""
+    import vip_netns
+    from keel.system import dbwatch
+    from vip_netns import wait_until
+    a_root, b_root = roots[0], roots[1]
+    report["b_sync_before_s"] = wait_until(
+        lambda: sync_standbys(a_root) == "1", 120, 1)
+    since = len(HOOKS["alerts"])
+    vip_netns.leg("to2", "100%")
+    sh("tc", "qdisc", "replace", "dev", "uplink", "root", "netem", "loss",
+       "100%", pid=pids[1])
+    cut_at = time.time()
+    pending: dict = {}
+    writing = threading.Thread(target=lambda: pending.update(
+        app_write(pids[0], "cut-1", 600)), daemon=True)
+    writing.start()
+    report["b_waits_alerted_s"] = wait_until(
+        lambda: alerted("A", dbwatch.SYNC_WAITS, since), 120, 0.5)
+    report["b_pending_at_alert"] = writing.is_alive()
+    report["b_a_holds_vip"] = vip_netns.holds(pids[0])
+    # cut for 40 s in all, the alert's 10 s and a watch run past it
+    time.sleep(max(0.0, cut_at + 40 - time.time()))
+    report["b_pending_at_heal"] = writing.is_alive()
+    healed_at = vip_netns.heal(pids, 1)
+    writing.join(600)
+    report["b_cut_write"] = pending
+    report["b_cut_s"] = round(healed_at - cut_at, 2)
+    report["b_ack_after_heal_s"] = round(pending["end"] - healed_at, 2) \
+        if pending.get("ok") else None
+    report["b_sync_after_heal_s"] = wait_until(
+        lambda: sync_standbys(a_root) == "1", 180, 1)
+    report["b_back_alerted_s"] = wait_until(
+        lambda: alerted("A", dbwatch.SYNC_BACK, since), 120, 0.5)
+    report["b_row_on_b"] = pg_ask(
+        b_root, "SELECT count(*) FROM t WHERE v = 'cut-1'", APP_DB)
+    report["b_alerts"] = [one.get("text", "")[:200]
+                          for one in HOOKS["alerts"][since:]]
+
+
+class Writer:
+    """The application writes every 0.1 s on the node that carries the
+    VIP, through that node's loopback, a new connection each time (the
+    real-node test's writer, co-located the way 0054 has it)"""
+
+    def __init__(self, pids: list[int]):
+        self.pids = pids
+        self.done: list[dict] = []
+        self.halt = threading.Event()
+        self.thread = threading.Thread(target=self.run, daemon=True)
+
+    def start(self) -> None:
+        self.thread.start()
+
+    def stop(self) -> None:
+        self.halt.set()
+        self.thread.join()
+
+    def run(self) -> None:
+        import vip_netns
+        n = 0
+        while not self.halt.is_set():
+            n += 1
+            index = 0 if vip_netns.holds(self.pids[0]) else 1
+            one = app_write(self.pids[index], f"crash-{n}")
+            self.done.append({"n": n, "node": vip_netns.NAMES[index], **one})
+            self.halt.wait(0.1)
+
+
+class NewPrimary:
+    """When B carries the VIP, and when its server ends recovery,
+    sampled every 0.2 s from the driver"""
+
+    def __init__(self, pid: int, root: str):
+        self.pid, self.root = pid, root
+        self.carried_at = self.promoted_at = None
+        self.halt = threading.Event()
+        self.thread = threading.Thread(target=self.run, daemon=True)
+
+    def start(self) -> None:
+        self.thread.start()
+
+    def stop(self) -> None:
+        self.halt.set()
+        self.thread.join()
+
+    def run(self) -> None:
+        import vip_netns
+        while not self.halt.is_set():
+            now = time.time()
+            if self.carried_at is None and vip_netns.holds(self.pid):
+                self.carried_at = now
+            if self.promoted_at is None and \
+                    pg_ask(self.root, "SELECT pg_is_in_recovery()") == "f":
+                self.promoted_at = now
+            self.halt.wait(0.2)
+
+
+def downtime(writer: Writer, watched: NewPrimary, cut_at: float,
+             promote_at: float, promoted_at: float,
+             reseeded_at: float | None) -> dict:
+    """The unplanned write downtime and where it went"""
+    ok = [one for one in writer.done if one["ok"]]
+    before = [one["end"] for one in ok if one["end"] <= cut_at]
+    after = [one["end"] for one in ok if one["t"] > cut_at]
+    errors: dict[str, int] = {}
+    for one in writer.done:
+        if not one["ok"] and one["t"] > cut_at:
+            key = f"{one['node']}: {one['err'][:40]}"
+            errors[key] = errors.get(key, 0) + 1
+
+    def since(at):
+        return None if at is None else round(at - cut_at, 2)
+    first_after = min(after) if after else None
+    return {"last_ok_before_s": since(max(before)) if before else None,
+            "first_ok_after_s": since(first_after),
+            "downtime_s": None if not before or first_after is None
+            else round(first_after - max(before), 2),
+            "promote_started_s": since(promote_at),
+            "promote_took_s": round(promoted_at - promote_at, 2),
+            "carried_s": since(watched.carried_at),
+            "promoted_s": since(watched.promoted_at),
+            "reseeded_s": since(reseeded_at),
+            "first_ok_after_reseed_s": None if reseeded_at is None
+            or first_after is None else round(first_after - reseeded_at, 2),
+            "errors_after_cut": errors, "writes": len(writer.done),
+            "acked": len(ok)}
+
+
+def held_values(root: str, like: str) -> set[str] | None:
+    found = pg_ask(root, f"SELECT v FROM t WHERE v LIKE '{like}'", APP_DB,
+                   30)
+    if found in ("down", "timed out"):
+        return None
+    return set(found.split())
+
+
+def dumps_of(root: str) -> list[str]:
+    from keel.system import dbpgfollow
+    directory = os.path.join(root, dbpgfollow.BACKUPS)
+    try:
+        return sorted(os.path.join(directory, one)
+                      for one in os.listdir(directory))
+    except OSError:
+        return []
+
+
+def dump_holds(path: str, values: list[str]) -> list[str]:
+    """Which of `values` the compressed dump holds"""
+    try:
+        done = subprocess.run(["zstd", "-dc", path], capture_output=True,
+                              check=False, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    text = done.stdout.decode(errors="replace")
+    return [one for one in values if f"\t{one}\t" in text]
+
+
+class BootWrites:
+    """The application on A, while A is back from its crash: one write
+    every 2 s, its client killed after 10 s; none may be acknowledged
+    (the new primary is B, and A has no standby to acknowledge it)"""
+
+    def __init__(self, pid: int):
+        self.pid = pid
+        self.done: list[dict] = []
+        self.halt = threading.Event()
+        self.thread = threading.Thread(target=self.run, daemon=True)
+
+    def start(self) -> None:
+        self.thread.start()
+
+    def stop(self) -> None:
+        self.halt.set()
+        self.thread.join()
+
+    def run(self) -> None:
+        n = 0
+        while not self.halt.is_set():
+            n += 1
+            self.done.append(app_write(self.pid, f"boot-{n}", 10))
+            self.halt.wait(2)
+
+
+def stuck_facts(root: str) -> dict:
+    """What a rewind that never ended leaves to read: the processes, the
+    unit's journal and the state directory of the node"""
+    return {
+        "ps": sh("sh", "-c", "ps -eo pid,ppid,etimes,stat,args | grep -E"
+                 " 'pg_rewind|postgres|systemctl|runuser|keel' | grep -v"
+                 " grep | cut -c1-240", check=False),
+        "journal": sh("journalctl", "-u", service_of(root), "-o", "cat",
+                      "--no-pager", "-n", "40", check=False),
+        "state": sh("sh", "-c", f"ls -la {root}/var/lib/keel/database;"
+                    f" ls {root}/var/backups/keel/postgresql", check=False),
+        "pgdata": sh("sh", "-c", f"ls {root}/var/lib/postgresql/*/main |"
+                     " head -40; cat "
+                     f"{root}/var/lib/postgresql/*/main/postmaster.pid"
+                     " 2>&1 | head -2", check=False)}
+
+
+def crashed(report: dict, pids: list[int], roots: list[str]) -> None:
+    """(c), (e), (d): the primary A cut off while the application
+    writes, then killed; B promoted by itself once A's lease expired; A back
+    from its crash, fenced and dumped, then rewound against B with
+    pg_rewind and streaming from it, with no reseed (0054, amendment of
+    2026-10-18). The reseed itself is the seed of case (a)"""
+    import vip_netns
+    from keel.system import dbfollow, dbpgfollow, dbwatch
+    from vip_netns import OVERLAY, agent_send, wait_until
+    a_pid, a_root, b_root = pids[0], roots[0], roots[1]
+    report["c_sync_before_s"] = wait_until(
+        lambda: sync_standbys(a_root) == "1", 180, 1)
+    since = len(HOOKS["alerts"])
+    writer = Writer(pids[:2])
+    watched = NewPrimary(pids[1], b_root)
+    writer.start()
+    watched.start()
+    report["c_first_ack_s"] = wait_until(
+        lambda: any(one["ok"] for one in writer.done), 60, 0.2)
+    time.sleep(3)
+    # (c) A cut off first, so the write in flight on it waits for B and
+    # is in A's WAL unacknowledged (what makes A diverge), then killed
+    # with its VIP helper, the twin of MariaDB's crash
+    vip_netns.leg("to1", "100%")
+    sh("tc", "qdisc", "replace", "dev", "uplink", "root", "netem", "loss",
+       "100%", pid=a_pid)
+    cut_at = time.time()
+    time.sleep(2)
+    killed_at = time.time()
+    sh("systemctl", "kill", "--signal=SIGKILL", service_of(a_root),
+       check=False)
+    sh("systemctl", "stop", f"keel-vip-test-{vip_netns.NAMES[0]}",
+       check=False)
+    # no operator: B's VIP controller claims once the lease of A's
+    # claim expired, and that states A gone (keel#165, the 0054
+    # amendment of 2026-10-15), so B commits alone with no promote
+    promote_at = killed_at
+    report["c_automatic_s"] = wait_until(
+        lambda: watched.promoted_at is not None, 120, 0.2)
+    promoted_at = watched.promoted_at or time.time()
+    # the controller runs in a unit of its own, which the helper starts
+    from keel.mesh import vipbridge
+    report["c_b_vip_log"] = [line for line in sh(
+        "journalctl", "-u", vipbridge.unit_name(b_root), "-u",
+        f"keel-vip-test-{vip_netns.NAMES[1]}", "-o", "cat", "--no-pager",
+        check=False).splitlines() if "claimed at epoch" in line]
+    mark(report, "case_c_promoted")
+    # the follow makes the slot just after the promotion: waited for
+    wait_until(lambda: pg_ask(b_root, "SELECT slot_name FROM"
+                              " pg_replication_slots"), 30, 0.5)
+    report["c_b_slot"] = pg_ask(b_root, "SELECT slot_name FROM"
+                                " pg_replication_slots")
+    # the expired lease said the old primary is gone: the new primary
+    # commits alone (0054, amendment of 2026-10-15), reloaded, and its
+    # watch alerts at each run while it does
+    # the follow reloads the empty line just after the promotion: waited
+    # for, since no command returns after it now (keel#165)
+    report["c_b_alone_s"] = wait_until(
+        lambda: pg_ask(b_root, "SHOW synchronous_standby_names") == "",
+        30, 0.5)
+    report["c_b_sync_names"] = pg_ask(b_root,
+                                      "SHOW synchronous_standby_names")
+    report["c_b_alone_alerted_s"] = wait_until(
+        lambda: len(alerted("B", dbwatch.SYNC_ALONE, since)) >= 2,
+        3 * WATCH_EVERY + 10, 0.5)
+    report["c_b_waits_alerts"] = len(alerted("B", dbwatch.SYNC_WAITS,
+                                             since))
+    # (e) A boots: the link back, its server started from its crash (a
+    # primary, writable, with no standby to acknowledge it), and what
+    # keel-database-follow.service does at boot, before its VIP helper
+    # told it of B's newer claim
+    vip_netns.heal(pids, 0)
+    sh("systemctl", "reset-failed", service_of(a_root), check=False)
+    # keel database guard refuses the start: A's own claim is not proven
+    # (keel#156), so its server never takes a write as a primary
+    started = subprocess.run(["systemctl", "start", service_of(a_root)],
+                             capture_output=True, text=True, check=False)
+    report["e_boot_start"] = {
+        "code": started.returncode,
+        "guard": [line for line in sh(
+            "journalctl", "-u", service_of(a_root), "-o", "cat",
+            "--no-pager", check=False).splitlines()
+            if "keel database guard" in line][-3:]}
+    boot = BootWrites(a_pid)
+    boot.start()
+    try:
+        report["e_follow_at_boot"] = follow_when_etcd_answers(agent_send)
+        # A's VIP helper starts again: its lease is gone, so it is fenced
+        # and takes B's claim; follow fences A's server, dumps it, stops
+        # it, rewinds it against B and starts it as B's standby (0054,
+        # amendment of 2026-10-18)
+        vip_netns.tended(0, a_pid, a_root,
+                         os.path.join(a_root, "instance.yaml"))
+        report["e_fenced_s"] = wait_until(
+            lambda: dumps_of(a_root), 240, 1)
+        mark(report, "case_e_fenced")
+        report["e_rewound_s"] = wait_until(
+            lambda: pg_ask(a_root, "SELECT status FROM"
+                           " pg_stat_wal_receiver", timeout=5)
+            == "streaming" and dbfollow.diverged(a_root) is None,
+            600, 1)
+        rewound_at = time.time()
+        if report["e_rewound_s"] is None:
+            report["e_stuck"] = stuck_facts(a_root)
+        mark(report, "case_e_rewound")
+    finally:
+        boot.stop()
+    report["e_boot_writes"] = boot.done
+    report["e_record"] = dbfollow.diverged(a_root)
+    report["e_in_recovery"] = pg_ask(a_root, "SELECT pg_is_in_recovery()")
+    report["e_receivers"] = pg_ask(
+        a_root, "SELECT count(*) FROM pg_stat_wal_receiver")
+    report["e_refused"] = agent_send(
+        "A", "sql-app INSERT INTO t (v, at) VALUES ('fenced', 0)")
+    # the writes on A that waited for B when A was cut off: committed in
+    # A's WAL, never acknowledged; a write after the kill was refused
+    # and is nowhere
+    unacked = [f"crash-{one['n']}" for one in writer.done
+               if one["node"] == "A" and not one["ok"]
+               and cut_at - 1 <= one["t"] < killed_at]
+    report["e_a_unacked"] = unacked
+    dumps = dumps_of(a_root)
+    report["e_dumps"] = [os.path.basename(one) for one in dumps]
+    # the dump was taken before the rewind: it holds A's own writes
+    report["e_dump_holds"] = dump_holds(dumps[-1], unacked) if dumps else []
+    report["e_diff"] = agent_send("A", "diff")
+    report["e_dbstatus"] = agent_send("A", "dbstatus")
+    # two watch runs later: still one dump, no divergence, no alert
+    time.sleep(2 * WATCH_EVERY + 5)
+    report["e_dumps_later"] = [os.path.basename(one)
+                               for one in dumps_of(a_root)]
+    report["e_alerts"] = [one.get("text", "")[:200] for one in
+                          alerted("A", dbpgfollow.DIVERGED_TITLE, since)]
+    report["e_follow_log"] = agent_send("A", "followlog")
+    report["d_streaming_s"] = wait_until(
+        lambda: agent_send("A", "wstatus").get("status") == "streaming",
+        120, 1)
+    report["d_status"] = agent_send("A", "wstatus")
+    report["d_b_sync_s"] = wait_until(
+        lambda: sync_standbys(b_root) == "1", 120, 1)
+    report["d_b_sync_names"] = pg_ask(b_root,
+                                      "SHOW synchronous_standby_names")
+    # the writer's next write on B is acknowledged: the downtime's end
+    report["d_first_ack_s"] = wait_until(
+        lambda: any(one["ok"] and one["t"] > rewound_at
+                    for one in writer.done), 120, 0.2)
+    time.sleep(3)
+    writer.stop()
+    watched.stop()
+    report["c_downtime"] = downtime(writer, watched, cut_at, promote_at,
+                                    promoted_at, rewound_at)
+    report["d_rewound_s"] = round(rewound_at - cut_at, 2)
+    acked = {f"crash-{one['n']}" for one in writer.done if one["ok"]}
+    on_b = held_values(b_root, "crash-%")
+    report["c_acked_missing"] = sorted(acked - (on_b or set()))[:20] \
+        if on_b is not None else ["B did not answer"]
+    report["d_rows_equal_s"] = wait_until(
+        lambda: pg_ask(a_root, "SELECT count(*) FROM t", APP_DB) ==
+        pg_ask(b_root, "SELECT count(*) FROM t", APP_DB), 60, 0.5)
+    report["d_rows_a"] = pg_ask(a_root, "SELECT count(*) FROM t", APP_DB)
+    report["d_rows_b"] = pg_ask(b_root, "SELECT count(*) FROM t", APP_DB)
+    # A is B's copy now: of its own unacknowledged rows it holds those
+    # B holds (one B received before the cut), and no other
+    report["d_a_holds_unacked"] = sorted(
+        (held_values(a_root, "crash-%") or set()) & set(unacked))
+    report["d_b_holds_unacked"] = sorted((on_b or set()) & set(unacked))
+    report["d_record_after"] = dbfollow.diverged(a_root)
+    # the VIP fence of A's loss is cleared once A is B's copy and caught
+    # up, within a watch run, so a next failover is automatic (keel#166)
+    from keel.mesh import vip as vipstate
+    report["d_a_unfenced_s"] = wait_until(
+        lambda: not (vipstate.read(a_root, vip_netns.VIP) or
+                     vipstate.Held(vip_netns.VIP)).fenced,
+        3 * WATCH_EVERY + 10, 1)
+    report["d_back_alerted_s"] = wait_until(
+        lambda: alerted("B", dbwatch.SYNC_BACK, since), 60, 0.5)
+    report["d_a_status_line"] = OVERLAY.format(n=2) in str(
+        report["d_status"].get("conninfo"))
+    report["c_writes"] = writer.done[-60:]
 
 
 def main() -> None:

@@ -337,6 +337,10 @@ class FollowVip:
 
     spec: str
     confirmed: bool = False
+    # keel database promote --old-primary-gone: the operator says the
+    # old primary is gone, so a new PostgreSQL primary commits alone
+    # until a standby streams again (0054, keel.system.dbpgfollow)
+    alone: bool = False
 
     def describe(self) -> str:
         return ("make the server follow the pair's VIP (keel database"

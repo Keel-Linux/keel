@@ -76,6 +76,7 @@ from etcd_netns import (
     measured,
     sh,
     start_etcd,
+    tune,
     utcnow,
 )
 
@@ -142,6 +143,7 @@ def child(index: int) -> int:
                  ("ip", "-6", "route", "add", "default", "via", f"{net}::1",
                   "dev", "uplink")):
         sh(*argv, pid=found.pid)
+    tune(found.pid)
     leg(f"to{n}")
     return found.pid
 
@@ -478,6 +480,11 @@ def tended(index: int, pid: int, root: str, spec: str) -> None:
     HELPERS.append(unit)
     scratch = os.path.join(root, "tmp")
     os.makedirs(scratch, mode=0o700, exist_ok=True)
+    state = os.path.join(root, "var/lib/keel/vip")
+    os.makedirs(state, mode=0o700, exist_ok=True)
+    wgdir = os.path.join(root, "etc/wireguard")
+    os.makedirs(wgdir, exist_ok=True)
+    writable = " ".join((state, wgdir, scratch))
     command = (sys.executable, "-m", "keel", "vip", "tend", "--root", root,
                "--spec", spec)
     # the unit's name is the node's, host-global: a generation whose
@@ -497,7 +504,10 @@ def tended(index: int, pid: int, root: str, spec: str) -> None:
        f"--property=ExecStopPost={' '.join(command)} --stopped",
        "--property=Restart=always", "--property=RestartSec=2",
        f"--property=NetworkNamespacePath=/proc/{pid}/ns/net",
-       f"--property=ReadWritePaths={root}",
+       # keel-vip.service's: the VIP's state and wg0's configuration
+       # alone, so a write anywhere else fails here as on a machine
+       # (keel#178: the statement of keel#165 under /var/lib/keel/database)
+       f"--property=ReadWritePaths={writable}",
        *(f"--property={one}" for one in HELPER_PROPERTIES),
        f"--setenv=PYTHONPATH={LISTENER_HOME}",
        f"--setenv=PATH={TOOLS}:{os.environ.get('PATH', '')}",

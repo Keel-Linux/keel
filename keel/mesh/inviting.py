@@ -53,11 +53,11 @@ from keel.mesh.node import Node, NodeError
 from keel.mesh.signing import SigningError
 from keel.network import live, wgkeys, wireguard
 from keel.system import DEFAULT_WINDOW
+from keel.network.wireguard import DEFAULT_KEEPALIVE as KEEPALIVE
 
 UNIT = "keel-mesh-invite@{id}"
 # a join accepted just before the expiry is confirmed within its window
 LINGER = DEFAULT_WINDOW + 60
-KEEPALIVE = 25
 EVERY_ADDRESS = "::"
 
 
