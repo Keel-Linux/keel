@@ -19,5 +19,6 @@ jobs:
       package: keel
       apt-packages: bats shellcheck gnupg gpgv wireguard-tools
 
+
   package:
     uses: keel-linux/.github/.github/workflows/github-require-changelog.yml@main
