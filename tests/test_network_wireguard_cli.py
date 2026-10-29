@@ -21,7 +21,8 @@ import wgtools
 from helpers import spec  # noqa: F401
 
 from keel import cli, exits
-from keel.network import wireguard
+from keel import system
+from keel.network import wgkeys, wireguard
 
 PUBLIC = "9vm/AzCVQQsWt1cU2eyjom4cABkNuodiHL8nDjKohEE="
 
@@ -47,13 +48,13 @@ class Case(unittest.TestCase):
         """The scratch root as the live system, as uid `euid`"""
         stack = contextlib.ExitStack()
         stack.enter_context(mock.patch(
-            "keel.commands.inspection.ROOT_DEFAULT", self.root))
+            "keel.commands.ROOT_DEFAULT", self.root))
         stack.enter_context(mock.patch("keel.system.ROOT_DEFAULT",
                                        self.root))
         if euid is None:
             # the real key file is this user's: secret_file_error accepts
             # the caller's own, so only the root check is stood in
-            stack.enter_context(mock.patch("keel.commands.system.needs_root",
+            stack.enter_context(mock.patch("keel.system.needs_root",
                                            return_value=None))
         else:
             stack.enter_context(mock.patch("os.geteuid", return_value=euid))
@@ -85,7 +86,7 @@ class TestSuggest(Case):
 
 class TestKeyMocked(Case):
     def test_an_existing_key_prints_its_public_key_only(self):
-        with mock.patch("keel.commands.wgkeys.public",
+        with mock.patch("keel.network.wgkeys.public",
                         return_value=(PUBLIC, None)) as public:
             os.makedirs(os.path.dirname(self.key()))
             open(self.key(), "w").close()
@@ -100,7 +101,7 @@ class TestKeyMocked(Case):
                         "      interface: ov1\n      address: fd00:1::1/64\n")
         os.makedirs(os.path.dirname(self.key()))
         open(self.key("etc/wireguard/ov1.key"), "w").close()
-        with mock.patch("keel.commands.wgkeys.public",
+        with mock.patch("keel.network.wgkeys.public",
                         return_value=(PUBLIC, None)) as public:
             code, _, _ = run_cli("network", "wireguard", "key", "--spec",
                                  self.spec, "--root", self.root)
@@ -128,14 +129,14 @@ class TestKeyMocked(Case):
         self.assertIn("must run as root", err)
 
     def test_a_key_that_cannot_be_made_or_read(self):
-        with self.live(), mock.patch("keel.commands.wgkeys.generate",
+        with self.live(), mock.patch("keel.network.wgkeys.generate",
                                      return_value="wg is not installed"):
             code, _, err = self.key_cli()
         self.assertEqual(code, exits.APPLY_FAILED)
         self.assertIn("wg is not installed", err)
         os.makedirs(os.path.dirname(self.key()))
         open(self.key(), "w").close()
-        with mock.patch("keel.commands.wgkeys.public",
+        with mock.patch("keel.network.wgkeys.public",
                         return_value=(None, "mode must be 0600")):
             code, _, err = run_cli("network", "wireguard", "key", "--spec",
                                    self.spec, "--root", self.root)

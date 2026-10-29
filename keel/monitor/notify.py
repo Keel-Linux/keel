@@ -30,18 +30,15 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
 from keel.monitor import advice, channels
+from keel.monitor.constants import CHECKS, DIRECTIONS, LEVELS
 from keel.monitor.render import slug
 from keel.spec.errors import SpecError
 from keel.spec.secretstore import read_secret_file
 from keel.spec.validate_monitor import url_problem
 
-LEVELS = ("warn", "critical", "recovery")
-CHECKS = ("disk", "inodes", "memory", "swap", "cpu", "load", "link",
-          "throughput", "service", "restarts")
 # the checks the appliance manifests derive (keel.manifest.monit): a unit
 # or a probe failing, and a restart limit reached
 SERVICE_CHECKS = ("service", "restarts")
-DIRECTIONS = ("upload", "download")
 MASK = "[masked]"
 COMMAND_TIMEOUT = 5
 LOCK_DIR = "/run/lock"

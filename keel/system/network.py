@@ -19,6 +19,7 @@ the configuration:
 
 import ipaddress
 
+from keel.constants import DEFAULT_WINDOW
 from keel.diff.compare import compare_section
 from keel.diff.report import DRIFT
 from keel.system.actions import Action, Note, Refuse, Step, SwitchNetwork
@@ -28,7 +29,6 @@ from keel.system.netstate import NetworkState
 FIELD = "network"
 INTERFACES = "etc/network/interfaces"
 INTERFACES_MODE = 0o644
-DEFAULT_WINDOW = 120
 LIVE_COMMANDS = ("ifup", "ifdown", "ip", "systemd-run", "systemctl",
                  "sysctl")
 # drift under these changes the file; nameservers only when it can hold them

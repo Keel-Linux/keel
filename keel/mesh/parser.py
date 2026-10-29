@@ -7,22 +7,27 @@ are keel.cli's own, handed in, so they are defined once.
 
 import argparse
 from collections.abc import Callable
-from dataclasses import dataclass
 
-from keel.mesh import commands
-from keel.network.wireguard import DEFAULT_PORT as WIREGUARD_PORT
-from keel.system import DEFAULT_WINDOW
+from keel.constants import DEFAULT_WINDOW, WIREGUARD_PORT
 
 
-@dataclass(frozen=True)
 class Options:
     """keel.cli's shared helpers: --spec and friends, --root, and the
     types of a port and of a window"""
 
-    common: Callable[[argparse.ArgumentParser], None]
-    root: Callable[[argparse.ArgumentParser, str], None]
-    port: Callable[[str], int]
-    window: Callable[[str], int]
+    __slots__ = ("common", "root", "port", "window")
+
+    def __init__(
+        self,
+        common: Callable[[argparse.ArgumentParser], None],
+        root: Callable[[argparse.ArgumentParser, str], None],
+        port: Callable[[str], int],
+        window: Callable[[str], int],
+    ):
+        self.common = common
+        self.root = root
+        self.port = port
+        self.window = window
 
 
 def add(subparsers, options: Options) -> None:
@@ -54,7 +59,7 @@ def add(subparsers, options: Options) -> None:
         " the number of WireGuard's UDP port)",
     )
     options.root(invite_parser, "read the overlay of and keep the invite in")
-    invite_parser.set_defaults(handler=commands.mesh_invite)
+    invite_parser.set_defaults(handler="keel.mesh.commands.mesh_invite")
     join_parser = mesh_actions.add_parser(
         "join",
         help="join the mesh of the node that printed TOKEN (root); with"
@@ -79,7 +84,7 @@ def add(subparsers, options: Options) -> None:
     )
     window(options, join_parser)
     options.root(join_parser, "read the appliance manifests of")
-    join_parser.set_defaults(handler=commands.mesh_join)
+    join_parser.set_defaults(handler="keel.mesh.commands.mesh_join")
     actions(mesh_actions, options)
 
 
@@ -108,7 +113,7 @@ def actions(mesh_actions, options: Options) -> None:
     )
     window(options, create_parser)
     options.root(create_parser, "create the mesh in")
-    create_parser.set_defaults(handler=commands.mesh_create)
+    create_parser.set_defaults(handler="keel.mesh.commands.mesh_create")
     sync_parser = mesh_actions.add_parser(
         "sync",
         help="add the members this node's peers know and it does not, over"
@@ -129,7 +134,7 @@ def actions(mesh_actions, options: Options) -> None:
     )
     window(options, sync_parser)
     options.root(sync_parser, "sync the mesh of")
-    sync_parser.set_defaults(handler=commands.mesh_sync)
+    sync_parser.set_defaults(handler="keel.mesh.commands.mesh_sync")
     members_parser = mesh_actions.add_parser(
         "members",
         help="the members' channel on the overlay, which keel-mesh-members"
@@ -139,7 +144,7 @@ def actions(mesh_actions, options: Options) -> None:
     options.common(members_parser)
     window(options, members_parser)
     options.root(members_parser, "serve the mesh of")
-    members_parser.set_defaults(handler=commands.mesh_members)
+    members_parser.set_defaults(handler="keel.mesh.commands.mesh_members")
     members_listen = mesh_actions.add_parser(
         "members-listen",
         help="the unprivileged listener keel mesh members starts as the"
@@ -147,7 +152,7 @@ def actions(mesh_actions, options: Options) -> None:
     )
     members_listen.add_argument("socket", metavar="SOCKET",
                                 help="the root helper's unix socket")
-    members_listen.set_defaults(handler=commands.mesh_members_listen)
+    members_listen.set_defaults(handler="keel.mesh.commands.mesh_members_listen")
     remove_parser = mesh_actions.add_parser(
         "remove",
         help="remove a peer from this node's spec, applied under the window"
@@ -160,7 +165,7 @@ def actions(mesh_actions, options: Options) -> None:
         help="the peer's WireGuard public key or its overlay address")
     window(options, remove_parser)
     options.root(remove_parser, "remove the peer in")
-    remove_parser.set_defaults(handler=commands.mesh_remove)
+    remove_parser.set_defaults(handler="keel.mesh.commands.mesh_remove")
     accept_parser = mesh_actions.add_parser(
         "accept",
         help="on the inviter, the keel mesh accept line a join printed when"
@@ -173,7 +178,7 @@ def actions(mesh_actions, options: Options) -> None:
     )
     window(options, accept_parser)
     options.root(accept_parser, "accept the new node in")
-    accept_parser.set_defaults(handler=commands.mesh_accept)
+    accept_parser.set_defaults(handler="keel.mesh.commands.mesh_accept")
     status_parser = mesh_actions.add_parser(
         "status",
         help="this node's peers, their last handshakes, and the pending"
@@ -181,7 +186,7 @@ def actions(mesh_actions, options: Options) -> None:
     )
     options.common(status_parser)
     options.root(status_parser, "read the mesh of")
-    status_parser.set_defaults(handler=commands.mesh_status)
+    status_parser.set_defaults(handler="keel.mesh.commands.mesh_status")
     serve_parser = mesh_actions.add_parser(
         "serve",
         help="the invite's root helper, which keel mesh invite starts as"
@@ -191,7 +196,7 @@ def actions(mesh_actions, options: Options) -> None:
     serve_parser.add_argument("invite", metavar="ID",
                               help="the invite to answer")
     options.root(serve_parser, "serve the invite of")
-    serve_parser.set_defaults(handler=commands.mesh_serve)
+    serve_parser.set_defaults(handler="keel.mesh.commands.mesh_serve")
     listen_parser = mesh_actions.add_parser(
         "listen",
         help="the unprivileged listener keel mesh serve starts as the unit"
@@ -199,7 +204,7 @@ def actions(mesh_actions, options: Options) -> None:
     )
     listen_parser.add_argument("socket", metavar="SOCKET",
                                help="the root helper's unix socket")
-    listen_parser.set_defaults(handler=commands.mesh_listen)
+    listen_parser.set_defaults(handler="keel.mesh.commands.mesh_listen")
     check_parser = mesh_actions.add_parser(
         "upgrade-check",
         help="whether this node may be upgraded now: every other etcd"
@@ -209,7 +214,7 @@ def actions(mesh_actions, options: Options) -> None:
     )
     options.common(check_parser)
     options.root(check_parser, "check the upgrade of")
-    check_parser.set_defaults(handler=commands.mesh_upgrade_check)
+    check_parser.set_defaults(handler="keel.mesh.commands.mesh_upgrade_check")
     etcd_actions(mesh_actions, options)
 
 
@@ -248,7 +253,7 @@ def etcd_actions(mesh_actions, options: Options) -> None:
     )
     window(options, form_parser)
     options.root(form_parser, "form etcd in")
-    form_parser.set_defaults(handler=commands.mesh_etcd_form)
+    form_parser.set_defaults(handler="keel.mesh.commands.mesh_etcd_form")
     tend_parser = etcd_subs.add_parser(
         "tend",
         help="promote learners in sync, remove those that never started"
@@ -258,7 +263,7 @@ def etcd_actions(mesh_actions, options: Options) -> None:
     options.common(tend_parser)
     window(options, tend_parser)
     options.root(tend_parser, "tend etcd in")
-    tend_parser.set_defaults(handler=commands.mesh_etcd_tend)
+    tend_parser.set_defaults(handler="keel.mesh.commands.mesh_etcd_tend")
     gate_parser = etcd_subs.add_parser(
         "gate",
         help="restart etcd one member at a time: `stop` waits until every"
@@ -275,7 +280,7 @@ def etcd_actions(mesh_actions, options: Options) -> None:
         " 120)",
     )
     options.root(gate_parser, "gate etcd in")
-    gate_parser.set_defaults(handler=commands.mesh_etcd_gate)
+    gate_parser.set_defaults(handler="keel.mesh.commands.mesh_etcd_gate")
     reissue_parser = etcd_subs.add_parser(
         "reissue",
         help="on the root CA's holder: move every member to a certificate"
@@ -295,4 +300,4 @@ def etcd_actions(mesh_actions, options: Options) -> None:
     )
     window(options, reissue_parser)
     options.root(reissue_parser, "reissue etcd's certificates in")
-    reissue_parser.set_defaults(handler=commands.mesh_etcd_reissue)
+    reissue_parser.set_defaults(handler="keel.mesh.commands.mesh_etcd_reissue")

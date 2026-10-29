@@ -10,7 +10,6 @@ import ipaddress
 import subprocess
 
 from keel.network import marker
-from keel.network.confirm import Probes
 
 SOCKETS = ("ss", "-Htnp", "state", "established")
 
@@ -143,7 +142,8 @@ def link_up_in(text: str) -> bool:
     return "UP" in text[start + 1:end].split(",")
 
 
-def probes() -> Probes:
+def probes() -> "Probes":
+    from keel.network.confirm import Probes
     return Probes(boot_id=marker.boot_id, addresses=addresses,
                   route_via=route_via, holder=holder, route_dev=route_dev,
                   gateways=default_gateways)

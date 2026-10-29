@@ -18,11 +18,12 @@ address for the message.
 
 import json
 
+from keel.monitor.constants import MONITOR_PATH
 from keel.spec.errors import SpecError
 from keel.spec.secretstore import secret_file_error
 from keel.spec.validate_monitor import alerts_address, working_channels
 
-PATH = "/etc/keel/monitor.json"
+PATH = MONITOR_PATH
 WRITTEN_BY = "keel spec apply --system, from the monitor section (0021)"
 # the most of the file notify reads; it is a few hundred bytes
 MAX_BYTES = 65536

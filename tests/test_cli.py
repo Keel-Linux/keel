@@ -27,6 +27,7 @@ from layers_helpers import (
     write_manifest,
 )
 
+from keel import layers
 from keel.layers import CACHE_ENV, LAYERS_ENV  # noqa: E402
 from keel.layers.verify import SIGNATURE_UNKNOWN  # noqa: E402
 
@@ -401,7 +402,7 @@ class TestPullAndAssemble(CLITestCase):
         self.assertIn("run keel pull first", err)
 
     def test_assemble_reports_an_os_error_as_assemble_failed(self):
-        with mock.patch.object(commands.layers, "assemble",
+        with mock.patch.object(layers, "assemble",
                                side_effect=OSError("zstd: not found")):
             code, _, err = self.assemble()
         self.assertEqual(code, exits.ASSEMBLE_FAILED)

@@ -5,10 +5,13 @@ Kept apart from the code that uses them so that the format can be read
 without reading the parser.
 """
 
-SPEC_DEFAULT = "/etc/keel/instance.yaml"
-CONF_DEFAULT = "/etc/inithooks.conf"
-SPEC_ENV = "KEEL_SPEC"
-CONF_ENV = "KEEL_CONF"
+from keel.constants import (
+    CONF_DEFAULT,
+    CONF_ENV,
+    SPEC_DEFAULT,
+    SPEC_ENV,
+)
+
 LXC_MARKER = "/var/lib/turnkey-info/inithooks.service/lxc"
 
 SCHEMA_VERSION = 1

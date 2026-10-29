@@ -20,15 +20,14 @@ the only place either set of names is spelled.
 import posixpath
 import re
 
+from keel.constants import CHANNEL_STABLE, CHANNEL_TESTING, CHANNELS
+
 BLOB_DIR = "sha256"
 # The pointer a release revision keeps of itself: the very bytes that were
 # signed for it when a channel was moved to it, archived inside the
 # immutable revision directory. It is what a rollback verifies against,
 # because no channel pointer names an older revision any more.
 REVISION_POINTER = "revision"
-CHANNEL_STABLE = "stable"
-CHANNEL_TESTING = "testing"
-CHANNELS = (CHANNEL_STABLE, CHANNEL_TESTING)
 
 RELEASE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 REV_RE = re.compile(r"^[1-9][0-9]*$")

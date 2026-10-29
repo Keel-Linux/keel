@@ -9,20 +9,9 @@ import dataclasses
 import os
 import sys
 
-from keel import exits, layers, manifest, spec
-from keel import diff as drift
-from keel import inspect as inspection
-from keel import system
-from keel.system import filesync
-from keel.monitor import channelfile
-from keel.monitor import notify as notifier
-from keel.network import confirm as netconfirm
-from keel.manifest.facts import gather as gather_facts
-from keel.network import live, session, switch, wgkeys, wireguard
-from keel.spec import overlayrecord
+from keel import exits, spec
+from keel.constants import DEFAULT_WINDOW, ROOT_DEFAULT
 from keel.spec.validate_appliance import default_warnings, with_defaults
-from keel.spec.validate_appliance import is_name as is_manifest_name
-from keel.system.ovstate import overlay_of
 
 
 def warn(message: str) -> None:
@@ -35,7 +24,7 @@ def error(message: str) -> None:
 
 def read_spec(
     path: str, check_secret_files: bool = True,
-    root: str = inspection.ROOT_DEFAULT,
+    root: str = ROOT_DEFAULT,
 ) -> tuple[dict | None, int]:
     """Load and validate a spec file
 
@@ -103,8 +92,10 @@ def manifest_facts(doc: dict, root: str):
     """
     appliance = doc.get("appliance")
     name = appliance.get("name") if isinstance(appliance, dict) else None
+    from keel.spec.validate_appliance import is_name as is_manifest_name
     if not is_manifest_name(name):
         return None
+    from keel.manifest.facts import gather as gather_facts
     return gather_facts(root, name)
 
 
@@ -116,7 +107,7 @@ def spec_validate(args) -> int:
     """
     check_secret_files = not getattr(args, "no_secret_files", False)
     doc, code = read_spec(args.spec, check_secret_files,
-                          getattr(args, "root", inspection.ROOT_DEFAULT))
+                          getattr(args, "root", ROOT_DEFAULT))
     if doc is None:
         return code
     checked = "checked" if check_secret_files else "not checked"
@@ -154,10 +145,11 @@ def spec_apply(args) -> int:
     A caller that builds the Namespace by hand, as confconsole does, gets
     the conf only.
     """
+    from keel import system
     system_only = getattr(args, "system_only", False)
     with_system = system_only or getattr(args, "system", False)
     dry_run = getattr(args, "dry_run", False)
-    root = getattr(args, "root", inspection.ROOT_DEFAULT)
+    root = getattr(args, "root", ROOT_DEFAULT)
     no_secrets = dry_run or system_only
     doc, code = read_spec(args.spec, not no_secrets, root)
     if doc is None:
@@ -183,7 +175,7 @@ def spec_apply(args) -> int:
         doc, root, dry_run, phase_label(system_only),
         getattr(args, "destroy_local_database", False),
         getattr(args, "defer_certificate", False),
-        getattr(args, "network_window", system.DEFAULT_WINDOW),
+        getattr(args, "network_window", DEFAULT_WINDOW),
         getattr(args, "skip_network", False),
         getattr(args, "skip_uplink", False),
         spec_path=args.spec,
@@ -221,7 +213,7 @@ def apply_conf(args, doc: dict, with_system: bool) -> int:
 def apply_system(
     doc: dict, root: str, dry_run: bool, label: str = "apply --system",
     confirmed: bool = False, defer_certificate: bool = False,
-    network_window: int = system.DEFAULT_WINDOW, skip_network: bool = False,
+    network_window: int = DEFAULT_WINDOW, skip_network: bool = False,
     skip_uplink: bool = False, spec_path: str | None = None,
 ) -> int:
     """Observe, plan, then carry out or only print; one line per action
@@ -243,11 +235,13 @@ def apply_system(
     """
     facts = manifest_facts(doc, root)
     declared = doc
+    from keel.system import filesync
     problem = filesync.undeclared_problem(root, doc)
     if problem:
         error(problem)
         return exits.SPEC_INVALID
     doc, _ = with_defaults(doc, facts)
+    from keel import system
     state = system.observe(root, doc, start=not dry_run, spec=spec_path)
     plan = system.plan(doc, state, confirmed, defer_certificate,
                        network_window, skip_network, skip_uplink, spec_path)
@@ -267,6 +261,7 @@ def apply_system(
 
 def record_overlays(doc: dict, facts, root: str) -> None:
     """What the spec declared of the chain, for the next validation"""
+    from keel.spec import overlayrecord
     if facts is None or facts.problems:
         return
     overlays = doc.get("overlays")
@@ -286,7 +281,10 @@ def network_confirm(args) -> int:
     it was just given is a session that could only have been opened on
     it, and a shell that survived the change is not one.
     """
-    root = getattr(args, "root", inspection.ROOT_DEFAULT)
+    from keel import system
+    from keel.network import confirm as netconfirm
+    from keel.network import live, session
+    root = getattr(args, "root", ROOT_DEFAULT)
     refusal = system.needs_root(root, "network confirm")
     if refusal:
         error(refusal)
@@ -308,7 +306,9 @@ def network_revert(args) -> int:
     What the revert timer runs, and the boot unit with --boot; by hand it
     is the way to give up on a change without waiting for the window.
     """
-    root = getattr(args, "root", inspection.ROOT_DEFAULT)
+    from keel import system
+    from keel.network import live, switch
+    root = getattr(args, "root", ROOT_DEFAULT)
     refusal = system.needs_root(root, "network revert")
     if refusal:
         error(refusal)
@@ -325,7 +325,8 @@ def network_mtu(args) -> int:
     """Each WireGuard interface up whose MTU is not its file's, set live
     (keel#139); what the package's postinst runs, so an upgrade needs no
     reboot. Only on the live system"""
-    root = getattr(args, "root", inspection.ROOT_DEFAULT)
+    from keel import system
+    root = getattr(args, "root", ROOT_DEFAULT)
     refusal = system.needs_root(root, "network mtu")
     if refusal:
         error(refusal)
@@ -349,7 +350,9 @@ def network_wireguard_key(args) -> int:
     to the other nodes before declaring anything. Only the public key is
     printed, on standard output, alone, for a caller to read.
     """
-    root = getattr(args, "root", inspection.ROOT_DEFAULT)
+    from keel.network import wgkeys, wireguard
+    from keel.system.ovstate import overlay_of
+    root = getattr(args, "root", ROOT_DEFAULT)
     overlay: dict = {}
     if os.path.exists(args.spec):
         doc, code = read_spec(args.spec, False, root)
@@ -371,7 +374,9 @@ def network_wireguard_key(args) -> int:
 
 
 def make_key(root: str, key: str, path: str) -> int:
-    if os.path.abspath(root) != inspection.ROOT_DEFAULT:
+    from keel import system
+    from keel.network import wgkeys
+    if os.path.abspath(root) != ROOT_DEFAULT:
         error(f"{key} is not made under --root: a private key is made on"
               " the machine that uses it, never in an image (keel-core#8)")
         return exits.APPLY_FAILED
@@ -393,6 +398,7 @@ def network_wireguard_suggest(args) -> int:
     Random, so two sets formed apart do not collide when joined later;
     the other nodes take ::2, ::3 on the same /64.
     """
+    from keel.network import wireguard
     print(wireguard.suggest_address(
         os.urandom(wireguard.GLOBAL_ID_BYTES)))
     return exits.OK
@@ -409,6 +415,8 @@ def notify(args) -> int:
     logged to syslog at user.crit and mailed to root, and the exit code
     is NOTIFY_FAILED, which is all monit could do anything with.
     """
+    from keel.monitor import channelfile
+    from keel.monitor import notify as notifier
     event = notifier.event_from(
         args.level, args.check, args.name or args.path or args.iface,
         args.threshold, dict(os.environ), args.direction, args.unit,
@@ -449,7 +457,8 @@ def database_promote(args) -> int:
     have, and two writable servers on one dataset is what promoting the
     wrong node produces.
     """
-    root = getattr(args, "root", inspection.ROOT_DEFAULT)
+    from keel import system
+    root = getattr(args, "root", ROOT_DEFAULT)
     dry_run = getattr(args, "dry_run", False)
     doc, code = read_spec(args.spec, False, root)
     if doc is None:
@@ -493,8 +502,9 @@ def database_promote(args) -> int:
 
 def database_follow(args) -> int:
     """The server made to follow the pair's VIP (keel.system.dbfollow)"""
+    from keel import system
     from keel.system import dbfollow
-    root = getattr(args, "root", inspection.ROOT_DEFAULT)
+    root = getattr(args, "root", ROOT_DEFAULT)
     refusal = system.needs_root(root, "database follow")
     if refusal:
         error(refusal)
@@ -509,8 +519,9 @@ def database_follow(args) -> int:
 
 def database_guard(args) -> int:
     """The PostgreSQL unit's ExecStartPre on a pair (keel.system.dbpgguard)"""
+    from keel import system
     from keel.system import dbpgguard
-    root = getattr(args, "root", inspection.ROOT_DEFAULT)
+    root = getattr(args, "root", ROOT_DEFAULT)
     refusal = system.needs_root(root, "database guard")
     if refusal:
         error(refusal)
@@ -521,8 +532,9 @@ def database_guard(args) -> int:
 
 
 def database_watch(args) -> int:
+    from keel import system
     from keel.system import dbwatch
-    root = getattr(args, "root", inspection.ROOT_DEFAULT)
+    root = getattr(args, "root", ROOT_DEFAULT)
     refusal = system.needs_root(root, "database watch")
     if refusal:
         error(refusal)
@@ -566,17 +578,19 @@ def manifest_validate(args) -> int:
     0041, docs/manifest.md). An appliance is resolved along its chain as
     well, since most of what can go wrong between manifests shows there.
     """
+    from keel import manifest
     return manifest_report(manifest.validate_target(
         args.root, args.target, args.kind))
 
 
 def manifest_show(args) -> int:
     """Print a manifest as its file says it, or resolved along its chain"""
+    from keel import manifest
     return manifest_report(manifest.show(
         args.root, args.name, args.resolved, args.kind))
 
 
-def manifest_report(outcome: manifest.Outcome) -> int:
+def manifest_report(outcome) -> int:
     print(outcome.out, end="")
     for note in outcome.notes:
         print(note, file=sys.stderr)
@@ -603,6 +617,7 @@ def check_channel(args, result):
     point of signing the pointer is that "nothing new" and "you are
     being held back" are different answers.
     """
+    from keel import inspect as inspection, layers
     state = result.channel
     if state is None:
         return (
@@ -644,6 +659,7 @@ def inspect(args) -> int:
     INSPECT_INCOMPLETE, because a mirror that cannot be believed is a
     worse answer than a spec field nobody could infer.
     """
+    from keel import inspect as inspection
     result = inspection.inspect_root(args.root, args.secrets_dir)
     channel_code, refusal = exits.OK, None
     if getattr(args, "check_channel", False):
@@ -687,6 +703,7 @@ def diff(args) -> int:
     json, and nothing is written anywhere. Drift decides the exit code
     before unknown fields do (docs/diff.md).
     """
+    from keel import diff as drift
     doc, code = read_spec(args.spec, False, args.root)
     if doc is None:
         return code
@@ -723,6 +740,7 @@ def verify(args) -> int:
 
 def image_keyrings(args) -> tuple[str, ...]:
     """The keyrings a .hash file or a release MANIFEST is verified with"""
+    from keel import layers
     named = getattr(args, "keyrings", None)
     if named is None:
         named = os.environ.get(layers.IMAGE_KEYRINGS_ENV, "").split(":")
@@ -734,6 +752,7 @@ def image_keyrings(args) -> tuple[str, ...]:
 
 def verify_release_manifest(args) -> int:
     """keel verify --release-manifest: one line, then one per file"""
+    from keel import layers
     report = layers.verify_release_manifest(
         args.release_manifest, image_keyrings(args)
     )
@@ -743,6 +762,7 @@ def verify_release_manifest(args) -> int:
 
 
 def verify_layers(args) -> int:
+    from keel import layers
     report = layers.verify_layers(
         args.layers_dir, args.tarballs_dir, image_keyrings(args)
     )
@@ -764,17 +784,19 @@ def signers(args) -> tuple[str, ...]:
     """
     named = getattr(args, "channel_signers", None)
     if named is None:
+        from keel import layers
         named = os.environ.get(layers.SIGNER_ENV, "").split()
     return tuple(named)
 
 
-def resolution(args) -> layers.Resolution:
+def resolution(args) -> "layers.Resolution":
     """The layout keel pull was told to resolve through
 
     A bad combination of options raises ValueError here, before anything
     is fetched, so the CLI turns it into a usage error rather than the
     mirror answering 404 for a path that was never going to exist.
     """
+    from keel import layers
     return layers.Resolution(
         channel=getattr(args, "channel", None),
         release=getattr(args, "release", None),
@@ -795,6 +817,7 @@ def pull(args) -> int:
     channel, when its pointer was signed and when it expires. A failure
     prints the reason and returns the code that names it.
     """
+    from keel import layers
     try:
         report = layers.pull(
             args.layer, args.source, args.cache_dir, resolution(args)
@@ -816,6 +839,7 @@ def assemble(args) -> int:
     LayerError (tar or zstd missing, a disk full) is reported the same
     way and returns ASSEMBLE_FAILED.
     """
+    from keel import layers
     try:
         report = layers.assemble(
             args.layer, args.cache_dir, args.rootfs, args.template,

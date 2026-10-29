@@ -1,3 +1,12 @@
+keel (0.23.56+perf1) unstable; urgency=medium
+
+  * Performance: the CLI builds its parser and prints help without
+    importing the command implementations. Parser constants live in
+    keel.constants; commands and vipcli import only what they use;
+    importlib.metadata is read for --version alone.
+
+ -- Marcos Méndez <mendez.foto@gmail.com>  Tue, 27 Oct 2026 00:00:00 +0000
+
 keel (0.23.55) unstable; urgency=medium
 
   * File replication now resumes by itself after a node restarts

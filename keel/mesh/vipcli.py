@@ -13,12 +13,12 @@ import sys
 import threading
 from datetime import datetime, timezone
 
-from keel import exits, system
-from keel.commands import error
-from keel.inspect import ROOT_DEFAULT
-from keel.mesh import vipbridge, vipetcd, vippromote, vipunit
-from keel.mesh.node import Node
-from keel.mesh.vipnode import Here
+from keel import exits
+from keel.constants import ROOT_DEFAULT
+
+
+def error(message: str) -> None:
+    print(f"Error: {message}", file=sys.stderr)
 
 
 def add(subparsers, options) -> None:
@@ -124,11 +124,14 @@ def err(line: str) -> None:
     print(line, file=sys.stderr, flush=True)
 
 
-def here_of(args) -> Here:
+def here_of(args) -> "Here":
+    from keel.mesh.node import Node
+    from keel.mesh.vipnode import Here
     return Here(Node(os.path.abspath(args.root), args.spec), utcnow, err)
 
 
 def as_root(args, verb: str) -> int:
+    from keel import system
     refusal = system.needs_root(os.path.abspath(args.root), verb)
     if refusal:
         error(refusal)
@@ -137,6 +140,7 @@ def as_root(args, verb: str) -> int:
 
 
 def vip_promote(args) -> int:
+    from keel.mesh import vippromote
     code = as_root(args, "keel vip promote")
     if code != exits.OK:
         return code
@@ -144,6 +148,7 @@ def vip_promote(args) -> int:
 
 
 def vip_pair(args) -> int:
+    from keel.mesh import vippromote
     code = as_root(args, "keel vip pair")
     if code != exits.OK:
         return code
@@ -151,6 +156,7 @@ def vip_pair(args) -> int:
 
 
 def vip_unpair(args) -> int:
+    from keel.mesh import vippromote
     code = as_root(args, "keel vip unpair")
     if code != exits.OK:
         return code
@@ -158,6 +164,7 @@ def vip_unpair(args) -> int:
 
 
 def vip_check(args) -> int:
+    from keel.mesh import vippromote
     code = as_root(args, "keel vip check")
     if code != exits.OK:
         return code
@@ -165,6 +172,7 @@ def vip_check(args) -> int:
 
 
 def vip_tend(args) -> int:
+    from keel.mesh import vipbridge, vipetcd, vipunit
     code = as_root(args, "keel vip tend")
     if code != exits.OK:
         return code
@@ -192,10 +200,12 @@ def vip_tend(args) -> int:
 
 def vip_control(args) -> int:
     """What keel-vip-control runs: the unprivileged controller"""
+    from keel.mesh import vipbridge
     return vipbridge.control(args.socket, err)
 
 
 def vip_status(args) -> int:
+    from keel.mesh import vippromote
     for line in vippromote.lines(here_of(args),
                                  os.path.abspath(args.root) == ROOT_DEFAULT):
         print(line)

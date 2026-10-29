@@ -10,24 +10,19 @@ for the same reason.
 
 import re
 
-LAYERS_DEFAULT = "/var/lib/keel/layers"
-LAYERS_ENV = "KEEL_LAYERS_DIR"
-CACHE_DEFAULT = "/var/cache/keel/layers"
-CACHE_ENV = "KEEL_CACHE_DIR"
-
-# The record of the channel this instance follows, and the keyring a
-# channel pointer is verified against. The keyring default is binary
-# because that is the only form gpgv reads; an armored file is dearmored
-# on the way in (keel.layers.signature).
-STATE_DEFAULT = "/var/lib/keel/channel"
-STATE_ENV = "KEEL_CHANNEL_STATE"
-KEYRING_DEFAULT = "/usr/share/keyrings/keel-channel-keyring.gpg"
-KEYRING_ENV = "KEEL_CHANNEL_KEYRING"
-# Which key may move a channel, when an image wants to say so without
-# passing --channel-signer on every call. Empty means every key in the
-# keyring is accepted, so a keyring holding only the channel key is the
-# other way to get the same separation.
-SIGNER_ENV = "KEEL_CHANNEL_SIGNER"
+from keel.constants import (
+    CACHE_DEFAULT,
+    CACHE_ENV,
+    IMAGE_KEYRINGS_DEFAULT,
+    IMAGE_KEYRINGS_ENV,
+    KEYRING_DEFAULT,
+    KEYRING_ENV,
+    LAYERS_DEFAULT,
+    LAYERS_ENV,
+    SIGNER_ENV,
+    STATE_DEFAULT,
+    STATE_ENV,
+)
 
 MANIFEST_SUFFIX = ".manifest"
 HASH_SUFFIX = ".hash"
@@ -133,11 +128,7 @@ BADSIG_RE = re.compile(r"^\[GNUPG:\] BADSIG\b")
 # that sign the image artifacts (decision 0055): the layer `.hash` files
 # and the release MANIFEST. A signature by either key is good. The files
 # stay separate, and a missing file is skipped.
-IMAGE_KEYRINGS_DEFAULT = (
-    "/usr/share/keyrings/keel-archive-keyring.gpg",
-    "/usr/share/keyrings/keel-images-keyring.gpg",
-)
-IMAGE_KEYRINGS_ENV = "KEEL_IMAGE_KEYRINGS"
+# IMAGE_KEYRINGS_DEFAULT and IMAGE_KEYRINGS_ENV come from keel.constants.
 
 READ_CHUNK = 1 << 20
 
