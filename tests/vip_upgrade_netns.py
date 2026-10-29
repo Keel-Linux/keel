@@ -43,6 +43,7 @@ import vip_netns
 from etcd_netns import NAMES, environment, samples, sh, start_etcd, summary
 from vip_netns import (
     OVERLAY,
+    VIP,
     agent_send,
     answers,
     first,
@@ -92,6 +93,26 @@ def window(samples_: list[dict], since: float) -> list[list[str]]:
                    if one["t"] >= since}, key=len)
 
 
+def valid_lft_of(pid: int) -> int | None:
+    """The VIP's valid_lft on the node's wg0; None when it is not
+    carried or has no lifetime"""
+    import re
+    try:
+        text = subprocess.run(
+            ["nsenter", "-t", str(pid), "-n",
+             "ip", "-6", "-o", "addr", "show", "dev", "wg0"],
+            capture_output=True, text=True, check=False, timeout=5
+        ).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    for line in text.splitlines():
+        if VIP in line:
+            found = re.search(r"valid_lft (\d+)sec", line)
+            if found:
+                return int(found.group(1))
+    return None
+
+
 def restarted(how: str, index: int, pids: list[int], samples_: list[dict],
               log: str) -> dict:
     """keel-vip.service on node `index` restarted as a package upgrade
@@ -105,11 +126,13 @@ def restarted(how: str, index: int, pids: list[int], samples_: list[dict],
     else:
         sh("systemctl", how, unit)
     took = round(time.time() - at, 2)
+    vlft = valid_lft_of(pids[index]) if index == 0 else None
     back = wait_until(lambda: main_pid(unit) not in (0, pid), 60)
     time.sleep(SETTLE)
     after = epoch()
     return {"how": how, "node": NAMES[index], "systemctl_s": took,
             "helper_back_s": back,
+            "valid_lft_after_restart": vlft,
             "gap_s": gap(answers(log), at - 1, time.time()),
             "epoch_before": before.get("epoch"),
             "epoch_after": after.get("epoch"),
