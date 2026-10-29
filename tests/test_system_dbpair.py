@@ -126,6 +126,11 @@ class TestThePair(Pair):
                          ["fd00::1", "::1", VIP])
         self.assertEqual(dbpair.bind_addresses(None, ["fd00::1"], VIP),
                          ["fd00::1", "::1", "127.0.0.1", VIP])
+        # keel#233: the overlay must appear even when listen is declared
+        # without it, because the peer connects to the overlay address
+        self.assertEqual(
+            dbpair.bind_addresses(["::1", "127.0.0.1"], ["fd00::1"], VIP),
+            ["::1", "127.0.0.1", "fd00::1", VIP])
         self.assertEqual(dbpair.role_text("replica", VIP),
                          f"role=replica\nreplicates=database\nvip={VIP}\n")
         self.assertEqual(dbpair.role_text("primary", VIP, files=True),
@@ -529,6 +534,17 @@ class TestThePairPlan(unittest.TestCase):
                          [FollowVip("/spec.yaml", False)])
         self.assertIn("declared role, primary, stands",
                       only(plan[2], Note)[0].summary)
+
+    def test_the_overlay_is_bound_even_when_listen_omits_it(self):
+        """keel#233: the peer connects to the overlay address, so it must
+        appear in bind-address even when the spec declares only loopbacks"""
+        doc = dict(DOC, database={"server": {
+            "engine": "mariadb", "role": "primary",
+            "listen": ["::1", "127.0.0.1"]}})
+        plan = plan_database(doc, paired_state(), False, "/spec.yaml")
+        text = only(plan[0], WriteFile)[1].content
+        self.assertIn(f"bind-address = ::1,127.0.0.1,{address(0)},{VIP}",
+                      text)
 
     def test_an_unchanged_node_restarts_nothing_and_sets_no_sysctl(self):
         first = plan_database(DOC, paired_state(), False, "/s")
