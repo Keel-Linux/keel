@@ -761,16 +761,24 @@ def handed_over(here: Here, held: Held, client: Callable[[], Client],
     try:
         etcd = client()
         ttl = etcd.keepalive(held.lease)
+        kept = clock() - sent
         if ttl > 0:
             etcd.prefix(key_of(here.mesh_id(), held.vip, EPOCH))
     except (EtcdError, *FAILURES) as e:
+        age = clock() - sent
         here.err(f"vip {held.vip}: not renewed as the unit restarts ({e});"
+                 f" {age:.2f} s in;"
                  " the kernel ends the address by the last renewal's"
                  " deadline")
         return True
     if ttl <= 0:
         return False
-    if not vipnode.carry_held(here, held.vip, clock() - sent):
+    age = clock() - sent
+    valid = vipnet.lifetime(age)
+    here.err(f"vip {held.vip}: renewed as the unit restarts"
+             f" (keepalive {kept:.2f} s, total {age:.2f} s,"
+             f" valid_lft {valid})")
+    if not vipnode.carry_held(here, held.vip, age):
         here.err(f"vip {held.vip}: renewed as the unit restarts, but not"
                  " carried again")
     return True
