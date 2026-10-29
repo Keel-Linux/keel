@@ -43,6 +43,7 @@ import vip_netns
 from etcd_netns import NAMES, environment, samples, sh, start_etcd, summary
 from vip_netns import (
     OVERLAY,
+    VIP,
     agent_send,
     answers,
     first,

@@ -754,30 +754,39 @@ def handed_over(here: Here, held: Held, client: Callable[[], Client],
     keep-alive, then a linearizable read, which needs the majority), and
     the address given the lifetime that renewal leaves; whether the
     address stays. With no answer it stays as it is, the kernel's to end
-    by the last renewal's deadline; a lease gone drops it"""
+    by the last renewal's deadline; a lease gone drops it.
+
+    A single deadline (CALL_TIMEOUT) caps the two calls: on a 250 ms
+    link the whole sequence takes about 1.5 s, which gains the new
+    controller a fresh lifetime; anything longer costs more restart time
+    than the lifetime it gains (keel#87)"""
     if not held.lease or not held.holds(here.own_key()):
         return True
     sent = clock()
+    deadline = sent + CALL_TIMEOUT
     try:
         etcd = client()
+        etcd.timeout = max(0.5, deadline - clock())
         ttl = etcd.keepalive(held.lease)
-        kept = clock() - sent
         if ttl > 0:
+            left = deadline - clock()
+            if left < 0.5:
+                here.err(f"vip {held.vip}: keepalive took"
+                         f" {clock() - sent:.2f} s, no time for the"
+                         " prefix; the kernel ends the address by the"
+                         " last renewal's deadline")
+                return True
+            etcd.timeout = left
             etcd.prefix(key_of(here.mesh_id(), held.vip, EPOCH))
     except (EtcdError, *FAILURES) as e:
-        age = clock() - sent
         here.err(f"vip {held.vip}: not renewed as the unit restarts ({e});"
-                 f" {age:.2f} s in;"
+                 f" {clock() - sent:.2f} s in;"
                  " the kernel ends the address by the last renewal's"
                  " deadline")
         return True
     if ttl <= 0:
         return False
     age = clock() - sent
-    valid = vipnet.lifetime(age)
-    here.err(f"vip {held.vip}: renewed as the unit restarts"
-             f" (keepalive {kept:.2f} s, total {age:.2f} s,"
-             f" valid_lft {valid})")
     if not vipnode.carry_held(here, held.vip, age):
         here.err(f"vip {held.vip}: renewed as the unit restarts, but not"
                  " carried again")
