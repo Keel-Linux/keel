@@ -1,3 +1,14 @@
+keel (0.23.61) unstable; urgency=medium
+
+  * The bind-address in 99-keel-database.cnf did not include the node's
+    own overlay address when the spec declared listen addresses without
+    it (keel#233). The peer connects to the overlay address for database
+    follow, so the connection failed. The overlay is now always bound.
+    Both engines (MariaDB and PostgreSQL) use the same bind_addresses
+    function. keel diff no longer counts the overlay as drift.
+
+ -- Marcos Méndez <popsolutions.co@gmail.com>  Thu, 29 Oct 2026 14:45:00 +0000
+
 keel (0.23.60) unstable; urgency=medium
 
   * A try-restart of keel-vip.service on the holder could remove the VIP

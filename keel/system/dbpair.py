@@ -149,12 +149,16 @@ def role_text(role: str, vip: str, files: bool = False) -> str:
 
 def bind_addresses(listen: list | None, overlay: list[str],
                    vip: str) -> list[str]:
-    """What a paired server binds: the declared addresses, else its own
-    overlay addresses and the loopbacks, and the VIP (with
-    net.ipv6.ip_nonlocal_bind, so the replica binds an address it does
-    not carry, and the primary answers on it the moment it does)"""
+    """What a paired server binds: the declared addresses, else the
+    defaults, then the overlay and VIP (the peer connects to the overlay
+    address, and both nodes bind the VIP with net.ipv6.ip_nonlocal_bind
+    so the replica binds an address it does not carry and the primary
+    answers on it the moment it does)"""
     found = [str(one) for one in (listen or [])] or \
         list(overlay) + ["::1", "127.0.0.1"]
+    for addr in overlay:
+        if addr not in found:
+            found.append(addr)
     if vip not in found:
         found.append(vip)
     return found
