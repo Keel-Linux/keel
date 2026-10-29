@@ -354,14 +354,18 @@ class TestPromoteWithEtcd(WithEtcd):
                                           said.append), exits.APPLY_FAILED)
 
     def test_promote_finds_its_own_controller_claimed_while_it_waited(self):
+        """With the old primary gone (a released one is not waited for,
+        keel#138), the promote waits for its lease, and its own
+        controller may claim meanwhile"""
         self.promote(0)
         self.turn()
+        self.down.add(address(0))
         with mock.patch.object(vippromote, "gone_lease",
                                side_effect=lambda here, vip, lease, wait:
                                self.own_claim(1)):
             with mock.patch.object(vippromote, "carried_soon",
                                    return_value=True):
-                code, said = self.promote(1)
+                code, said = self.promote(1, gone=True)
         self.assertEqual(code, exits.OK, said)
         self.assertIn("claimed by its controller", said)
 
