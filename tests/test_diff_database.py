@@ -432,3 +432,44 @@ class TestReadOnly(unittest.TestCase):
         database = [n for n, one in enumerate(fields)
                     if one.startswith("database.")]
         self.assertEqual(fields.index(READ_ONLY), max(database))
+
+
+class TestPairListen(unittest.TestCase):
+    """keel#233: the VIP and the overlay are implicitly bound, so they
+    are never drift when the spec did not declare them in listen"""
+
+    VIP = "fd00:6b65:1::ffff:100"
+    OVERLAY = "fd00:6b65:1::1"
+    LISTEN = "database.server.listen"
+
+    def paired_declared(self, listen):
+        return {
+            "appliance": {"name": "core", "vip": self.VIP},
+            "network": {"overlay": {"wireguard": {
+                "address": f"{self.OVERLAY}/64"}}},
+            "database": {"server": {
+                "engine": "mariadb", "role": "primary",
+                "listen": listen}},
+        }
+
+    def test_the_overlay_and_vip_are_not_drift(self):
+        from keel.diff.compare import LISTEN_FIELD, pair_listen
+        from keel.diff.report import DRIFT, SAME, FieldDiff
+        declared = self.paired_declared(["::1", "127.0.0.1"])
+        field = FieldDiff(
+            LISTEN_FIELD, DRIFT,
+            declared=["::1", "127.0.0.1"],
+            observed=["::1", "127.0.0.1", self.OVERLAY, self.VIP])
+        result = pair_listen([field], declared)
+        self.assertEqual(result[0].status, SAME)
+
+    def test_a_declared_overlay_stays_in_the_comparison(self):
+        from keel.diff.compare import LISTEN_FIELD, pair_listen
+        from keel.diff.report import SAME, FieldDiff
+        declared = self.paired_declared([self.OVERLAY, "::1"])
+        field = FieldDiff(
+            LISTEN_FIELD, "drift",
+            declared=[self.OVERLAY, "::1"],
+            observed=[self.OVERLAY, "::1", self.VIP])
+        result = pair_listen([field], declared)
+        self.assertEqual(result[0].status, SAME)

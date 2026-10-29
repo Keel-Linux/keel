@@ -208,21 +208,40 @@ LISTEN_FIELD = "database.server.listen"
 
 
 def pair_listen(fields: list[FieldDiff], declared: dict) -> list[FieldDiff]:
-    """On a paired node the server binds the VIP beside the declared
-    addresses (keel.system.dbpair.bind_addresses), so the VIP among the
-    observed listen addresses is never drift: it is compared without it,
-    as the peers are compared without the VIP's /128"""
+    """On a paired node the server binds the VIP and the overlay beside
+    the declared addresses (keel.system.dbpair.bind_addresses), so
+    neither the VIP nor an undeclared overlay address among the observed
+    listen addresses is drift: they are compared without them"""
     if not paired(declared):
         return fields
     vip = canonical_origin(str(declared["appliance"]["vip"]))
+    # the overlay addresses bind_addresses adds (keel#233)
+    wg = ((declared.get("network") or {}).get("overlay") or {}) \
+        .get("wireguard") or {}
+    overlay = set()
+    for key in ("address", "ipv4_address"):
+        raw = wg.get(key)
+        if raw:
+            try:
+                overlay.add(canonical_origin(
+                    str(ipaddress.ip_interface(str(raw)).ip)))
+            except ValueError:
+                pass
     found = []
     for one in fields:
         if one.field != LISTEN_FIELD or one.status != DRIFT or \
                 not isinstance(one.observed, list):
             found.append(one)
             continue
+        declared_set = set(
+            canonical_origin(str(item)) for item in one.declared
+        ) if isinstance(one.declared, list) else set()
+        implicit = {vip}
+        for addr in overlay:
+            if addr not in declared_set:
+                implicit.add(addr)
         observed = [item for item in one.observed
-                    if canonical_origin(str(item)) != vip]
+                    if canonical_origin(str(item)) not in implicit]
         same = isinstance(one.declared, list) and sorted(
             canonical_origin(str(item)) for item in one.declared) == sorted(
             canonical_origin(str(item)) for item in observed)
