@@ -680,6 +680,8 @@ def play(report: dict, pids: list[int], pairs, roots: list[str],
     report["b_bypass"] = agent_send(
         "B", "sql SELECT GRANTEE FROM information_schema.USER_PRIVILEGES"
         " WHERE PRIVILEGE_TYPE = 'READ_ONLY ADMIN'")
+    planned(report, pids, pairs, roots, "B", "k138_to_b")
+    planned(report, pids, pairs, roots, "A", "k138_to_a")
     crashed(report, pids, roots)
     report["alerts"] = [one.get("text", "")[:160] for one in HOOKS["alerts"]]
     for process in vip_netns.AGENTS.values():
@@ -708,8 +710,9 @@ class Writer:
     """C writes one row at the VIP every 0.1 s, a new connection each
     time with a 2 s connect timeout, as the real-node test's writer"""
 
-    def __init__(self, pid: int):
+    def __init__(self, pid: int, name: str = "crash"):
         self.pid = pid
+        self.name = name
         self.done: list[dict] = []
         self.halt = threading.Event()
         self.thread = threading.Thread(target=self.run, daemon=True)
@@ -733,7 +736,7 @@ class Writer:
                      "--batch", "--connect-timeout=2", "-h", vip_netns.VIP,
                      "-u", APP_USER, f"--password={APP_PASSWORD}",
                      "--skip-ssl-verify-server-cert", APP_DB, "--execute",
-                     f"INSERT INTO t (v, at) VALUES ('crash-{n}',"
+                     f"INSERT INTO t (v, at) VALUES ('{self.name}-{n}',"
                      f" {started:.3f})"], capture_output=True, text=True,
                     check=False, timeout=30)
                 ok, err = one.returncode == 0, one.stderr.strip()[:12]
@@ -806,13 +809,84 @@ def downtime(writer: Writer, watched: NewPrimary, killed_at: float,
             "acked": len(ok)}
 
 
-def acked_missing(writer: Writer, agent_send) -> list[str]:
-    """The rows C had acknowledged that the new primary B lacks"""
-    acked = {f"crash-{one['n']}" for one in writer.done if one["ok"]}
-    found = agent_send("B", f"sql SELECT v FROM {APP_DB}.t WHERE v LIKE"
-                       " 'crash-%'")
+def acked_missing(writer: Writer, agent_send,
+                  node: str = "B") -> list[str]:
+    """The rows C had acknowledged that the new primary lacks"""
+    acked = {f"{writer.name}-{one['n']}" for one in writer.done
+             if one["ok"]}
+    found = agent_send(node, f"sql SELECT v FROM {APP_DB}.t WHERE v LIKE"
+                       f" '{writer.name}-%'")
     held = set((found.get("out") or "").split())
     return sorted(acked - held)[:20]
+
+
+def planned(report: dict, pids: list[int], pairs, roots: list[str],
+            to: str, key: str) -> None:
+    """keel#138: a planned promote while C writes at the VIP: the
+    longest gap between two acknowledged writes, the writes that waited,
+    and the acknowledged rows the new primary lacks"""
+    import vip_netns
+    from vip_netns import NAMES, agent_send, wait_until
+    writer = Writer(pids[2], key)
+    writer.start()
+    report[f"{key}_first_ack_s"] = wait_until(
+        lambda: any(one["ok"] for one in writer.done), 60, 0.2)
+    time.sleep(3)
+    old = "A" if to == "B" else "B"
+    marks: dict[str, float] = {}
+    halt = threading.Event()
+
+    def watch() -> None:
+        """When each step of the handover is seen, every 0.05 s"""
+        checks = {
+            "old_read_only": lambda: read_only_of(
+                roots[NAMES.index(old)]) == "1",
+            "old_dropped": lambda: not vip_netns.holds(
+                pids[NAMES.index(old)]),
+            "new_carries": lambda: vip_netns.holds(pids[NAMES.index(to)]),
+            "c_routes_new": lambda: vip_netns.routed_to(pids[2]) ==
+            pairs[NAMES.index(to)][1],
+            "new_writable": lambda: read_only_of(
+                roots[NAMES.index(to)]) == "0"}
+        while not halt.is_set():
+            for name, check in checks.items():
+                if name not in marks and check():
+                    marks[name] = time.time()
+            halt.wait(0.05)
+    watcher = threading.Thread(target=watch, daemon=True)
+    promote_at = time.time()
+    watcher.start()
+    report[key] = agent_send(to, "dbpromote", 300)
+    promoted_at = time.time()
+    root = roots[NAMES.index(to)]
+    report[f"{key}_writable_s"] = wait_until(
+        lambda: read_only_of(root) == "0", 60, 0.2)
+    time.sleep(5)
+    halt.set()
+    watcher.join()
+    writer.stop()
+    report[f"{key}_marks"] = {name: round(at - promote_at, 2)
+                              for name, at in sorted(marks.items(),
+                                                     key=lambda one: one[1])}
+    before = [one["end"] for one in writer.done
+              if one["ok"] and one["end"] < promote_at + 1]
+    after = [one["end"] for one in writer.done
+             if one["ok"] and one["t"] > promote_at]
+    report[f"{key}_marks"]["last_ok"] = round(max(before) - promote_at, 2) \
+        if before else None
+    report[f"{key}_marks"]["first_ok_after"] = round(
+        min(after) - promote_at, 2) if after else None
+    ok = sorted(one["end"] for one in writer.done if one["ok"])
+    window = [t for t in ok if t >= promote_at - 2]
+    gaps = [b - a for a, b in zip(window, window[1:])]
+    report[f"{key}_gap"] = {
+        "promote_took_s": round(promoted_at - promote_at, 2),
+        "longest_gap_s": round(max(gaps), 2) if gaps else None,
+        "longest_write_s": round(max(one["end"] - one["t"] for one in
+                                     writer.done), 2),
+        "failed": sum(1 for one in writer.done if not one["ok"]),
+        "acked": len(ok)}
+    report[f"{key}_missing"] = acked_missing(writer, agent_send, to)
 
 
 def promote_gone(agent_send) -> dict:
