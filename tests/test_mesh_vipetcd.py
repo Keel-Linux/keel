@@ -8,6 +8,7 @@ round), on a fake etcd with a clock (tests/vip_helpers.py)"""
 import os
 import threading
 import unittest
+from dataclasses import replace
 from unittest import mock
 
 from vip_helpers import KEYS, NOW, VIP, Pair, address
@@ -685,6 +686,34 @@ class TestTheController(WithEtcd):
                                      vipnode.signed_claim(self.all[1], VIP,
                                                           1))
         self.assertIn("did not take the claim", self.text(1))
+
+    def test_a_dead_peer_does_not_delay_the_others(self):
+        """keel#235: the claim went to one peer after the other, and the
+        dead old holder came first, so every other node learnt the new
+        route only after that peer's timeout"""
+        dead, live = address(0), address(2)
+        released = threading.Event()
+        reached = threading.Event()
+
+        def exchange(at, iface, raw):
+            if at == dead:
+                released.wait(10)
+                raise OSError("timed out")
+            reached.set()
+            return b""
+        self.controllers[1].exchange = exchange
+        facts = replace(vipetcd.Ops(self.all[1]).facts(), peers=(dead, live))
+        made = vipnode.signed_claim(self.all[1], VIP, 1)
+        told = threading.Thread(target=self.controllers[1].announce,
+                                args=(facts, made))
+        told.start()
+        try:
+            self.assertTrue(reached.wait(2))
+        finally:
+            released.set()
+            told.join(5)
+        self.assertFalse(told.is_alive())
+        self.assertIn(f"{dead} did not take the claim", self.text(1))
 
     def test_run_until_stopped(self):
         stop = self.controllers[2].stop
