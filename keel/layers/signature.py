@@ -49,7 +49,9 @@ from dataclasses import dataclass
 from keel.layers.constants import (
     ARMOR_END,
     ARMOR_START,
+    BADSIG_RE,
     GOODSIG_RE,
+    NEWSIG_RE,
     OTHER_ARMOR_RE,
     RETIRED_RE,
     VALIDSIG_RE,
@@ -233,3 +235,115 @@ def _check_signers(
         f"{path}: signed by {', '.join(fingerprints)}, which is not the key"
         f" that may move a channel ({', '.join(sorted(allowed))})"
     )
+
+
+def verify_by_any(
+    label: str,
+    data: bytes,
+    keyrings: tuple[str, ...],
+    detached: bytes | None = None,
+) -> Verified:
+    """A signature by a key of any of the keyrings; raises SignatureError
+
+    For the files that main and images both sign while the verifiers move
+    to the images key (decision 0055). `data` is a clear signed document,
+    or the document that `detached` signs. The keyrings stay separate
+    files. A keyring that cannot be read is skipped, because it can only
+    take keys away, and the refusal names it.
+
+    gpgv exits 2 for a file with 2 signatures when one key is in no
+    keyring, so its exit status is not read. Its status lines are read one
+    signature at a time: one BADSIG refuses the file, and the file is good
+    when at least one signature has GOODSIG and VALIDSIG and is not by a
+    retired key. The fingerprints are the primary keys of those
+    signatures. Text comes back for a clear signed document only.
+    """
+    with tempfile.TemporaryDirectory(prefix="keel-verify.") as work:
+        rings, skipped = _write_keyrings(work, keyrings)
+        if not rings:
+            raise SignatureError(
+                f"{label}: no keyring could be read: {'; '.join(skipped)}"
+            )
+        document = os.path.join(work, "document")
+        with open(document, "wb") as fob:
+            fob.write(data)
+        argv = [*VERIFIER, "--status-fd", "1"]
+        for ring in rings:
+            argv += ["--keyring", ring]
+        plain = os.path.join(work, "plain")
+        if detached is None:
+            argv += ["--output", plain, document]
+        else:
+            sig = os.path.join(work, "document.asc")
+            with open(sig, "wb") as fob:
+                fob.write(detached)
+            argv += [sig, document]
+        try:
+            done = subprocess.run(argv, capture_output=True, text=True)
+        except OSError as e:
+            raise SignatureError(f"{label}: cannot run {VERIFIER[0]}: {e}")
+        fingerprints = _good_signers(label, done.stdout, skipped)
+        if detached is not None:
+            return Verified("", fingerprints)
+        with open(plain, encoding="utf-8") as fob:
+            return Verified(fob.read(), fingerprints)
+
+
+def _write_keyrings(
+    work: str, keyrings: tuple[str, ...]
+) -> tuple[list[str], list[str]]:
+    """Each readable keyring as a binary file in `work`, and the skipped"""
+    rings: list[str] = []
+    skipped: list[str] = []
+    for number, keyring in enumerate(keyrings):
+        try:
+            binary = read_keyring(keyring)
+        except SignatureError as e:
+            skipped.append(str(e))
+            continue
+        ring = os.path.join(work, f"keyring{number}.gpg")
+        with open(ring, "wb") as fob:
+            fob.write(binary)
+        rings.append(ring)
+    return rings, skipped
+
+
+def _signature_parts(status: str) -> list[list[str]]:
+    """The status lines of each signature, split at NEWSIG"""
+    parts: list[list[str]] = []
+    for line in status.splitlines():
+        if NEWSIG_RE.match(line) or not parts:
+            parts.append([])
+        parts[-1].append(line)
+    return parts
+
+
+def _good_signers(
+    label: str, status: str, skipped: list[str]
+) -> tuple[str, ...]:
+    """The primary keys of the good signatures; raises when there is none"""
+    if any(BADSIG_RE.match(line) for line in status.splitlines()):
+        raise SignatureError(
+            f"{label}: BADSIG, the file changed after it was signed"
+        )
+    found: list[str] = []
+    retired = False
+    for part in _signature_parts(status):
+        text = "\n".join(part)
+        if _status_problem(text) is not None:
+            retired = retired or any(RETIRED_RE.match(x) for x in part)
+            continue
+        for line in part:
+            match = VALIDSIG_RE.match(line)
+            value = match.group("primary").upper() if match else None
+            if value and value not in found:
+                found.append(value)
+    if found:
+        return tuple(found)
+    reason = (
+        "every signature is by a key that is revoked or expired"
+        if retired else "no good signature by a key of the keyrings"
+    )
+    if skipped:
+        reason += f" (skipped: {'; '.join(skipped)})"
+    raise SignatureError(f"{label}: {reason}")

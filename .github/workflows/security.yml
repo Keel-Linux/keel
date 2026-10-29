@@ -1,19 +1,14 @@
-# Security scanning (keel-linux/.github, profile/WORKFLOWS.md "Security
-# scanning"): gitleaks, bandit, semgrep and shellcheck on GitHub-hosted
-# runners, no secrets. Findings that are not a risk are listed, each with its
-# justification, in .github/security-baseline; gitleaks fixtures, if any, in
-# .github/gitleaks.toml.
+# Light CI on GitHub-hosted runners, for pull requests on the GitHub mirror
+# (decision 0056). The full CI is .forgejo/workflows on git.pop.coop, and
+# .forgejo/workflows/security.yml has the notes on each job.
 name: security
+
 on:
   pull_request:
-  push:
-    branches: [main]
-  workflow_dispatch:
+
 permissions:
   contents: read
+
 jobs:
   security:
-    uses: keel-linux/.github/.github/workflows/security-scan.yml@main
-    permissions:
-      contents: read
-      security-events: write
+    uses: keel-linux/.github/.github/workflows/github-security-scan.yml@main

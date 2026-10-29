@@ -169,6 +169,60 @@ class TestChannels(unittest.TestCase):
         self.assertIn("monitor.notify.ntfy.user: unknown key", check(
             {"notify": {"ntfy": {"url": "https://a.example", "user": "x"}}}))
 
+    def test_ntfy_takes_a_list_of_one_to_five_servers(self):
+        def servers(count):
+            return [{"url": f"https://ntfy-br{n}.pop.coop/keel",
+                     "token": {"file": "/etc/keel/secrets/t"}}
+                    for n in range(1, count + 1)]
+        for count in (1, 3, 5):
+            self.assertEqual(check({"enabled": True, "notify": {
+                "ntfy": servers(count)}}), [])
+        self.assertEqual(check({"notify": {"ntfy": []}}), [
+            "monitor.notify.ntfy: a list must hold 1 to 5 servers, it"
+            " holds 0"])
+        self.assertEqual(check({"notify": {"ntfy": servers(6)}}), [
+            "monitor.notify.ntfy: a list must hold 1 to 5 servers, it"
+            " holds 6"])
+
+    def test_an_empty_ntfy_list_is_not_a_working_channel(self):
+        self.assertIn(NO_CHANNEL, check({"enabled": True,
+                                         "notify": {"ntfy": []}}))
+        self.assertEqual(working_channels({"ntfy": [{"url": "y"}]}, None),
+                         ["ntfy"])
+        self.assertEqual(working_channels({"ntfy": []}, None), [])
+
+    def test_ntfy_servers_must_have_different_urls(self):
+        same = {"url": "https://ntfy-br1.pop.coop/keel"}
+        self.assertEqual(check({"notify": {"ntfy": [
+            same, {"url": "https://ntfy-br2.pop.coop/keel"}, dict(same)]}}),
+            ["monitor.notify.ntfy[2].url: the same as"
+             " monitor.notify.ntfy[0].url"])
+        file = {"url": {"file": "/etc/keel/secrets/a"}}
+        self.assertEqual(check({"notify": {"ntfy": [file, dict(file)]}}), [
+            "monitor.notify.ntfy[1].url: the same as"
+            " monitor.notify.ntfy[0].url"])
+
+    def test_an_error_in_a_server_names_its_place_in_the_list(self):
+        found = check({"notify": {"ntfy": [
+            {"url": "https://ntfy-br1.pop.coop/keel"},
+            {"url": "http://ntfy-br2.pop.coop/keel", "user": "x"},
+            "https://ntfy-br3.pop.coop/keel",
+            {"token": {"generate": True}}]}})
+        self.assertEqual(found, [
+            "monitor.notify.ntfy[1].user: unknown key",
+            "monitor.notify.ntfy[1].url: not an https URL with a host",
+            "monitor.notify.ntfy[2]: must be a mapping",
+            "monitor.notify.ntfy[3].url: required, an https URL or a"
+            " secret reference",
+            "monitor.notify.ntfy[3].token: a token is issued by the"
+            " service, so it is a file reference; a generated value is"
+            " one nobody else knows"])
+
+    def test_a_bad_url_in_a_list_is_never_repeated(self):
+        found = check({"notify": {"ntfy": [
+            {"url": "http://secret-topic.example.org/abc"}]}})
+        self.assertNotIn("secret-topic", str(found))
+
     def test_urls_must_be_https_with_a_host_and_no_credentials(self):
         cases = {
             None: "required, an https URL or a secret reference",

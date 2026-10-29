@@ -255,7 +255,8 @@ class TestPromoteNeedsAMajority(Pair):
         self.down.update({address(1), address(2)})
         code, said = promote(self.all[0])
         self.assertEqual(code, exits.MESH_REFUSED)
-        self.assertIn("0 of the 0", said)
+        # the other member of the pair gates the handover (keel#137)
+        self.assertIn("did not take the claim", said)
         self.assertFalse(self.carried(0))
 
     def test_a_carry_that_fails_after_the_majority(self):

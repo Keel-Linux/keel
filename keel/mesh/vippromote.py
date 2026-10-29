@@ -36,6 +36,7 @@ routes it to, whether this node is fenced, and the lease.
 """
 
 import json
+import threading
 from collections.abc import Callable
 from datetime import datetime
 
@@ -75,8 +76,14 @@ def with_etcd(here: Here) -> bool:
         return False
 
 
-def promote(here: Here, gone: bool, out: Callable[[str], None]) -> int:
-    """`keel vip promote`: this node becomes the VIP's holder"""
+def promote(here: Here, gone: bool, out: Callable[[str], None],
+            then: Callable[[], int] | None = None) -> int:
+    """`keel vip promote`: this node becomes the VIP's holder. `then`
+    runs once the promote succeeded, before the late asks of a gone old
+    primary are joined: keel database promote makes the database
+    writable there, not after the members' channel's timeout (keel#169)"""
+    def after(code: int) -> int:
+        return then() if then is not None and code == exits.OK else code
     try:
         vip = vipstate.declared(here.node.document())
         if vip is None:
@@ -89,12 +96,12 @@ def promote(here: Here, gone: bool, out: Callable[[str], None]) -> int:
             out(problem)
             return exits.MESH_REFUSED
         if not with_etcd(here):
-            return promoted(here, vip, gone, out)
+            return after(promoted(here, vip, gone, out))
         if not gone:
-            return promoted_etcd(here, vip, gone, out)
+            return after(promoted_etcd(here, vip, gone, out))
         here = without_waiting(here, vip)
         try:
-            return promoted_etcd(here, vip, gone, out)
+            return after(promoted_etcd(here, vip, gone, out))
         finally:
             if vipnode.finished(here):
                 out("an ask of the old primary is still running after the"
@@ -252,9 +259,146 @@ def released(here: Here, vip: str, newest: Claim, epoch: int, gone: bool,
     return True
 
 
+# the announcements to the members outside the pair, told after the
+# handover in the background (keel#137); `announced` waits for them.
+# BACKGROUND False tells them before the promote returns (the tests that
+# read the peers right after a promote)
+PENDING: list[threading.Thread] = []
+BACKGROUND = True
+
+
+def pair_peer(here: Here, vip: str) -> str | None:
+    """The other member of the pair's overlay address, or None"""
+    try:
+        record = vipnode.kept(here, vip)
+        own = here.own_key()
+    except VipError:
+        return None
+    return next((vipnode.peer_at(here, key) for key in record.members
+                 if not same_key(key, own)), None)
+
+
 def promoted(here: Here, vip: str, gone: bool,
              out: Callable[[str], None]) -> int:
-    """Before etcd: release, take, announce"""
+    """Before etcd: release, take, announce. The other member of the
+    pair alone gates the handover (keel#137): its epoch, its release,
+    its taking the claim, each waited for in full (nothing fences a live
+    old primary without etcd); the members outside the pair are told
+    after, in the background. With --old-primary-gone the other member
+    is declared gone, so every peer is asked and the claim is carried
+    on a majority of those that answer, as before"""
+    other = None if gone else pair_peer(here, vip)
+    if other is None:
+        return promoted_by_all(here, vip, gone, out)
+    own = here.own_key()
+    held = vipnode.current(here, vip)
+    # the other member's claim known here: the release is asked at the
+    # next epoch at once, and its epoch only when it refuses that as
+    # stale (two round trips with it, not three)
+    known = held.claim is not None and not same_key(held.claim.holder, own)
+    newest = held.claim if known else asked_epoch(here, vip, other, held,
+                                                  out)
+    if newest is not None and same_key(newest.holder, own) and \
+            held.holds(own) and vipnet.carried(
+                here.iface(), vip, here.node.output):
+        out(f"this node holds {vip} already, at epoch {newest.epoch}")
+        return exits.OK
+    epoch = (newest.epoch if newest else 0) + 1
+    if newest is not None and not same_key(newest.holder, own):
+        why = asked_release(here, vip, newest, epoch, out)
+        if why == STALE and known:
+            newest = asked_epoch(here, vip, other, held, out)
+            epoch = (newest.epoch if newest else 0) + 1
+            why = None if newest is None or same_key(newest.holder, own) \
+                else asked_release(here, vip, newest, epoch, out)
+        if why:
+            out(f"the primary at {newest.address} did not release it: {why}."
+                " Nothing was changed. Only you know whether that node is"
+                " gone: if it is, run keel vip promote --old-primary-gone")
+            return exits.MESH_REFUSED
+    made = vipnode.signed_claim(here, vip, epoch)
+    vipnode.hold(here, made, False)
+    what = vipnode.announce(here, made, {other}).get(
+        other, "unreachable: not a peer of this node")
+    out(f"  {other}: {what}")
+    if what not in ACCEPTED:
+        vipnode.release(here, vip, lambda lease: None)
+        out(f"the other member of the pair, at {other}, did not take the"
+            f" claim at epoch {epoch}: this node does not carry {vip}")
+        return exits.MESH_REFUSED
+    if not vipnode.carry_held(here, vip):
+        out(f"the VIP could not be added to {here.iface()}")
+        return exits.APPLY_FAILED
+    out(f"this node holds {vip} at epoch {epoch}, on {here.iface()},"
+        " taken by the other member of the pair; the other peers are told"
+        " in the background")
+    in_background(here, made, {other})
+    return exits.OK
+
+
+STALE = "stale"
+
+
+def asked_epoch(here: Here, vip: str, other: str, held,
+                out: Callable[[str], None]) -> Claim | None:
+    """The newest claim this node and the other member of the pair know"""
+    answers = vipnode.epochs(here, vip, {other})
+    for at, one in answers.items():
+        if isinstance(one, str):
+            out(f"  {at}: {one}")
+    claims = [one for one in answers.values() if isinstance(one, Claim)]
+    return vipnode.newest(claims + ([held.claim] if held.claim else []))
+
+
+def asked_release(here: Here, vip: str, newest: Claim, epoch: int,
+                  out: Callable[[str], None]) -> str | None:
+    """The holder asked to release, for `epoch`: None once it did, STALE
+    when it knows that epoch or a newer one, else why not"""
+    out(f"asking the primary, {newest.holder} at {newest.address}, to"
+        f" release {vip}…")
+    try:
+        here.say("release", newest.address, {"vip": vip, "epoch": epoch})
+    except (LinkError, VipError, SigningError) as e:
+        if "stale release" in str(e):
+            out(f"the primary at {newest.address} knows a newer epoch;"
+                " asking it")
+            return STALE
+        return str(e)
+    out(f"released by {newest.address}")
+    return None
+
+
+def in_background(here: Here, made: Claim, told_already: set[str]) -> None:
+    """The claim told to every other peer in a thread of its own, not a
+    daemon (the process ends after it), what each said logged"""
+    peers = {one.address for one in here.node.peers("")} - told_already
+    if not peers:
+        return
+
+    def tell() -> None:
+        for at, what in sorted(vipnode.announce(here, made, peers).items()):
+            here.err(f"vip {made.vip}: {at}: {what}")
+    if not BACKGROUND:
+        tell()
+        return
+    worker = threading.Thread(target=tell)
+    PENDING.append(worker)
+    worker.start()
+
+
+def announced(timeout: float | None = None) -> int:
+    """Wait for the announcements in the background; how many there were"""
+    done = 0
+    while PENDING:
+        PENDING.pop(0).join(timeout)
+        done += 1
+    return done
+
+
+def promoted_by_all(here: Here, vip: str, gone: bool,
+                    out: Callable[[str], None]) -> int:
+    """Every peer asked and told, the claim carried on a majority of the
+    peers that answer (the flag is the acceptance when none does)"""
     own = here.own_key()
     held = vipnode.current(here, vip)
     answers = vipnode.epochs(here, vip)
@@ -393,7 +537,9 @@ def promoted_etcd(here: Here, vip: str, gone: bool,
             f" {CARRY_WAIT:g} s: is it running? Its lease expires"
             f" {vipetcd.TTL} s after its last renewal")
         return exits.APPLY_FAILED
-    told(here, made[0], out)
+    # etcd holds the claim; the peers are told in the background (keel#137)
+    out("the peers are told in the background")
+    in_background(here, made[0], set())
     return exits.OK
 
 
@@ -414,6 +560,23 @@ def raced(here: Here, vip: str, own: str,
         return exits.MESH_REFUSED
     out(f"this node holds {vip} at epoch {now.epoch.epoch}, claimed by its"
         " controller")
+    held = vipnode.current(here, vip)
+    if now.epoch.lease and (held.claim is None or
+                            held.claim.raw != now.epoch.raw or
+                            held.lease != now.epoch.lease):
+        # this node's own claim in etcd that its file does not hold with
+        # its lease (a transaction that committed after its answer was
+        # lost, keel#135): recorded, so the controller renews the lease
+        # and carries the address
+        problem = vipnode.verified(here, now.epoch)
+        if problem:
+            out(f"this node's claim in etcd is not taken: {problem}")
+            return exits.APPLY_FAILED
+        try:
+            vipnode.hold(here, now.epoch, False, now.epoch.lease)
+        except VipError as e:
+            out(f"this node's claim in etcd is not taken: {e}")
+            return exits.APPLY_FAILED
     if not carried_soon(here, vip):
         out(f"keel-vip.service did not add {vip} to {here.iface()} within"
             f" {CARRY_WAIT:g} s: is it running?")

@@ -73,6 +73,20 @@ def dump(text, extra=None, port=51820, endpoint=None):
 class TestCommands(RootCase):
     """switch.live_peers: the `wg set` lines, or None for a bounce"""
 
+    def test_a_keepalive_only_change_of_an_off_link_peer_stays_live(self):
+        """keel#140 review: the upgrade writes the keepalive of every
+        peer; a peer whose allowed-ips lie outside the interface's own
+        prefixes (a routed subnet) must still get it by wg set, not by a
+        bounce of the interface"""
+        before = INTERFACE + peer(ONE, "fd00:1::2/128, fd99::/64",
+                                  "[2001:db8::2]:51820")
+        after = INTERFACE + peer(ONE, "fd00:1::2/128, fd99::/64",
+                                 "[2001:db8::2]:51820", 25)
+        found = switch.live_peers(before, after, "wg0", dump(before))
+        self.assertIsNotNone(found)
+        self.assertEqual(found, [("wg", "set", "wg0", "peer", ONE,
+                                  "persistent-keepalive", "25")])
+
     def test_a_peer_added_removed_or_changed(self):
         self.assertEqual(switch.live_peers(BEFORE, AFTER, "wg0",
                                            dump(BEFORE)), [SET_TWO])
@@ -108,6 +122,19 @@ class TestCommands(RootCase):
             TWO, "fd00:1::3/128"), "wg0", dump(BEFORE))[1])
         self.assertEqual(switch.live_plan(BEFORE, BEFORE, "wg0",
                                           dump(BEFORE)), ([], False))
+
+    def test_a_keepalive_set_on_a_peer_it_holds_cannot_cut_it_off(self):
+        """keel#140: the keepalive every peer gets, set live; kept as an
+        addition is (keel#117), with no handshake"""
+        kept = INTERFACE + peer(ONE, "fd00:1::2/128", "[2001:db8::2]:51820",
+                                25)
+        self.assertEqual(switch.live_plan(BEFORE, kept, "wg0", dump(BEFORE)),
+                         ([("wg", "set", "wg0", "peer", ONE,
+                            "persistent-keepalive", "25")], True))
+        moved = INTERFACE + peer(ONE, "fd00:1::2/128", "[2001:db8::9]:51820",
+                                 25)
+        self.assertFalse(switch.live_plan(BEFORE, moved, "wg0",
+                                          dump(BEFORE))[1])
 
     def test_the_interface_s_drift_is_corrected(self):
         """keel#96: the spec and the file name a peer wg0 lacks; and a

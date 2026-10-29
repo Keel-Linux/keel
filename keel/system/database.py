@@ -32,8 +32,12 @@ Nothing here reads a file or runs a command: keel.system.dbstate observes
 and keel.system.effects acts.
 """
 
+import os
+
+from keel.inspect import constants as paths
 from keel.spec.origins import canonical, is_name, mariadb_problem
 from keel.system import dbmariadb as mariadb
+from keel.system import dbpostgres
 from keel.system.actions import (
     Action,
     LockReplica,
@@ -56,6 +60,7 @@ from keel.system.dbstate import (
 )
 
 FIELD = "database.server"
+CONVERGED = ("mariadb", "postgresql")
 AUTHORIZATIONS = f"{FIELD}.replication.allowed_from"
 REPLICATION = f"{FIELD}.replication.primary"
 STANDALONE = "standalone"
@@ -66,7 +71,7 @@ DROPIN_MODE = 0o644
 OTHER_ENGINE = (
     "{engine} is read by keel inspect and compared by keel diff, and its"
     " roles are not configured by this version; decision 0013 takes the"
-    " engines one at a time and MariaDB is the first"
+    " engines one at a time, and MariaDB and PostgreSQL are the ones done"
 )
 OFFLINE = (
     "the root is not the live system, so the server cannot be asked what"
@@ -198,13 +203,18 @@ def plan_database(
         return []
     server = declared_server(doc)
     role = str(server.get("role") or "")
-    if state.pair is not None and state.engine == mariadb_name():
-        from keel.system.dbpairplan import plan_pair
+    if state.pair is not None and state.engine in CONVERGED:
+        if state.engine == mariadb_name():
+            from keel.system.dbpairplan import plan_pair
+        else:
+            from keel.system.dbpgpairplan import plan_pair
         return plan_pair(doc, state, confirmed,
                          spec or "/etc/keel/instance.yaml", _cannot_act)
     refusal = _cannot_act(state, role)
     if refusal:
         return [Step(FIELD, (refusal,))]
+    if state.engine == "postgresql":
+        return _pg_plan(server, state, role, confirmed)
     overlay = mariadb.overlay_addresses(doc)
 
     observed = str(state.reading.role.value)
@@ -272,10 +282,17 @@ OLD_PRIMARY = (
     " dataset is what this command can cause, and only the operator"
     " knows the old primary is gone"
 )
+AFTER_PG = (
+    "this node is a primary now and the description still says replica,"
+    " which keel diff reports as drift and must not be corrected"
+    " automatically. Change the description to primary and run"
+    " `keel spec apply --system-only` to give it the WAL settings of a"
+    " primary"
+)
 
 
 def plan_promote(doc: dict, state: DatabaseState | None,
-                 spec: str | None = None) -> list[Step]:
+                 spec: str | None = None, alone: bool = False) -> list[Step]:
     """Make this replica a primary, which apply is never allowed to do
 
     Its own operation because it is its own decision. Replication in Keel
@@ -290,7 +307,7 @@ def plan_promote(doc: dict, state: DatabaseState | None,
     """
     if state is None:
         return [Step(PROMOTE_FIELD, (Refuse(NO_SERVER),))]
-    if state.pair is not None and state.engine == mariadb_name():
+    if state.pair is not None and state.engine in CONVERGED:
         from keel.system.actions import FollowVip
         refusal = _cannot_act(state, REPLICA)
         if refusal:
@@ -298,7 +315,7 @@ def plan_promote(doc: dict, state: DatabaseState | None,
         return [Step(PROMOTE_FIELD, (
             Note(f"the VIP {state.pair.vip} decides the role; the database"
                  " follows it"),
-            FollowVip(spec or "/etc/keel/instance.yaml"),
+            FollowVip(spec or "/etc/keel/instance.yaml", alone=alone),
             Note(AFTER_PAIR)))]
     refusal = _cannot_act(state, REPLICA)
     if refusal:
@@ -307,6 +324,18 @@ def plan_promote(doc: dict, state: DatabaseState | None,
     if observed != REPLICA:
         return [Step(PROMOTE_FIELD, (
             Refuse(NOT_A_REPLICA.format(observed=observed)),
+        ))]
+    if state.engine == "postgresql":
+        # No read_only line to take out of a file (a standby refuses
+        # writes while it is in recovery, decision 0054) and no stopped
+        # thread to catch: the drain in keel.system.dbpgpromote is the
+        # walreceiver's positions, and a standby that receives nothing
+        # is refused there, never promoted.
+        return [Step(PROMOTE_FIELD, (
+            PromoteReplica(DRAIN_TIMEOUT, engine="postgresql"),
+        ) + _give_back(state) + (
+            Note(AFTER_PG),
+            Note(OLD_PRIMARY),
         ))]
     error = sql_stopped(state.status)
     if error is not None:
@@ -350,7 +379,7 @@ def _writable_file(state: DatabaseState) -> tuple[Action, ...]:
 
 def _cannot_act(state: DatabaseState, role: str) -> Action | None:
     """Why this machine cannot be configured at all, if it cannot"""
-    if state.engine != mariadb_name():
+    if state.engine not in CONVERGED:
         return Note(OTHER_ENGINE.format(engine=state.engine))
     if not state.live:
         return Note(OFFLINE)
@@ -562,3 +591,198 @@ def _reason(held: list[str], why: str) -> str:
     if why:
         return why
     return DESTRUCTION.format(count=len(held), schemas=", ".join(held))
+
+
+PG_UNCHANGED = "unchanged ({path}, {role})"
+PG_HBA_NOTE = (
+    "the hba file is the whole authorization surface (decision 0054):"
+    " Debian's base rules, and one replication line per declared origin"
+)
+PG_AUTH_UNCHANGED = (
+    "unchanged (the authorized origins are the declared ones)")
+
+
+def _pg_plan(
+    server: dict, state: DatabaseState, role: str, confirmed: bool,
+) -> list[Step]:
+    """The PostgreSQL flow (handbook decision 0054)
+
+    The twin of the MariaDB flow above with what the engine does not
+    have: no read_only lock step (a standby refuses writes while it is
+    in recovery, so there is nothing to take from accounts), and no
+    account alignment on a seed (a base backup copies the cluster's
+    roles with its data).
+    """
+    observed = str(state.reading.role.value)
+    stop = _wrong_way_round(role, observed)
+    if stop:
+        return [Step(FIELD, (Refuse(stop),))]
+    if role == REPLICA:
+        # Declining comes before the configuration is written, as above.
+        replication = _pg_replication(server, state, observed, confirmed)
+        if any(isinstance(one, Refuse) for one in replication.actions):
+            return [replication]
+        return [_pg_configuration(server, state, role), replication]
+    steps = [_pg_configuration(server, state, role)]
+    if role == PRIMARY:
+        steps.append(_pg_authorizations(server, state))
+    return steps
+
+
+def _pg_configuration(server: dict, state: DatabaseState, role: str) -> Step:
+    """The drop-in and the hba file: the whole configuration surface
+
+    Both files are written by this one step, so they cannot drift apart:
+    the drop-in points at the hba file, and a server started on a
+    missing one refuses to run. A changed drop-in restarts the server,
+    the only way its settings take effect; a changed hba file alone is
+    reloaded, which is enough for hba rules. The hba file holds a
+    replication line per declared origin only while this node is a
+    primary: a replica is dialed by its primary and authorizes nobody.
+    """
+    if not state.hba.path:
+        return Step(FIELD, (
+            Refuse("no PostgreSQL cluster is installed under "
+                   f"{dbpostgres.CONF_GLOB}"),
+        ))
+    origins = [str(one) for one in _allowed_from(server) or []]
+    names = [one for one in origins if is_name(one)]
+    hba_path = os.path.join(paths.ROOT_DEFAULT, state.hba.path)
+    dropin_text = dbpostgres.dropin_text(server.get("listen"), role, hba_path)
+    held = origins if role == PRIMARY else []
+    password = state.credential.value if state.credential.known else ""
+    hba_wanted = dbpostgres.hba_text(held, password)
+    dropin_kept = state.dropin.readable and \
+        state.dropin.text == dropin_text
+    hba_kept = state.hba.readable and state.hba.text == hba_wanted
+
+    notes: list[Action] = []
+    if names:
+        notes.append(Note(NAME_ORIGIN.format(names=", ".join(names))))
+    if state.enabled == "disabled":
+        notes.append(Run(("systemctl", "enable", dbpostgres.boot_unit()),
+                         ENABLE))
+    if dropin_kept and hba_kept:
+        return Step(FIELD, tuple(notes) + (
+            Note(PG_UNCHANGED.format(path=state.dropin.path, role=role)),
+            Note(PG_HBA_NOTE),
+        ))
+    if dropin_kept:
+        return Step(FIELD, tuple(notes) + (
+            Note(PG_UNCHANGED.format(path=state.dropin.path, role=role)),
+            WriteFile(state.hba.path, hba_wanted, DROPIN_MODE, None,
+                      f"write {state.hba.path}: {role}"),
+            Run(("systemctl", "reload", dbpostgres.boot_unit()),
+                "reload the server, which is how hba rules take effect"),
+        ))
+    actions: list[Action] = list(notes) + [
+        WriteFile(state.dropin.path, dropin_text, DROPIN_MODE, None,
+                  f"write {state.dropin.path}: {role}"),
+        WriteFile(state.hba.path, hba_wanted, DROPIN_MODE, None,
+                  f"write {state.hba.path}: {role}"),
+        Run(("systemctl", "restart", dbpostgres.boot_unit()),
+            "restart the server, which is the only way these take effect"),
+    ]
+    return Step(FIELD, tuple(actions))
+
+
+def _pg_authorizations(server: dict, state: DatabaseState) -> Step:
+    """The replication role's password, kept true when origins drift
+
+    The file half of the authorization is _pg_configuration's; this is
+    the role half: the idempotent block that makes the replication role
+    exist and hold the pair's password. It is sent when the declared
+    origins and the authorized ones differ, which is when a seed or a
+    withdrawn origin proves the role's state is not what the pair needs.
+    A password rotated with the origins unchanged does not reach the
+    role until an origin changes, the same limitation MariaDB's grants
+    step has today.
+    """
+    declared = _allowed_from(server)
+    if declared is None:
+        return Step(AUTHORIZATIONS, (Note(NOT_DECLARED),))
+    if not state.credential.known:
+        return Step(AUTHORIZATIONS, (Refuse(state.credential.problem),))
+    wanted = {canonical(str(one)) for one in declared}
+    held = {
+        canonical(str(one))
+        for one in (state.reading.allowed_from.value or [])
+    }
+    if wanted == held:
+        return Step(AUTHORIZATIONS, (Note(PG_AUTH_UNCHANGED),))
+    statements = dbpostgres.role_statements(state.credential.value)
+    return Step(AUTHORIZATIONS, (
+        RunSql(dbpostgres.CLIENT, statements.text, statements.summary),
+    ))
+
+
+def _pg_replication(
+    server: dict, state: DatabaseState, observed: str, confirmed: bool,
+) -> Step:
+    """Make this node a standby of the declared primary, or refuse to"""
+    host, port = endpoint(server)
+    if observed == REPLICA:
+        return _pg_already_replicating(state, host, port, confirmed)
+    return _pg_become_replica(state, host, port, confirmed, "")
+
+
+def _pg_already_replicating(
+    state: DatabaseState, host: str, port: int, confirmed: bool,
+) -> Step:
+    """A standby of the declared primary is converged and left alone
+
+    Idempotence matters as much here as in the MariaDB twin: reseeding
+    a healthy standby throws away everything it had caught up on. There
+    is no stopped thread to catch: a walreceiver that fails retries
+    forever, and a standby that diverged is the pair flow's concern
+    (keel.system.dbfollow), not a reason to reseed.
+    """
+    current = state.reading.primary.value or {}
+    was_host = str(current.get("host") or "")
+    was_port = int(current.get("port") or port)
+    if canonical(was_host) == canonical(host) and was_port == port:
+        return Step(REPLICATION, (
+            Note(ALREADY.format(host=host, port=port)),
+        ))
+    return _pg_become_replica(
+        state, host, port, confirmed,
+        REPOINT.format(
+            observed=f"{was_host or 'nowhere'}]:{was_port}",
+            declared=f"{host}]:{port}",
+        ),
+    )
+
+
+def _pg_become_replica(
+    state: DatabaseState, host: str, port: int, confirmed: bool, why: str,
+) -> Step:
+    """The one step of this flow that can lose data
+
+    A standby is a copy of its primary, seeded with a base backup
+    (keel.system.dbpgseed): the local data directory is replaced, which
+    is why the refusal comes first and the confirmation names what goes.
+    The primary was asked whether it can be copied from while the
+    machine was observed, so an unreachable one is refused here, before
+    anything is written.
+    """
+    if not state.credential.known:
+        return Step(REPLICATION, (Refuse(state.credential.problem),))
+    if not state.schemas.readable:
+        return Step(REPLICATION, (
+            Refuse(UNKNOWN_CONTENT.format(problem=state.schemas.problem)),
+        ))
+    if state.reach:
+        return Step(REPLICATION, (
+            Refuse(UNREACHABLE.format(problem=state.reach)),
+        ))
+    held = dbpostgres.user_databases((state.schemas.text or "").splitlines())
+    actions: list[Action] = []
+    if held or why:
+        reason = _reason(held, why)
+        if not confirmed:
+            return Step(REPLICATION, (Refuse(reason + REMEDY),))
+        actions.append(Note(CONFIRMED.format(reason=reason)))
+    actions.append(
+        SeedReplica(host, port, state.credential.value, engine="postgresql")
+    )
+    return Step(REPLICATION, tuple(actions))

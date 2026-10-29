@@ -201,6 +201,28 @@ class TestPerSource(Served):
         self.assertFalse(self.dropped("127.0.0.3"))
 
 
+class TestAnsweredSourceAsksAgain(Served):
+    """keel#177: the source's slot is free before its answer leaves.
+    A thread that closes its connection late, as on a loaded machine,
+    must not make the listener drop the next request of that source"""
+
+    def setUp(self):
+        super().setUp()
+        finish = listener.Handler.finish
+
+        def late(handler):
+            threading.Event().wait(0.5)
+            finish(handler)
+        patcher = mock.patch.object(listener.Handler, "finish", late)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_the_next_request_at_once_is_answered(self):
+        for _ in range(3):
+            with self.assertRaises(Refused):
+                self.post(body=b"{}")
+
+
 class TestBlocked(Served):
     def test_a_source_refused_too_often_is_not_answered(self):
         for _ in range(listener.MAX_REFUSED):

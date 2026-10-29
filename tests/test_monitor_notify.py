@@ -661,6 +661,61 @@ class TestSend(ChannelTestCase):
         self.assertEqual(notify.masked("a", ["", "b"]), "a")
 
 
+class TestNtfyList(ChannelTestCase):
+    def servers(self, *paths: str) -> list[dict]:
+        return [{"url": f"{self.server.url}/{path}",
+                 "token": {"file": self.token_file}} for path in paths]
+
+    def test_each_server_gets_the_alert_and_has_its_own_line(self):
+        doc = self.doc(ntfy=self.servers("br1", "br2", "br3"))
+        found = notify.send(doc, self.message(), "critical", self.context)
+        self.assertEqual([d.line() for d in found], [
+            "ntfy 1: sent", "ntfy 2: sent", "ntfy 3: sent"])
+        self.assertEqual([r[0] for r in self.server.requests],
+                         ["/br1", "/br2", "/br3"])
+        self.assertEqual(self.server.requests[2][1]["Authorization"],
+                         f"Bearer {TOKEN}")
+
+    def test_one_server_that_fails_leaves_the_alert_taken(self):
+        doc = self.doc(ntfy=self.servers("br1", "fail", "br3"))
+        found = notify.send(doc, self.message(), "critical", self.context)
+        self.assertEqual([d.line() for d in found], [
+            "ntfy 1: sent", "ntfy 2: failed: answered HTTP 500",
+            "ntfy 3: sent"])
+        self.assertEqual(len(self.server.requests), 3)
+        self.assertTrue(any(d.problem is None for d in found))
+
+    def test_every_server_that_fails_gives_three_failed_lines(self):
+        doc = self.doc(ntfy=self.servers("fail", "fail", "fail"))
+        found = notify.send(doc, self.message(), "critical", self.context)
+        self.assertEqual([d.line() for d in found], [
+            f"ntfy {n}: failed: answered HTTP 500" for n in (1, 2, 3)])
+        self.assertTrue(all(d.problem for d in found))
+
+    def test_a_secret_of_one_server_does_not_fail_the_others(self):
+        servers = self.servers("br1", "br2")
+        servers[0]["token"] = {"file": join(self.tmp, "missing")}
+        found = notify.send(self.doc(ntfy=servers), self.message(),
+                            "critical", self.context)
+        self.assertIn("failed", found[0].line())
+        self.assertEqual(found[1].line(), "ntfy 2: sent")
+
+    def test_a_single_mapping_is_unchanged(self):
+        doc = self.doc(ntfy=self.servers("br1")[0])
+        self.assertIsInstance(doc["ntfy"], dict)
+        found = notify.send(doc, self.message(), "critical", self.context)
+        self.assertEqual([d.line() for d in found], ["ntfy: sent"])
+
+    def test_a_list_holds_url_files_and_paths_never_tokens(self):
+        doc = self.doc(ntfy=[
+            {"url": {"file": "/s/a"}, "token": {"file": "/s/ta"}},
+            {"url": "https://ntfy-br2.pop.coop/keel"}])
+        self.assertEqual(doc["ntfy"], [
+            {"url_file": "/s/a", "token_file": "/s/ta"},
+            {"url": "https://ntfy-br2.pop.coop/keel"}])
+        self.assertEqual(channelfile.secret_paths(doc), ["/s/a", "/s/ta"])
+
+
 class TestEmail(unittest.TestCase):
     def test_a_failing_or_missing_sendmail_is_a_channel_error(self):
         with self.assertRaises(channels.ChannelError) as caught:
@@ -836,6 +891,29 @@ class TestCommand(ChannelTestCase):
         hook = json.loads(hook_request[2])
         self.assertEqual((hook["check"], hook["level"], hook["value"]),
                          ("disk", "critical", "92.3"))
+
+    def test_monit_s_event_reaches_every_ntfy_server(self):
+        servers = [{"url": f"{self.server.url}/{path}",
+                    "token": {"file": self.token_file}}
+                   for path in ("br1", "fail", "br3")]
+        path = self.write_settings(dict(self.doc(ntfy=servers),
+                                        host="blog"))
+        code, out, err = self.notify(path)
+        self.assertEqual(code, exits.OK)
+        self.assertEqual(out, "ntfy 1: sent\nntfy 3: sent\n")
+        self.assertEqual(err, "Error: ntfy 2: failed: answered HTTP 500\n")
+        self.assertEqual(self.resorts, [])
+
+    def test_monit_s_event_with_every_ntfy_server_failing_is_last_resort(
+            self):
+        servers = [{"url": f"{self.server.url}/fail"}] * 2
+        path = self.write_settings(dict(self.doc(ntfy=servers),
+                                        host="blog"))
+        code, out, err = self.notify(path)
+        self.assertEqual(code, exits.NOTIFY_FAILED)
+        self.assertEqual(out, "")
+        self.assertIn("ntfy 2: failed: answered HTTP 500\n", err)
+        self.assertEqual(self.resorts, ["every channel failed"])
 
     def test_a_manifest_check_as_monit_runs_it(self):
         path = self.write_settings(dict(self.doc(

@@ -74,6 +74,8 @@ def answer(here: Here, body: bytes, key: str) -> Answer:
             return countersigned(here, message)
         if message.kind == vipmsg.SECRET:
             return shared(here, message)
+        if message.kind == vipmsg.DEVICE:
+            return device(here, message)
         return released(here, message)
     except ProtocolError as e:
         here.err(f"vip: refused a message from {key}: {e}")
@@ -175,17 +177,40 @@ def of_the_pair(here: Here, message: vipmsg.Message, what: str) -> str:
 
 def shared(here: Here, message: vipmsg.Message) -> Answer:
     """A secret the pair shares, to the other member alone"""
-    from keel.system import dbsecret
+    from keel.system import anubiskey, dbsecret
     vip = of_the_pair(here, message, "ask a shared secret")
     name = message.body.get("name")
     if name not in vipmsg.SECRET_NAMES:
         raise Refusal(400, f"no shared secret is named {name!r}")
-    value = dbsecret.read(here.root)
+    if name == anubiskey.NAME:
+        # Keel-Linux/common#56: the key the primary's first start of
+        # Anubis made (decision 0041, shared: true)
+        value = anubiskey.read(here.root)
+        if value is None:
+            raise Refusal(404, f"this node holds no {name} secret yet:"
+                          " its first start of Anubis makes it")
+    else:
+        value = dbsecret.read(here.root)
     if value is None:
         raise Refusal(404, f"this node holds no {name} secret yet: the"
                       " pair's primary makes it at its first apply")
     here.err(f"vip {vip}: the {name} secret given to {message.sender}")
     return Answer(200, json.dumps({"value": value}).encode())
+
+
+def device(here: Here, message: vipmsg.Message) -> Answer:
+    """This node's Syncthing device ID, to the pair's other member
+    alone (0050's amendment, point 3); the ID is public, the channel
+    is the TLS inside WireGuard, as a shared secret's is"""
+    from keel.system import filesync
+    vip = of_the_pair(here, message, "ask the device ID")
+    value = filesync.device_id(here.root)
+    if value is None:
+        raise Refusal(404, "this node holds no syncthing identity yet:"
+                      " its first live apply or database follow makes it")
+    here.err(f"vip {vip}: the syncthing device ID given to"
+             f" {message.sender}")
+    return Answer(200, json.dumps({"id": value}).encode())
 
 
 def released(here: Here, message: vipmsg.Message) -> Answer:

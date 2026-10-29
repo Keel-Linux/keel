@@ -27,6 +27,10 @@ class TestLivePeers(unittest.TestCase):
     found: dict = {}
 
     def setUp(self):
+        # keel#177: in CI it runs in the mesh / trixie job alone, so the
+        # unit test job keeps its time for the unit tests
+        if os.environ.get("CI") and not os.environ.get("KEEL_MESH_NETNS"):
+            self.skipTest("runs in the mesh / trixie job")
         tools = wgtools.require(self)
         if not os.path.exists("/sys/module/wireguard") and \
                 not os.environ.get("CI"):

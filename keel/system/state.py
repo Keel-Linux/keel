@@ -143,7 +143,7 @@ def observe(root: str, doc: dict, start: bool = False,
         network=observe_network(root, doc),
         monitor=observe_monitor(root, doc),
         overlay=observe_overlay(root, doc),
-        appliance=observe_appliance(root, doc),
+        appliance=observe_appliance(root, doc, start, spec),
     )
 
 

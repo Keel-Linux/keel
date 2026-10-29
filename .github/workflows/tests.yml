@@ -1,28 +1,22 @@
-# Coverage gate for the keel library and CLI: 95 percent (decision 0003,
-# project-authored code). The check is "tests / coverage". Raise only.
+# Light CI on GitHub-hosted runners, for pull requests on the GitHub mirror
+# (decision 0056). The full CI is .forgejo/workflows on git.pop.coop, and
+# .forgejo/workflows/tests.yml has the notes on each job.
 #
-# The package also ships one shell file, the firstboot hook
-# firstboot.d/10keel-system, which is tested with bats (tests/hook.bats).
-# tests/test_hook_bats.py runs that suite from pytest so the repository
-# keeps one required check, and fails instead of skipping when bats is
-# missing in CI; hence bats and shellcheck here.
+# Jobs on Forgejo only (no GitHub-hosted version): etcd, etcd-auth, mariadb, mariadb-simple, mesh, postgres, vip, vip-upgrade.
 name: tests
+
 on:
   pull_request:
-  push:
-    branches: [main]
+
+permissions:
+  contents: read
+
 jobs:
   tests:
-    uses: keel-linux/.github/.github/workflows/test-python.yml@main
+    uses: keel-linux/.github/.github/workflows/github-test-python.yml@main
     with:
       threshold: 95
       package: keel
-      # gnupg and gpgv are what the channel tests sign and verify
-      # with. Named rather than assumed: without them those tests
-      # skip, and a skipped suite would pass the coverage gate on
-      # code nothing ran. wireguard-tools is the real wg and wg-quick
-      # the overlay tests hand keel's key and file to (tests/wgtools.py);
-      # in CI they fail rather than skip without it.
       apt-packages: bats shellcheck gnupg gpgv wireguard-tools
   # keel mesh end to end (decision 0048) in a Debian trixie system
   # container, the release keel ships on: three network namespaces,
@@ -86,6 +80,41 @@ jobs:
           etcd-server etcd-client util-linux
         KEEL_VIP_NETNS=1 PYTHONPATH=. python3 -m pytest -q -s \
           tests/test_vip_netns.py
+  # keel vip promote when etcd does not answer the claim's transaction in
+  # time (keel#135), on the vip job's nodes and links: one claim
+  # committed in etcd with its answer lost, one not run with its answer
+  # lost, injected by tests/etcdctl_shim.py on the agents' PATH; each
+  # promote takes the VIP, and no two nodes carry it at one instant
+  # (tests/test_vip_claim_netns.py). The check is "vip-claim / trixie".
+  vip-claim:
+    uses: keel-linux/.github/.github/workflows/lxc-trixie.yml@main
+    with:
+      systemd: true
+      timeout: 30
+      run: |
+        apt-get update -qq
+        apt-get install -y -qq --no-install-recommends python3-pytest \
+          python3-yaml wireguard-tools iproute2 iputils-ping openssl \
+          etcd-server etcd-client util-linux
+        KEEL_VIP_CLAIM_NETNS=1 PYTHONPATH=. python3 -m pytest -q -s \
+          tests/test_vip_claim_netns.py
+  # keel vip promote in cloud simple with a member outside the pair down
+  # (keel#137), on the vip job's nodes and links, every spec in cloud
+  # simple: a planned promote takes the VIP in less than 3 s, and no two
+  # nodes carry it at one instant (tests/test_vip_simple_netns.py). The
+  # check is "vip-simple / trixie".
+  vip-simple:
+    uses: keel-linux/.github/.github/workflows/lxc-trixie.yml@main
+    with:
+      systemd: true
+      timeout: 30
+      run: |
+        apt-get update -qq
+        apt-get install -y -qq --no-install-recommends python3-pytest \
+          python3-yaml wireguard-tools iproute2 iputils-ping openssl \
+          etcd-server etcd-client util-linux
+        KEEL_VIP_SIMPLE_NETNS=1 PYTHONPATH=. python3 -m pytest -q -s \
+          tests/test_vip_simple_netns.py
   # Upgrades on a pair whose VIP is active (the maintainer's requirement
   # of 2026-10-10), on the nodes and links of the vip job: keel-vip.service
   # try-restarted on the holder and the replica as keel-overlay-vip's
@@ -184,5 +213,4 @@ jobs:
   # bin/require-changelog of the .github repository. The check is
   # "package / changelog"; it runs on pull requests only.
   package:
-    if: github.event_name == 'pull_request'
-    uses: keel-linux/.github/.github/workflows/require-changelog.yml@main
+    uses: keel-linux/.github/.github/workflows/github-require-changelog.yml@main

@@ -10,12 +10,14 @@ size, the parent chain must resolve to a rootfs layer with every
 parent_sha256 equal to the parent's recorded sha256, and a
 `<tarball>.hash` file, when present, must name the same sha256.
 
-A signature inside the hash file is detected and reported, never
-verified. There is a trusted key now (the channel keyring `keel pull`
-verifies a pointer against), but it is not what a `.hash` file is signed
-with, and this command is given no keyring. So it still claims nothing
-about a `.hash` signature, and says which check was not made rather than
-which key does not exist.
+A signature inside the hash file is verified when keyrings are given:
+`keel verify` gives the keyrings of the main and the images roles that
+keel-archive-keyring installs (decision 0055), and a signature by either
+key is good. Then the digest lines are read from the text that the
+signature covers, not from the file. A signature by no key of the
+keyrings leaves the layer unverified. A signature that does not match the
+file is a mismatch. With no keyrings, a signature is detected and
+reported, never verified.
 """
 
 import hashlib
@@ -30,8 +32,9 @@ from keel.layers.constants import (
     MANIFEST_SUFFIX,
     READ_CHUNK,
 )
-from keel.layers.errors import ManifestError
+from keel.layers.errors import ManifestError, SignatureError
 from keel.layers.manifest import Manifest
+from keel.layers.signature import verify_by_any
 
 STATUS_OK = "ok"
 STATUS_INVALID = "invalid"
@@ -47,9 +50,9 @@ STATUS_CODES = {
 SEVERITY = (STATUS_OK, STATUS_UNVERIFIED, STATUS_MISMATCH, STATUS_INVALID)
 
 SIGNATURE_PRESENT = (
-    "signature present, not verified (keel verify reads no keyring; the"
-    " signature that is checked is the channel pointer's, in keel pull)"
+    "signature present, not verified (no keyring was given)"
 )
+SIGNATURE_UNKNOWN = "signature present, not verified"
 SIGNATURE_ABSENT = "hash file present, not signed"
 
 
@@ -198,25 +201,36 @@ def check_parent_chain(
 
 
 def check_hash_file(
-    layer: Manifest, tarballs_dir: str, tarball: str
-) -> tuple[list[str], str | None]:  # noqa: D401
-    """Problems with the hash file and, when it exists, its signature note
+    layer: Manifest, tarballs_dir: str, tarball: str,
+    keyrings: tuple[str, ...] = (),
+) -> tuple[list[str], str | None, str | None]:  # noqa: D401
+    """Problems with the hash file, its signature note, and its signer
 
-    The note is None when there is no hash file, so the layer can be
-    fully ok; otherwise it says what was found about the signature, and
-    the caller reports the layer as unverified. The hash file sits next
-    to the tarball under the tarball's name, in either layout; the name
-    on its digest line is the `tarball` field, as bt-layer wrote it.
+    The note is None when there is no hash file, or when its signature
+    verifies against the keyrings; otherwise it says what was found about
+    the signature, and the caller reports the layer as unverified. The
+    signer is the "signed by" detail of a verified hash file. The hash file
+    sits next to the tarball under the tarball's name, in either layout;
+    the name on its digest line is the `tarball` field, as bt-layer wrote
+    it.
     """
     path = os.path.join(tarballs_dir, tarball + HASH_SUFFIX)
     if not os.path.exists(path):
-        return [], None
+        return [], None, None
     try:
         found = hashfile.load(path)
     except OSError as e:
         # No note: a signature state must not be asserted for bytes
         # nobody managed to read.
-        return [f"hash file: {e.strerror or e}"], None
+        return [f"hash file: {e.strerror or e}"], None, None
+    note = SIGNATURE_PRESENT if found.signed else SIGNATURE_ABSENT
+    signer = None
+    if found.signed and keyrings:
+        found, note, signer, problem = check_hash_signature(
+            path, found, keyrings
+        )
+        if problem is not None:
+            return [problem], None, None
     problems = []
     if found.sha256 is None:
         problems.append("hash file: no sha256 line")
@@ -228,27 +242,59 @@ def check_hash_file(
         problems.append(
             f"hash file names {found.filename}, manifest says {layer.tarball}"
         )
-    note = SIGNATURE_PRESENT if found.signed else SIGNATURE_ABSENT
-    return problems, note
+    return problems, note, signer
+
+
+def check_hash_signature(
+    path: str, found: hashfile.HashFile, keyrings: tuple[str, ...]
+) -> tuple[hashfile.HashFile, str | None, str | None, str | None]:
+    """The hash file as its signature covers it, the note, signer, problem
+
+    A good signature gives the digests of the signed text, no note and the
+    signer. No good signature by a key of the keyrings gives the file as
+    read and a note. A BADSIG gives a problem, because the file changed
+    after it was signed.
+    """
+    with open(path, "rb") as fob:
+        data = fob.read()
+    try:
+        verified = verify_by_any(path, data, keyrings)
+    except SignatureError as e:
+        reason = str(e).removeprefix(f"{path}: ")
+        if reason.startswith("BADSIG"):
+            return found, None, None, f"hash file: {reason}"
+        return found, f"{SIGNATURE_UNKNOWN}: {reason}", None, None
+    signed = hashfile.parse(path, verified.text)
+    signer = f"hash file signed by {', '.join(verified.fingerprints)}"
+    return signed, None, signer, None
 
 
 def verify_layer(
-    layer: Manifest, known: dict[str, Manifest], tarballs_dir: str
+    layer: Manifest, known: dict[str, Manifest], tarballs_dir: str,
+    keyrings: tuple[str, ...] = (),
 ) -> LayerResult:
     tarball = manifests.tarball_filename(layer, layer.path)
     problems = check_filename(layer)
     problems += check_tarball(layer, tarballs_dir, tarball)
     problems += check_parent_chain(layer, known)
-    hash_problems, note = check_hash_file(layer, tarballs_dir, tarball)
+    hash_problems, note, signer = check_hash_file(
+        layer, tarballs_dir, tarball, keyrings
+    )
     problems += hash_problems
     if problems:
         return LayerResult(layer.name, STATUS_MISMATCH, tuple(problems))
     if note is not None:
         return LayerResult(layer.name, STATUS_UNVERIFIED, (note,))
+    if signer is not None:
+        return LayerResult(layer.name, STATUS_OK, (signer,))
     return LayerResult(layer.name, STATUS_OK)
 
 
-def verify_layers(layers_dir: str, tarballs_dir: str | None = None) -> Report:
+def verify_layers(
+    layers_dir: str,
+    tarballs_dir: str | None = None,
+    keyrings: tuple[str, ...] = (),
+) -> Report:
     """Verify every layer in the directory; never raises
 
     An absent directory holds no layers and gives an empty report, so an
@@ -268,7 +314,7 @@ def verify_layers(layers_dir: str, tarballs_dir: str | None = None) -> Report:
         return Report(layers_dir, (result,))
     known, failed = load_manifests(paths)
     checked = [
-        verify_layer(layer, known, tarballs_dir)
+        verify_layer(layer, known, tarballs_dir, keyrings)
         for layer in known.values()
     ]
     results = sorted(checked + failed, key=lambda result: result.name)

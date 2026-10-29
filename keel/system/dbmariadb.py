@@ -114,7 +114,11 @@ PAIR_LINES = (
     "rpl_semi_sync_master_wait_no_slave = OFF\n"
     "slave_net_timeout = 10\n"
 )
-SEMI_SYNC_TIMEOUT_MS = 10000
+# longer than the VIP's release (keel.mesh.vip.RELEASE_AFTER, 15 s) and
+# the fence that follows it, with room: a write that waits for the ACK
+# on a cut primary must not return OK before the fence ends it
+# (keel#186); a lost replica still falls back to asynchronous commits
+SEMI_SYNC_TIMEOUT_MS = 30000
 ROLE_HEADER = (
     "# Written by keel database follow (decision 0049). Both nodes of a\n"
     "# pair boot read only: an old primary that crashed must not take a\n"
@@ -401,6 +405,22 @@ def replicate_from(
         "START SLAVE;\n",
         f"replicate from [{host}]:{port} as '{REPLICATION_USER}'"
         + (" over TLS, the primary's certificate verified" if tls else ""),
+    )
+
+
+def keep_history(state: str) -> Statements:
+    """Give a seeded replica the binary log state of its copy
+
+    `state` is keel.system.dbgtid.carried. `RESET MASTER` first: the
+    state can be set only on an empty binary log, and what the node
+    logged before the copy replaced its data is not history of the copy
+    (keel#202).
+    """
+    return Statements(
+        "RESET MASTER;\n"
+        + (f"SET GLOBAL gtid_binlog_state = {literal(state)};\n"
+           if state else ""),
+        "start the binary log at the history of the copy",
     )
 
 

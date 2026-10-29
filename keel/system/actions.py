@@ -208,8 +208,23 @@ class SeedReplica:
     # (keel.system.dbtls)
     options: str = ""
     tls: str = ""
+    # which engine's seeding carries this out: keel.system.effects
+    # dispatches to keel.system.dbseed (mariadb) or .dbpgseed
+    # (postgresql, handbook decision 0054)
+    engine: str = "mariadb"
 
     def describe(self) -> str:
+        if self.engine == "postgresql":
+            return (
+                f"copy [{self.host}]:{self.port} with pg_basebackup (a"
+                " streaming base backup of the primary), write"
+                " standby.signal and the follow drop-in beside it, and"
+                " start as its standby"
+                + (" over TLS, the primary's certificate verified"
+                   if self.tls else "")
+                + " (the credential in a pgpass file of mode 0600, removed"
+                " afterwards)"
+            )
         dropped = (
             f", then drop {', '.join(self.drop)}" if self.drop else ""
         )
@@ -273,8 +288,19 @@ class PromoteReplica:
     """
 
     timeout: int
+    # which engine's promotion carries this out: keel.system.effects
+    # dispatches to keel.system.dbreadonly (mariadb) or .dbpgpromote
+    # (postgresql, handbook decision 0054)
+    engine: str = "mariadb"
 
     def describe(self) -> str:
+        if self.engine == "postgresql":
+            return (
+                "wait up to"
+                f" {self.timeout} s for the standby to replay everything"
+                " it received (the replayed LSN reaching the received"
+                " one), then pg_promote() to end recovery and take writes"
+            )
         return (
             "stop the I/O thread, wait up to"
             f" {self.timeout} s for the SQL thread to apply everything it"
@@ -299,7 +325,8 @@ class EnsureDatabaseTls:
         return (f"make or renew the database certificate for {self.address}"
                 f" and {self.vip}, signed by the mesh's root CA (here, or"
                 " asked of its holder over the members' channel), under"
-                " /etc/mysql/keel-tls")
+                " the engine's TLS directory (etc/mysql/keel-tls or"
+                " etc/postgresql/keel-tls)")
 
 
 @dataclass(frozen=True)
@@ -310,6 +337,10 @@ class FollowVip:
 
     spec: str
     confirmed: bool = False
+    # keel database promote --old-primary-gone: the operator says the
+    # old primary is gone, so a new PostgreSQL primary commits alone
+    # until a standby streams again (0054, keel.system.dbpgfollow)
+    alone: bool = False
 
     def describe(self) -> str:
         return ("make the server follow the pair's VIP (keel database"

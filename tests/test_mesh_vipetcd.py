@@ -5,6 +5,7 @@ failover through the root half, a member outside the pair writing,
 deleting and revoking, and promote through etcd (decision 0049, third
 round), on a fake etcd with a clock (tests/vip_helpers.py)"""
 
+import os
 import threading
 import unittest
 from unittest import mock
@@ -12,7 +13,7 @@ from unittest import mock
 from vip_helpers import KEYS, NOW, VIP, Pair, address
 
 from keel import exits
-from keel.mesh import etcdstate, vipetcd, vipmsg, vipnode, vippromote
+from keel.mesh import etcdstate, vipetcd, vipmsg, vipnet, vipnode, vippromote
 from keel.mesh import vip as vipstate
 from keel.mesh.etcdstate import Cluster, Member
 from keel.mesh.vipnode import VipError
@@ -251,6 +252,46 @@ class TestPromoteWithEtcd(WithEtcd):
         # the late asks were joined before the promote returned
         self.assertLess(time.monotonic() - started, 6.0)
 
+    def test_the_database_step_does_not_wait_for_the_late_ask(self):
+        """keel#169: keel database promote --old-primary-gone made the
+        database writable only after the late ask of the gone old
+        primary ended (the members' channel's 10 s connect timeout), 12 s
+        after the VIP. `then`, the database step, runs once the VIP is
+        carried; the promote still joins the ask before it returns"""
+        import time
+        self.promote(0)
+        self.turn()
+        self.slow_old_primary(3.0, answers=False)
+        self.kv.leases[self.lease()] = self.monotonic() + 5
+        ran: list[float] = []
+        said: list[str] = []
+        started = time.monotonic()
+
+        def then() -> int:
+            ran.append(time.monotonic() - started)
+            return exits.APPLY_FAILED
+        with mock.patch.object(vipnode, "GONE_BOUND", 0.2), \
+                mock.patch.object(vippromote, "carried_soon",
+                                  side_effect=self.carry_soon):
+            code = vippromote.promote(self.all[1], True, said.append,
+                                      then=then)
+        took = time.monotonic() - started
+        self.assertEqual(code, exits.APPLY_FAILED, said)
+        self.assertEqual(len(ran), 1, said)
+        self.assertLess(ran[0], 2.0, said)
+        self.assertGreaterEqual(took, 2.9)
+        self.assertTrue(self.carried(1))
+
+    def test_a_refused_promote_runs_no_database_step(self):
+        self.promote(0)
+        self.turn()
+        self.kv.refuse = "connect"
+        ran: list[int] = []
+        code = vippromote.promote(self.all[1], False, lambda line: None,
+                                  then=lambda: ran.append(1) or exits.OK)
+        self.assertNotEqual(code, exits.OK)
+        self.assertEqual(ran, [])
+
     def test_an_old_primary_that_answers_after_the_bound_still_drops_it(
             self):
         """The ask goes on after the bound, and the promote waits for it
@@ -375,6 +416,126 @@ class TestTheController(WithEtcd):
         self.sleep(vipetcd.RENEW)
         self.turn(0)
         self.assertTrue(self.carried(0))
+
+    def test_a_holder_with_no_confirmed_renewal_marks_its_doubt(self):
+        """keel#195: on a cut MariaDB holder a write that waits for the
+        replica returns OK when the dump thread to it ends, about 12.6 s
+        after the cut, before the release; so the holder marks its doubt
+        after DOUBT s with no renewal the majority confirmed, keeps the
+        VIP, and clears the mark at the next confirmed renewal"""
+        root = self.all[0].root
+        self.promote(0)
+        self.run_for(3, 0)
+        self.assertFalse(vipstate.unconfirmed(root, VIP))
+        # a renewal confirmed now, then none
+        self.sleep(vipetcd.RENEW)
+        self.turn(0)
+        self.kv.refuse = "keepalive"
+        self.sleep(vipetcd.DOUBT - 1)
+        self.turn(0)
+        self.assertFalse(vipstate.unconfirmed(root, VIP))
+        self.sleep(1.5)
+        self.turn(0)
+        self.assertTrue(vipstate.unconfirmed(root, VIP))
+        self.assertTrue(self.carried(0))
+        self.assertIn("no renewal the majority confirmed", self.text(0))
+        self.kv.refuse = None
+        self.sleep(vipetcd.RENEW)
+        self.turn(0)
+        self.assertFalse(vipstate.unconfirmed(root, VIP))
+        self.assertTrue(self.carried(0))
+
+    def test_a_mark_left_by_an_earlier_controller_goes_at_a_renewal(self):
+        root = self.all[0].root
+        self.promote(0)
+        vipstate.mark_unconfirmed(root, VIP, True)
+        self.controllers[0] = self.controller(0)
+        self.sleep(vipetcd.RENEW)
+        self.turn(0)
+        self.assertFalse(vipstate.unconfirmed(root, VIP))
+
+    def test_a_mark_that_cannot_be_written_never_stops_the_release(self):
+        """the doubt is best effort: the release at RELEASE_AFTER stays,
+        whatever becomes of the mark"""
+        self.promote(0)
+        self.sleep(vipetcd.RENEW)
+        self.turn(0)
+        self.kv.refuse = "keepalive"
+        with mock.patch.object(vipetcd.Ops, "doubt",
+                               side_effect=OSError("read-only")):
+            self.sleep(vipetcd.RELEASE_AFTER + 0.5)
+            self.turn(0)
+        self.assertFalse(self.carried(0))
+        self.assertIn("doubt not marked", self.text(0))
+
+    def test_a_restarted_controller_cut_off_marks_its_doubt(self):
+        """a controller that starts with no confirmed renewal of its
+        own marks the doubt DOUBT s after it first saw its claim"""
+        root = self.all[0].root
+        self.promote(0)
+        self.kv.refuse = "keepalive"
+        self.controllers[0] = self.controller(0)
+        self.turn(0)
+        self.assertFalse(vipstate.unconfirmed(root, VIP))
+        self.sleep(vipetcd.DOUBT + 0.5)
+        self.turn(0)
+        self.assertTrue(vipstate.unconfirmed(root, VIP))
+
+    def test_a_mark_goes_with_the_claim(self):
+        """a node that no longer holds its claim (its lease gone, here)
+        clears its mark, so a later claim does not start read only"""
+        root = self.all[0].root
+        self.promote(0)
+        self.sleep(vipetcd.RENEW)
+        self.turn(0)
+        self.kv.refuse = "keepalive"
+        self.sleep(vipetcd.DOUBT + 0.5)
+        self.turn(0)
+        self.assertTrue(vipstate.unconfirmed(root, VIP))
+        self.kv.refuse = None
+        self.kv.revoke(self.lease())
+        self.sleep(vipetcd.RENEW)
+        self.turn(0)
+        self.turn(0)
+        self.assertFalse(vipstate.unconfirmed(root, VIP))
+
+    def test_the_doubt_comes_well_before_the_end_of_a_dump_thread(self):
+        """the doubt, plus a follow that turns MariaDB read only, ends
+        before a dump thread to a cut replica can end (tcp_retries2 = 5:
+        about 12.6 s at the least) and before the semi-synchronous
+        timeout; and after the longest normal renewal gap"""
+        from keel.system import dbmariadb
+        self.assertLessEqual(vipetcd.DOUBT + 4, 12)
+        self.assertLess(vipetcd.DOUBT + 4,
+                        dbmariadb.SEMI_SYNC_TIMEOUT_MS / 1000)
+        self.assertGreater(vipetcd.DOUBT,
+                           vipetcd.RENEW + vipetcd.CALL_TIMEOUT)
+
+    def test_the_holder_rides_out_a_re_election_under_loss(self):
+        """keel#167: a cut of the site of etcd's leader made the holder
+        drop the VIP 2 to 4 s: the new leader came 7.4 s after the cut,
+        and the kernel ended the address about 8 s after the last
+        confirmed renewal. With no renewal for 11 s, a re-election of
+        5 to 10 s and a renewal, the holder still carries it, and the
+        kernel's lifetime after a renewal covers that time"""
+        self.promote(0)
+        self.run_for(5)
+        self.kv.refuse = "keepalive"
+        for _ in range(11):
+            self.sleep(1.0)
+            self.turn(0)
+            self.assertTrue(self.carried(0))
+        self.kv.refuse = None
+        self.sleep(vipetcd.RENEW)
+        self.turn(0)
+        self.assertTrue(self.carried(0))
+        self.assertGreaterEqual(vipnet.lifetime(0.5), 12)
+
+    def test_the_release_stays_well_inside_the_ttl(self):
+        """The holder's address ends before etcd can expire the lease:
+        the release time, counted from the renewal's send, is at least
+        5 s inside the TTL, counted from etcd's receipt (0049)"""
+        self.assertLessEqual(vipetcd.RELEASE_AFTER + 5, vipetcd.TTL)
 
     def test_a_renewal_the_majority_does_not_confirm_is_none(self):
         """etcd's leader cut off renews leases by itself; the read that
@@ -715,6 +876,180 @@ class TestAMemberOutsideThePair(WithEtcd):
         self.assertEqual(self.both, [])
         self.assertGreaterEqual(self.monotonic() - revoked_at,
                                 vipetcd.GRACE)
+
+
+class TestTheFollowPath(WithEtcd):
+    """keel#164: keel-database-follow.path (PathChanged=/var/lib/keel/
+    vip) started keel database follow every 1 to 2 s with etcd, until
+    the start limit: the controller took the state's lock at each turn,
+    and the lock was opened for writing in the watched directory, so
+    its close was an event. A steady pair makes no event there"""
+
+    def test_a_steady_pair_makes_no_event_for_the_path(self):
+        from pathwatch import PathChanged
+        self.promote(0)
+        self.run_for(5)
+        self.assertEqual(self.holds(), [0])
+        watches = [PathChanged(os.path.join(one.root, vipstate.DIR))
+                   for one in self.all[:2]]
+        try:
+            self.run_for(10)
+            events = [watch.events() for watch in watches]
+        finally:
+            for watch in watches:
+                watch.close()
+        self.assertEqual(self.holds(), [0])
+        self.assertEqual(events, [[], []])
+
+    def test_a_move_still_makes_an_event(self):
+        from pathwatch import PathChanged
+        self.promote(0)
+        self.run_for(5)
+        watch = PathChanged(os.path.join(self.all[1].root, vipstate.DIR))
+        try:
+            self.promote(1)
+            self.run_for(3)
+            events = watch.events()
+        finally:
+            watch.close()
+        self.assertTrue(events)
+
+
+class TestTheOldPrimaryGone(WithEtcd):
+    """keel#165, the 0054 amendment of 2026-10-15: a claim of the
+    controller because the lease of the newest claim expired states that
+    the old primary is gone, the way keel database promote
+    --old-primary-gone does; a revoked lease, or one this controller
+    never saw alive, states nothing"""
+
+    def gone_mark(self, index: int) -> str | None:
+        try:
+            with open(os.path.join(self.all[index].root,
+                                   vipstate.GONE_NOTE)) as fob:
+                return fob.read()
+        except FileNotFoundError:
+            return None
+
+    def test_an_expired_lease_states_the_old_primary_gone(self):
+        self.promote(0)
+        self.run_for(10)
+        self.controllers[0].stop.set()
+        self.nets[0].addresses.clear()
+        for _ in range(60):
+            self.sleep(1.0)
+            self.turn(1, 2)
+            if self.carried(1):
+                break
+        self.assertTrue(self.carried(1))
+        said = self.gone_mark(1)
+        self.assertIsNotNone(said)
+        self.assertEqual(vipstate.gone_epoch(said), 2)
+        self.assertEqual(vipnode.current(self.all[1], VIP).epoch, 2)
+        self.assertIn("expired", self.text(1))
+        self.assertIsNone(self.gone_mark(2))
+
+    def test_a_lease_never_seen_alive_states_nothing(self):
+        """B's controller started after A died: the lease is gone when B
+        first asks, expired or revoked, B cannot tell"""
+        self.promote(0)
+        self.run_for(10)
+        self.controllers[0].stop.set()
+        self.nets[0].addresses.clear()
+        self.sleep(vipetcd.TTL + 1)
+        self.controllers[1] = self.controller(1)
+        for _ in range(int(vipetcd.GRACE) + 10):
+            self.sleep(1.0)
+            self.turn(1, 2)
+            if self.carried(1):
+                break
+        self.assertTrue(self.carried(1))
+        self.assertIsNone(self.gone_mark(1))
+
+    def test_a_revoked_lease_states_nothing(self):
+        self.promote(0)
+        self.run_for(5)
+        self.kv.keepalive = lambda lease: (_ for _ in ()).throw(
+            vipetcd.EtcdError("cut off"))
+        self.kv.revoke(self.lease())
+        for _ in range(int(vipetcd.GRACE) + 10):
+            self.sleep(1.0)
+            self.turn()
+            if self.carried(1):
+                break
+        self.assertTrue(self.carried(1))
+        self.assertIsNone(self.gone_mark(1))
+
+    def test_the_holder_that_claims_again_states_nothing(self):
+        self.promote(0)
+        self.run_for(5)
+        self.kv.revoke(self.lease())
+        for _ in range(int(vipetcd.TTL)):
+            self.sleep(1.0)
+            self.turn()
+        self.assertEqual(self.holds(), [0])
+        self.assertEqual(vipnode.current(self.all[0], VIP).epoch, 2)
+        self.assertIsNone(self.gone_mark(0))
+
+    def test_the_statement_lives_in_the_vip_s_state_directory(self):
+        """keel#178: keel-vip.service writes only under /var/lib/keel/vip
+        and /etc/wireguard (ProtectSystem=strict); a statement elsewhere
+        failed with a read-only file system"""
+        self.assertTrue(vipstate.GONE_NOTE.startswith(vipstate.DIR + "/"))
+        self.assertFalse(vipstate.GONE_NOTE.endswith(vipstate.SUFFIX))
+
+    def test_a_statement_that_cannot_be_written_never_stops_the_claim(self):
+        """keel#178: the write failed, Ops.hold raised before it recorded
+        the claim, and no node carried the VIP"""
+        self.promote(0)
+        self.run_for(10)
+        self.controllers[0].stop.set()
+        self.nets[0].addresses.clear()
+        with mock.patch.object(vipstate, "state_gone",
+                               side_effect=OSError(30, "Read-only file"
+                                                   " system")):
+            for _ in range(60):
+                self.sleep(1.0)
+                self.turn(1, 2)
+                if self.carried(1):
+                    break
+        self.assertTrue(self.carried(1), self.text(1))
+        held = vipnode.current(self.all[1], VIP)
+        self.assertEqual(held.epoch, 2)
+        self.assertIsNotNone(held.lease)
+        self.assertIn("Read-only file system", self.text(1))
+
+    def test_its_own_claim_taken_from_the_counter_keeps_its_lease(self):
+        """keel#178: a claim this node made, that etcd holds but its
+        state missed, is taken with its lease, so it is renewed and
+        carried"""
+        self.promote(0)
+        self.run_for(5)
+        made = vipetcd.claim(
+            self.kv, MESH_HEX, VIP, vipetcd.seen(self.kv, MESH_HEX)[VIP], 1,
+            lambda vip, epoch, lease: vipnode.signed_claim(
+                self.all[1], vip, epoch, lease), self.monotonic)
+        self.assertIsNotNone(made)
+        self.run_for(5, 1, 2)
+        held = vipnode.current(self.all[1], VIP)
+        self.assertEqual(held.epoch, 2)
+        self.assertEqual(held.lease, made[1])
+        self.assertTrue(self.carried(1), self.text(1))
+
+    def test_the_root_half_over_the_bridge_carries_the_statement(self):
+        from keel.mesh import vipbridge
+        self.promote(0)
+        self.run_for(5)
+        made = vipetcd.claim(
+            self.kv, MESH_HEX, VIP, vipetcd.seen(self.kv, MESH_HEX)[VIP], 1,
+            lambda vip, epoch, lease: vipnode.signed_claim(
+                self.all[1], vip, epoch, lease), self.monotonic)
+        import base64
+        import json
+        answer = vipbridge.answered(vipetcd.Ops(self.all[1]), json.dumps({
+            "op": "hold", "raw": base64.b64encode(made[0].raw).decode(),
+            "lease": made[1], "expired": 1}).encode())
+        self.assertNotIn("error", answer)
+        self.assertEqual(vipstate.gone_epoch(self.gone_mark(1)), 2)
 
 
 class TestStatusWithEtcd(WithEtcd):
