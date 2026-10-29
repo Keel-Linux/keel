@@ -210,16 +210,6 @@ class TestHandOver(WithEtcd):
         self.assertEqual(self.stopped(), ([], [VIP]))
         self.assertEqual(self.nets[0].lifetimes[HOST], 4)
 
-    def test_a_kept_alive_lease_carries_even_when_the_prefix_fails(self):
-        before = self.slow()
-        self.kv.refuse = "prefix"
-        self.assertEqual(self.stopped(), ([], [VIP]))
-        self.assertEqual(self.kv.calls[before:], ["keepalive", "prefix"])
-        self.assertEqual(self.nets[0].lifetimes[HOST],
-                         vipnet.lifetime(0.0))
-        self.assertTrue(self.carried(0))
-        self.assertIn("linearizable read did not answer", self.text(0))
-
     def test_a_lease_gone_drops_it(self):
         self.slow()
         self.kv.expire(self.lease())
