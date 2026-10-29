@@ -754,15 +754,19 @@ def handed_over(here: Here, held: Held, client: Callable[[], Client],
     keep-alive, then a linearizable read, which needs the majority), and
     the address given the lifetime that renewal leaves; whether the
     address stays. With no answer it stays as it is, the kernel's to end
-    by the last renewal's deadline; a lease gone drops it"""
+    by the last renewal's deadline; a lease gone drops it.
+
+    A keep-alive that succeeds carries the address even when the
+    linearizable read does not answer: the lease is alive, and the
+    address's lifetime stays within RELEASE_AFTER of the renewal.
+    Without this, the two calls add enough delay on a slow link that
+    the old lifetime runs out before the next controller renews."""
     if not held.lease or not held.holds(here.own_key()):
         return True
     sent = clock()
     try:
         etcd = client()
         ttl = etcd.keepalive(held.lease)
-        if ttl > 0:
-            etcd.prefix(key_of(here.mesh_id(), held.vip, EPOCH))
     except (EtcdError, *FAILURES) as e:
         here.err(f"vip {held.vip}: not renewed as the unit restarts ({e});"
                  " the kernel ends the address by the last renewal's"
@@ -770,6 +774,11 @@ def handed_over(here: Here, held: Held, client: Callable[[], Client],
         return True
     if ttl <= 0:
         return False
+    try:
+        etcd.prefix(key_of(here.mesh_id(), held.vip, EPOCH))
+    except (EtcdError, *FAILURES) as e:
+        here.err(f"vip {held.vip}: renewed as the unit restarts, but the"
+                 f" linearizable read did not answer ({e})")
     if not vipnode.carry_held(here, held.vip, clock() - sent):
         here.err(f"vip {held.vip}: renewed as the unit restarts, but not"
                  " carried again")

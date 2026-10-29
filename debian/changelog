@@ -1,15 +1,18 @@
 keel (0.23.59) unstable; urgency=medium
 
   * A try-restart of keel-vip.service on the holder could remove the VIP
-    from wg0 for a moment (keel#87; seen in vip-upgrade / trixie, 4.47 s
-    after the restart, on main too). The address keeps the lifetime of
-    the old controller's last confirmed renewal, and on a link of 250 ms
-    with 2% loss the next controller's start and first renewal took
-    longer than what was left. keel vip tend --stopped now renews the
-    lease once, as the controller does (a keep-alive, then a
-    linearizable read), before it lets the unit restart, and gives the
-    address the lifetime that renewal leaves. With no answer from etcd
-    the address stays as it was; a lease gone drops it.
+    from wg0 for a moment (keel#87; seen in vip-upgrade / trixie, on a
+    link of 250 ms with 2% loss). The address keeps the lifetime of the
+    old controller's last confirmed renewal, and the next controller's
+    start and first renewal took longer than what was left. keel vip
+    tend --stopped now renews the lease once (a keep-alive, then a
+    linearizable read) before it lets the unit restart, and gives the
+    address the lifetime that renewal leaves. A keep-alive that succeeds
+    carries the address even when the linearizable read does not answer:
+    both calls together add enough delay on a slow link that the old
+    lifetime can run out before the next controller renews. With no
+    answer from the keep-alive the address stays as it was; a lease gone
+    drops it.
 
  -- Marcos Méndez <popsolutions.co@gmail.com>  Thu, 29 Oct 2026 01:53:30 +0000
 
