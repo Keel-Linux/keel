@@ -682,13 +682,21 @@ class Controller:
         return True
 
     def announce(self, facts: Facts, made: Claim) -> None:
-        """The claim told to every peer, for those without etcd"""
-        for at in facts.peers:
+        """The claim told to every peer, for those without etcd, each in
+        its own thread: one after the other, a dead old holder's timeout
+        delayed the route on every other node (keel#235)"""
+        def tell(at: str) -> None:
             try:
                 self.exchange(at, facts.iface, made.raw)
             except Exception as e:  # noqa: BLE001 - each is said
                 self.err(f"vip {made.vip}: {at} did not take the claim:"
                          f" {e}")
+        told = [threading.Thread(target=tell, args=(at,), daemon=True)
+                for at in facts.peers]
+        for each in told:
+            each.start()
+        for each in told:
+            each.join()
 
     def run(self) -> None:
         """Until `stop`: the holder's duty every HOLD_TICK, the keys every

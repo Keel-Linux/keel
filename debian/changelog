@@ -1,3 +1,15 @@
+keel (0.23.62) unstable; urgency=medium
+
+  * After a VIP claim, the new holder told its peers of the claim one
+    after the other (keel#235). The dead old holder came first, so each
+    other peer learnt the new route only after that peer's 10 s timeout.
+    A mesh node outside the pair has no keel-vip-control and learns the
+    route only from this message, so its clients sent to the dead node
+    for about 10 s. The claim now goes to each peer in its own thread,
+    and a dead peer does not delay the others.
+
+ -- Marcos Méndez <popsolutions.co@gmail.com>  Thu, 29 Oct 2026 20:00:00 +0000
+
 keel (0.23.61) unstable; urgency=medium
 
   * The bind-address in 99-keel-database.cnf did not include the node's
