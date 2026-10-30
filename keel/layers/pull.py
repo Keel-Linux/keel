@@ -45,6 +45,8 @@ from keel.layers.constants import (
     HASH_SUFFIX,
     KIND_ROOTFS,
     MANIFEST_SUFFIX,
+    PACKAGES_LIST_MAX,
+    PACKAGES_SUFFIX,
     PART_SUFFIX,
     READ_CHUNK,
     TARBALL_SUFFIX,
@@ -202,6 +204,11 @@ class Places:
         if self.release is None:
             return layout.flat_manifest_path(name)
         return layout.manifest_path(self.release, self.rev, name)
+
+    def packages_name(self, name: str) -> str:
+        """The package list beside the manifest, in the same layout"""
+        manifest = self.manifest_name(name)
+        return manifest[: -len(MANIFEST_SUFFIX)] + PACKAGES_SUFFIX
 
     def tarball_names(self, layer: Manifest) -> tuple[str, ...]:
         """Every name the source may keep the tarball under, best first"""
@@ -394,6 +401,35 @@ def fetch_hash_file(
             out.write(text)
         return True
     return False
+
+
+def fetch_packages_list(
+    source: Source, layer: Manifest, target: str, places: Places = Places()
+) -> bool:
+    """Copy the layer's package list to `target` when the manifest declares one
+
+    The list sits beside the manifest at the source (keel#249), and the
+    manifest records its sha256, so the bytes are checked before they are
+    stored. A list that does not match is not stored: keel verify then
+    reports it, rather than trusting what the mirror sent. A source without
+    the list is not an error here, for the same reason. Returns whether a
+    list was stored.
+    """
+    declared = layer.fields.get("packages_sha256")
+    if declared is None:
+        return False
+    try:
+        with source.open(places.packages_name(layer.name)) as fob:
+            data = fob.read(PACKAGES_LIST_MAX + 1)
+    except OSError:
+        return False
+    if len(data) > PACKAGES_LIST_MAX:
+        return False
+    if hashlib.sha256(data).hexdigest() != declared:
+        return False
+    with open(target, "wb") as out:
+        out.write(data)
+    return True
 
 
 def remove_quietly(path: str) -> None:
@@ -618,5 +654,8 @@ def pull_layer(
     cache.store_manifest(layer)
     fetch_hash_file(
         source, layer, cache.hash_file(layer.name, layer.sha256), places
+    )
+    fetch_packages_list(
+        source, layer, cache.packages_list(layer.name, layer.sha256), places
     )
     return PullResult(layer.name, layer.sha256, layer.size, status)

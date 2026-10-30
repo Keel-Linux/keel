@@ -34,6 +34,7 @@ HASH_SUFFIX = ".hash"
 TARBALL_SUFFIX = ".tar.zst"
 SHA512_SUFFIX = ".sha512"
 PART_SUFFIX = ".part"
+PACKAGES_SUFFIX = ".packages"
 NONE = "none"
 
 KIND_ROOTFS = "rootfs"
@@ -87,6 +88,9 @@ MAX_FUTURE_SECONDS = 3600
 # A `.hash` file is prose with two digest lines in it. Anything larger is
 # not one, and the tarball path is already careful about unbounded reads.
 HASH_FILE_MAX = 1 << 16
+# A package list is one short line per package; a few thousand packages
+# fit in well under this, and the read stays bounded like the tarball.
+PACKAGES_LIST_MAX = 1 << 22
 CHANNEL_REQUIRED_KEYS = ("channel", "release", "rev", *TIMESTAMPS)
 STATE_REQUIRED_KEYS = ("channel", "release", "rev", "source")
 TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"

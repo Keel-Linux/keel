@@ -6,6 +6,8 @@ Layout of the cache directory (the cache layout of keel.layers.manifest):
     <name>-<sha256>.tar.zst       the layer tarball, as built
     <name>-<sha256>.tar.zst.hash  its .hash file, when the source had one
     <name>-<sha256>.manifest      its manifest, as pulled
+    <name>-<sha256>.packages      its package list, when the manifest
+                                  declares one
 
 Everything is keyed by the sha256 the manifest records, so two versions
 of the same layer never collide and a file that is present with the
@@ -21,6 +23,7 @@ from keel.layers.constants import (
     HASH_SUFFIX,
     KIND_ROOTFS,
     MANIFEST_SUFFIX,
+    PACKAGES_SUFFIX,
     TARBALL_SUFFIX,
 )
 from keel.layers.errors import LayerError, ManifestError
@@ -43,6 +46,9 @@ class Cache:
 
     def manifest(self, name: str, sha256: str) -> str:
         return self.stem(name, sha256) + MANIFEST_SUFFIX
+
+    def packages_list(self, name: str, sha256: str) -> str:
+        return self.stem(name, sha256) + PACKAGES_SUFFIX
 
     def has(self, layer: Manifest) -> bool:
         """The tarball is present with the recorded size and sha256

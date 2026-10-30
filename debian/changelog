@@ -1,3 +1,15 @@
+keel (0.23.68) unstable; urgency=medium
+
+  * keel pull now copies the layer's package list into the cache, as
+    <name>-<sha256>.packages, when the manifest declares packages_sha256
+    (keel#249). It reads the list from beside the manifest, in the flat
+    layout and in a release revision, and stores it only when its sha256 is
+    the one the manifest records. Before, keel verify (0.23.67, keel#239)
+    read that list in a pulled cache, found no file and exited 25, so the
+    appliance gate failed on every repository.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Fri, 30 Oct 2026 20:17:05 +0000
+
 keel (0.23.67) unstable; urgency=medium
 
   * keel verify checked the layers and then exited 9: the packages half

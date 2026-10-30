@@ -23,11 +23,10 @@ from dataclasses import dataclass
 
 from keel import exits
 from keel.layers import manifest as manifests
-from keel.layers.constants import KIND_ROOTFS
+from keel.layers.constants import KIND_ROOTFS, PACKAGES_SUFFIX
 from keel.layers.manifest import Manifest
 from keel.layers.verify import find_manifests, load_manifests
 
-PACKAGES_SUFFIX = ".packages"
 DPKG_FORMAT = "${Package} ${Version} ${Architecture}\n"
 
 STATUS_OK = "ok"
