@@ -1,4 +1,4 @@
-keel (0.23.64) unstable; urgency=medium
+keel (0.23.65) unstable; urgency=medium
 
   * keel read only the TurnKey LXC marker to know that a container's
     host owns its interfaces (keel#238). The released Proxmox templates
@@ -9,16 +9,33 @@ keel (0.23.64) unstable; urgency=medium
     "lxc" there means a container. An offline tree has an empty run/,
     so there the marker alone still decides. No image changes.
 
- -- Marcos Méndez <popsolutions.co@gmail.com>  Fri, 30 Oct 2026 13:30:00 +0000
+ -- Marcos Méndez <popsolutions.co@gmail.com>  Fri, 30 Oct 2026 17:00:00 +0000
 
-keel (0.23.63) unstable; urgency=low
+keel (0.23.64) unstable; urgency=low
 
   * The VIP claim message named PostgreSQL and decision 0054 on every
     pair (keel#237). On a MariaDB pair that text was wrong. The message
     now names no engine: the old primary is gone, so the new primary
     commits alone until a replica follows it.
 
- -- Marcos Méndez <popsolutions.co@gmail.com>  Fri, 30 Oct 2026 12:45:00 +0000
+ -- Marcos Méndez <popsolutions.co@gmail.com>  Fri, 30 Oct 2026 16:30:00 +0000
+
+keel (0.23.63) unstable; urgency=high
+
+  * A primary whose server crashed and started again while it held the
+    VIP acknowledged writes with no copy on the replica (keel#242). The
+    replica's I/O thread connects again only at its next try, and with
+    rpl_semi_sync_master_wait_no_slave OFF a commit with no replica
+    connected is acknowledged at once. follow turned read_only off on
+    such a holder at once, so a cut that came before the replica
+    connected lost an acknowledged row (CI runs 452 and 482; the end to
+    end test lost a row in 2 of 4 runs). Now follow, on a holder that is
+    read only and replicates from nobody, waits until a replica is
+    connected and Rpl_semi_sync_master_status is ON, for 30 s at most
+    (the semi-synchronous timeout), and reads the VIP's proof again
+    before read_only goes off. A promoted replica does not wait.
+
+ -- Marcos Méndez <popsolutions.co@gmail.com>  Fri, 30 Oct 2026 16:00:00 +0000
 
 keel (0.23.62) unstable; urgency=medium
 
