@@ -106,8 +106,9 @@ EARLY = 2.0
 # confirmed renewal (RELEASE_AFTER), a renewal period and a call late
 GRACE = RELEASE_AFTER + RENEW + CALL_TIMEOUT
 EPOCH, HOLDER = "epoch", "holder"
-EXPIRED_SAID = (" (expired at its due time: the old primary is gone, so a"
-                " PostgreSQL primary commits alone, decision 0054)")
+# the pair can be PostgreSQL or MariaDB, so the text names no engine
+EXPIRED_SAID = (" (expired at its due time: the old primary is gone, so the"
+                " new primary commits alone until a replica follows it)")
 # what a turn of the controller survives, said: a spec being edited, a
 # damaged state file, a key not readable for a moment, the root half
 # gone a moment

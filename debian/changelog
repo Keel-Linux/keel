@@ -1,3 +1,12 @@
+keel (0.23.64) unstable; urgency=low
+
+  * The VIP claim message named PostgreSQL and decision 0054 on every
+    pair (keel#237). On a MariaDB pair that text was wrong. The message
+    now names no engine: the old primary is gone, so the new primary
+    commits alone until a replica follows it.
+
+ -- Marcos Méndez <popsolutions.co@gmail.com>  Fri, 30 Oct 2026 16:30:00 +0000
+
 keel (0.23.63) unstable; urgency=high
 
   * A primary whose server crashed and started again while it held the
