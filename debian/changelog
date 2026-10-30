@@ -1,3 +1,20 @@
+keel (0.23.63) unstable; urgency=high
+
+  * A primary whose server crashed and started again while it held the
+    VIP acknowledged writes with no copy on the replica (keel#242). The
+    replica's I/O thread connects again only at its next try, and with
+    rpl_semi_sync_master_wait_no_slave OFF a commit with no replica
+    connected is acknowledged at once. follow turned read_only off on
+    such a holder at once, so a cut that came before the replica
+    connected lost an acknowledged row (CI runs 452 and 482; the end to
+    end test lost a row in 2 of 4 runs). Now follow, on a holder that is
+    read only and replicates from nobody, waits until a replica is
+    connected and Rpl_semi_sync_master_status is ON, for 30 s at most
+    (the semi-synchronous timeout), and reads the VIP's proof again
+    before read_only goes off. A promoted replica does not wait.
+
+ -- Marcos Méndez <popsolutions.co@gmail.com>  Fri, 30 Oct 2026 16:00:00 +0000
+
 keel (0.23.62) unstable; urgency=medium
 
   * After a VIP claim, the new holder told its peers of the claim one

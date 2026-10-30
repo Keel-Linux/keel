@@ -154,6 +154,24 @@ earlier than the release, at the doubt of the lease: on real nodes,
 A replica that is lost while the primary keeps the VIP still gives the
 fallback, 30 s after the last acknowledgement in place of 10 s.
 
+**A primary that comes back waits for its replica** (keel#242). When
+the primary's server stops (a crash, a kill) and starts again while the
+node still holds the VIP, the replica's I/O thread is not connected:
+it connects again only at its next try, every 2 s, and the TLS
+handshake takes more round trips. With `wait_no_slave = OFF` a commit
+with no replica connected is acknowledged at once, with no copy. The
+end to end test found it: the server started again 1.2 s after the
+kill, follow turned `read_only` off at 2.0 s, a write was acknowledged
+at 2.7 s, and the cut came before the replica connected. So follow,
+on a holder that is read only and replicates from nobody, waits until
+`Rpl_semi_sync_master_clients` is 1 or more and
+`Rpl_semi_sync_master_status` is `ON`, for 30 s at most (the timeout,
+so a primary that comes back gives the fallback no sooner than a
+running one). It reads the VIP's proof again after the wait and stays
+read only if the VIP is gone. Writes meanwhile get error 1290, not OK.
+A promoted replica does not wait: its old primary is the replica to
+be, and it is gone or rejoins later.
+
 **The fence starts when the lease is in doubt** (keel#195). A cut
 holder that keeps the VIP until the release (15 s) cannot wait for it:
 a write that waits for the cut replica returns OK when the dump thread
