@@ -18,8 +18,8 @@ Working today: `spec validate`, `spec render`, `spec apply` (see
 and `manifest show` for the appliance and overlay manifests of decision
 0041 (see [docs/manifest.md](docs/manifest.md)).
 
-One stub prints what it will do, names the brief section covering it and
-exits 9: the packages half of `verify`. It never pretends to work.
+No command is a stub now. Exit 9 stays reserved for one, and `verify`
+never claims more than it checked.
 
 The package also ships one first boot hook,
 `/usr/lib/inithooks/firstboot.d/10keel-system`, which converges the system
@@ -53,7 +53,7 @@ in [docs/apply.md](docs/apply.md).
 | `keel notify` | What monit runs when a check of the `monitor` section fails, lasts or recovers: sends one message, saying what happened and what to do, to every channel the section declares (email, Telegram, ntfy, a webhook). It reads the channels from `/etc/keel/monitor.json`, which `apply --system` writes as root, never from the spec, reads the tokens from their secret files and prints no URL (decision 0021, docs/apply.md) |
 | `keel inspect` | Write a spec from the running machine, or from an offline root, and report every field with its source or why it was not inferred; secrets are never read (brief sections 5.2 and 7) |
 | `keel diff` | Report drift between the spec and the running machine, or an offline root, field by field, through the same collector `inspect` uses; secrets are never compared and their files need not exist, nothing is written (brief section 5.2) |
-| `keel verify` | Check the installed layers against their manifests, one line per layer (brief section 5.4; packages not implemented yet) |
+| `keel verify` | Check the installed layers against their manifests, one line per layer (brief section 5.4), then each layer's package list, and with `--root DIR --layer NAME` the packages dpkg records under DIR |
 | `keel pull` | Fetch the layers of an appliance that the cache does not have yet, from a directory or an http(s) URL, checking every digest (brief section 5.1) |
 | `keel assemble` | Extract a cached chain into a rootfs, honouring whiteouts and opaque directories, and pack it as a Proxmox template with its sha512 (brief section 5.1; root only) |
 | `keel manifest validate` | Check the appliance and overlay manifests under `/usr/share/keel` (decision 0041): one file, the manifests of a name, or every installed one, each appliance resolved along its base chain; every error at once ([docs/manifest.md](docs/manifest.md)) |
@@ -143,7 +143,7 @@ Defined in one place, `keel/exits.py`, and reproduced here.
 | 6 | `MANIFEST_INVALID` | A layer manifest cannot be read or fails validation; every problem is printed |
 | 7 | `LAYER_MISMATCH` | A layer tarball, parent chain or `.hash` digest does not match its manifest |
 | 8 | `SIGNATURE_UNVERIFIED` | Every layer matches, but a `.hash` file is present with no good signature by a key of the keyrings; or a release MANIFEST has no good signature |
-| 9 | `NOT_IMPLEMENTED` | The command is a documented stub, or the part of it that is (`verify` exits 9 after the layers pass, because packages are not checked yet) |
+| 9 | `NOT_IMPLEMENTED` | The command is a documented stub. No command uses it now: `verify` exited 9 until keel 0.23.67 checked packages |
 | 10 | `LAYER_UNAVAILABLE` | `pull` could not fetch a manifest or tarball from the source or write the cache; `assemble` found a layer of the chain missing from the cache |
 | 11 | `ASSEMBLE_NEEDS_ROOT` | `assemble` was run by a user other than root; nothing was written |
 | 12 | `ASSEMBLE_FAILED` | The rootfs is not empty or cannot be created, or `tar` or `zstd` failed while extracting or packing |
@@ -159,6 +159,7 @@ Defined in one place, `keel/exits.py`, and reproduced here.
 | 22 | `NOTIFY_FAILED` | `keel notify` reached no channel: `/etc/keel/monitor.json` is missing or refused, declares none, or every one failed; the message then went to syslog (user.crit) and root's mailbox. One channel that takes the message is success; the others' failures are printed |
 | 23 | `MESH_TOKEN_INVALID` | `keel mesh join` could not use the token: not a `keel1:` token, mistyped or truncated (its checksum), of a later format, inconsistent, or expired; or `keel mesh accept` could not read its `keel1a:` line. The message never holds the token or its secret |
 | 24 | `MESH_REFUSED` | `keel mesh` refused: no overlay to invite into, no key yet, no endpoint, no free address in the prefix, another invite pending on the port; this node is in another mesh, at another address of it, or the change would make a spec validation refuses; a network change already waits in its window; the inviter refused the join (used, expired, bad HMAC), or the certificate is not the pinned one; no route to the inviter, or neither node can reach the other; an invite whose peers hold another mesh identity, or none; a sync from members of another identity |
+| 25 | `PACKAGES_MISMATCH` | `verify`: a layer's `.packages` list is missing, or its sha256 or line count is not the one its manifest records; or the packages dpkg records under `--root` differ from the lists of the chain of `--layer` (a missing, an undeclared or a different package, one line each) |
 
 Two rules that callers depend on:
 

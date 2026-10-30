@@ -10,7 +10,6 @@ import importlib
 import io
 import os
 import runpy
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -252,16 +251,17 @@ class TestVerify(CLITestCase):
             "verify", "--layers-dir", self.layers, "--non-interactive", *argv
         )
 
-    def test_layers_that_pass_still_exit_not_implemented_for_packages(self):
+    def test_layers_that_pass_and_lists_not_declared_exit_ok(self):
         code, out, err = self.verify()
-        self.assertEqual(code, exits.NOT_IMPLEMENTED)
+        self.assertEqual(code, exits.OK, err)
         self.assertEqual(out.splitlines(), [
             "core: ok",
             "lamp: ok",
             "layers: 2 checked, 2 ok, 0 unverified, 0 mismatch, 0 invalid",
+            "packages core: not declared",
+            "packages lamp: not declared",
+            "installed packages: not checked (no --root)",
         ])
-        self.assertIn("verify packages: not implemented yet", err)
-        self.assertIn("BRIEF.md section 5.4", err)
 
     def test_invalid_manifest_exits_manifest_invalid(self):
         write_manifest(self.layers, {**self.fields["core"], "size": "big"})
@@ -293,14 +293,14 @@ class TestVerify(CLITestCase):
             os.rename(join(self.layers, f"{name}.tar.zst"),
                       join(tarballs, f"{name}.tar.zst"))
         code, _, _ = self.verify("--tarballs-dir", tarballs)
-        self.assertEqual(code, exits.NOT_IMPLEMENTED)
+        self.assertEqual(code, exits.OK)
 
     def test_absent_layers_dir_says_so_and_checks_nothing(self):
         absent = join(self.tmpdir, "absent")
         code, out, err = self.run_cli_captured(
             "verify", "--layers-dir", absent
         )
-        self.assertEqual(code, exits.NOT_IMPLEMENTED)
+        self.assertEqual(code, exits.OK)
         self.assertIn(f"{absent}: no layer manifests found", err)
         self.assertIn("layers: 0 checked", out)
 
@@ -413,29 +413,6 @@ class TestPullAndAssemble(CLITestCase):
         self.assertEqual(raised.exception.code, exits.USAGE)
 
 
-class TestStubs(CLITestCase):
-    """The packages half of verify is the one stub left"""
-
-    def test_stubs_exit_not_implemented(self):
-        code = self.run_cli("verify", "--layers-dir", self.tmpdir)
-        self.assertEqual(code, exits.NOT_IMPLEMENTED)
-
-    def test_stub_names_the_brief_section(self):
-        out = self.module_run("verify", "--layers-dir", self.tmpdir)
-        self.assertEqual(out.returncode, exits.NOT_IMPLEMENTED)
-        self.assertIn("not implemented yet", out.stderr.decode())
-        self.assertIn("BRIEF.md section", out.stderr.decode())
-
-    def module_run(self, *argv: str):
-        environment = dict(os.environ)
-        environment["PYTHONPATH"] = ROOT
-        return subprocess.run(
-            [sys.executable, "-m", "keel", *argv],
-            capture_output=True,
-            env=environment,
-        )
-
-
 class TestUsage(CLITestCase):
     def test_unknown_command_exits_usage(self):
         with self.assertRaises(SystemExit) as raised:
@@ -514,17 +491,19 @@ class TestEntryPoints(CLITestCase):
     def test_python_dash_m_keel_exits_with_the_command_code(self):
         code = self.run_as_main(
             lambda: runpy.run_module("keel", run_name="__main__"),
-            "verify", "--layers-dir", self.tmpdir,
+            "verify", "--layers-dir", self.tmpdir, "--root", self.tmpdir,
+            "--layer", "absent",
         )
-        self.assertEqual(code, exits.NOT_IMPLEMENTED)
+        self.assertEqual(code, exits.PACKAGES_MISMATCH)
 
     def test_cli_module_run_as_a_script_exits_with_the_command_code(self):
         script = join(ROOT, "keel", "cli.py")
         code = self.run_as_main(
             lambda: runpy.run_path(script, run_name="__main__"),
-            "verify", "--layers-dir", self.tmpdir,
+            "verify", "--layers-dir", self.tmpdir, "--root", self.tmpdir,
+            "--layer", "absent",
         )
-        self.assertEqual(code, exits.NOT_IMPLEMENTED)
+        self.assertEqual(code, exits.PACKAGES_MISMATCH)
 
 
 if __name__ == "__main__":

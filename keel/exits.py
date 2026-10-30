@@ -30,6 +30,7 @@ NETWORK_NOT_CONFIRMED = 21
 NOTIFY_FAILED = 22
 MESH_TOKEN_INVALID = 23
 MESH_REFUSED = 24
+PACKAGES_MISMATCH = 25
 
 DESCRIPTIONS = {
     OK: "success, including the no-op cases",
@@ -45,7 +46,8 @@ DESCRIPTIONS = {
     LAYER_MISMATCH: "a layer does not match its manifest",
     SIGNATURE_UNVERIFIED: "a layer hash file or a release MANIFEST could"
     " not be verified",
-    NOT_IMPLEMENTED: "command is a documented stub, not implemented yet",
+    NOT_IMPLEMENTED: "command is a documented stub, not implemented yet"
+    " (no command uses it now)",
     LAYER_UNAVAILABLE: "a layer could not be fetched into the cache, or is"
     " not in it",
     ASSEMBLE_NEEDS_ROOT: "assemble must run as root",
@@ -78,4 +80,6 @@ DESCRIPTIONS = {
     MESH_REFUSED: "keel mesh refused: no overlay to invite into, no"
     " endpoint, no free address, this node is in another mesh, a change"
     " waits in its window, or the inviter refused the join",
+    PACKAGES_MISMATCH: "a layer's package list does not match its manifest,"
+    " or the packages under --root differ from the lists of its chain",
 }

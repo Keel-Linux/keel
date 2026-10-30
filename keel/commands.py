@@ -585,15 +585,6 @@ def manifest_report(outcome: manifest.Outcome) -> int:
     return outcome.code
 
 
-def not_implemented(command: str, section: str, summary: str) -> int:
-    """A documented stub: say so plainly and fail, never pretend to work"""
-    error(
-        f"{command}: not implemented yet, see BRIEF.md section {section}"
-        f" ({summary})"
-    )
-    return exits.NOT_IMPLEMENTED
-
-
 def check_channel(args, result):
     """Ask the mirror what its channel now holds; adds one report line
 
@@ -700,25 +691,27 @@ def diff(args) -> int:
 
 
 def verify(args) -> int:
-    """Check the installed layers, then say that packages are not checked
+    """Check the layers, then their package lists and, with --root, a root
 
-    One line per layer on stdout, then a summary line. A layer problem
-    decides the exit code; when every layer passes, the code is still
-    NOT_IMPLEMENTED because the packages half of the check (brief
-    section 5.4) does not exist yet, and verify never claims more than
-    it checked.
+    One line per layer and a summary, then one line per package list and
+    the installed packages line (brief section 5.4). A layer that is
+    invalid or a mismatch decides the exit code and stops there; a
+    package problem is PACKAGES_MISMATCH; otherwise the layers' code
+    (0, or 8 for a hash file not verified) is the result.
     """
     if getattr(args, "release_manifest", None):
         return verify_release_manifest(args)
+    root, layer = getattr(args, "root", None), getattr(args, "layer", None)
+    if (root is None) != (layer is None):
+        error("verify: --root and --layer go together")
+        return exits.USAGE
     code = verify_layers(args)
-    if code != exits.OK:
+    if code not in (exits.OK, exits.SIGNATURE_UNVERIFIED):
         return code
-    return not_implemented(
-        "verify packages",
-        "5.4",
-        "check installed packages against the manifest; the layers above"
-        " were checked",
-    )
+    report = layers.verify_packages_dir(args.layers_dir, root, layer)
+    for line in report.lines():
+        print(line)
+    return report.code if report.code != exits.OK else code
 
 
 def image_keyrings(args) -> tuple[str, ...]:
