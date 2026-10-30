@@ -5,6 +5,7 @@ import os
 from dataclasses import dataclass
 
 from keel.inspect import constants as paths
+from keel.inspect.container import in_container
 from keel.inspect.tree import Tree
 from keel.mesh import vip
 from keel.network import live, marker, mtu, wireguard
@@ -66,7 +67,7 @@ def observe_overlay(root: str, doc: dict) -> OverlayState | None:
         key_present=present,
         key_problem=(secret_file_error(key_file) if present and is_live
                      else None),
-        in_container=tree.exists(paths.LXC_MARKER),
+        in_container=in_container(tree),
         module_loaded=tree.exists(MODULE) if is_live else None,
         pending=os.path.exists(tree.path(marker.PENDING)),
         enabled=tree.exists(WANTS.format(iface=iface)),

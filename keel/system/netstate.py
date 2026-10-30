@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from keel.diff.compare import not_inferred
 from keel.inspect import constants as paths
 from keel.inspect.collect import leases, links, run_command
+from keel.inspect.container import in_container as is_container
 from keel.inspect.ipv6 import Runtime
 from keel.inspect.network import probe_network, slaac_enabled
 from keel.inspect.interfaces import Stanza, parse_interfaces
@@ -43,7 +44,7 @@ def observe_network(root: str, doc: dict) -> NetworkState | None:
     if not isinstance(interfaces, dict) or not interfaces:
         return None
     tree = Tree(root)
-    in_container = tree.exists(paths.LXC_MARKER)
+    in_container = is_container(tree)
     observed, findings = probe_network(
         [tree.read(paths.INTERFACES)] + tree.read_dir(paths.INTERFACES_D),
         tree.read(paths.RESOLV_CONF),
