@@ -150,8 +150,19 @@ checked, in name order:
    roles (decision 0055, below), and the digest lines are read from the
    text that the signature covers.
 
-Then the command says that packages are not checked, because that half
-of brief section 5.4 is not implemented yet, and exits accordingly.
+Then the packages half of brief section 5.4 (keel#239):
+
+5. Each manifest that records `packages` and `packages_sha256` has its
+   `<layer>.packages` list next to it, with that line count and that
+   sha256. A manifest that records no list says `not declared`.
+6. With `--root DIR --layer NAME`, the packages that dpkg records under
+   DIR (`dpkg-query --admindir=DIR/var/lib/dpkg`) are compared with the
+   lists of the chain of NAME, the rootfs first, a higher layer
+   replacing the entry of a lower one. Each package that is missing, not
+   declared or different has one line, then a summary. Without `--root`
+   the last line says that the installed packages were not checked.
+
+A list or a root that does not match exits 25 (`PACKAGES_MISMATCH`).
 
 ### What it refuses to claim
 
@@ -268,9 +279,10 @@ The statuses, worst first, and the exit code each one sets:
 | `unverified` | 8 `SIGNATURE_UNVERIFIED` | Everything matches and a `.hash` file is present, but its signature was not (or cannot be) verified |
 | `ok` | 0 | Everything matches, and there is no `.hash` file or its signature is good |
 
-The exit code of the command is the worst status of any layer; when
-every layer is `ok`, it is 9 (`NOT_IMPLEMENTED`) for the packages half,
-as explained above. A layers directory that exists but cannot be listed
+The exit code of the command is the worst status of any layer. An
+`invalid` or `mismatch` layer stops there; otherwise a package problem
+gives 25 (`PACKAGES_MISMATCH`), and else the code is 0, or 8 when a hash
+file is not verified. A layers directory that exists but cannot be listed
 is reported as one `invalid` line named after the directory.
 
 ## Verify from confconsole

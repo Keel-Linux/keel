@@ -1,3 +1,20 @@
+keel (0.23.67) unstable; urgency=medium
+
+  * keel verify checked the layers and then exited 9: the packages half
+    of brief section 5.4 was a stub (keel#239). It now checks that each
+    layer's .packages list has the line count and the sha256 that its
+    manifest records, and with --root DIR --layer NAME it compares the
+    packages that dpkg records under DIR with the lists of the chain of
+    NAME, a higher layer replacing the entry of a lower one. Each
+    missing, undeclared or different package has one line, then a
+    summary. A problem exits 25 (PACKAGES_MISMATCH). When the layers
+    and the lists agree, verify exits 0 (8 when a hash file is not
+    verified). Without --root the last line says that the installed
+    packages were not checked. The release and mirror scripts of the
+    apt repository accept exit 9 today; they change after this release.
+
+ -- Marcos Méndez <popsolutions.co@gmail.com>  Fri, 30 Oct 2026 17:55:24 +0000
+
 keel (0.23.66) unstable; urgency=medium
 
   * keel manifest validate refused every application with its own

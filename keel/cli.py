@@ -284,8 +284,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_diff_options(diff_parser)
     verify_parser = _add_command(
         subparsers, "verify",
-        "check the installed layers against their manifests (packages not"
-        " implemented yet)",
+        "check the layers and their package lists against their manifests,"
+        " and with --root the packages installed there",
         commands.verify,
     )
     add_layer_options(verify_parser)
@@ -435,6 +435,19 @@ def add_verify_options(parser: argparse.ArgumentParser) -> None:
         metavar="FILE",
         help="verify this release MANIFEST against FILE.asc, then each"
         " listed file that is present, instead of the layers",
+    )
+    parser.add_argument(
+        "--root",
+        default=None,
+        metavar="DIR",
+        help="also compare the packages dpkg records under DIR with the"
+        " package lists of the chain of --layer",
+    )
+    parser.add_argument(
+        "--layer",
+        default=None,
+        metavar="NAME",
+        help="the top layer of the root given with --root",
     )
 
 

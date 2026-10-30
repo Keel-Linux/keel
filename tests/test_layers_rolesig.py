@@ -402,7 +402,7 @@ class TestVerifyCommand(RoleTestCase):
               clearsign_many(self.keys.home, text, self.main, self.images))
         code, out, _ = self.cli("--layers-dir", root,
                                 "--keyring", self.images_ring)
-        self.assertEqual(code, exits.NOT_IMPLEMENTED, out)
+        self.assertEqual(code, exits.OK, out)
         self.assertIn(f"lamp: ok: hash file signed by {self.images}",
                       out.splitlines())
 

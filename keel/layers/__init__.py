@@ -36,6 +36,7 @@ from keel.layers.pull import (
     fetch_channel_at,
     pull,
 )
+from keel.layers.packages import verify_packages_dir
 from keel.layers.release_manifest import verify as verify_release_manifest
 from keel.layers.verify import LayerResult, Report, verify_layers
 
@@ -73,5 +74,6 @@ __all__ = [
     "pull",
     "validate",
     "verify_layers",
+    "verify_packages_dir",
     "verify_release_manifest",
 ]
