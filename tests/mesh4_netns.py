@@ -199,6 +199,11 @@ def inviter() -> None:
     thread.join(120)
     report["serve"] = codes
     members["D"] = d_process
+    if not d.get("address"):
+        # keel#251: say why, not an AttributeError on None
+        raise RuntimeError(f"D's join gave no address: result {d!r},"
+                           f" inviter exit {codes!r},"
+                           f" journal {journal[-20:]!r}")
     d_address = d["address"].split("/")[0]
     report["d_roots"] = roots_of(d["root"])
 
