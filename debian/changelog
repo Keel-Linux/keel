@@ -1,3 +1,16 @@
+keel (0.23.64) unstable; urgency=medium
+
+  * keel read only the TurnKey LXC marker to know that a container's
+    host owns its interfaces (keel#238). The released Proxmox templates
+    do not have that marker, so on a real CT keel inspect said
+    network.managed_by: file, and a spec that declared host, as the
+    docs say for a container, gave keel diff exit 14. keel now also
+    reads /run/systemd/container, which systemd writes at boot, and
+    "lxc" there means a container. An offline tree has an empty run/,
+    so there the marker alone still decides. No image changes.
+
+ -- Marcos Méndez <popsolutions.co@gmail.com>  Fri, 30 Oct 2026 13:30:00 +0000
+
 keel (0.23.63) unstable; urgency=low
 
   * The VIP claim message named PostgreSQL and decision 0054 on every

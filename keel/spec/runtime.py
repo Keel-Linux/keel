@@ -6,10 +6,22 @@ import subprocess
 
 from keel.spec.constants import LXC_MARKER
 
+# systemd's record of the container manager (keel#238)
+SYSTEMD_CONTAINER = "/run/systemd/container"
+
+
+def systemd_container() -> str:
+    """The container manager systemd recorded at boot, empty when none"""
+    try:
+        with open(SYSTEMD_CONTAINER) as fob:
+            return fob.read().strip()
+    except OSError:
+        return ""
+
 
 def default_managed_by() -> str:
     """Containers get their addresses from the host, other builds do not"""
-    if os.path.exists(LXC_MARKER):
+    if os.path.exists(LXC_MARKER) or systemd_container() == "lxc":
         return "host"
     try:
         out = subprocess.run(

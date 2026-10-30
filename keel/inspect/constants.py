@@ -17,6 +17,8 @@ INTERFACES = "etc/network/interfaces"
 INTERFACES_D = "etc/network/interfaces.d"
 RESOLV_CONF = "etc/resolv.conf"
 LXC_MARKER = "var/lib/turnkey-info/inithooks.service/lxc"
+# systemd writes the container manager here at boot: "lxc" on Proxmox
+SYSTEMD_CONTAINER = "run/systemd/container"
 DEHYDRATED_DIR = "etc/dehydrated"
 DEHYDRATED_CONFIG = "etc/dehydrated/confconsole.config"
 DEHYDRATED_DOMAINS = "etc/dehydrated/confconsole.domains.txt"

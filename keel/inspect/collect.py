@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from keel.inspect import constants as paths
 from keel.inspect.app import probe_app, probe_appliance
 from keel.inspect.channel import probe_channel
+from keel.inspect.container import in_container
 from keel.inspect.database import Installed, probe_database
 from keel.inspect.dbclient import READERS, Reader
 from keel.inspect.dbengines import ENGINES
@@ -62,7 +63,7 @@ def inspect_root(
     network, found = probe_network(
         [tree.read(paths.INTERFACES)] + tree.read_dir(paths.INTERFACES_D),
         tree.read(paths.RESOLV_CONF),
-        tree.exists(paths.LXC_MARKER),
+        in_container(tree),
         Runtime(run_command(tree, paths.IP_ADDR_COMMAND), leases(tree),
                 links(tree)),
     )
@@ -222,7 +223,7 @@ def overlay_section(tree: Tree) -> tuple[dict | None, list[Finding]]:
         [tree.read(name) for name in tree.glob(OVERLAY_FILES)],
         lambda key: wgkeys.public(tree.path(key.lstrip("/"))),
         Module(tree.exists(MODULE) if live else None,
-               tree.exists(paths.LXC_MARKER)),
+               in_container(tree)),
     )
     # a VIP is routed at runtime, never declared: the peers read back
     # are the spec's (decision 0049), so a VIP move is never drift
