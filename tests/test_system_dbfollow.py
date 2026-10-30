@@ -41,8 +41,11 @@ class Server:
                  sql_running: str = "Yes", holder_down: bool = False,
                  bypass: str = "'root'@'localhost'\n'admin'@'localhost'\n",
                  dump_fails: bool = False, slave_pos: str = "",
-                 log_bin: str = "1"):
+                 log_bin: str = "1", clients: tuple = ()):
         self.log_bin = log_bin
+        # the semi-synchronous replicas each status read finds, in turn;
+        # one when the turns are used up
+        self.clients = list(clients)
         self.replicating_from = replicating_from
         self.read_only = read_only
         self.schemas = schemas
@@ -55,6 +58,8 @@ class Server:
         self.slave_pos = slave_pos
         self.sent: list[str] = []
         self.argv: list[list[str]] = []
+        # what was asked or sent, in order
+        self.events: list[str] = []
 
     def status(self) -> str:
         if not self.replicating_from:
@@ -83,6 +88,7 @@ class Server:
             stdin = stdin.decode()
         if stdin:
             self.sent.append(stdin)
+        self.events.append(stdin or argv[-1])
         if argv[0] == "mariadb-dump":
             if self.dump_fails:
                 return subprocess.CompletedProcess(argv, 2, b"", b"no room")
@@ -123,8 +129,12 @@ class Server:
         elif "mysql.user" in asked:
             out = "root\tlocalhost\nadmin\tlocalhost\n"
         elif "Rpl_semi_sync" in asked:
-            out = ("Rpl_semi_sync_master_status\tON\n"
-                   "Rpl_semi_sync_master_clients\t1\n")
+            # the turns are follow's wait (keel#242), not inspect's read
+            waits = "yes_tx" not in asked
+            clients = self.clients.pop(0) if waits and self.clients else 1
+            out = (f"Rpl_semi_sync_master_status\t"
+                   f"{'ON' if clients else 'OFF'}\n"
+                   f"Rpl_semi_sync_master_clients\t{clients}\n")
         elif "Variable_name IN" in asked:
             out = (f"log_bin\tON\nport\t3306\nserver_id\t1\nwsrep_on\tOFF\n"
                    f"read_only\t{self.read_only}\n")
@@ -241,6 +251,50 @@ class TestThePrimary(FollowTestCase):
         self.assertIsNone(found.problem, found.lines)
         self.assertIn("SET GLOBAL read_only = OFF;\n", server.sent)
         self.assertEqual(server.argv[-1][:4], ["runuser", "-u", "mysql", "--"])
+
+    def test_a_restarted_holder_takes_no_write_before_its_replica_is_back(
+            self):
+        # keel#242: the primary's server killed and started again while it
+        # holds the VIP. Writable before the replica reconnects, it
+        # acknowledged a commit with no copy (wait_no_slave OFF)
+        self.pair_nodes()
+        server = Server(read_only="ON", clients=(0, 0, 0, 1))
+        found = self.follow(0, server)
+        self.assertIsNone(found.problem, found.lines)
+        semi = [i for i, one in enumerate(server.events)
+                if one == dbfollow.SEMI_SYNC_QUESTION[-1]]
+        off = server.events.index("SET GLOBAL read_only = OFF;\n")
+        # four reads, the last one found the replica back, and only then
+        # read_only went off
+        self.assertEqual(len(semi), 4, server.events)
+        self.assertGreater(off, semi[-1])
+        self.assertNotIn(dbfollow.NO_REPLICA.format(
+            wait=dbfollow.REPLICA_WAIT), found.lines)
+
+    def test_a_holder_whose_replica_stays_away_takes_writes_after_the_wait(
+            self):
+        self.pair_nodes()
+        turns = int(dbfollow.REPLICA_WAIT / dbfollow.REPLICA_POLL) + 1
+        server = Server(read_only="ON", clients=(0,) * turns)
+        started = self.monotonic()
+        found = self.follow(0, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertIn("SET GLOBAL read_only = OFF;\n", server.sent)
+        self.assertIn(dbfollow.NO_REPLICA.format(wait=dbfollow.REPLICA_WAIT),
+                      found.lines)
+        self.assertGreaterEqual(self.monotonic() - started,
+                                dbfollow.REPLICA_WAIT)
+
+    def test_a_holder_that_lost_the_vip_while_it_waited_stays_read_only(self):
+        self.pair_nodes()
+        turns = int(dbfollow.REPLICA_WAIT / dbfollow.REPLICA_POLL) + 1
+        server = Server(read_only="ON", clients=(0,) * turns)
+        with mock.patch.object(dbfollow, "_proven",
+                               side_effect=[True, False, False]):
+            found = self.follow(0, server)
+        self.assertNotIn("SET GLOBAL read_only = OFF;\n", server.sent)
+        self.assertTrue(any("not proven" in one for one in found.lines),
+                        found.lines)
 
     def test_a_replica_that_takes_the_vip_is_drained_and_promoted(self):
         self.pair_nodes()
