@@ -16,6 +16,7 @@ from keel.manifest.constants import (
     ITEM_TEXT,
     MODES,
     NEVER_REPLICATED,
+    NO_BASE,
     PHP,
     PLACEMENTS,
     SIZE_RE,
@@ -63,7 +64,8 @@ def validate_app(doc: dict, secrets: set, root: str) -> list[str]:
     optional = {name for name, item in declared.items()
                 if isinstance(item, dict) and item.get("required") is False}
     if "state" in doc:
-        errors.extend(_state_errors(doc["state"], optional))
+        alone = doc.get("base") in (NO_BASE, "core")
+        errors.extend(_state_errors(doc["state"], optional, alone))
     if "workers" in doc:
         errors.extend(_workers_errors(doc["workers"], set(declared), root))
     if "web" in doc:
@@ -163,8 +165,12 @@ def _defaults_errors(key: str, value: Any) -> list[str]:
     return errors
 
 
-def _state_errors(state: Any, optional: set) -> list[str]:
-    """Rule 23, within the file"""
+def _state_errors(state: Any, optional: set, alone: bool) -> list[str]:
+    """Rule 23, within the file
+
+    An exclude may sit inside a path of a base (keel#246), so the file
+    checks it only when ALONE, on core; resolve checks the merged state.
+    """
     error = mapping_error("state", state)
     if error:
         return [error]
@@ -182,10 +188,15 @@ def _state_errors(state: Any, optional: set) -> list[str]:
         error = path_error(key, path)
         if error:
             errors.append(error)
-        elif not any(inside(path, parent) and path != parent
-                     for parent in replicated):
+        elif alone and not excluded_inside(path, replicated):
             errors.append(f"{key}: {path} is inside no replicated path")
     return errors
+
+
+def excluded_inside(path: str, replicated: list[str]) -> bool:
+    """Whether an exclude is strictly inside one of the replicated paths"""
+    return any(inside(path, parent) and path != parent
+               for parent in replicated)
 
 
 def replicate_paths(state: Any) -> list[tuple[int, str]]:

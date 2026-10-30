@@ -25,7 +25,9 @@ from keel.manifest.constants import (
     OVERLAY,
 )
 from keel.manifest.fields import inside
-from keel.manifest.validate_app import replicate_paths
+from keel.manifest.validate_app import excluded_inside, replicate_paths
+
+STATE = "state"
 
 
 @dataclass(frozen=True)
@@ -64,6 +66,7 @@ class Resolved:
     options: tuple[Owned, ...]
     hooks: tuple[Owned, ...]
     application: Owned | None
+    state_paths: tuple[Owned, ...] = ()
 
 
 def overlay_units(resolved: Resolved, overlay: str) -> tuple[str, ...]:
@@ -95,7 +98,7 @@ def resolve(catalog, top: dict) -> tuple[Resolved | None, list[str]]:
     for doc in chain:
         builder.add(doc)
     errors = builder.errors + builder.requires_errors()
-    application, more = _application(chain, top["name"], builder)
+    application, paths, more = _application(chain, top["name"], builder)
     errors.extend(more)
     return Resolved(
         name=top["name"], title=top["title"],
@@ -106,6 +109,7 @@ def resolve(catalog, top: dict) -> tuple[Resolved | None, list[str]]:
         secrets=tuple(builder.items["secret"].values()),
         options=tuple(builder.items["option"].values()),
         hooks=tuple(builder.hooks), application=application,
+        state_paths=paths,
     ), errors
 
 
@@ -248,31 +252,96 @@ class _Builder:
         return errors
 
 
-def _application(chain: list[dict], top: str,
-                 builder: _Builder) -> tuple[Owned | None, list[str]]:
+def _application(chain: list[dict], top: str, builder: _Builder
+                 ) -> tuple[Owned | None, tuple[Owned, ...], list[str]]:
     """Rules 19, 21 and 23 for the application of the chain, if any
 
-    When exactly one manifest in the chain declares application sections,
-    the top inherits them regardless of where they are declared: a base
-    layer such as web can set state that every child inherits.  When more
-    than one manifest declares them, only the topmost one is accepted and
-    the others are an error (a child overrides, it does not merge).
+    services, workers, web and hooks.migrate have one owner: the one
+    manifest of the chain that declares them, or the top when more than
+    one does.  state adds up along the chain, base first (0068 section 3,
+    keel#246), so a manifest that declares only state owns nothing.
     """
-    owners = [doc for doc in chain if application_of(doc)]
-    if not owners:
-        return None, []
-    if len(owners) > 1:
+    owners = [doc for doc in chain if _owned_sections(doc)]
+    if len(owners) > 1 and any(doc["name"] != top for doc in owners):
         names = [doc["name"] for doc in owners]
-        non_top = [n for n in names if n != top]
-        if non_top:
-            return None, [f"application sections: declared by"
+        return None, (), [f"application sections: declared by"
                           f" {' and by '.join(names)}; only the top of"
                           f" the chain ({top}) may declare them when"
                           " more than one manifest has them"]
-    doc = owners[-1] if owners[-1]["name"] == top else owners[0]
-    errors = _embedded_errors(doc.get("services") or {}, builder.overlays)
-    errors.extend(_state_data_errors(doc.get("state"), builder.overlays))
-    return Owned(application_of(doc), top), errors
+    state, paths, errors = _merged_state(chain, top)
+    owned = application_of(owners[0]) if owners else {}
+    if state:
+        owned[STATE] = state
+    found = {key: owned[key] for key in (*APP_SECTIONS, "hooks")
+             if key in owned}
+    if not found:
+        return None, (), []
+    errors.extend(_embedded_errors(found.get("services") or {},
+                                   builder.overlays))
+    errors.extend(_state_data_errors(state, builder.overlays))
+    return Owned(found, top), paths, errors
+
+
+def _owned_sections(doc: dict) -> dict:
+    """The single-owner application sections of DOC: all but state"""
+    return {key: value for key, value in application_of(doc).items()
+            if key != STATE}
+
+
+def _merged_state(chain: list[dict], top: str
+                  ) -> tuple[dict, tuple[Owned, ...], list[str]]:
+    """state.replicate and state.exclude of the chain, base first, once each"""
+    entries, paths, excludes, errors = [], [], [], []
+    for doc in chain:
+        state = doc.get(STATE) or {}
+        for entry in state.get("replicate") or []:
+            path = entry.get("path") if isinstance(entry, dict) else entry
+            if all(path != owned.item for owned in paths):
+                entries.append(entry)
+                paths.append(Owned(path, doc["name"]))
+        for index, path in enumerate(state.get("exclude") or []):
+            if path not in excludes:
+                excludes.append(path)
+            errors.extend(_exclude_error(doc["name"], top, index, path))
+    replicated = [owned.item for owned in paths]
+    errors = _nested_errors(paths) + [
+        error for error, path in errors
+        if not excluded_inside(path, replicated)]
+    state = {}
+    if entries:
+        state["replicate"] = entries
+    if excludes:
+        state["exclude"] = excludes
+    return state, tuple(paths), errors
+
+
+def _exclude_error(name: str, top: str, index: int,
+                   path: str) -> list[tuple[str, str]]:
+    """The error an exclude of NAME gets if no merged path holds it"""
+    return [(f"{_where(name, top)}state.exclude[{index}]: {path} is inside"
+             " no replicated path", path)]
+
+
+def _nested_errors(paths: list[Owned]) -> list[str]:
+    """Two manifests' replicated paths never sit one inside the other
+
+    Within one file the shape check already refuses it.
+    """
+    errors = []
+    for index, owned in enumerate(paths):
+        for earlier in paths[:index]:
+            if earlier.appliance == owned.appliance:
+                continue
+            if inside(owned.item, earlier.item):
+                inner, outer = owned, earlier
+            elif inside(earlier.item, owned.item):
+                inner, outer = earlier, owned
+            else:
+                continue
+            errors.append(f"state.replicate: {inner.item}, from"
+                          f" {inner.appliance}, is inside {outer.item}, from"
+                          f" {outer.appliance}")
+    return errors
 
 
 def _embedded_errors(services: dict, overlays: dict) -> list[str]:
