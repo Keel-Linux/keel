@@ -948,6 +948,18 @@ class TestTheFollowPath(WithEtcd):
         self.assertTrue(events)
 
 
+class TestTheClaimMessage(unittest.TestCase):
+    """keel#237: the VIP controls a MariaDB pair as well as a PostgreSQL
+    pair, so the claim message names no engine"""
+
+    def test_the_expired_text_names_no_engine(self):
+        for engine in ("PostgreSQL", "MariaDB", "0054"):
+            self.assertNotIn(engine, vipetcd.EXPIRED_SAID)
+
+    def test_the_expired_text_says_the_old_primary_is_gone(self):
+        self.assertIn("the old primary is gone", vipetcd.EXPIRED_SAID)
+
+
 class TestTheOldPrimaryGone(WithEtcd):
     """keel#165, the 0054 amendment of 2026-10-15: a claim of the
     controller because the lease of the newest claim expired states that
