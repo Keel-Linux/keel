@@ -22,6 +22,7 @@ from layers_helpers import (
 from keel import exits
 from keel.layers import LayerError, PullReport, PullResult, pull, verify_layers
 from keel.layers.cache import Cache
+from keel.layers.packages import verify_packages_dir
 from keel.layers.pull import STATUS_CACHED, STATUS_FETCHED
 from keel.layers.verify import SIGNATURE_PRESENT
 from keel.layers.source import Source
@@ -164,6 +165,60 @@ class TestDirectorySource(PullTestCase):
                            ".tar.zst.hash"))
         self.pull()
         self.assertTrue(exists(self.cached("core", ".tar.zst.hash")))
+
+    def write_package_lists(self, text="adduser 3.152 all\n") -> None:
+        data = text.encode()
+        for name in ("core", "lamp"):
+            write(join(self.source, f"{name}.packages"), data)
+            self.rewrite(name, packages=str(len(text.splitlines())),
+                         packages_sha256=sha256(data))
+            self.fields[name] = {**self.fields[name],
+                                 "packages": str(len(text.splitlines())),
+                                 "packages_sha256": sha256(data)}
+
+    def test_the_package_list_is_copied_when_the_manifest_declares_one(self):
+        self.write_package_lists()
+        self.pull()
+        for name in ("core", "lamp"):
+            with open(self.cached(name, ".packages")) as cached:
+                self.assertEqual(cached.read(), "adduser 3.152 all\n")
+        report = verify_packages_dir(self.cache)
+        self.assertEqual(report.code, exits.OK)
+
+    def test_a_package_list_that_does_not_match_is_not_stored(self):
+        self.write_package_lists()
+        write(join(self.source, "lamp.packages"), b"changed 1 all\n")
+        self.pull()
+        self.assertTrue(exists(self.cached("core", ".packages")))
+        self.assertFalse(exists(self.cached("lamp", ".packages")))
+        report = verify_packages_dir(self.cache)
+        self.assertEqual(report.code, exits.PACKAGES_MISMATCH)
+
+    def test_no_declared_list_leaves_none_in_the_cache(self):
+        write(join(self.source, "core.packages"), b"adduser 3.152 all\n")
+        self.pull()
+        self.assertFalse(any(
+            entry.endswith(".packages") for entry in os.listdir(self.cache)
+        ))
+
+    def test_a_package_list_over_the_bound_is_not_stored(self):
+        self.write_package_lists()
+        with mock.patch.object(pulling, "PACKAGES_LIST_MAX", 4):
+            self.pull()
+        self.assertFalse(exists(self.cached("core", ".packages")))
+
+    def test_the_list_name_follows_the_manifest_layout(self):
+        self.assertEqual(pulling.Places().packages_name("core"),
+                         "core.packages")
+        self.assertEqual(
+            pulling.Places("2026-10-26", 1).packages_name("core"),
+            "2026-10-26/1/core.packages")
+
+    def test_the_package_list_is_copied_for_a_cached_layer_too(self):
+        self.pull()
+        self.write_package_lists()
+        self.pull()
+        self.assertTrue(exists(self.cached("lamp", ".packages")))
 
     def test_the_cache_verifies_as_the_source_does(self):
         self.write_hash_files()
