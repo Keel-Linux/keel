@@ -39,6 +39,9 @@ def render(resolved: Resolved) -> str:
         ("First boot hooks", _hooks(resolved)),
     ]
     parts = [head] + [f"{title}\n{body}" for title, body in sections]
+    if resolved.state_paths:
+        parts.append("Replicated paths\n" + table(("Path", "From"), [
+            (owned.item, owned.origin) for owned in resolved.state_paths]))
     parts.append(_application(resolved.application))
     return "\n\n".join(parts) + "\n"
 
