@@ -13,7 +13,7 @@ have no twin there:
 
 | the VIP here | what is done |
 | --- | --- |
-| held, by this node's newest claim, and on wg0 | the server made writable: a replica drained and promoted (keel.system.dbreadonly), read_only off, READ_ONLY ADMIN back |
+| held, by this node's newest claim, and on wg0 | the server made writable: a replica drained and promoted (keel.system.dbreadonly), read_only off, READ_ONLY ADMIN back; a server that replicates from nobody and is read only (restarted, or fenced) first waits up to REPLICA_WAIT for its replica (keel#242) |
 | held, by this node's newest claim, and not on wg0 | read_only on, the root lock; nothing else (keel#104) |
 | no claim, on a paired node | the same: read only until a claim is proven (keel#104) |
 | held by the other member; released or fenced here | read_only on at once, the root lock, then replication from the holder: a fresh server seeded, one already following it left alone, an old primary rejoined by GTID when it holds nothing the holder lacks, else left read only, reported and alerted |
@@ -115,6 +115,21 @@ CHECK = "database-rejoin"
 PROOF_WAIT = 15.0
 # how often follow looks for the VIP on wg0 while it waits (keel#118)
 PROOF_POLL = 0.2
+# how long a holder that is read only and replicates from nobody (its
+# server restarted, or fenced) waits for its replica before it takes
+# writes (keel#242): with wait_no_slave OFF a commit with no replica
+# connected is acknowledged with no copy. The semi-synchronous timeout,
+# so a restarted primary does that no sooner than a running one does
+REPLICA_WAIT = mariadb.SEMI_SYNC_TIMEOUT_MS / 1000
+REPLICA_POLL = 0.5
+SEMI_SYNC_QUESTION = mariadb.QUIET_CLIENT + (
+    "--execute", "SHOW GLOBAL STATUS WHERE Variable_name IN"
+    " ('Rpl_semi_sync_master_status', 'Rpl_semi_sync_master_clients')")
+NO_REPLICA = (
+    "the replica did not connect within {wait:g} s, so this node takes"
+    " writes without it: until it connects, a commit is acknowledged with"
+    " no copy on the replica (Rpl_semi_sync_master_status OFF)"
+)
 NO_PAIR = ("this node declares no appliance.vip: there is no VIP for the"
            " database to follow (keel spec apply converges a declared role)")
 NO_SERVER = ("this node declares no database.server: there is no server to"
@@ -282,7 +297,10 @@ def _follow_proof(root: str, spec: str, confirmed: bool, found: Followed,
         _unproven(root, state, found, runner)
         return
     elif role == PRIMARY:
-        _primary(root, state, found, runner)
+        if not _primary(root, state, found, runner, sleep,
+                        lambda: _proven(root, doc, output, 0, sleep)):
+            _unproven(root, state, found, runner)
+            return
     elif role == REPLICA:
         _replica(root, doc, server, state, confirmed, found, runner)
     else:
@@ -460,23 +478,28 @@ def _read_only(root: str, state: DatabaseState, found: Followed,
 
 
 def _primary(root: str, state: DatabaseState, found: Followed,
-             runner) -> None:
-    """The holder: writable, replicating from nobody"""
+             runner, sleep=time.sleep, proven=lambda: True) -> bool:
+    """The holder: writable, replicating from nobody. False when the VIP
+    was no longer proven after the wait for the replica"""
     replicating = bool(state.status.lines())
     if replicating:
         problem = dbreadonly.promote(root, PromoteReplica(DRAIN_TIMEOUT),
                                      runner)
         if problem:
             found.fail(problem)
-            return
+            return True
         found.say("drained and promoted: this node replicates from nobody"
                   " and takes writes")
     elif state.reading.read_only.value is True:
+        if not _replica_back(runner, sleep):
+            found.say(NO_REPLICA.format(wait=REPLICA_WAIT))
+        if not proven():
+            return False
         statements = mariadb.set_read_only(False)
         problem = _send(runner, statements.text)
         if problem:
             found.fail(f"{statements.summary} failed: {problem}")
-            return
+            return True
         found.say(statements.summary)
     else:
         found.say("unchanged (the primary, writable)")
@@ -487,10 +510,28 @@ def _primary(root: str, state: DatabaseState, found: Followed,
         problem = dbreadonly.unlock(root, runner)
         if problem:
             found.fail(problem)
-            return
+            return True
         found.say("READ_ONLY ADMIN given back to the accounts the replica"
                   " took it from")
     _forget_divergence(root)
+    return True
+
+
+def _replica_back(runner, sleep) -> bool:
+    """Whether a replica is connected and the primary's commits wait for
+    it (keel#242), waited for up to REPLICA_WAIT. The server is read only
+    meanwhile, so a write gets an error, not an OK with no copy"""
+    for turn in range(int(REPLICA_WAIT / REPLICA_POLL) + 1):
+        if turn:
+            sleep(REPLICA_POLL)
+        out = _ask(runner, SEMI_SYNC_QUESTION) or ""
+        values = dict(line.split("\t", 1) for line in out.splitlines()
+                      if "\t" in line)
+        clients = values.get("Rpl_semi_sync_master_clients", "0").strip()
+        if values.get("Rpl_semi_sync_master_status", "").strip() == "ON" \
+                and clients.isdigit() and int(clients) >= 1:
+            return True
+    return False
 
 
 def _replica(root: str, doc: dict, server: dict, state: DatabaseState,
