@@ -446,7 +446,7 @@ this one (the maintainer, 2026-10-11).
 | Line | From |
 | --- | --- |
 | `database.server.role` | the server: `SHOW REPLICA STATUS`, grants, as today; on a paired node compared as information |
-| `database.server.semi_sync` | `Rpl_semi_sync_master_status` / `Rpl_semi_sync_slave_status`, the clients, `yes_tx`, `no_tx`; `off` on a paired primary is drift |
+| `database.server.semi_sync` | `Rpl_semi_sync_master_status` / `Rpl_semi_sync_slave_status`, the clients, `yes_tx`, `no_tx`; on a paired primary, `off` is drift (the fallback) and `on` with no replica acknowledging is drift too (keel#107, lines 167-168: healthy is clients >= 1 with status ON) |
 | `database.server.replica_lag` | `Seconds_Behind_Master`, and `Gtid_IO_Pos` against the holder's `gtid_binlog_pos` |
 | `database.server.gtid` | `gtid_binlog_pos`, `gtid_slave_pos`, `gtid_current_pos`, `gtid_binlog_state` |
 | `database.server.read_only` | as today, now expected `on` on a fenced node too |

@@ -512,7 +512,7 @@ class TestSemiSync(unittest.TestCase):
         found = verdicts(PAIRED_DECLARED, inspection)
         self.assertEqual(found[SEMI_SYNC], SAME)
 
-    def test_on_with_unknown_clients_is_not_same(self):
+    def test_on_with_unknown_clients_is_unknown(self):
         """A clients count the probe could not read is not healthy"""
         answered = dict(
             MARIADB_STANDALONE,
@@ -527,7 +527,7 @@ class TestSemiSync(unittest.TestCase):
         )
         inspection = paired_inspection(answered)
         found = verdicts(PAIRED_DECLARED, inspection)
-        self.assertNotEqual(found[SEMI_SYNC], SAME)
+        self.assertEqual(found[SEMI_SYNC], UNKNOWN)
 
     def test_on_the_replica_semi_sync_is_not_compared(self):
         inspection = paired_inspection(
