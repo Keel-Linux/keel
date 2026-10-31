@@ -20,6 +20,11 @@ from keel.mesh import vipbridge, vipetcd, vippromote, vipunit
 from keel.mesh.node import Node
 from keel.mesh.vipnode import Here
 
+# how long a SIGTERM waits for serve to end by itself (the drain is at
+# most vipbridge.DRAIN): a read that `stop` cannot reach, such as the rest
+# of a line the controller does not finish, then ends by SystemExit
+STOP_BOUND = 20
+
 
 def add(subparsers, options) -> None:
     """keel vip, with keel.mesh.parser's shared options"""
@@ -182,10 +187,14 @@ def vip_tend(args) -> int:
         return exits.OK
     stop = threading.Event()
 
+    def ended(signum, frame):
+        # out of a read that `stop` cannot reach, through serve's cleanup
+        raise SystemExit(0)
+
     def stopped(signum, frame):
         stop.set()
-        # out of the bridge's read, through serve's cleanup
-        raise SystemExit(0)
+        signal.alarm(STOP_BOUND)
+    signal.signal(signal.SIGALRM, ended)
     signal.signal(signal.SIGTERM, stopped)
     return vipbridge.serve(here, stop)
 
