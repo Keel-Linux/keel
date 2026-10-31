@@ -835,6 +835,17 @@ class TestAMemberOutsideThePair(WithEtcd):
                 return self.monotonic() - revoked_at
         self.fail(f"nobody carries the VIP: {self.text(0)}\n{self.text(1)}")
 
+    def test_a_release_with_no_claim_after_it_moves_the_vip_by_itself(self):
+        """The planned promote that failed after the release: the old
+        holder released and revoked its lease, and the other member's
+        command claimed nothing. The other member's controller claims
+        once GRACE has passed; the node that released does not"""
+        vipnode.release(self.all[0], VIP, self.kv.revoke)
+        self.assertTrue(vipnode.current(self.all[0], VIP).released)
+        self.run_for(vipetcd.GRACE + 2, 0, 1)
+        self.assertEqual(self.holds(), [1])
+        self.assertEqual(vipnode.current(self.all[1], VIP).epoch, 2)
+
     def test_the_holder_s_lease_revoked(self):
         """the holder learns it at its next renewal, drops the VIP, and,
         having lost nothing, claims again at the next epoch; nobody stays

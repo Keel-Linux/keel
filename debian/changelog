@@ -1,3 +1,13 @@
+keel (0.23.74) unstable; urgency=medium
+
+  * A planned promote quiesces a PostgreSQL primary before it releases
+    the VIP (keel#163): CHECKPOINT, standby.signal and a restart as a
+    standby, so that the new primary replays the shutdown checkpoint.
+    A fast shutdown ends the transactions in flight. Their clients get
+    an error. When the release fails, the quiesce is undone.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Sat, 01 Nov 2026 01:25:00 +0000
+
 keel (0.23.73) unstable; urgency=medium
 
   * keel diff reported derived.monit as drift with no further context

@@ -576,6 +576,8 @@ def quiesce(root: str, runner=subprocess.run) -> str | None:
         _, _, dropdir, datadir = dbpostgres.cluster_paths(root)
     except FileNotFoundError:
         return "no PostgreSQL cluster is installed"
+    if os.path.exists(os.path.join(datadir, dbpostgres.STANDBY_SIGNAL)):
+        return None
     # CHECKPOINT with half the budget: it flushes dirty buffers so the
     # restart's own shutdown checkpoint is fast
     half = QUIESCE_TIMEOUT // 2
@@ -604,14 +606,54 @@ def quiesce(root: str, runner=subprocess.run) -> str | None:
             pass
     except OSError as e:
         return f"standby.signal could not be written: {e.strerror or e}"
-    # restart with the remaining budget; killing the client does not
-    # cancel the systemd job, so the server restarts anyway
+    # restart with the remaining budget; killing the systemctl client
+    # does not cancel the systemd job, so the server restarts anyway
+    remaining = QUIESCE_TIMEOUT - half
     try:
         done = runner(["systemctl", "restart", dbpostgres.service(root)],
                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                      check=False, timeout=QUIESCE_TIMEOUT - half)
+                      check=False, timeout=remaining)
     except subprocess.TimeoutExpired:
-        return None  # the systemd job runs; the server restarts
+        # the systemd job is still running; the server will restart,
+        # but the walsender may not have sent the shutdown checkpoint
+        # yet, so the caller should not claim the server is a standby
+        return (f"the restart client timed out after {remaining} s"
+                " (the systemd job runs; the server restarts anyway)")
+    except OSError as e:
+        return f"cannot run systemctl: {e.strerror or e}"
+    if done.returncode != 0:
+        detail = (done.stderr or b"").decode(errors="replace").strip()
+        return f"the restart failed: {detail or f'exited {done.returncode}'}"
+    return None
+
+
+def is_standby(root: str) -> bool:
+    """Whether the data directory holds standby.signal"""
+    try:
+        _, _, _, datadir = dbpostgres.cluster_paths(root)
+    except FileNotFoundError:
+        return False
+    return os.path.exists(os.path.join(datadir, dbpostgres.STANDBY_SIGNAL))
+
+
+def unquiesce(root: str, runner=subprocess.run) -> str | None:
+    """A quiesce undone, when the VIP could not be released and this node
+    stays the holder: without it the holder is a standby that follows
+    nobody, and follow refuses to promote it. None, or why not"""
+    try:
+        _, _, _, datadir = dbpostgres.cluster_paths(root)
+        os.remove(os.path.join(datadir, dbpostgres.STANDBY_SIGNAL))
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        return f"standby.signal could not be removed: {e.strerror or e}"
+    try:
+        done = runner(["systemctl", "restart", dbpostgres.service(root)],
+                      stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                      check=False, timeout=QUIESCE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return (f"the restart client timed out after {QUIESCE_TIMEOUT} s"
+                " (the systemd job runs)")
     except OSError as e:
         return f"cannot run systemctl: {e.strerror or e}"
     if done.returncode != 0:

@@ -677,3 +677,48 @@ class TestTheReleaseQuiescesTheDatabase(Pair):
              mock.patch("keel.system.dbreadonly.quiesce") as maria:
             vipserve.quiesced(here, VIP)
         maria.assert_not_called()
+
+    def test_a_failed_release_undoes_the_postgresql_quiesce(self):
+        from unittest import mock
+        from keel.mesh import vipserve
+        from keel.mesh.vipnode import VipError
+        self.nodes()
+        here = self.all[0]
+        message = mock.Mock()
+        message.epoch.return_value = 99
+        with mock.patch.object(vipserve, "of_the_pair", return_value=VIP), \
+                mock.patch.object(vipserve, "quiesced", return_value=True), \
+                mock.patch.object(vipserve.vipnode, "release",
+                                  side_effect=VipError("no")), \
+                mock.patch("keel.system.dbpgfollow.unquiesce",
+                           return_value=None) as undone, \
+                self.assertRaises(VipError):
+            vipserve.released(here, message)
+        undone.assert_called_once_with(here.root)
+        self.assertIn("is a primary again", self.text(0))
+
+    def test_a_failed_release_does_not_undo_what_it_did_not_make(self):
+        from unittest import mock
+        from keel.mesh import vipserve
+        from keel.mesh.vipnode import VipError
+        self.nodes()
+        message = mock.Mock()
+        message.epoch.return_value = 99
+        with mock.patch.object(vipserve, "of_the_pair", return_value=VIP), \
+                mock.patch.object(vipserve, "quiesced",
+                                  return_value=False), \
+                mock.patch.object(vipserve.vipnode, "release",
+                                  side_effect=VipError("no")), \
+                mock.patch("keel.system.dbpgfollow.unquiesce") as undone, \
+                self.assertRaises(VipError):
+            vipserve.released(self.all[0], message)
+        undone.assert_not_called()
+
+    def test_a_failed_undo_is_said(self):
+        from unittest import mock
+        from keel.mesh import vipserve
+        self.nodes()
+        with mock.patch("keel.system.dbpgfollow.unquiesce",
+                        return_value="the restart failed"):
+            vipserve.unquiesced(self.all[0], VIP)
+        self.assertIn("stays a standby (the restart failed)", self.text(0))

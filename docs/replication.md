@@ -432,6 +432,32 @@ and keel#69 (one writer for instance.yaml) is open. 0049's "writes
 precision the maintainer approved on 2026-10-11 and the handbook records
 under 0049.
 
+## A planned promote of a PostgreSQL pair that fails
+
+A planned promote makes the old PostgreSQL primary a standby before it
+releases the VIP (`keel.system.dbpgfollow.quiesce`): CHECKPOINT,
+`standby.signal`, a restart. If the release itself fails, the node keeps
+the VIP and the quiesce is undone.
+
+If the release works and the other member's promote then fails, the old
+primary is a standby that follows nobody. It refuses writes. With etcd
+and the other member alive, that member's controller claims the VIP once
+`GRACE` has passed (`Controller.fail_over`), and it is promoted, so the
+pair gets a writer by itself.
+
+The pair has no writer until an operator acts in these cases:
+
+- there is no etcd;
+- the other member is gone too;
+- an operator ran `keel vip promote` on the old primary before the other
+  member's controller claimed.
+
+The old primary then refuses writes (`FENCED_REFUSED`), because nothing
+proves that the other member took no write. If the other member is gone,
+run `keel database promote --old-primary-gone` on the old primary. Else
+run `keel vip promote` on the other member. A follow after a release
+fences an old primary in the same way when no quiesce ran.
+
 ## Dumps on the standby (interim backup)
 
 `keel-database-dump.timer` on a paired node runs `keel database dump`

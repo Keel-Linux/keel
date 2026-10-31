@@ -430,6 +430,32 @@ class TestThePrimary(FollowTestCase):
         self.assertIn("--old-primary-gone", found.problem)
         self.assertFalse(any("pg_promote()" in one for one in server.sent))
 
+    def test_a_quiesced_old_primary_that_claims_again_stays_refused(self):
+        """A planned promote: A quiesced and released, the other member's
+        promote failed, and an operator runs keel vip promote on A. A is
+        then a standby that follows nobody, as a follow after a release
+        leaves it with no quiesce too (_fence): nothing proves that the
+        other member took no write, so A stays refused until the operator
+        says the other member is gone. With etcd the other member's
+        controller claims by itself (fail_over)"""
+        self.pair_nodes()
+        root = self.all[0].root
+        dbpgfollow._write(root, dbpair.ROLE_FILE,
+                          dbpair.role_text("primary", VIP), 0o644)
+        self.assertIsNone(dbpgfollow.quiesce(
+            root, lambda argv, **kwargs: subprocess.CompletedProcess(
+                argv, 0, b"", b"")))
+        self.assertTrue(dbpgfollow.is_standby(root))
+        server = Server(**self.FENCED)
+        found = self.follow(0, server)
+        self.assertIn("--old-primary-gone", found.problem)
+        self.assertFalse(any("pg_promote()" in one for one in server.sent))
+        self.pair_dropin(0, dbpostgres.pair_dropin_text())
+        server = Server(**self.FENCED, streaming="0\n")
+        found = self.follow(0, server, alone=True)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertTrue(any("pg_promote()" in one for one in server.sent))
+
     def test_the_old_primary_gone_a_fenced_holder_takes_writes(self):
         """after case (e), the newer primary lost: the operator's flag
         says it is gone, so the fenced last node takes writes, alone"""
@@ -1075,18 +1101,68 @@ class TestQuiesce(unittest.TestCase):
         self.assertFalse(any(c[:2] == ["systemctl", "restart"]
                              for c in calls), calls)
 
-    def test_restart_timeout_is_none(self):
+    def test_restart_timeout_reports_the_job_runs(self):
         """Killing the systemctl client does not cancel the systemd job,
-        so the restart runs anyway: the quiesce reports no problem"""
+        so the restart runs anyway, but the caller should not claim
+        the server is a standby"""
         runner, _ = self._runner(restart_timeout=True)
         problem = dbpgfollow.quiesce(self.root, runner)
-        self.assertIsNone(problem)
+        self.assertIsNotNone(problem)
+        self.assertIn("the systemd job runs", problem)
 
     def test_restart_failure_is_reported(self):
         runner, _ = self._runner(restart_rc=1)
         problem = dbpgfollow.quiesce(self.root, runner)
         self.assertIsNotNone(problem)
         self.assertIn("restart failed", problem)
+
+    def signal_file(self):
+        return os.path.join(self.root, STANDBY_SIGNAL)
+
+    def test_a_standby_is_not_quiesced_again(self):
+        open(self.signal_file(), "w").close()
+        runner, calls = self._runner()
+        self.assertIsNone(dbpgfollow.quiesce(self.root, runner))
+        self.assertEqual(calls, [])
+        self.assertTrue(dbpgfollow.is_standby(self.root))
+
+    def test_is_standby_without_a_cluster(self):
+        empty = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, empty)
+        self.assertFalse(dbpgfollow.is_standby(empty))
+
+    def test_unquiesce_removes_the_signal_and_restarts(self):
+        open(self.signal_file(), "w").close()
+        runner, calls = self._runner()
+        self.assertIsNone(dbpgfollow.unquiesce(self.root, runner))
+        self.assertFalse(os.path.exists(self.signal_file()))
+        self.assertTrue(any(c[:2] == ["systemctl", "restart"] for c in calls))
+
+    def test_unquiesce_with_no_signal_does_nothing(self):
+        runner, calls = self._runner()
+        self.assertIsNone(dbpgfollow.unquiesce(self.root, runner))
+        self.assertEqual(calls, [])
+
+    def test_unquiesce_reports_the_failures(self):
+        for kwargs, said in (({"restart_rc": 1}, "restart failed"),
+                             ({"restart_timeout": True}, "timed out")):
+            with self.subTest(said=said):
+                open(self.signal_file(), "w").close()
+                runner, _ = self._runner(**kwargs)
+                self.assertIn(said, dbpgfollow.unquiesce(self.root, runner))
+
+    def test_unquiesce_without_systemctl(self):
+        open(self.signal_file(), "w").close()
+
+        def run(argv, **kwargs):
+            raise OSError("no systemctl")
+        self.assertIn("cannot run systemctl",
+                      dbpgfollow.unquiesce(self.root, run))
+
+    def test_unquiesce_cannot_remove_the_signal(self):
+        with mock.patch("os.remove", side_effect=PermissionError("no")):
+            self.assertIn("could not be removed",
+                          dbpgfollow.unquiesce(self.root))
 
     def test_checkpoint_runs_before_standby_signal(self):
         """CHECKPOINT must finish before standby.signal is written:

@@ -228,12 +228,26 @@ def released(here: Here, message: vipmsg.Message) -> Answer:
 
     def revoke(lease: str) -> None:
         here.local().revoke(lease)
-    quiesced(here, vip)
-    vipnode.release(here, vip, revoke)
+    made_standby = quiesced(here, vip)
+    try:
+        vipnode.release(here, vip, revoke)
+    except VipError:
+        if made_standby:
+            unquiesced(here, vip)
+        raise
     return Answer(200, b'{"released": true}')
 
 
-def quiesced(here: Here, vip: str) -> None:
+def unquiesced(here: Here, vip: str) -> None:
+    """The release failed and this node keeps the VIP: its PostgreSQL
+    server is a primary again"""
+    from keel.system import dbpgfollow
+    problem = dbpgfollow.unquiesce(here.root)
+    here.err(f"vip {vip}: the release failed, and the database"
+             f" {'is a primary again' if not problem else f'stays a standby ({problem})'}")
+
+
+def quiesced(here: Here, vip: str) -> bool:
     """The database of a node that declares one quiesced before the VIP
     goes: no new write is taken once it returns. MariaDB (keel#138):
     SET GLOBAL read_only = ON waits for the commits in flight, so the
@@ -242,17 +256,20 @@ def quiesced(here: Here, vip: str) -> None:
     aborts in-flight transactions but lets the new primary replay the
     shutdown checkpoint and avoids a divergence that needs pg_rewind.
     A failure is logged and the release goes on: the database follows
-    the VIP's state after, as before"""
+    the VIP's state after, as before. Returns whether this call may have
+    made a PostgreSQL server a standby, which a failed release undoes"""
     try:
         doc = here.node.document()
     except NodeError:
-        return
+        return False
     server = (doc.get("database") or {}).get("server")
     if not server:
-        return
+        return False
     engine = str(server.get("engine") or "")
+    made_standby = False
     if engine == "postgresql":
         from keel.system import dbpgfollow
+        made_standby = not dbpgfollow.is_standby(here.root)
         problem = dbpgfollow.quiesce(here.root)
         label = "a standby"
     else:
@@ -262,5 +279,6 @@ def quiesced(here: Here, vip: str) -> None:
     if problem:
         here.err(f"vip {vip}: the database could not be made {label}"
                  f" first ({problem}); the release goes on")
-        return
+        return made_standby
     here.err(f"vip {vip}: the database is {label} before the release")
+    return made_standby
