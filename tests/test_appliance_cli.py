@@ -161,6 +161,29 @@ class TestConverge(ApplianceCliCase):
         os.remove(join(self.root, MANIFEST_MONIT))
         self.assertIn("observed nothing", self.diff()[1])
 
+    def test_monit_missing_before_first_apply_says_why(self):
+        """keel#252: when apply has not converged the appliance (no overlay
+        record), a missing monit file is drift with a note that says why"""
+        self.write(spec_text())
+        # Before any apply, the overlay record does not exist and the
+        # monit file has never been written. diff reports drift with
+        # a note naming the overlay record and the log to check.
+        code, out, _ = self.diff()
+        self.assertEqual(code, DRIFT)
+        self.assertIn("derived.monit: drift", out)
+        self.assertIn("no successful apply is recorded", out)
+        self.assertIn("10keel-system", out)
+        # After apply converges, the record exists. Deleting the file
+        # is drift without the note: the record proves apply ran.
+        self.apply()
+        self.assertTrue(os.path.exists(join(self.root, MANIFEST_MONIT)))
+        os.remove(join(self.root, MANIFEST_MONIT))
+        code, out, _ = self.diff()
+        self.assertEqual(code, DRIFT)
+        self.assertIn("derived.monit: drift", out)
+        self.assertIn("observed nothing", out)
+        self.assertNotIn("no successful apply is recorded", out)
+
     def test_a_unit_turned_off_by_hand_is_drift(self):
         self.write(spec_text("enabled"))
         self.apply()
