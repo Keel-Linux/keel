@@ -547,6 +547,79 @@ def _fence(root: str, found, runner) -> bool:
     return True
 
 
+QUIESCE_TIMEOUT = 20
+"""The budget for the whole quiesce: CHECKPOINT, standby.signal, and
+the restart that makes the server a standby. The asker's answer
+timeout is 30 s (keel.mesh.memberlink.ANSWER_TIMEOUT), so this must
+finish well inside it. Killing the systemctl client does not cancel
+the systemd job; when the restart times out the server restarts
+anyway, and the fallback is the divergence and a later pg_rewind."""
+
+
+def quiesce(root: str, runner=subprocess.run) -> str | None:
+    """A PostgreSQL primary made a standby before the VIP goes; None,
+    or why not
+
+    A fast shutdown aborts in-flight transactions, so unlike the
+    MariaDB path (keel.system.dbreadonly.quiesce) the commits in flight
+    are not drained. What this does is stop the server cleanly, so the
+    standby replays the shutdown checkpoint WAL before it promotes, and
+    the old primary can rejoin by pg_rewind with nothing to copy. Without
+    it, the shutdown checkpoint of a stopped primary creates WAL the new
+    primary does not have, and the old primary diverges.
+
+    Order: CHECKPOINT flushes dirty buffers so the restart is fast, then
+    standby.signal and the restart. A slow CHECKPOINT leaves the server
+    untouched (the release goes on and the divergence is handled later).
+    """
+    try:
+        _, _, dropdir, datadir = dbpostgres.cluster_paths(root)
+    except FileNotFoundError:
+        return "no PostgreSQL cluster is installed"
+    # CHECKPOINT with half the budget: it flushes dirty buffers so the
+    # restart's own shutdown checkpoint is fast
+    half = QUIESCE_TIMEOUT // 2
+    try:
+        done = runner(list(dbpostgres.CLIENT + ("--command", "CHECKPOINT")),
+                      stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                      check=False, timeout=half)
+    except subprocess.TimeoutExpired:
+        return f"CHECKPOINT did not finish within {half} s"
+    except OSError as e:
+        return f"cannot run psql: {e.strerror or e}"
+    if done.returncode != 0:
+        detail = (done.stderr or b"").decode(errors="replace").strip()
+        return f"CHECKPOINT failed: {detail or f'exited {done.returncode}'}"
+    # standby.signal so the restart comes up in recovery
+    signal = os.path.join(datadir, dbpostgres.STANDBY_SIGNAL)
+    try:
+        fd = os.open(signal, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW,
+                     0o644)
+        os.close(fd)
+        dbpgseed._as_postgres(signal)
+        try:
+            os.remove(os.path.join(dropdir,
+                                   dbpostgres.FOLLOW_DROPIN_NAME))
+        except FileNotFoundError:
+            pass
+    except OSError as e:
+        return f"standby.signal could not be written: {e.strerror or e}"
+    # restart with the remaining budget; killing the client does not
+    # cancel the systemd job, so the server restarts anyway
+    try:
+        done = runner(["systemctl", "restart", dbpostgres.service(root)],
+                      stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                      check=False, timeout=QUIESCE_TIMEOUT - half)
+    except subprocess.TimeoutExpired:
+        return None  # the systemd job runs; the server restarts
+    except OSError as e:
+        return f"cannot run systemctl: {e.strerror or e}"
+    if done.returncode != 0:
+        detail = (done.stderr or b"").decode(errors="replace").strip()
+        return f"the restart failed: {detail or f'exited {done.returncode}'}"
+    return None
+
+
 def _kept_dump(root: str) -> str | None:
     """The dump the recorded divergence names, when it is still there:
     a fenced node is in recovery and takes no write, so that dump still

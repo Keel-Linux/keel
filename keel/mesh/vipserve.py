@@ -26,8 +26,9 @@ message is (keel.mesh.etcdserve); then:
 
 Nothing here applies a change under 0018's window, and nothing waits
 but a release on a database: each answer is the time of an `ip` or a
-`wg set`, and a release also waits for SET GLOBAL read_only = ON (up to
-dbreadonly.QUIESCE_TIMEOUT).
+`wg set`, and a release also waits for the database quiesce (up to
+dbreadonly.QUIESCE_TIMEOUT for MariaDB, or dbpgfollow.QUIESCE_TIMEOUT
+for PostgreSQL).
 """
 
 import json
@@ -233,21 +234,33 @@ def released(here: Here, message: vipmsg.Message) -> Answer:
 
 
 def quiesced(here: Here, vip: str) -> None:
-    """The database of a node that declares one made read only before
-    the VIP goes (keel#138): the commits in flight end first, their
-    clients get the answer while the address is still here, and no new
-    write is taken. A failure is logged and the release goes on: the
-    database follows the VIP's state after, as before"""
+    """The database of a node that declares one quiesced before the VIP
+    goes: no new write is taken once it returns. MariaDB (keel#138):
+    SET GLOBAL read_only = ON waits for the commits in flight, so the
+    clients' answers go while the address is still here. PostgreSQL:
+    the server is made a standby (standby.signal + restart), which
+    aborts in-flight transactions but lets the new primary replay the
+    shutdown checkpoint and avoids a divergence that needs pg_rewind.
+    A failure is logged and the release goes on: the database follows
+    the VIP's state after, as before"""
     try:
         doc = here.node.document()
     except NodeError:
         return
-    if not (doc.get("database") or {}).get("server"):
+    server = (doc.get("database") or {}).get("server")
+    if not server:
         return
-    from keel.system import dbreadonly
-    problem = dbreadonly.quiesce()
+    engine = str(server.get("engine") or "")
+    if engine == "postgresql":
+        from keel.system import dbpgfollow
+        problem = dbpgfollow.quiesce(here.root)
+        label = "a standby"
+    else:
+        from keel.system import dbreadonly
+        problem = dbreadonly.quiesce()
+        label = "read only"
     if problem:
-        here.err(f"vip {vip}: the database could not be made read only"
+        here.err(f"vip {vip}: the database could not be made {label}"
                  f" first ({problem}); the release goes on")
         return
-    here.err(f"vip {vip}: the database is read only before the release")
+    here.err(f"vip {vip}: the database is {label} before the release")

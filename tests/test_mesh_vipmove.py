@@ -632,3 +632,48 @@ class TestTheReleaseQuiescesTheDatabase(Pair):
                         return_value="ERROR 2002"):
             vipserve.quiesced(here, VIP)
         self.assertIn("ERROR 2002); the release goes on", self.text(0))
+
+    def test_quiesced_dispatches_postgresql_to_dbpgfollow(self):
+        from unittest import mock
+        from keel.mesh import vipserve
+        self.nodes()
+        here = self.all[0]
+        doc = here.node.document()
+        doc["database"] = {"server": {"engine": "postgresql",
+                                      "role": "primary"}}
+        here.node.write(doc)
+        with mock.patch("keel.system.dbpgfollow.quiesce",
+                        return_value=None) as asked:
+            vipserve.quiesced(here, VIP)
+        asked.assert_called_once_with(here.root)
+        self.assertIn("a standby before the release", self.text(0))
+
+    def test_quiesced_postgresql_failure_logs_and_continues(self):
+        from unittest import mock
+        from keel.mesh import vipserve
+        self.nodes()
+        here = self.all[0]
+        doc = here.node.document()
+        doc["database"] = {"server": {"engine": "postgresql",
+                                      "role": "primary"}}
+        here.node.write(doc)
+        with mock.patch("keel.system.dbpgfollow.quiesce",
+                        return_value="CHECKPOINT timed out"):
+            vipserve.quiesced(here, VIP)
+        self.assertIn("CHECKPOINT timed out); the release goes on",
+                      self.text(0))
+
+    def test_quiesced_postgresql_does_not_call_mariadb(self):
+        from unittest import mock
+        from keel.mesh import vipserve
+        self.nodes()
+        here = self.all[0]
+        doc = here.node.document()
+        doc["database"] = {"server": {"engine": "postgresql",
+                                      "role": "primary"}}
+        here.node.write(doc)
+        with mock.patch("keel.system.dbpgfollow.quiesce",
+                        return_value=None), \
+             mock.patch("keel.system.dbreadonly.quiesce") as maria:
+            vipserve.quiesced(here, VIP)
+        maria.assert_not_called()
