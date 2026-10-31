@@ -8,11 +8,12 @@ it, since the messages name the choices in that order.
 
 import re
 
+from keel.constants import MANIFEST_KINDS
+
 MANIFEST_VERSION = 1
 
-OVERLAY = "overlay"
-APPLIANCE = "appliance"
-KINDS = (OVERLAY, APPLIANCE)
+OVERLAY, APPLIANCE = MANIFEST_KINDS
+KINDS = MANIFEST_KINDS
 DIRS = {OVERLAY: "overlays", APPLIANCE: "appliances"}
 SHARE_DIR = "usr/share/keel"
 SUFFIX = ".yaml"

@@ -214,12 +214,13 @@ class TestCliEdges(Pair):
                         side_effect=lambda sig, fn: handlers.update(
                             {sig: fn})), \
                 mock.patch("signal.alarm") as alarm, \
-                mock.patch.object(vipcli.vipbridge, "serve",
-                                  side_effect=fake_serve):
+                mock.patch("keel.mesh.vipbridge.serve",
+                           side_effect=fake_serve):
             result = vipcli.vip_tend(args)
         self.assertEqual(result, 0)
+        from keel.mesh.vipbridge import DRAIN
         alarm.assert_called_once_with(vipcli.STOP_BOUND)
-        self.assertGreater(vipcli.STOP_BOUND, vipcli.vipbridge.DRAIN)
+        self.assertGreater(vipcli.STOP_BOUND, DRAIN)
         with self.assertRaises(SystemExit):
             handlers[signal.SIGALRM](signal.SIGALRM, None)
         self.assertTrue(vipcli.utcnow().tzinfo)

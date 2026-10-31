@@ -1,3 +1,11 @@
+keel (0.23.75) unstable; urgency=medium
+
+  * The CLI builds its parser without loading the library (decision
+    0070). Handlers are stored as dotted names and imported after
+    parse_args. No behavior changes.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Sat, 01 Nov 2026 01:30:00 +0000
+
 keel (0.23.74) unstable; urgency=medium
 
   * A planned promote quiesces a PostgreSQL primary before it releases

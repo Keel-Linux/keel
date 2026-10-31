@@ -199,9 +199,9 @@ class TestCommands(unittest.TestCase):
 
     def test_confirm_from_a_console(self):
         origin = session.Origin(session.CONSOLE_KIND, "the console tty1")
-        with mock.patch.object(commands.session, "origin",
+        with mock.patch.object(session, "origin",
                                return_value=origin), \
-                mock.patch.object(commands.live, "run", return_value=None), \
+                mock.patch.object(live, "run", return_value=None), \
                 mock.patch.object(marker, "boot_id", return_value="b1"):
             code, out, _ = run_cli("network", "confirm", "--root", self.root)
         self.assertEqual(code, exits.OK)
@@ -209,7 +209,7 @@ class TestCommands(unittest.TestCase):
 
     def test_confirm_refused_exits_21(self):
         origin = session.Origin(session.UNKNOWN, "a tmux shell")
-        with mock.patch.object(commands.session, "origin",
+        with mock.patch.object(session, "origin",
                                return_value=origin), \
                 mock.patch.object(marker, "boot_id", return_value="b1"):
             code, _, err = run_cli("network", "confirm", "--root", self.root)

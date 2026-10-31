@@ -5,10 +5,11 @@ Kept apart from the code that uses them so that the format can be read
 without reading the parser.
 """
 
-SPEC_DEFAULT = "/etc/keel/instance.yaml"
-CONF_DEFAULT = "/etc/inithooks.conf"
-SPEC_ENV = "KEEL_SPEC"
-CONF_ENV = "KEEL_CONF"
+# These four were defined here before decision 0070 moved them to
+# keel.constants so the CLI parser does not load this package.
+from keel.constants import (  # noqa: F401
+    CONF_DEFAULT, CONF_ENV, SPEC_DEFAULT, SPEC_ENV,
+)
 LXC_MARKER = "/var/lib/turnkey-info/inithooks.service/lxc"
 
 SCHEMA_VERSION = 1
