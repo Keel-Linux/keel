@@ -208,9 +208,9 @@ class TestCliEdges(Pair):
         with mock.patch("signal.signal",
                         side_effect=lambda sig, fn: handlers.update(
                             {sig: fn})), \
-                mock.patch.object(vipcli.vipbridge, "serve",
-                                  side_effect=lambda here, stop:
-                                  handlers[15](15, None)), \
+                mock.patch("keel.mesh.vipbridge.serve",
+                           side_effect=lambda here, stop:
+                           handlers[15](15, None)), \
                 self.assertRaises(SystemExit):
             vipcli.vip_tend(args)
         self.assertTrue(vipcli.utcnow().tzinfo)

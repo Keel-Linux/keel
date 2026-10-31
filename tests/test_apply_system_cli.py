@@ -231,11 +231,11 @@ class TestApplySystem(ApplySystemTestCase):
                                  failed=0)
         outcome.summary.return_value = "apply --system: 0 change(s), 0 failed"
         with AS_ROOT, \
-                mock.patch.object(commands.system, "observe",
+                mock.patch.object(system, "observe",
                                   return_value=fake_state) as observe, \
-                mock.patch.object(commands.system, "plan",
+                mock.patch.object(system, "plan",
                                   return_value=fake_plan), \
-                mock.patch.object(commands.system, "execute",
+                mock.patch.object(system, "execute",
                                   return_value=outcome) as execute:
             code, out, _ = run_cli("spec", "apply", "--spec", self.spec,
                                    "--conf", self.conf, "--system")
@@ -252,10 +252,10 @@ class TestApplySystem(ApplySystemTestCase):
         outcome = mock.MagicMock(lines=(), failed=0)
         outcome.summary.return_value = "dry run"
         with AS_USER, \
-                mock.patch.object(commands.system, "observe",
+                mock.patch.object(system, "observe",
                                   return_value=fake_state) as observe, \
-                mock.patch.object(commands.system, "plan"), \
-                mock.patch.object(commands.system, "execute",
+                mock.patch.object(system, "plan"), \
+                mock.patch.object(system, "execute",
                                   return_value=outcome):
             code, _, _ = run_cli("spec", "apply", "--spec", self.spec,
                                  "--conf", self.conf, "--system",
@@ -829,8 +829,8 @@ class TestDatabasePromote(unittest.TestCase):
     def test_only_a_run_that_may_change_the_machine_starts_the_server(self):
         for extra, start in (((), True), (("--dry-run",), False)):
             with self.subTest(extra=extra), AS_ROOT, \
-                    mock.patch("keel.commands.system.observe",
-                               wraps=commands.system.observe) as observe:
+                    mock.patch("keel.system.observe",
+                               wraps=system.observe) as observe:
                 self.promote(*extra)
             self.assertIs(observe.call_args.kwargs["start"], start)
 

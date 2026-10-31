@@ -111,18 +111,18 @@ class TestTheCommands(Pair):
             # a restart keeps an address bounded by its lifetime
             self.nets[0].addresses.append(f"{VIP}/128")
             self.nets[0].lifetimes[f"{VIP}/128"] = 6
-            with mock.patch.object(vipcli.vipunit, "restarting",
-                                   return_value=True):
+            with mock.patch("keel.mesh.vipunit.restarting",
+                           return_value=True):
                 code, out, _ = self.run_cli("vip", "tend", "--stopped",
                                             *self.args(0))
             self.assertIn("kept while the unit restarts", out)
             self.assertTrue(self.carried(0))
-            with mock.patch.object(vipcli.vipbridge, "serve",
-                                   return_value=exits.OK) as ran:
+            with mock.patch("keel.mesh.vipbridge.serve",
+                           return_value=exits.OK) as ran:
                 code, _, _ = self.run_cli("vip", "tend", *self.args(0))
             self.assertEqual((code, ran.call_count), (exits.OK, 1))
-            with mock.patch.object(vipcli.vipbridge, "control",
-                                   return_value=exits.OK) as ran:
+            with mock.patch("keel.mesh.vipbridge.control",
+                           return_value=exits.OK) as ran:
                 code, _, _ = self.run_cli("vip", "control", "/x")
             self.assertEqual((code, ran.call_args[0][0]), (exits.OK, "/x"))
 

@@ -13,12 +13,8 @@ import sys
 import threading
 from datetime import datetime, timezone
 
-from keel import exits, system
-from keel.commands import error
-from keel.inspect import ROOT_DEFAULT
-from keel.mesh import vipbridge, vipetcd, vippromote, vipunit
-from keel.mesh.node import Node
-from keel.mesh.vipnode import Here
+from keel import exits
+from keel.constants import ROOT_DEFAULT
 
 
 def add(subparsers, options) -> None:
@@ -46,7 +42,7 @@ def add(subparsers, options) -> None:
         " newer claim",
     )
     options.root(promote_parser, "promote the VIP of")
-    promote_parser.set_defaults(handler=vip_promote)
+    promote_parser.set_defaults(handler="keel.mesh.vipcli.vip_promote")
     pair_parser = actions.add_parser(
         "pair",
         help="record this node's appliance.vip as the pair's with the peer"
@@ -57,7 +53,7 @@ def add(subparsers, options) -> None:
     pair_parser.add_argument("address", metavar="ADDRESS",
                              help="the other node's overlay address")
     options.root(pair_parser, "pair the VIP of")
-    pair_parser.set_defaults(handler=vip_pair)
+    pair_parser.set_defaults(handler="keel.mesh.vipcli.vip_pair")
     unpair_parser = actions.add_parser(
         "unpair",
         help="release this pair's reservation of VIP in etcd, once no"
@@ -67,7 +63,7 @@ def add(subparsers, options) -> None:
     unpair_parser.add_argument("vip", metavar="VIP",
                                help="the VIP the pair no longer uses")
     options.root(unpair_parser, "release the VIP of")
-    unpair_parser.set_defaults(handler=vip_unpair)
+    unpair_parser.set_defaults(handler="keel.mesh.vipcli.vip_unpair")
     check_parser = actions.add_parser(
         "check",
         help="ask every peer its epoch, take a newer claim, drop the VIP"
@@ -76,7 +72,7 @@ def add(subparsers, options) -> None:
     )
     options.common(check_parser)
     options.root(check_parser, "check the VIPs of")
-    check_parser.set_defaults(handler=vip_check)
+    check_parser.set_defaults(handler="keel.mesh.vipcli.vip_check")
     tend_parser = actions.add_parser(
         "tend",
         help="the VIP's root helper with etcd, which starts the"
@@ -93,7 +89,7 @@ def add(subparsers, options) -> None:
         " the unit runs once the controller stopped",
     )
     options.root(tend_parser, "tend the VIPs of")
-    tend_parser.set_defaults(handler=vip_tend)
+    tend_parser.set_defaults(handler="keel.mesh.vipcli.vip_tend")
     control_parser = actions.add_parser(
         "control",
         help="the unprivileged controller keel vip tend starts as the unit"
@@ -101,7 +97,7 @@ def add(subparsers, options) -> None:
     )
     control_parser.add_argument("socket", metavar="SOCKET",
                                 help="the root helper's unix socket")
-    control_parser.set_defaults(handler=vip_control)
+    control_parser.set_defaults(handler="keel.mesh.vipcli.vip_control")
     status_parser = actions.add_parser(
         "status",
         help="each VIP: the role, the epoch and holder, whether this node"
@@ -109,7 +105,7 @@ def add(subparsers, options) -> None:
     )
     options.common(status_parser)
     options.root(status_parser, "read the VIPs of")
-    status_parser.set_defaults(handler=vip_status)
+    status_parser.set_defaults(handler="keel.mesh.vipcli.vip_status")
 
 
 def utcnow() -> datetime:
@@ -124,11 +120,18 @@ def err(line: str) -> None:
     print(line, file=sys.stderr, flush=True)
 
 
-def here_of(args) -> Here:
+def error(message: str) -> None:
+    print(f"Error: {message}", file=sys.stderr)
+
+
+def here_of(args):
+    from keel.mesh.node import Node
+    from keel.mesh.vipnode import Here
     return Here(Node(os.path.abspath(args.root), args.spec), utcnow, err)
 
 
 def as_root(args, verb: str) -> int:
+    from keel import system
     refusal = system.needs_root(os.path.abspath(args.root), verb)
     if refusal:
         error(refusal)
@@ -137,6 +140,7 @@ def as_root(args, verb: str) -> int:
 
 
 def vip_promote(args) -> int:
+    from keel.mesh import vippromote
     code = as_root(args, "keel vip promote")
     if code != exits.OK:
         return code
@@ -144,6 +148,7 @@ def vip_promote(args) -> int:
 
 
 def vip_pair(args) -> int:
+    from keel.mesh import vippromote
     code = as_root(args, "keel vip pair")
     if code != exits.OK:
         return code
@@ -151,6 +156,7 @@ def vip_pair(args) -> int:
 
 
 def vip_unpair(args) -> int:
+    from keel.mesh import vippromote
     code = as_root(args, "keel vip unpair")
     if code != exits.OK:
         return code
@@ -158,6 +164,7 @@ def vip_unpair(args) -> int:
 
 
 def vip_check(args) -> int:
+    from keel.mesh import vippromote
     code = as_root(args, "keel vip check")
     if code != exits.OK:
         return code
@@ -165,6 +172,7 @@ def vip_check(args) -> int:
 
 
 def vip_tend(args) -> int:
+    from keel.mesh import vipbridge, vipetcd, vipunit
     code = as_root(args, "keel vip tend")
     if code != exits.OK:
         return code
@@ -192,10 +200,12 @@ def vip_tend(args) -> int:
 
 def vip_control(args) -> int:
     """What keel-vip-control runs: the unprivileged controller"""
+    from keel.mesh import vipbridge
     return vipbridge.control(args.socket, err)
 
 
 def vip_status(args) -> int:
+    from keel.mesh import vippromote
     for line in vippromote.lines(here_of(args),
                                  os.path.abspath(args.root) == ROOT_DEFAULT):
         print(line)

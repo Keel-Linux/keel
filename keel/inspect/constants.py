@@ -1,15 +1,12 @@
 # Copyright (c) 2026 KeelLinux maintainers
 """Paths inspect reads, relative to the root it is given, and its defaults"""
 
-import os
+import os  # noqa: F401 (kept for the constants below that use os.path)
 
-# The live system is /. KEEL_LIVE_ROOT names a tree that stands for it:
-# the multi-node tests run several nodes in one container, each on a
-# scratch root in a network namespace of its own, and keel there asks
-# the servers, runs systemctl and writes under that root as it does on
-# a machine (tests/mariadb_netns.py). Never set on a machine.
-ROOT_DEFAULT = os.path.abspath(os.environ.get("KEEL_LIVE_ROOT") or "/")
-SECRETS_DIR_DEFAULT = "/etc/keel/secrets"
+# ROOT_DEFAULT and SECRETS_DIR_DEFAULT were defined here before decision
+# 0070 moved them to keel.constants so the CLI parser does not load this
+# package.  The re-export keeps every existing import working.
+from keel.constants import ROOT_DEFAULT, SECRETS_DIR_DEFAULT  # noqa: F401
 
 HOSTNAME = "etc/hostname"
 HOSTS = "etc/hosts"

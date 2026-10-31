@@ -33,7 +33,7 @@ import re
 from dataclasses import dataclass
 
 DEFAULT_INTERFACE = "wg0"
-DEFAULT_PORT = 51820
+from keel.constants import WIREGUARD_PORT as DEFAULT_PORT  # noqa: F401
 CONF_DIR = "etc/wireguard"
 # the link `systemctl enable wg-quick@<iface>` makes, which apply makes
 # once a change of the overlay is confirmed (keel.system.overlay)
