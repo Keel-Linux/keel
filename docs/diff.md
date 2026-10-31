@@ -317,10 +317,12 @@ the role line is `not compared` with the reason: the VIP makes this node
 the primary or the replica, the server is what it is, and the declared
 role is the installation's. `database.server.read_only` is then compared
 against the VIP's role, not the server's. `database.server.semi_sync` is
-compared on the primary: `on` is the same, `off` is drift with the note
-that the primary commits without the replica's acknowledgement (the
-fallback after 10 s, decision 0031), and on the replica it is not
-compared. `database.server.diverged` is drift on an old primary that
+compared on the primary: `on` with at least one replica acknowledging is
+the same, `on` with no replica connected is drift (the setting is on but
+every write goes through without waiting, keel#107), `off` is drift with
+the note that the primary fell back to asynchronous replication (decision
+0031), and on the replica it is not compared.
+`database.server.diverged` is drift on an old primary that
 came back holding transactions the new primary lacks, naming them
 ([docs/replication.md](replication.md)).
 
