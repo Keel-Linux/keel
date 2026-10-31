@@ -295,8 +295,13 @@ def semi_sync(declared: dict, inspection: Inspection) -> list[FieldDiff]:
                           " wait for the replica; this node is the"
                           f" {inspection.role or 'node of a pair without a'
                               ' claim yet'}")]
-    if found == "on" and _semi_sync_clients(finding.value) >= 1:
+    clients = _semi_sync_clients(finding.value)
+    if found == "on" and clients is not None and clients >= 1:
         return [FieldDiff(SEMI_SYNC_FIELD, SAME, "on", finding.value)]
+    if found == "on" and clients is None:
+        return [FieldDiff(SEMI_SYNC_FIELD, UNKNOWN, "on", finding.value,
+                          "the status names no"
+                          " Rpl_semi_sync_master_clients")]
     if found == "on":
         # setting on but no replica connected (keel#107)
         return [FieldDiff(SEMI_SYNC_FIELD, DRIFT, "on", finding.value,
@@ -305,21 +310,18 @@ def semi_sync(declared: dict, inspection: Inspection) -> list[FieldDiff]:
                       note=SEMI_SYNC_NOTE)]
 
 
-def _semi_sync_clients(shown: str) -> int:
+def _semi_sync_clients(shown: str) -> int | None:
     """The number of replicas acknowledging, from the shown value
 
-    The format is 'on (N replica(s) acknowledging, ...)'. A count the
-    probe could not read appears as '?' and returns -1 so the caller
-    never treats it as healthy.
+    The format is 'on (N replica(s) acknowledging, ...)'. Returns None
+    when the count could not be read ('?' or absent), so the caller
+    can distinguish zero from unknown.
     """
-    start = shown.find("(")
-    if start < 0:
-        return -1
-    token = shown[start + 1:].lstrip().split(" ", 1)[0]
+    token = shown[shown.find("(") + 1:].lstrip().split(" ", 1)[0]
     try:
         return int(token)
     except ValueError:
-        return -1
+        return None
 
 
 def diverged(declared: dict, inspection: Inspection) -> list[FieldDiff]:
