@@ -205,14 +205,17 @@ class TestCliEdges(Pair):
             "vip", "tend", "--spec", self.all[0].node.path, "--root",
             self.all[0].root])
         handlers = {}
+        def fake_serve(here, stop):
+            handlers[15](15, None)
+            self.assertTrue(stop.is_set())
+            return 0
         with mock.patch("signal.signal",
                         side_effect=lambda sig, fn: handlers.update(
                             {sig: fn})), \
                 mock.patch.object(vipcli.vipbridge, "serve",
-                                  side_effect=lambda here, stop:
-                                  handlers[15](15, None)), \
-                self.assertRaises(SystemExit):
-            vipcli.vip_tend(args)
+                                  side_effect=fake_serve):
+            result = vipcli.vip_tend(args)
+        self.assertEqual(result, 0)
         self.assertTrue(vipcli.utcnow().tzinfo)
 
     def test_a_damaged_state_file_is_skipped_by_held_all(self):

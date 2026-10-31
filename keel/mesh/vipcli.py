@@ -184,8 +184,6 @@ def vip_tend(args) -> int:
 
     def stopped(signum, frame):
         stop.set()
-        # out of the bridge's read, through serve's cleanup
-        raise SystemExit(0)
     signal.signal(signal.SIGTERM, stopped)
     return vipbridge.serve(here, stop)
 

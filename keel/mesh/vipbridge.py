@@ -322,13 +322,26 @@ def accepted(server: socket.socket, started,
         conn.close()
 
 
+# how long the drain waits for the controller's next carry: a renewal
+# period, a call's timeout, and a second of slack
+DRAIN = vipetcd.RENEW + vipetcd.CALL_TIMEOUT + 1.0
+
+
 def serve(here: Here, stop: threading.Event,
           start: Callable[[str], object] | None = None,
           path: str | None = None) -> int:
     """`keel vip tend`: the root helper, until `stop` or the controller
     is gone; every VIP this node carries is dropped when it ends. It
     binds a fresh abstract name before it starts the controller and
-    hands the name to it, so no process can sit on the name first"""
+    hands the name to it, so no process can sit on the name first.
+
+    On `stop` (a SIGTERM for a restart), the helper lets the controller
+    carry the VIP one more time before it stops: the controller's next
+    renewal gives the address a fresh lifetime, which the kernel keeps
+    across the restart. The root half's RestrictAddressFamilies=AF_UNIX
+    AF_NETLINK prevents `handed_over` from reaching etcd itself, so the
+    controller, which has AF_INET/AF_INET6, must be the one to renew
+    (keel#190)."""
     try:
         texts = credentials(here.root)
     except OSError as e:
@@ -355,6 +368,14 @@ def serve(here: Here, stop: threading.Event,
                     if now != seen and refreshed(here.root, fds, here.err):
                         seen = now
                     send(conn, answered(ops, data))
+                # on stop (a restart), let the controller carry one
+                # more time: its renewal refreshes the address's
+                # lifetime, which handed_over cannot do from the
+                # restricted service (keel#190); only when this node
+                # carries a bounded VIP, so a replica restart or a
+                # stop does not wait
+                if stop.is_set() and _holds_bounded(ops):
+                    _drain_carry(conn, ops, here.err)
     except (BridgeError, OSError) as e:
         here.err(f"vip: the controller stopped: {e}")
         code = exits.APPLY_FAILED
@@ -367,6 +388,47 @@ def serve(here: Here, stop: threading.Event,
         # with none is dropped here, whatever comes next
         vipetcd.stopped(here, restarting=True)
     return code
+
+
+def _holds_bounded(ops: Ops) -> bool:
+    """Whether this node carries a VIP with a lifetime the kernel ends;
+    only then is the drain worth waiting for"""
+    try:
+        facts = ops.facts()
+        return facts.vip is not None and ops.bounded(facts.vip) is True
+    except (VipError, OSError):
+        return False
+
+
+def _drain_carry(conn, ops: Ops, err: Callable[[str], None],
+                 timeout: float = DRAIN) -> bool:
+    """Answer the controller's messages until it carries the VIP or the
+    deadline passes: the controller's next renewal gives the address a
+    fresh lifetime, which the kernel keeps across the restart. The root
+    half's RestrictAddressFamilies prevents it from reaching etcd itself.
+    Returns whether a carry arrived."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        left = max(0.1, deadline - time.monotonic())
+        conn.settimeout(left)
+        try:
+            data = line(conn)
+        except (TimeoutError, OSError, BridgeError):
+            break
+        if data is None:
+            break
+        reply = answered(ops, data)
+        send(conn, reply)
+        try:
+            op = json.loads(data.decode()).get("op")
+        except (ValueError, AttributeError):
+            continue
+        if op == "carry":
+            err("vip: the controller carried the VIP before the restart")
+            return True
+    err("vip: no carry arrived; the address keeps the lifetime of the"
+        " last renewal")
+    return False
 
 
 def endpoints(here: Here) -> list[str]:
