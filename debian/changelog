@@ -1,3 +1,19 @@
+keel (0.23.69) unstable; urgency=medium
+
+  * keel spec apply --system now masks mariadb.socket and
+    mariadb-extra.socket when either is enabled or active (keel#110).
+    Socket activation overrides bind-address: the server answers on the
+    socket's addresses, not the ones declared in database.server.listen,
+    so the listen field stays in drift.  The image fix (keel-mariadb#29)
+    masks the sockets; apply converges older machines to the same state.
+    When the drop-in is already correct and only the socket needs masking,
+    apply masks it and restarts the server in one step rather than
+    reporting the configuration as unchanged.  keel diff names the active
+    socket unit when database.server.listen drifts and a socket is the
+    cause.  Paired nodes (appliance.vip) are handled the same way.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Fri, 31 Oct 2026 00:00:00 +0000
+
 keel (0.23.68) unstable; urgency=medium
 
   * keel pull now copies the layer's package list into the cache, as

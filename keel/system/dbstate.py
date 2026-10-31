@@ -26,6 +26,7 @@ from keel.inspect.dbengines import (
 )
 from keel.inspect.dbreading import Reading, field_lines
 from keel.inspect.tree import File, Tree
+from keel.inspect.units import UnitState, read_units
 from keel.spec.constants import DEFAULT_PORTS
 from keel.spec.errors import SpecError
 from keel.spec.origins import canonical
@@ -40,6 +41,7 @@ from keel.system.dbmariadb import (
     ROLE_DROPIN,
     SCHEMAS_QUESTION,
     service,
+    socket_units,
     unquotable,
 )
 from keel.system.dbpair import PairState
@@ -116,6 +118,10 @@ class DatabaseState:
     tls_ready: bool = False
     # the mesh root's name, for the authorization's REQUIRE ... ISSUER
     tls_issuer: str = ""
+    # mariadb.socket and mariadb-extra.socket (keel#110): when one of them
+    # is enabled or active, bind-address has no effect and the server
+    # answers on [::]:3306.  apply masks them.
+    socket_units: tuple[UnitState, ...] = ()
 
     @property
     def installed(self) -> bool:
@@ -245,6 +251,7 @@ def observe_database(
             )
         enabled = dbready.enabled(
             dbpostgres.boot_unit() if name == "postgresql" else probe[0])
+    observed_sockets = _observe_sockets(name, tree, live) if binary else ()
     answers = {} if binary is None else {
         key: run_command(tree, argv)
         for key, argv in engine.questions.items()
@@ -285,6 +292,7 @@ def observe_database(
         tls_ready=dbtls.present(root, name)
         if pair is not None else False,
         tls_issuer=dbtls.issuer_name(root, name) if pair is not None else "",
+        socket_units=observed_sockets,
     )
 
 
@@ -462,3 +470,18 @@ def credential(server: dict, root: str = "", pair: PairState | None = None,
     if problem:
         return Credential(problem=f"{reference.get('file')}: {problem}")
     return Credential(value=value)
+
+
+def _observe_sockets(
+    name: str, tree: Tree, live: bool,
+) -> tuple[UnitState, ...]:
+    """The socket units that override bind-address (keel#110)
+
+    Read with keel.inspect.units.read_units, the same question the
+    appliance plan asks of an overlay's units.  Only MariaDB: PostgreSQL
+    does not use socket activation for its TCP port.
+    """
+    if name != "mariadb":
+        return ()
+    units = read_units(tree, socket_units(), live)
+    return tuple(units.values())
