@@ -604,14 +604,19 @@ def quiesce(root: str, runner=subprocess.run) -> str | None:
             pass
     except OSError as e:
         return f"standby.signal could not be written: {e.strerror or e}"
-    # restart with the remaining budget; killing the client does not
-    # cancel the systemd job, so the server restarts anyway
+    # restart with the remaining budget; killing the systemctl client
+    # does not cancel the systemd job, so the server restarts anyway
+    remaining = QUIESCE_TIMEOUT - half
     try:
         done = runner(["systemctl", "restart", dbpostgres.service(root)],
                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                      check=False, timeout=QUIESCE_TIMEOUT - half)
+                      check=False, timeout=remaining)
     except subprocess.TimeoutExpired:
-        return None  # the systemd job runs; the server restarts
+        # the systemd job is still running; the server will restart,
+        # but the walsender may not have sent the shutdown checkpoint
+        # yet, so the caller should not claim the server is a standby
+        return (f"the restart client timed out after {remaining} s"
+                " (the systemd job runs; the server restarts anyway)")
     except OSError as e:
         return f"cannot run systemctl: {e.strerror or e}"
     if done.returncode != 0:

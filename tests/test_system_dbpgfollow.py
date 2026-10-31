@@ -1075,12 +1075,14 @@ class TestQuiesce(unittest.TestCase):
         self.assertFalse(any(c[:2] == ["systemctl", "restart"]
                              for c in calls), calls)
 
-    def test_restart_timeout_is_none(self):
+    def test_restart_timeout_reports_the_job_runs(self):
         """Killing the systemctl client does not cancel the systemd job,
-        so the restart runs anyway: the quiesce reports no problem"""
+        so the restart runs anyway, but the caller should not claim
+        the server is a standby"""
         runner, _ = self._runner(restart_timeout=True)
         problem = dbpgfollow.quiesce(self.root, runner)
-        self.assertIsNone(problem)
+        self.assertIsNotNone(problem)
+        self.assertIn("the systemd job runs", problem)
 
     def test_restart_failure_is_reported(self):
         runner, _ = self._runner(restart_rc=1)
