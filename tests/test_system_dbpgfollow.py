@@ -12,7 +12,9 @@ tests/postgres_netns.py.
 
 import json
 import os
+import shutil
 import subprocess
+import tempfile
 import unittest
 from unittest import mock
 
@@ -991,6 +993,121 @@ class TestTheFileFlip(FollowTestCase):
             found = self.follow(1, Server(holder_down=True))
         self.assertIsNotNone(found.problem)
         self.assertIsNone(flipped.call_args.args[3])
+
+
+class TestQuiesce(unittest.TestCase):
+    """The PostgreSQL quiesce for a planned promote: CHECKPOINT, then
+    standby.signal and a restart, so the new primary replays the
+    shutdown checkpoint and the old primary does not diverge"""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root)
+        for relative in (DATADIR, "etc/postgresql/17/main/conf.d"):
+            os.makedirs(os.path.join(self.root, relative), exist_ok=True)
+
+    def _runner(self, checkpoint_rc=0, restart_rc=0,
+                checkpoint_timeout=False, restart_timeout=False):
+        """A runner that records what it was asked to do"""
+        calls = []
+
+        def run(argv, **kwargs):
+            argv = list(argv)
+            calls.append(argv)
+            timeout = kwargs.get("timeout")
+            if any("psql" in a for a in argv) and "CHECKPOINT" in str(argv):
+                if checkpoint_timeout:
+                    raise subprocess.TimeoutExpired(argv, timeout)
+                return subprocess.CompletedProcess(
+                    argv, checkpoint_rc, b"", b"" if checkpoint_rc == 0
+                    else b"ERROR: permission denied")
+            if argv[:2] == ["systemctl", "restart"]:
+                if restart_timeout:
+                    raise subprocess.TimeoutExpired(argv, timeout)
+                return subprocess.CompletedProcess(
+                    argv, restart_rc, b"", b"" if restart_rc == 0
+                    else b"Job failed")
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+        return run, calls
+
+    def test_quiesce_fences_the_cluster(self):
+        runner, calls = self._runner()
+        problem = dbpgfollow.quiesce(self.root, runner)
+        self.assertIsNone(problem)
+        # CHECKPOINT must run first
+        self.assertTrue(any("CHECKPOINT" in str(c) for c in calls),
+                        calls)
+        # then systemctl restart
+        self.assertTrue(any(c[:2] == ["systemctl", "restart"]
+                            for c in calls), calls)
+        # standby.signal must exist
+        signal = os.path.join(self.root, STANDBY_SIGNAL)
+        self.assertTrue(os.path.exists(signal))
+
+    def test_quiesce_returns_none_without_a_cluster(self):
+        empty = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, empty)
+
+        def must_not_be_called(argv, **kwargs):
+            raise AssertionError(f"runner called with {argv}")
+        problem = dbpgfollow.quiesce(empty, must_not_be_called)
+        self.assertIsNotNone(problem)
+        self.assertIn("no PostgreSQL cluster", problem)
+
+    def test_checkpoint_timeout_stops_early(self):
+        runner, calls = self._runner(checkpoint_timeout=True)
+        problem = dbpgfollow.quiesce(self.root, runner)
+        self.assertIsNotNone(problem)
+        self.assertIn("CHECKPOINT did not finish", problem)
+        # no restart attempted
+        self.assertFalse(any(c[:2] == ["systemctl", "restart"]
+                             for c in calls), calls)
+        # standby.signal must NOT exist
+        signal = os.path.join(self.root, STANDBY_SIGNAL)
+        self.assertFalse(os.path.exists(signal))
+
+    def test_checkpoint_failure_stops_early(self):
+        runner, calls = self._runner(checkpoint_rc=1)
+        problem = dbpgfollow.quiesce(self.root, runner)
+        self.assertIsNotNone(problem)
+        self.assertIn("CHECKPOINT failed", problem)
+        # no restart attempted
+        self.assertFalse(any(c[:2] == ["systemctl", "restart"]
+                             for c in calls), calls)
+
+    def test_restart_timeout_is_none(self):
+        """Killing the systemctl client does not cancel the systemd job,
+        so the restart runs anyway: the quiesce reports no problem"""
+        runner, _ = self._runner(restart_timeout=True)
+        problem = dbpgfollow.quiesce(self.root, runner)
+        self.assertIsNone(problem)
+
+    def test_restart_failure_is_reported(self):
+        runner, _ = self._runner(restart_rc=1)
+        problem = dbpgfollow.quiesce(self.root, runner)
+        self.assertIsNotNone(problem)
+        self.assertIn("restart failed", problem)
+
+    def test_checkpoint_runs_before_standby_signal(self):
+        """CHECKPOINT must finish before standby.signal is written:
+        a slow CHECKPOINT leaves the server untouched"""
+        order = []
+
+        def run(argv, **kwargs):
+            argv = list(argv)
+            if "CHECKPOINT" in str(argv):
+                order.append("checkpoint")
+                signal = os.path.join(self.root, STANDBY_SIGNAL)
+                self.assertFalse(os.path.exists(signal),
+                                 "standby.signal before CHECKPOINT")
+                return subprocess.CompletedProcess(argv, 0, b"", b"")
+            if argv[:2] == ["systemctl", "restart"]:
+                order.append("restart")
+                return subprocess.CompletedProcess(argv, 0, b"", b"")
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+        problem = dbpgfollow.quiesce(self.root, run)
+        self.assertIsNone(problem)
+        self.assertEqual(order, ["checkpoint", "restart"])
 
 
 if __name__ == "__main__":
