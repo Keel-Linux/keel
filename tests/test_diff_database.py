@@ -473,3 +473,70 @@ class TestPairListen(unittest.TestCase):
             observed=[self.OVERLAY, "::1", self.VIP])
         result = pair_listen([field], declared)
         self.assertEqual(result[0].status, SAME)
+
+
+# --- keel#110: socket annotation on listen drift -------------------------
+
+class TestListenSocketNote(unittest.TestCase):
+    """When database.server.listen drifts and a socket is active, the
+    FieldDiff carries a note naming the socket and the remedy"""
+
+    def _note(self, fields, declared, units_dict):
+        from unittest.mock import patch
+        from keel.diff.observe import _listen_socket_note
+        with patch("keel.diff.observe.read_units", return_value=units_dict):
+            return _listen_socket_note(fields, declared, "/not-live")
+
+    @staticmethod
+    def _unit(name, enabled="enabled", active="active"):
+        from keel.inspect.units import UnitState
+        return UnitState(unit=name, enabled=enabled, active=active)
+
+    @staticmethod
+    def _drift_field(field="database.server.listen", note=""):
+        from keel.diff.compare import LISTEN_FIELD
+        from keel.diff.report import DRIFT, FieldDiff
+        return FieldDiff(LISTEN_FIELD, DRIFT,
+                         declared=["::1"], observed=["::"],
+                         note=note)
+
+    def test_active_socket_annotates_drift(self):
+        declared = {"database": {"server": {"engine": "mariadb"}}}
+        drift = self._drift_field()
+        unit = self._unit("mariadb.socket")
+        result = self._note((drift,), declared, {"mariadb.socket": unit})
+        self.assertIn("mariadb.socket", result[0].note)
+        self.assertIn("socket activation", result[0].note)
+        self.assertIn("keel spec apply --system", result[0].note)
+
+    def test_masked_socket_does_not_annotate(self):
+        declared = {"database": {"server": {"engine": "mariadb"}}}
+        drift = self._drift_field()
+        unit = self._unit("mariadb.socket", enabled="masked",
+                          active="inactive")
+        result = self._note((drift,), declared, {"mariadb.socket": unit})
+        self.assertEqual(result[0].note, "")
+
+    def test_no_drift_leaves_fields_unchanged(self):
+        from keel.diff.compare import LISTEN_FIELD
+        from keel.diff.report import SAME, FieldDiff
+        declared = {"database": {"server": {"engine": "mariadb"}}}
+        same = FieldDiff(LISTEN_FIELD, SAME,
+                         declared=["::1"], observed=["::1"])
+        result = self._note((same,), declared, {})
+        self.assertEqual(result[0].status, SAME)
+        self.assertEqual(result[0].note, "")
+
+    def test_non_mariadb_engine_skips_annotation(self):
+        declared = {"database": {"server": {"engine": "postgresql"}}}
+        drift = self._drift_field()
+        result = self._note((drift,), declared, {})
+        self.assertEqual(result[0].note, "")
+
+    def test_existing_note_is_preserved(self):
+        declared = {"database": {"server": {"engine": "mariadb"}}}
+        drift = self._drift_field(note="previous note")
+        unit = self._unit("mariadb.socket")
+        result = self._note((drift,), declared, {"mariadb.socket": unit})
+        self.assertIn("previous note", result[0].note)
+        self.assertIn("socket activation", result[0].note)

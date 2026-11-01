@@ -50,6 +50,12 @@ SERVICE_DEFAULT = "mariadb"
 # the unit's name: mariadb, or what KEEL_MARIADB_SERVICE says (the tests
 # run a server per node in one container, each its own unit)
 SERVICE_ENV = "KEEL_MARIADB_SERVICE"
+# Socket units that override bind-address (keel#110): when active, the
+# socket listens on [::]:3306 and hands the fd to the service via
+# LISTEN_FDS, so bind-address has no effect and database.server.listen
+# stays in drift.  The image fix (keel-mariadb#29) masks them; apply
+# converges older machines to the same state.
+SOCKET_SUFFIXES = (".socket", "-extra.socket")
 # The account both ends of a pair name. It is a constant and not a field
 # of the description on purpose: the primary grants to it and the replica
 # connects as it, so a field each operator could set differently on their
@@ -245,6 +251,17 @@ def dropin_text(
 def service() -> str:
     """The server's unit"""
     return os.environ.get(SERVICE_ENV) or SERVICE_DEFAULT
+
+
+def socket_units() -> tuple[str, ...]:
+    """The socket units that override bind-address (keel#110)
+
+    Derived from `service()` so the tests, which run one server per node
+    under a unit of its own, get their own socket names and never mask the
+    container's real ones.
+    """
+    base = service().removesuffix(".service")
+    return tuple(f"{base}{suffix}" for suffix in SOCKET_SUFFIXES)
 
 
 def pair_dropin_text(

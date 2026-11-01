@@ -187,6 +187,27 @@ NO_SERVER = (
     "the description declares no database.server, so there is no role to"
     " promote and nothing says what this machine should become"
 )
+SOCKET_OVERRIDE = (
+    "mask {unit}: socket activation overrides bind-address, so"
+    " database.server.listen stays in drift while it is active (keel#110)"
+)
+
+
+def mask_socket_actions(socket_units) -> list[Action]:
+    """Stop and mask every socket unit that is enabled or active (keel#110)
+
+    A socket that is already masked needs no action.  `mask --now` stops
+    the socket and prevents systemd from starting it again, so the
+    server's own bind-address takes effect at the next restart.
+    """
+    actions: list[Action] = []
+    for unit in socket_units:
+        if unit.is_enabled or unit.is_running:
+            actions.append(Run(
+                ("systemctl", "mask", "--now", unit.unit),
+                SOCKET_OVERRIDE.format(unit=unit.unit),
+            ))
+    return actions
 
 
 def plan_database(
@@ -432,20 +453,25 @@ def _configuration(
         notes.append(Note(NAME_ORIGIN.format(names=", ".join(names))))
     if state.enabled == "disabled":
         notes.append(Run(("systemctl", "enable", mariadb.service()), ENABLE))
-    if state.dropin.readable and state.dropin.text == text:
+    mask = mask_socket_actions(state.socket_units)
+    dropin_kept = state.dropin.readable and state.dropin.text == text
+    if dropin_kept and not mask:
         return Step(FIELD, tuple(notes) + (
             Note(f"unchanged ({state.dropin.path}, server id {identity})"),
         ) + _read_only_now(state, role))
-    return Step(FIELD, tuple(notes) + (
-        WriteFile(
+    actions: list[Action] = list(notes) + list(mask)
+    if not dropin_kept:
+        actions.append(WriteFile(
             mariadb.DROPIN, text, DROPIN_MODE, None,
             f"write {state.dropin.path}: {role}, server id {identity}",
-        ),
-        Run(
-            ("systemctl", "restart", mariadb.service()),
-            "restart the server, which is the only way these take effect",
-        ),
+        ))
+    actions.append(Run(
+        ("systemctl", "restart", mariadb.service()),
+        "restart the server"
+        + (", after masking the socket that overrode bind-address" if mask
+           else ", which is the only way these take effect"),
     ))
+    return Step(FIELD, tuple(actions))
 
 
 def _read_only_now(state: DatabaseState, role: str) -> tuple[Action, ...]:

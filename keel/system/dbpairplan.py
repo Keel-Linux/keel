@@ -23,6 +23,7 @@ the authorizations; then the role.
 
 from keel.system import dbmariadb as mariadb
 from keel.system import dbpair, dbtls
+from keel.system.database import mask_socket_actions
 from keel.system.actions import (
     Action,
     EnsureDatabaseTls,
@@ -125,18 +126,25 @@ def _configuration(server: dict, state: DatabaseState,
     if state.enabled == "disabled":
         actions.append(Run(("systemctl", "enable", mariadb.service()),
                            "enable the server, so it starts at boot"))
-    if state.dropin.readable and state.dropin.text == text:
+    mask = mask_socket_actions(state.socket_units)
+    dropin_kept = state.dropin.readable and state.dropin.text == text
+    if dropin_kept and not mask:
         actions.append(Note(f"unchanged ({state.dropin.path}, server id"
                             f" {identity}, a paired node)"))
         return Step(FIELD, tuple(actions))
-    actions += [
-        WriteFile(mariadb.DROPIN, text, DROPIN_MODE, None,
-                  f"write {state.dropin.path}: a paired node, server id"
-                  f" {identity}, binary log, GTID strict, semi-synchronous"
-                  f" replication, TLS, the VIP {pair.vip} bound"),
-        Run(("systemctl", "restart", mariadb.service()),
-            "restart the server, which is the only way these take effect"),
-    ]
+    actions += mask
+    if not dropin_kept:
+        actions.append(WriteFile(
+            mariadb.DROPIN, text, DROPIN_MODE, None,
+            f"write {state.dropin.path}: a paired node, server id"
+            f" {identity}, binary log, GTID strict, semi-synchronous"
+            f" replication, TLS, the VIP {pair.vip} bound"))
+    actions.append(Run(
+        ("systemctl", "restart", mariadb.service()),
+        "restart the server"
+        + (", after masking the socket that overrode bind-address" if mask
+           else ", which is the only way these take effect"),
+    ))
     return Step(FIELD, tuple(actions))
 
 

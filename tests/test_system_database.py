@@ -20,6 +20,7 @@ from test_inspect_database import (
 
 from keel.inspect.dbreading import Value
 from keel.inspect.tree import File
+from keel.inspect.units import UnitState
 from keel.system import dbmariadb as mariadb
 from keel.system import dbreadonly
 from keel.system.actions import (
@@ -1178,3 +1179,121 @@ class TestPromotion(unittest.TestCase):
             "not the live system",
             only(plan["database.server.role"], Note)[0].summary,
         )
+
+
+# --- keel#110: socket activation overrides bind-address ---
+
+
+def _socket(name: str, enabled: str = "enabled",
+            active: str | None = "active") -> UnitState:
+    return UnitState(unit=name, enabled=enabled, active=active)
+
+
+FIELD = "database.server"
+SOCKET = _socket("mariadb.socket")
+EXTRA_SOCKET = _socket("mariadb-extra.socket")
+MASKED_SOCKET = _socket("mariadb.socket", enabled="masked", active="inactive")
+MASKED_EXTRA = _socket(
+    "mariadb-extra.socket", enabled="masked", active="inactive",
+)
+
+
+class TestSocketMasking(unittest.TestCase):
+    """mask --now on active sockets so bind-address takes effect (keel#110)"""
+
+    def plan(self, observed, doc=None, **kw):
+        doc = doc or declaring(listen="[::1]")
+        return steps(doc, observed, **kw)
+
+    def with_sockets(self, *units, **kw):
+        return replace(state(**kw), socket_units=units)
+
+    # -- sockets active, drop-in unchanged ---------------------------------
+
+    def test_active_socket_triggers_mask_and_restart(self):
+        """Even when the drop-in is already correct, an active socket
+        must be masked and the server restarted"""
+        dropin = mariadb.dropin_text(
+            mariadb.server_id(MACHINE_ID.strip(), "[::1]", []),
+            "[::1]", "standalone", False,
+        )
+        observed = self.with_sockets(SOCKET, dropin=dropin)
+        plan = self.plan(observed)
+        runs = only(plan[FIELD], Run)
+        mask_cmds = [r for r in runs if "mask" in r.argv]
+        restart_cmds = [r for r in runs if "restart" in r.argv]
+        self.assertEqual(len(mask_cmds), 1)
+        self.assertIn("mariadb.socket", mask_cmds[0].argv)
+        self.assertEqual(len(restart_cmds), 1)
+        # No WriteFile: the drop-in was already correct
+        self.assertEqual(only(plan[FIELD], WriteFile), [])
+
+    def test_both_sockets_active_masks_both(self):
+        dropin = mariadb.dropin_text(
+            mariadb.server_id(MACHINE_ID.strip(), "[::1]", []),
+            "[::1]", "standalone", False,
+        )
+        observed = self.with_sockets(SOCKET, EXTRA_SOCKET, dropin=dropin)
+        plan = self.plan(observed)
+        runs = only(plan[FIELD], Run)
+        mask_cmds = [r for r in runs if "mask" in r.argv]
+        self.assertEqual(len(mask_cmds), 2)
+        units = {r.argv[3] for r in mask_cmds}
+        self.assertEqual(units, {"mariadb.socket", "mariadb-extra.socket"})
+
+    # -- sockets active, drop-in also changes ------------------------------
+
+    def test_socket_mask_before_restart_when_dropin_changes(self):
+        """When both drop-in and socket need attention, mask comes before
+        the restart that picks up the new drop-in"""
+        observed = self.with_sockets(SOCKET, dropin="old content")
+        plan = self.plan(observed)
+        runs = only(plan[FIELD], Run)
+        cmds = [r.argv for r in runs]
+        mask_idx = next(i for i, c in enumerate(cmds) if "mask" in c)
+        restart_idx = next(i for i, c in enumerate(cmds) if "restart" in c)
+        self.assertLess(mask_idx, restart_idx)
+
+    # -- sockets already masked --------------------------------------------
+
+    def test_already_masked_sockets_are_unchanged(self):
+        dropin = mariadb.dropin_text(
+            mariadb.server_id(MACHINE_ID.strip(), "[::1]", []),
+            "[::1]", "standalone", False,
+        )
+        observed = self.with_sockets(MASKED_SOCKET, MASKED_EXTRA,
+                                     dropin=dropin)
+        plan = self.plan(observed)
+        runs = only(plan[FIELD], Run)
+        mask_cmds = [r for r in runs if "mask" in r.argv]
+        self.assertEqual(mask_cmds, [])
+        notes = only(plan[FIELD], Note)
+        self.assertTrue(any("unchanged" in n.summary for n in notes))
+
+    # -- no sockets at all -------------------------------------------------
+
+    def test_no_sockets_is_unchanged(self):
+        dropin = mariadb.dropin_text(
+            mariadb.server_id(MACHINE_ID.strip(), "[::1]", []),
+            "[::1]", "standalone", False,
+        )
+        observed = state(dropin=dropin)
+        plan = self.plan(observed)
+        runs = only(plan[FIELD], Run)
+        mask_cmds = [r for r in runs if "mask" in r.argv]
+        self.assertEqual(mask_cmds, [])
+        notes = only(plan[FIELD], Note)
+        self.assertTrue(any("unchanged" in n.summary for n in notes))
+
+    # -- mask summary mentions keel#110 ------------------------------------
+
+    def test_mask_summary_mentions_issue(self):
+        dropin = mariadb.dropin_text(
+            mariadb.server_id(MACHINE_ID.strip(), "[::1]", []),
+            "[::1]", "standalone", False,
+        )
+        observed = self.with_sockets(SOCKET, dropin=dropin)
+        plan = self.plan(observed)
+        runs = only(plan[FIELD], Run)
+        mask_cmds = [r for r in runs if "mask" in r.argv]
+        self.assertIn("keel#110", mask_cmds[0].summary)

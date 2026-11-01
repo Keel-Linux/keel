@@ -710,5 +710,35 @@ class TestThePairPlan(unittest.TestCase):
         self.assertIn("names no Seconds_Behind_Master", reading.lag.problem)
 
 
+class TestSocketMaskingPaired(unittest.TestCase):
+    """mask --now on active sockets in the paired path (keel#110)"""
+
+    def test_active_socket_triggers_mask_and_restart_paired(self):
+        """Drop-in unchanged on a paired node: socket mask + restart,
+        no WriteFile for the drop-in"""
+        from dataclasses import replace as _replace
+        from keel.inspect.units import UnitState
+        sock = UnitState(unit="mariadb.socket", enabled="enabled",
+                         active="active")
+        # First run: get the drop-in text the plan would write
+        first = plan_database(DOC, paired_state(), False, "/s")
+        text = only(first[0], WriteFile)[1].content
+        # Second run: dropin unchanged, sysctl done, but socket active
+        base = paired_state(dropin=text, nonlocal_bind="1")
+        observed = _replace(base, socket_units=(sock,))
+        plan = plan_database(DOC, observed, False, "/s")
+        conf_step = plan[0]
+        runs = only(conf_step, Run)
+        mask_cmds = [r for r in runs if "mask" in r.argv]
+        restart_cmds = [r for r in runs if "restart" in r.argv]
+        self.assertEqual(len(mask_cmds), 1)
+        self.assertIn("mariadb.socket", mask_cmds[0].argv)
+        self.assertEqual(len(restart_cmds), 1)
+        # No WriteFile for the drop-in: it was already correct
+        dropin_writes = [w for w in only(conf_step, WriteFile)
+                         if w.path == mariadb.DROPIN]
+        self.assertEqual(dropin_writes, [])
+
+
 if __name__ == "__main__":
     unittest.main()
