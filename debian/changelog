@@ -1,3 +1,15 @@
+keel (0.23.77) unstable; urgency=medium
+
+  * An upgrade from before 0.23.65 no longer stops a container whose spec
+    says network.managed_by: file (keel#266). keel inspect before keel#238
+    wrote that value on a released template. keel#238 then made keel see the
+    container, so keel diff gave exit 14 and keel spec apply gave exit 16 on
+    a running node. keel now acts as for host on each container. keel diff
+    and keel spec apply say to change the line to host. keel does not edit
+    the spec.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Sun, 01 Nov 2026 00:00:00 +0000
+
 keel (0.23.76) unstable; urgency=medium
 
   * keel database watch alerts when a MariaDB primary has no replica and

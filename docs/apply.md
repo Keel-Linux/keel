@@ -1254,8 +1254,10 @@ write. The rules:
 
 - **A container's network is not converged.** With `managed_by: host`
   the host writes the interfaces; the step says so and `keel diff` keeps
-  comparing. Declaring `managed_by: file` inside a container is refused
-  when there is something to change.
+  comparing. A spec that says `managed_by: file` inside a container gets
+  the same treatment and a note that says to change the line to `host`:
+  `keel inspect` before keel#238 wrote `file` on a released template, and
+  an upgrade must not stop a running node. keel does not edit the spec.
 - **Only drift changes anything.** The plan compares the declared section
   with what `keel inspect` reads, exactly as `keel diff` does, so a file
   that says the same thing in other words is left alone, and a field

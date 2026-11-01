@@ -19,7 +19,7 @@ the configuration:
 
 import ipaddress
 
-from keel.diff.compare import compare_section
+from keel.diff.compare import CONTAINER_REMEDY, compare_section
 from keel.diff.report import DRIFT
 from keel.system.actions import Action, Note, Refuse, Step, SwitchNetwork
 from keel.system.actions import WriteFile, unchanged
@@ -37,6 +37,12 @@ INTERFACE_FIELDS = ("network.interfaces.", "network.managed_by")
 NAMESERVER_LIMIT = (
     "ifupdown writes nameservers only in a static stanza, two per stanza"
 )
+# keel before keel#238 did not see a released template as a container, so
+# `keel inspect` wrote `file` there. The node must keep working on an upgrade.
+CONTAINER_NOTE = (
+    "the spec says managed_by: file and this is a container: keel continues"
+    f" as for host. {CONTAINER_REMEDY}"
+)
 
 
 def plan_network(network: dict, state: NetworkState | None, live: bool,
@@ -50,9 +56,12 @@ def plan_network(network: dict, state: NetworkState | None, live: bool,
         return [Step(FIELD, (Note(
             f"not converged in this run ({skipped_by})"),))]
     if state.owner == "host":
-        return [Step(FIELD, (Note(
+        notes = [Note(
             "the host owns this container's interfaces: compared by keel"
-            " diff, not converged from inside (decision 0018)"),))]
+            " diff, not converged from inside (decision 0018)")]
+        if state.in_container and str(network.get("managed_by")) == "file":
+            notes.append(Note(CONTAINER_NOTE))
+        return [Step(FIELD, tuple(notes))]
     # the overlay is its own interface and its own step (keel.system.overlay)
     uplink = {key: value for key, value in network.items()
               if key != "overlay"}
@@ -90,8 +99,9 @@ def plan_network(network: dict, state: NetworkState | None, live: bool,
 def not_convergeable(network: dict, state: NetworkState) -> Refuse | None:
     """Drift this converge will not touch; refused, so the run says so
 
-    A container is refused even when declared `managed_by: file`: besides
-    its host owning the interfaces, lxcfs dates /proc/uptime from the
+    A container gets here only from a state that a caller made by hand:
+    observe_network makes the host the owner of each container. It stays a
+    refusal because, besides its host owning the interfaces, lxcfs dates /proc/uptime from the
     container's start while process start times count from the host's
     boot, so the confirmation could not tell an old session from a new one.
     """

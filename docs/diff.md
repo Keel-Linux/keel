@@ -97,7 +97,11 @@ noted something about that field it could not express (a `v4tunnel`
 stanza next to a `dhcp` one, a loopback resolver next to real ones). That
 is what makes the round trip hold. A field inspect could not infer at all
 is `unknown`, never `drift`, and `network.managed_by` is unknown whenever
-the interfaces are, because inspect derives one from the other.
+the interfaces are, because inspect derives one from the other. On a
+container, a declared `managed_by: file` against an observed `host` is `not
+compared`, with a reason that says to change the line to `host`: `keel
+inspect` before keel#238 wrote `file` there, and that is not drift on a node
+that upgraded.
 
 Normalisation, so that spelling is not drift: keywords (`security.alerts`,
 `security.updates_at_first_boot`, `hub.api_key`) and domain names (`hostname`, `fqdn`,

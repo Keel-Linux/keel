@@ -53,10 +53,13 @@ def observe_network(root: str, doc: dict) -> NetworkState | None:
                 links(tree)),
     )
     unknowns = not_inferred(tuple(findings))
-    # the declared owner, else what this root says, not the machine keel
-    # runs on: keel.spec.runtime.managed_by looks at the live marker
-    owner = str(network.get("managed_by")
-                or ("host" if in_container else "file"))
+    # A container's host owns its interfaces, whatever the spec says: a spec
+    # from `keel inspect` before keel#238 says `file` on a running container
+    # (keel.system.network.CONTAINER_NOTE). Else the declared owner, else
+    # what this root says, not the machine keel runs on:
+    # keel.spec.runtime.managed_by looks at the live marker.
+    owner = "host" if in_container else str(network.get("managed_by")
+                                            or "file")
     rendered = None
     current = tree.read(paths.INTERFACES).text
     if len(interfaces) == 1 and owner == "file":

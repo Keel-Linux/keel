@@ -114,6 +114,16 @@ ROLE_ONLY = {
     "database.server.replication.allowed_from": ("primary",),
 }
 ROLE_FIELD = "database.server.role"
+MANAGED_BY_FIELD = "network.managed_by"
+CONTAINER_REMEDY = (
+    "To remove this message, change network.managed_by to host in the spec"
+    " (keel#238)"
+)
+CONTAINER_OWNER_REASON = (
+    "this is a container, so its host writes its interfaces; a spec that"
+    " keel inspect wrote before keel#238 says file, and that is not drift."
+    f" {CONTAINER_REMEDY}"
+)
 ROLE_REASON = (
     "the declared role is {role}, so this field describes nothing; it is"
     " compared when the role is {roles}"
@@ -192,6 +202,8 @@ def compare(declared: dict, inspection: Inspection) -> Comparison:
                 section, declared.get(section), inspection.spec.get(section),
                 unknowns,
             )
+            if section == "network":
+                fields = owner_of_a_container(fields)
             if section == "database":
                 fields = pair_listen(fields, declared)
                 fields = pair_role(fields, declared, inspection)
@@ -204,6 +216,20 @@ def compare(declared: dict, inspection: Inspection) -> Comparison:
                           reason=NOT_COMPARED_REASONS[section])
             )
     return Comparison(inspection.root, tuple(fields))
+
+
+def owner_of_a_container(fields: list[FieldDiff]) -> list[FieldDiff]:
+    """`file` declared where inspect reads `host`: only a container reads
+    so, and only a spec from before keel#238 says so. An upgrade must not
+    make drift on a running node, so the line says what to change instead"""
+    return [
+        FieldDiff(one.field, NOT_COMPARED, one.declared, one.observed,
+                  CONTAINER_OWNER_REASON)
+        if one.field == MANAGED_BY_FIELD and one.status == DRIFT
+        and str(one.declared) == "file" and str(one.observed) == "host"
+        else one
+        for one in fields
+    ]
 
 
 def paired(declared: dict) -> bool:
