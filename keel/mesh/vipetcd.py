@@ -734,10 +734,12 @@ def stopped(here: Here, restarting: bool = False,
     dropped. The VIPs dropped and kept. Never fenced: a controller
     started again carries it once it renewed its lease.
 
-    A kept address is renewed once first (`handed_over`): on a slow
-    link, the next controller's start and first renewal took longer
-    than what the old one's last renewal had left, and the kernel
-    removed the address for a moment (vip-upgrade / trixie, keel#87)."""
+    `handed_over` tries to renew the lease once, as keel#87 added, but
+    on a machine the root half's RestrictAddressFamilies=AF_UNIX
+    AF_NETLINK prevents `etcdctl` from reaching etcd over TCP: the call
+    fails (EAFNOSUPPORT) and the address keeps its existing lifetime.
+    The address is instead refreshed by `serve`'s drain, which lets the
+    controller carry one more time before it stops (keel#244)."""
     dropped, kept = [], []
     for held in vipstate.held_all(here.root):
         if vipnet.carried(here.iface(), held.vip,
@@ -764,6 +766,13 @@ def handed_over(here: Here, held: Held, client: Callable[[], Client],
     the address given the lifetime that renewal leaves; whether the
     address stays. With no answer it stays as it is, the kernel's to end
     by the last renewal's deadline; a lease gone drops it.
+
+    On a machine, the root half's RestrictAddressFamilies=AF_UNIX
+    AF_NETLINK prevents this from reaching etcd (EAFNOSUPPORT), so the
+    renewal always falls into the error path and the address keeps its
+    existing lifetime. The address is instead refreshed by `serve`'s
+    drain before the controller stops (keel#244). The unit tests pass a
+    mock client to exercise the renewal path.
 
     A single deadline (CALL_TIMEOUT) caps the two calls: on a 250 ms
     link the whole sequence takes about 1.5 s, which gains the new

@@ -1,3 +1,13 @@
+keel (0.23.72) unstable; urgency=medium
+
+  * The VIP bridge drains messages on SIGTERM until the controller sends
+    the carry op, so the VIP lifetime is renewed before the process
+    exits (keel#244). Before, the bridge stopped immediately and the
+    VIP could expire during a unit restart.
+    A stop does not drain: only a restart job of the unit does.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Sat, 01 Nov 2026 01:20:00 +0000
+
 keel (0.23.71) unstable; urgency=medium
 
   * keel diff reports semi_sync drift when no replica is connected

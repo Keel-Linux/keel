@@ -287,6 +287,110 @@ class TestTheUnit(unittest.TestCase):
             "/nonexistent"))
 
 
+class TestDrainOnlyOnARestart(unittest.TestCase):
+    """A plain stop drops the address at once, as a failover expects:
+    only a restart keeps it, so only a restart drains (keel#244)"""
+
+    def here(self, jobs: str) -> mock.Mock:
+        here = mock.Mock()
+        here.node.output.return_value = jobs
+        return here
+
+    def asked(self, jobs: str) -> bool:
+        with mock.patch.object(vipunit, "own",
+                               return_value="keel-vip.service"), \
+                mock.patch.dict(os.environ, clear=True):
+            return vipbridge._restarting(self.here(jobs))
+
+    def test_a_restart_job_drains(self):
+        self.assertTrue(self.asked("9 keel-vip.service restart running\n"))
+        self.assertTrue(
+            self.asked("9 keel-vip.service try-restart running\n"))
+
+    def test_a_stop_job_does_not_drain(self):
+        self.assertFalse(self.asked("9 keel-vip.service stop running\n"))
+        self.assertFalse(self.asked(""))
+
+
+class TestDrainCarry(WithEtcd):
+    """On SIGTERM (a restart), the root helper drains the bridge for one
+    more carry from the controller, so the address gets a fresh lifetime
+    the kernel keeps across the restart. Without this the address keeps
+    only the seconds left from the previous renewal, which on a 250 ms
+    link with 2% loss is often too few (keel#244)."""
+
+    def drain(self, helper_side, timeout=0.5):
+        ops = vipetcd.Ops(self.all[0])
+        said = []
+        return vipbridge._drain_carry(helper_side, ops, said.append,
+                                      timeout=timeout), said
+
+    def test_a_carry_during_drain_returns_true(self):
+        """The controller sends a carry op; the drain answers it and
+        returns True."""
+        self.promote(0)
+        self.turn()
+        helper_side, controller_side = socket.socketpair()
+        self.addCleanup(helper_side.close)
+        self.addCleanup(controller_side.close)
+        # the controller sends a carry message
+        msg = json.dumps({"op": "carry", "vip": VIP, "age": 0.5}).encode()
+        controller_side.sendall(msg + b"\n")
+        ok, said = self.drain(helper_side)
+        self.assertTrue(ok)
+        self.assertTrue(any("carried the VIP before the restart" in s
+                            for s in said))
+        # the carry's answer went back to the controller
+        controller_side.settimeout(1.0)
+        answer = json.loads(controller_side.recv(4096).decode().strip())
+        self.assertIn("ok", answer)
+
+    def test_timeout_without_carry_returns_false(self):
+        """No message arrives within the deadline; returns False."""
+        self.promote(0)
+        self.turn()
+        helper_side, controller_side = socket.socketpair()
+        self.addCleanup(helper_side.close)
+        self.addCleanup(controller_side.close)
+        ok, said = self.drain(helper_side, timeout=0.2)
+        self.assertFalse(ok)
+        self.assertTrue(any("no carry arrived" in s for s in said))
+
+    def test_connection_close_during_drain_returns_false(self):
+        """The controller closes the connection; returns False."""
+        self.promote(0)
+        self.turn()
+        helper_side, controller_side = socket.socketpair()
+        self.addCleanup(helper_side.close)
+        controller_side.close()
+        ok, said = self.drain(helper_side, timeout=1.0)
+        self.assertFalse(ok)
+        self.assertTrue(any("no carry arrived" in s for s in said))
+
+    def test_non_carry_ops_are_answered_until_carry_arrives(self):
+        """Other ops (e.g. bounded) are answered before the carry."""
+        self.promote(0)
+        self.turn()
+        helper_side, controller_side = socket.socketpair()
+        self.addCleanup(helper_side.close)
+        self.addCleanup(controller_side.close)
+        # send a bounded op, then a carry op
+        bounded_msg = json.dumps({"op": "bounded", "vip": VIP}).encode()
+        carry_msg = json.dumps({"op": "carry", "vip": VIP,
+                                "age": 1.0}).encode()
+        controller_side.sendall(bounded_msg + b"\n" + carry_msg + b"\n")
+        ok, said = self.drain(helper_side)
+        self.assertTrue(ok)
+        # both answers were sent back
+        controller_side.settimeout(1.0)
+        data = controller_side.recv(8192).decode()
+        answers = [json.loads(line) for line in data.strip().split("\n")]
+        self.assertEqual(len(answers), 2)
+        # first answer is bounded, second is carry
+        self.assertIn("ok", answers[0])
+        self.assertIn("ok", answers[1])
+
+
 class TestTheBridge(WithEtcd):
     def test_bounded_over_the_bridge(self):
         self.promote(0)
