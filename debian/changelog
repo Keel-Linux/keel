@@ -1,3 +1,12 @@
+keel (0.23.70) unstable; urgency=medium
+
+  * The mesh listener splits the TLS handshake from the accept so a
+    failed client does not hold the source's connection slot (keel#245).
+    do_handshake_on_connect=False with a manual handshake prevents the
+    file descriptor from being closed before the slot is released.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Sat, 01 Nov 2026 01:00:00 +0000
+
 keel (0.23.69) unstable; urgency=medium
 
   * keel spec apply --system now masks mariadb.socket and
