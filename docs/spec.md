@@ -667,6 +667,23 @@ credential is the pair's, made on the primary and asked for by the other
 member over the members' channel ([docs/replication.md](replication.md)).
 Declared, each stands, and `secret` wins over the pair's.
 
+`replication.primary` is optional only when the node has the pair record.
+With `role: replica`, `appliance.vip`, no `replication.primary` and no record,
+keel does not know where to replicate from. `keel spec validate`, `keel spec
+apply` with the system phase and `keel diff` refuse that spec with exit 3, and
+apply changes nothing. So a replica that boots before `keel vip pair` declares
+`replication.primary.host`, the overlay address of the primary, and the
+primary must be in the mesh before the replica boots. The conf phase and the
+mesh commands do not apply this rule, because they read the spec before a
+record can exist.
+
+The same three commands refuse these specs on a node with no pair record:
+`replication.primary.host` that is the VIP (decision 0029) or this node's own
+overlay address, `role: standalone` beside `appliance.vip`, and `appliance.vip`
+with `overlays.vip` or `overlays.wireguard` disabled. A node with a record is
+not refused for these: its pair exists, and the holder's claim decides the
+direction.
+
 ### database.client: where the database this machine uses is
 
 | Field | State | Notes |
