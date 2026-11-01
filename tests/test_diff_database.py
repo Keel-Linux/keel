@@ -434,6 +434,108 @@ class TestReadOnly(unittest.TestCase):
         self.assertEqual(fields.index(READ_ONLY), max(database))
 
 
+SEMI_SYNC = "database.server.semi_sync"
+
+# A primary on a pair with log_bin ON: semi_sync is compared only here
+PAIRED_VARIABLES = (
+    "log_bin\tON\nport\t3306\nserver_id\t7\nwsrep_on\tOFF\nread_only\tOFF\n"
+)
+PAIR_VIP = "fd00:6b65:1::ffff:100"
+PAIRED_DECLARED = {
+    "appliance": {"name": "core", "vip": PAIR_VIP},
+    "database": {"server": {
+        "engine": "mariadb", "role": "primary",
+        "listen": ["::1", "127.0.0.1"],
+        "replication": {"allowed_from": ["fd00:6b65:1::/64"]},
+    }},
+}
+
+
+def semisync_answered(master: str, clients: str) -> dict:
+    """MARIADB_STANDALONE with semi_sync status variables spliced in"""
+    return dict(
+        MARIADB_STANDALONE,
+        variables=PAIRED_VARIABLES,
+        grants="fd00:6b65:1:%\nlocalhost\n",
+        semisync=(
+            f"Rpl_semi_sync_master_status\t{master}\n"
+            f"Rpl_semi_sync_slave_status\tOFF\n"
+            f"Rpl_semi_sync_master_clients\t{clients}\n"
+            f"Rpl_semi_sync_master_yes_tx\t100\n"
+            f"Rpl_semi_sync_master_no_tx\t5\n"
+        ),
+    )
+
+
+def paired_inspection(answered: dict, role: str = "primary") -> Inspection:
+    engine = next(one for one in ENGINES if one.name == "mariadb")
+    installed = Installed(
+        engine, "/usr/sbin/mariadbd",
+        answers(engine, answered), File("ss -lntH", SOCKETS),
+    )
+    section, findings = probe_database((installed,), ())
+    return Inspection("/", "test", {"database": section}, tuple(findings),
+                      role=role)
+
+
+class TestSemiSync(unittest.TestCase):
+    """keel#107: semi_sync must check whether a replica is connected,
+    not just the setting"""
+
+    def test_on_with_one_replica_is_same(self):
+        inspection = paired_inspection(semisync_answered("ON", "1"))
+        found = verdicts(PAIRED_DECLARED, inspection)
+        self.assertEqual(found[SEMI_SYNC], SAME)
+
+    def test_on_with_no_replica_is_drift(self):
+        """The setting is on but no replica is connected: the primary
+        commits without waiting, which is the bug keel#107 reports"""
+        inspection = paired_inspection(semisync_answered("ON", "0"))
+        found = verdicts(PAIRED_DECLARED, inspection)
+        self.assertEqual(found[SEMI_SYNC], DRIFT)
+
+    def test_on_with_no_replica_carries_a_note(self):
+        inspection = paired_inspection(semisync_answered("ON", "0"))
+        text = line(PAIRED_DECLARED, inspection, SEMI_SYNC)
+        self.assertIn("no replica", text.lower())
+        self.assertNotIn("fell back", text)
+
+    def test_off_with_no_replica_is_drift_with_fallback_note(self):
+        inspection = paired_inspection(semisync_answered("OFF", "0"))
+        found = verdicts(PAIRED_DECLARED, inspection)
+        self.assertEqual(found[SEMI_SYNC], DRIFT)
+        text = line(PAIRED_DECLARED, inspection, SEMI_SYNC)
+        self.assertIn("fell back", text)
+
+    def test_on_with_two_replicas_is_same(self):
+        inspection = paired_inspection(semisync_answered("ON", "2"))
+        found = verdicts(PAIRED_DECLARED, inspection)
+        self.assertEqual(found[SEMI_SYNC], SAME)
+
+    def test_on_with_unknown_clients_is_unknown(self):
+        """A clients count the probe could not read is not healthy"""
+        answered = dict(
+            MARIADB_STANDALONE,
+            variables=PAIRED_VARIABLES,
+            grants="fd00:6b65:1:%\nlocalhost\n",
+            semisync=(
+                "Rpl_semi_sync_master_status\tON\n"
+                "Rpl_semi_sync_slave_status\tOFF\n"
+                "Rpl_semi_sync_master_yes_tx\t100\n"
+                "Rpl_semi_sync_master_no_tx\t5\n"
+            ),
+        )
+        inspection = paired_inspection(answered)
+        found = verdicts(PAIRED_DECLARED, inspection)
+        self.assertEqual(found[SEMI_SYNC], UNKNOWN)
+
+    def test_on_the_replica_semi_sync_is_not_compared(self):
+        inspection = paired_inspection(
+            semisync_answered("ON", "0"), role="replica")
+        found = verdicts(PAIRED_DECLARED, inspection)
+        self.assertEqual(found[SEMI_SYNC], NOT_COMPARED)
+
+
 class TestPairListen(unittest.TestCase):
     """keel#233: the VIP and the overlay are implicitly bound, so they
     are never drift when the spec did not declare them in listen"""

@@ -1,3 +1,13 @@
+keel (0.23.71) unstable; urgency=medium
+
+  * keel diff reports semi_sync drift when no replica is connected
+    (keel#107). Before, it read only Rpl_semi_sync_master_status, so ON
+    with Rpl_semi_sync_master_clients 0 was the same. With
+    wait_no_slave = OFF such a primary commits without waiting. A
+    client count that cannot be read is unknown, not the same.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Sat, 01 Nov 2026 01:15:00 +0000
+
 keel (0.23.70) unstable; urgency=medium
 
   * The mesh listener splits the TLS handshake from the accept so a
