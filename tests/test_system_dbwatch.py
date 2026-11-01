@@ -60,6 +60,106 @@ class TestSemiSync(unittest.TestCase):
         self.assertIn("no database server", self.out[0])
 
 
+class TestTheFallback(unittest.TestCase):
+    """keel#270: with the replica away, the primary acknowledges each
+    write with no copy. A cut ends the dump thread first (about 12.6 s),
+    so the timeout never runs and Rpl_semi_sync_master_status stays ON:
+    its signal is Rpl_semi_sync_master_clients 0 (evidence of 2026-11-01,
+    case F1)"""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.out: list[str] = []
+        self.primary = dbpair.PairState(VIP, "own-key", "peer-key",
+                                        "fd00:6b65:f1b::2", role="primary")
+        self.taken = True
+
+    def reading(self, master="ON", clients="1", read_only=False,
+                unacknowledged="0"):
+        return dbreading.Reading(
+            read_only=dbreading.found(read_only, "probe"),
+            semi_sync=dbreading.found(
+                {"master": master, "slave": "OFF", "clients": clients,
+                 "acknowledged": "9", "unacknowledged": unacknowledged},
+                "probe"))
+
+    def ask(self, reading, pair=None):
+        with mock.patch.object(dbwatch, "Tree"), \
+                mock.patch.object(dbwatch, "database_servers",
+                                  return_value=[server("mariadb", reading)]), \
+                mock.patch("keel.monitor.alerting.alert",
+                           return_value=self.taken) as alerted:
+            dbwatch.semi_sync(self.root, pair or self.primary,
+                              self.out.append, self.out.append)
+        return alerted
+
+    def test_status_on_with_no_replica_is_alerted_once_and_its_end_once(self):
+        self.ask(self.reading()).assert_not_called()
+        alerted = self.ask(self.reading(clients="0", unacknowledged="77"))
+        self.assertEqual(alerted.call_count, 1)
+        self.assertEqual(alerted.call_args.args[2], dbwatch.FELL_BACK)
+        text = alerted.call_args.args[3]
+        self.assertIn("no replica is connected", text)
+        self.assertIn("77", text)
+        self.assertIn("Rpl_semi_sync_master_clients", text)
+        self.assertIn("semi-synchronous no replica", self.out[-1])
+        self.ask(self.reading(clients="0")).assert_not_called()
+        alerted = self.ask(self.reading())
+        self.assertEqual(alerted.call_count, 1)
+        self.assertEqual(alerted.call_args.args[2], dbwatch.BACK)
+        self.assertEqual(alerted.call_args.args[5], "recovery")
+
+    def test_one_fallback_changing_form_is_not_a_second_alert(self):
+        """A replica that comes back behind: 0 clients, then 1 client
+        and status OFF until it caught up (the timeout's path)"""
+        self.ask(self.reading(clients="0"))
+        self.ask(self.reading(master="OFF")).assert_not_called()
+        self.ask(self.reading(clients="0")).assert_not_called()
+
+    def test_the_timeout_s_fallback_keeps_its_own_text(self):
+        text = self.ask(self.reading(master="OFF")).call_args.args[3]
+        self.assertIn("Rpl_semi_sync_master_status OFF", text)
+
+    def test_a_replica_node_with_no_clients_is_not_a_fallback(self):
+        replica = dbpair.PairState(VIP, "own-key", "peer-key",
+                                   "fd00:6b65:f1b::2", role="replica")
+        self.ask(self.reading(clients="0"), replica).assert_not_called()
+        self.assertIn("semi-synchronous on", self.out[-1])
+
+    def test_a_read_only_primary_acknowledges_nothing_so_nothing_is_alerted(
+            self):
+        """A holder that waits for its replica (keel#242) or doubts its
+        lease (keel#195) gives an error, not an OK with no copy"""
+        self.ask(self.reading()).assert_not_called()
+        self.ask(self.reading(clients="0",
+                              read_only=True)).assert_not_called()
+        self.ask(self.reading(clients="0")).assert_called_once()
+
+    def test_an_alert_no_channel_took_is_tried_again_at_the_next_watch(self):
+        """A channel that is down at that moment must not lose the only
+        signal, and a channel set up later still gets it"""
+        self.taken = False
+        self.ask(self.reading(clients="0")).assert_called_once()
+        self.taken = True
+        self.ask(self.reading(clients="0")).assert_called_once()
+        self.ask(self.reading(clients="0")).assert_not_called()
+
+
+class TestTheFallbackInStatus(unittest.TestCase):
+    def test_the_words_of_each_state(self):
+        for values, role, read_only, expected in (
+                ({"master": "ON", "clients": "1"}, "primary", False, "on"),
+                ({"master": "ON", "clients": "0"}, "primary", False,
+                 "no replica"),
+                ({"master": "OFF", "clients": "1"}, "primary", False, "off"),
+                ({"master": "ON", "clients": "0"}, "replica", False, "on"),
+                ({"master": "ON", "clients": "0"}, "primary", True, "on"),
+                ({"master": "ON"}, "primary", False, "on")):
+            with self.subTest(values=values, role=role, read_only=read_only):
+                self.assertEqual(
+                    dbwatch.commits(values, role, read_only), expected)
+
+
 class TestSyncCommit(unittest.TestCase):
     """0054: the pair's synchronous commit has no fallback, and the
     watch alerts while the primary's commits wait, once each way (0054

@@ -682,6 +682,7 @@ def play(report: dict, pids: list[int], pairs, roots: list[str],
         " WHERE PRIVILEGE_TYPE = 'READ_ONLY ADMIN'")
     planned(report, pids, pairs, roots, "B", "k138_to_b")
     planned(report, pids, pairs, roots, "A", "k138_to_a")
+    replica_away(report, pids)
     crashed(report, pids, roots)
     report["alerts"] = [one.get("text", "")[:160] for one in HOOKS["alerts"]]
     for process in vip_netns.AGENTS.values():
@@ -903,6 +904,50 @@ def promote_gone(agent_send) -> dict:
         if found.get("code") != 16 or "etcd did not answer" not in said:
             break
     return {**found, "attempts": attempts}
+
+
+def replica_away(report: dict, pids: list[int]) -> None:
+    """keel#270: the replica B cut, the primary A takes writes with no
+    copy. The status variable does not show it, so what counts is that
+    an alert reaches the channel and status says it"""
+    import vip_netns
+    from vip_netns import agent_send, wait_until
+
+    def clients() -> str:
+        return status_value(agent_send, "A", "Rpl_semi_sync_master_clients")
+    wait_until(lambda: clients() == "1", 120, 1)
+    agent_send("A", "watch")
+    seen = len(HOOKS["alerts"])
+    vip_netns.leg("to2", "100%")
+    sh("tc", "qdisc", "replace", "dev", "uplink", "root", "netem", "loss",
+       "100%", pid=pids[1])
+    insert = f"sql INSERT INTO {APP_DB}.t (v, at) VALUES ('away', 0)"
+    # a cut of etcd's leader can fence the holder for a moment (keel#195):
+    # that write gets an error, and the holder waits for its replica
+    # (keel#242) before it takes writes again
+    report["k270_writes"] = [agent_send("A", insert, 120)]
+    report["k270_no_clients_s"] = wait_until(lambda: clients() == "0", 60, 1)
+    report["k270_status_variable"] = status_value(
+        agent_send, "A", "Rpl_semi_sync_master_status")
+    report["k270_writable_s"] = wait_until(
+        lambda: agent_send("A", "sql SELECT @@read_only").get("out") == "0",
+        120, 1)
+    report["k270_next_write"] = agent_send("A", insert, 120)
+    agent_send("A", "watch")
+    report["k270_status"] = agent_send("A", "dbstatus")
+
+    def alerts() -> list[str]:
+        return [json.dumps(one) for one in HOOKS["alerts"][seen:]]
+    report["k270_alert_s"] = wait_until(
+        lambda: any("fell back" in one for one in alerts()), 60, 1)
+    vip_netns.heal(pids, 1)
+    wait_until(lambda: clients() == "1" and status_value(
+        agent_send, "A", "Rpl_semi_sync_master_status") == "ON", 120, 1)
+    agent_send("A", insert, 120)
+    agent_send("A", "watch")
+    report["k270_back_s"] = wait_until(
+        lambda: any("is back" in one for one in alerts()), 30, 1)
+    report["k270_alerts"] = [one[:400] for one in alerts()]
 
 
 def crashed(report: dict, pids: list[int], roots: list[str]) -> None:

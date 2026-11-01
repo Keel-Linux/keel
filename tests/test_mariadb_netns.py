@@ -201,6 +201,30 @@ class TestAMariadbPairOnAPoorNetwork(unittest.TestCase):
         self.assertEqual(status.get("Master_SSL_Allowed"), "Yes", status)
         self.assertEqual(status.get("Using_Gtid"), "Slave_Pos", status)
 
+    def test_a_replica_that_is_away_gives_an_alert_and_a_status_line(self):
+        """keel#270, a real server and a real cut: the stall ends when
+        the dump thread ends, before the semi-synchronous timeout, and
+        the operator is told through the channel"""
+        found = self.found
+        print(f"k270 first write {found['k270_writes']},"
+              f" status variable {found['k270_status_variable']}",
+              file=sys.stderr)
+        # a write that ended in OK, or one the fence ended: none waits for
+        # the semi-synchronous timeout
+        self.assertLess(found["k270_writes"][0]["took_s"], 30,
+                        found["k270_writes"])
+        self.assertIsNotNone(found["k270_no_clients_s"])
+        self.assertIsNotNone(found["k270_writable_s"])
+        self.assertEqual(found["k270_next_write"].get("code"), 0,
+                         found["k270_next_write"])
+        self.assertLess(found["k270_next_write"]["took_s"], 5,
+                        found["k270_next_write"])
+        self.assertTrue(any("FALLBACK: no replica is connected" in line
+                            for line in found["k270_status"]["lines"]),
+                        found["k270_status"])
+        self.assertIsNotNone(found["k270_alert_s"], found.get("k270_alerts"))
+        self.assertIsNotNone(found["k270_back_s"], found["k270_alerts"])
+
     def test_the_unplanned_write_downtime_and_no_acked_row_lost(self):
         """keel#108, keel#118: the promote with the old primary gone and
         the database following the VIP at once, measured at 250 ms; with

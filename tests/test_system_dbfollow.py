@@ -1066,6 +1066,36 @@ class TestWatch(FollowTestCase):
 
 
 class TestStatus(FollowTestCase):
+    def test_a_primary_with_no_replica_shows_the_fallback(self):
+        """keel#270: the status variable stays ON, so the screen says it"""
+        from keel.system import dbstatus
+        self.pair_nodes()
+        here = self.all[0]
+        clients = {"now": "0"}
+
+        def server(argv, **kwargs):
+            asked = argv[-1] if "--execute" in argv else ""
+            out = ""
+            if "Rpl_semi_sync" in asked:
+                out = ("Rpl_semi_sync_master_status\tON\n"
+                       f"Rpl_semi_sync_master_clients\t{clients['now']}\n"
+                       "Rpl_semi_sync_master_no_tx\t77\n")
+            elif "Variable_name IN" in asked:
+                out = ("log_bin\tON\nport\t3306\nserver_id\t1\n"
+                       "wsrep_on\tOFF\nread_only\tOFF\n")
+            return subprocess.CompletedProcess(argv, 0, out, "")
+
+        def screen() -> str:
+            with mock.patch("keel.inspect.collect.paths.ROOT_DEFAULT",
+                            here.root), \
+                    mock.patch("keel.inspect.collect.subprocess.run", server), \
+                    mock.patch("keel.system.dbstatus.vip_lines",
+                               return_value=[]):
+                return "\n".join(dbstatus.lines(here.root, here.node.path))
+        self.assertIn("FALLBACK: no replica is connected", screen())
+        clients["now"] = "1"
+        self.assertNotIn("FALLBACK", screen())
+
     def test_one_screen_for_the_operator(self):
         from keel.system import dbstatus
         self.pair_nodes()
