@@ -328,8 +328,16 @@ def serve_one(listener: Listener, context, raw: socket.socket, source: str,
     read.start()
     try:
         raw.settimeout(READ_TIMEOUT)
-        held.append(context.wrap_socket(raw, server_side=True))
-        Handler(held[-1], (source, 0),
+        # keel#245: wrap_socket closes the descriptor when the handshake
+        # fails, before release runs; split the handshake so that the
+        # close below comes after release.  Side effect: shut() now
+        # reaches the live TLS socket during a stalled handshake,
+        # because held already has it.
+        tls = context.wrap_socket(raw, server_side=True,
+                                  do_handshake_on_connect=False)
+        held.append(tls)
+        tls.do_handshake()
+        Handler(tls, (source, 0),
                 Connection(listener, local, read, release))
     except (OSError, ValueError):
         pass

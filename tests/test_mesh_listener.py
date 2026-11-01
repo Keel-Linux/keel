@@ -257,12 +257,14 @@ class TestAFailedConnection(unittest.TestCase):
         and may ask again at once; its slot must be free by then, or the
         next connection of the same source is closed unread (CI, the
         mesh job of keel#200: test_a_client_without_tls_does_not_stop_
-        the_listener)"""
+        the_listener).  keel#245: the split handshake makes this order
+        hold: wrap_socket returns without closing, and serve_one calls
+        release before close."""
         order = []
 
-        class Raw:
-            def settimeout(self, seconds):
-                pass
+        class Tls:
+            def do_handshake(self):
+                raise OSError("not TLS")
 
             def shutdown(self, how):
                 pass
@@ -270,9 +272,13 @@ class TestAFailedConnection(unittest.TestCase):
             def close(self):
                 order.append("close")
 
+        class Raw:
+            def settimeout(self, seconds):
+                pass
+
         class Context:
-            def wrap_socket(self, raw, server_side=False):
-                raise OSError("not TLS")
+            def wrap_socket(self, raw, **kwargs):
+                return Tls()
 
         listener.serve_one(mock.Mock(), Context(), Raw(), "::1", "::1",
                            lambda: order.append("release"))

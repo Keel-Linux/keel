@@ -150,7 +150,35 @@ class TestPost(Served):
         with socket.create_connection(("::1", self.port), timeout=5) as raw:
             raw.sendall(b"GET / HTTP/1.0\r\n\r\n")
             with contextlib.suppress(OSError):
-                raw.recv(100)
+                while raw.recv(100):
+                    pass
+        self.assertEqual(protocol.join_answer(self.post().body).public_key,
+                         INVITER)
+
+
+class TestPlainClientSlotFreed(Served):
+    """keel#245: a failed handshake frees the source's slot before the
+    connection closes; a late release makes the order visible"""
+
+    def setUp(self):
+        super().setUp()
+        real = listener.serve_one
+
+        def slow(listener_, context, raw, source, local, release):
+            def late():
+                threading.Event().wait(0.5)
+                release()
+            real(listener_, context, raw, source, local, late)
+        patcher = mock.patch.object(listener, "serve_one", slow)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_the_next_request_after_a_plain_client_is_answered(self):
+        with socket.create_connection(("::1", self.port), timeout=5) as raw:
+            raw.sendall(b"GET / HTTP/1.0\r\n\r\n")
+            with contextlib.suppress(OSError):
+                while raw.recv(100):
+                    pass
         self.assertEqual(protocol.join_answer(self.post().body).public_key,
                          INVITER)
 
