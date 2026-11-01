@@ -48,6 +48,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -273,8 +274,14 @@ def tree_hash(root: str, folder: str) -> str:
             path = os.path.join(where, name)
             rel = os.path.relpath(path, base)
             found.update(rel.encode() + b"\0")
-            with open(path, "rb") as fob:
-                found.update(fob.read() + b"\0")
+            try:
+                with open(path, "rb") as fob:
+                    found.update(fob.read() + b"\0")
+            except FileNotFoundError:
+                # syncthing renames its temporary files as it works: a
+                # file that went between the walk and the open is a tree
+                # that still changes, never the same as the other side
+                return f"changing: {path}"
     return found.hexdigest()
 
 
@@ -740,6 +747,7 @@ def driver() -> None:
         cut_primary(report, 300)
     except Exception as e:  # noqa: BLE001 - the report says how it ended
         report["error"] = repr(e)
+        report["traceback"] = traceback.format_exc()
     finally:
         for process in AGENTS.values():
             try:
