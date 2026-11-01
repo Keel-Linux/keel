@@ -124,6 +124,46 @@ log() {
     log | grep -q "the boot carries on"
 }
 
+# keel records each call and reads what the hook pipes to record-refusal
+recording_keel() {
+    local status="$1" line="$2" record_status="${3:-0}"
+    cat > "$TMP/bin/keel" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$TMP/keel.calls"
+case "\$*" in
+    *record-refusal*) cat > "$TMP/keel.stdin"; exit $record_status ;;
+esac
+printf '%s\n' "$line"
+exit $status
+EOF
+    chmod +x "$TMP/bin/keel"
+}
+
+@test "a refused spec is recorded with the reason and the boot carries on" {
+    describe "$PRIMARY"
+    recording_keel 3 "Error: the spec is not valid"
+    run "$HOOK"
+    [ "$status" -eq 0 ]
+    grep -q "spec record-refusal --spec $PRIMARY" "$TMP/keel.calls"
+    grep -q "Error: the spec is not valid" "$TMP/keel.stdin"
+}
+
+@test "a record that fails is reported and the boot carries on" {
+    describe "$PRIMARY"
+    recording_keel 3 "Error: the spec is not valid" 1
+    run "$HOOK"
+    [ "$status" -eq 0 ]
+    grep -q "could not record" "$INITHOOKS_LOGFILE"
+}
+
+@test "an apply that fails on a valid spec is not a refused spec" {
+    describe "$PRIMARY"
+    recording_keel 16 "network: refused"
+    run "$HOOK"
+    [ "$status" -eq 0 ]
+    ! grep -q record-refusal "$TMP/keel.calls"
+}
+
 @test "keel missing is reported and the boot carries on" {
     describe "$PRIMARY"
     rm -f "$TMP/bin/keel"

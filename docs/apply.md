@@ -1638,6 +1638,15 @@ blog.yaml --root /tmp/scratch` then reports `instance.fqdn` and every
 
 ## The first boot
 
+A first boot that refuses its spec does not stop. `10keel-system` keeps the
+refusal in `/var/lib/keel/first-boot-refused.json` (keel#268). `keel diff`
+reports `first_boot.spec` as drift, and `keel spec validate` and `keel database
+status` say it. It fires one alert. The channels may not exist yet at that
+point, and then the alert goes to syslog and root's mailbox. A `keel spec apply`
+with the system phase that succeeds removes the record. It does not run the
+application hooks of the first boot again, so check that the application is
+complete.
+
 The conf phase runs at hook `00declarative`, which renders the description
 into the conf every later hook reads. The system phase runs at
 `10keel-system`, the hook this package ships into

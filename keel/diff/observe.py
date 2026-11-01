@@ -33,7 +33,19 @@ def diff_root(declared: dict, root: str = ROOT_DEFAULT) -> Comparison:
         appliance_fields(declared, root) + vip_fields(declared, root)
         + handshake_fields(declared, root == ROOT_DEFAULT)
         + mtu_fields(declared, root, root == ROOT_DEFAULT)
-        + filesync_fields(declared, root, root == ROOT_DEFAULT)))
+        + filesync_fields(declared, root, root == ROOT_DEFAULT)
+        + first_boot_fields(root)))
+
+
+def first_boot_fields(root: str) -> list[FieldDiff]:
+    """A first boot that refused its spec is drift until an apply succeeds
+    (keel#268): the boot continued, and nothing else says so"""
+    from keel.system import bootrefusal
+    found = bootrefusal.read(root)
+    if found is None:
+        return []
+    return [FieldDiff(bootrefusal.FIELD, DRIFT, "accepted", "refused",
+                      note=found.line())]
 
 
 def _listen_socket_note(
