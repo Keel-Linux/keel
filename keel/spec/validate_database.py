@@ -29,6 +29,8 @@ from typing import Any
 from keel.spec.constants import (
     DATABASE_ENGINES,
     DATABASE_SUBJECTS,
+    DUMP_ENGINES,
+    DUMP_RANGES,
     SERVER_ROLES,
 )
 from keel.spec.fields import (
@@ -41,7 +43,7 @@ from keel.spec.fields import (
 from keel.spec.origins import mariadb_problem
 from keel.spec.validate_secret import validate_secret
 
-SERVER_KEYS = ("engine", "role", "listen", "replication")
+SERVER_KEYS = ("engine", "role", "listen", "replication", "dump")
 REPLICATION_KEYS = ("primary", "allowed_from", "secret")
 CLIENT_KEYS = ("engine", "primary", "replicas")
 ENDPOINT_KEYS = ("host", "port")
@@ -97,6 +99,33 @@ def _validate_server(server: Any, check_secret_files: bool,
             str(server.get("engine")), paired,
         )
     )
+    errors.extend(_dump(server.get("dump"), str(server.get("engine")), paired))
+    return errors
+
+
+def _dump(dump: Any, engine: str, paired: bool) -> list[str]:
+    key = "database.server.dump"
+    if dump is None:
+        return []
+    error = mapping_error(key, dump)
+    if error:
+        return [error]
+    errors = [f"{key}.{name}: unknown key" for name in dump
+              if name != "enabled" and name not in DUMP_RANGES]
+    if not paired:
+        errors.append(f"{key}: requires appliance.vip: a dump runs on the"
+                      " standby of a pair")
+    if engine not in DUMP_ENGINES:
+        errors.append(f"{key}: the engine must be one of {DUMP_ENGINES}")
+    if "enabled" in dump and not isinstance(dump["enabled"], bool):
+        errors.append(f"{key}.enabled: must be true or false")
+    for name, (low, high) in DUMP_RANGES.items():
+        value = dump.get(name)
+        if name in dump and (isinstance(value, bool)
+                             or not isinstance(value, int)
+                             or not low <= value <= high):
+            errors.append(f"{key}.{name}: must be a whole number from {low}"
+                          f" to {high}")
     return errors
 
 

@@ -481,12 +481,78 @@ fences an old primary in the same way when no quiesce ran.
 
 ## Dumps on the standby (interim backup)
 
-`keel-database-dump.timer` on a paired node runs `keel database dump`
-daily; it dumps only while the node is the replica (a hot standby that
-serves nothing has the room and the idle time), `mariadb-dump
---single-transaction --gtid --all-databases` compressed with zstd into
-`/var/backups/keel/mariadb/`, keeping the last 7. The pull request after
-this one (the maintainer, 2026-10-11).
+`keel-database-dump.timer` starts each hour on a node of a pair. It runs
+`keel database dump --if-due`, and the command reads the spec to find if
+a dump is due. keel 0.23.71 added these two names. Before 0.23.71, this
+section described them and they did not exist.
+
+```yaml
+database:
+  server:
+    engine: mariadb
+    role: primary
+    dump:                     # all optional; the values are the defaults
+      enabled: true           # false: no dump, no alert
+      every_hours: 24         # 1 to 720
+      keep: 7                 # 1 to 365: the dumps that stay
+      min_free_percent: 10    # 1 to 90: the part of the disk a dump leaves free
+```
+
+A pair with no `database.server.dump` has these defaults. The section is
+refused on a node with no `appliance.vip`, and for Redis: a standalone server has
+no scheduled dump. `keel diff` does not compare the section.
+
+**The dump.** The node dumps only while it is the replica and its server
+replicates. A primary, a node that diverged and a server that was not
+seeded do not dump: their dump is not the pair's data, and it could push
+the good dumps out of the retention. The command is `mariadb-dump
+--single-transaction --gtid --master-data=2 --routines --events --triggers
+--all-databases`, in a pipe to `zstd`. This is one snapshot, and a comment
+in the file gives the GTID position. `--gtid` alone writes no position.
+keel does not use `--dump-slave`: it stops the SQL thread for all of the
+dump.
+
+**The files.** `/var/backups/keel/mariadb/dump-<UTC time>.sql.zst`, mode
+0600, in a directory of mode 0700. The file gets this name only when
+`mariadb-dump` and `zstd` both exit 0. A file that is not complete has
+the name `.dump-<UTC time>.partial`. keel removes it when the dump fails,
+and the next run removes it after a crash.
+
+**The credentials.** There are none: root connects by the server's socket.
+No secret is on a command line or in a log. The dump holds the hashes of
+the accounts, which is why the mode is 0600.
+
+**A dump cannot fill the disk.** The room is what is free above
+`min_free_percent`. With no room, or with less room than the size of the
+last dump, there is no dump. During the dump, the kernel stops `zstd` at
+that room (`RLIMIT_FSIZE`), and keel removes the file. After a good dump,
+only the newest `keep` dumps stay. A failed dump removes nothing.
+
+**A rejoin's dump.** `rejoin-*` files are not in the retention and keel
+never removes them: such a file can be the only copy of a diverged node's
+writes. The operator removes them after the reseed. A MariaDB rejoin does
+not dump again while the node's GTID state does not change. Before 0.23.71,
+a diverged node made a new file at each `keel database watch`: 223 files,
+246 MB in 2.5 hours on a real node. A rejoin's dump leaves 5% of the disk
+free, and the kernel stops the dump at half of the room above that,
+because the plain file and its compressed copy are on the disk together.
+With no room the rejoin stops, and nothing changes.
+
+**The signal.** `keel database watch` alerts through the monitor's
+channels (check `database-dump`), once for each kind of problem and once
+at the recovery:
+
+- a failed dump, with the reason;
+- a stale dump, on the replica: the newest dump is older than two
+  intervals and one hour. This also finds a timer that does not run.
+
+A primary sends no stale alert. On a primary with a replica that is away,
+the fallback alert of this document tells the operator.
+`keel database status` shows the newest dump and the last problem.
+
+**Restore.** No command restores a dump. `zstd -dc <file> | mariadb` on a
+server with no data loads it. A reseed is the way to make a node of a
+pair whole again.
 
 ## What `keel inspect`, `keel diff` and `keel database status` show
 

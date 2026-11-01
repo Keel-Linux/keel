@@ -463,6 +463,60 @@ class TestAllowedFrom(unittest.TestCase):
         )
 
 
+PAIRED_DUMP = """version: 1
+appliance:
+  name: mariadb
+  vip: fd2a:9c41:7e03::ffff:1
+database:
+  server:
+    engine: {engine}
+    role: primary
+    dump: {dump}
+"""
+
+
+class TestDump(unittest.TestCase):
+    def test_a_pair_may_set_each_value(self):
+        for engine, dump in (
+                ("mariadb", "{enabled: true, every_hours: 6, keep: 3,"
+                            " min_free_percent: 25}"),
+                ("postgresql", "{enabled: false}")):
+            found = errors(PAIRED_DUMP.format(engine=engine, dump=dump),
+                           check_secret_files=False)
+            self.assertEqual([one for one in found if ".dump" in one], [])
+
+    def test_it_is_not_a_mapping(self):
+        messages(PAIRED_DUMP.format(engine="mariadb", dump="daily"),
+                 "database.server.dump")
+
+    def test_an_unknown_key_is_refused(self):
+        messages(PAIRED_DUMP.format(engine="mariadb", dump="{every: 1}"),
+                 "database.server.dump.every: unknown key")
+
+    def test_redis_has_no_dump(self):
+        messages(PAIRED_DUMP.format(engine="redis", dump="{keep: 1}"),
+                 "database.server.dump", "mariadb")
+
+    def test_a_node_with_no_vip_is_refused(self):
+        messages(STANDALONE + "    dump: {keep: 2}\n",
+                 "database.server.dump", "appliance.vip")
+
+    def test_enabled_is_a_boolean(self):
+        messages(PAIRED_DUMP.format(engine="mariadb", dump="{enabled: 1}"),
+                 "database.server.dump.enabled")
+
+    def test_each_number_has_its_range(self):
+        for field, bad in (("every_hours", 0), ("every_hours", 721),
+                           ("keep", 0), ("keep", 366),
+                           ("min_free_percent", 0),
+                           ("min_free_percent", 91),
+                           ("keep", "many"), ("keep", True)):
+            with self.subTest(field=field, bad=bad):
+                messages(PAIRED_DUMP.format(
+                    engine="mariadb", dump=f"{{{field}: {bad}}}"),
+                    f"database.server.dump.{field}")
+
+
 class TestClient(unittest.TestCase):
     def test_a_client_names_where_it_writes(self):
         messages(

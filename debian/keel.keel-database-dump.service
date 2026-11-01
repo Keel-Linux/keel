@@ -1,0 +1,17 @@
+# keel database dump --if-due (docs/replication.md): on the replica of a
+# pair, a dump within database.server.dump. Run by
+# keel-database-dump.timer. A failure stays in keel's state file, and
+# keel database watch alerts through the monitor's channels.
+[Unit]
+Description=keel database: the dump on the standby
+After=network-online.target mariadb.service postgresql.service
+ConditionPathExists=/var/lib/keel/database
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/keel database dump --if-due
+UMask=0077
+Nice=10
+IOSchedulingClass=idle
+# a hung dump stops here; the next run removes its partial file
+TimeoutStartSec=12h

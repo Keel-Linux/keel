@@ -54,6 +54,17 @@ IPV6_METHODS = ("static", "dhcp", "auto", "manual", "none")
 # endpoints it uses. A machine can have both, or either alone.
 DATABASE_SUBJECTS = ("server", "client")
 DATABASE_ENGINES = ("mariadb", "postgresql", "redis")
+# database.server.dump (docs/replication.md): the engines with a dump, the
+# defaults a pair has with no such section, and each number's range
+DUMP_ENGINES = ("mariadb", "postgresql")
+DUMP_EVERY_HOURS = 24
+DUMP_KEEP = 7
+DUMP_MIN_FREE_PERCENT = 10
+DUMP_RANGES = {
+    "every_hours": (1, 720),
+    "keep": (1, 365),
+    "min_free_percent": (1, 90),
+}
 # Roles a server can be in. Multi-primary (Galera, Redis Cluster) and the
 # shard roles are not here: a machine in one of those is reported as a role
 # the spec has no value for, which is why nothing here has to be renamed

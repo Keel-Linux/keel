@@ -88,6 +88,9 @@ from keel.system.dbstate import (
 )
 
 DIVERGED = "var/lib/keel/database/diverged"
+# the rejoin's last dump and the GTID state it holds: a read-only node's
+# state does not move, so the watch's follow each 30 s does not dump again
+REJOIN_DUMP = "var/lib/keel/database/rejoin-dump"
 FOLLOW_LOCK = dbreadonly.REPLICATION_LOCK
 BACKUPS = "var/backups/keel/mariadb"
 DROPIN_MODE = 0o644
@@ -650,12 +653,19 @@ def _rejoin(root: str, host: str, port: int, state: DatabaseState,
     except ValueError as e:
         found.fail(f"a GTID state could not be read: {e}")
         return
-    kept = _dump(root, runner)
-    if kept.startswith("not kept"):
-        found.fail(f"a dump of what this node holds was {kept}; nothing was"
-                   " changed")
-        return
-    found.say(f"a dump of what this node holds is kept at {kept}")
+    kept = _kept_dump(root, own_state)
+    if kept:
+        found.say(f"a dump of what this node holds is kept at {kept}"
+                  " (its GTID state did not move since)")
+    else:
+        kept = _dump(root, runner)
+        if kept.startswith("not kept"):
+            found.fail(f"a dump of what this node holds was {kept}; nothing"
+                       " was changed")
+            return
+        _write(root, REJOIN_DUMP, json.dumps(
+            {"gtid": own_state, "path": kept}, sort_keys=True) + "\n", 0o600)
+        found.say(f"a dump of what this node holds is kept at {kept}")
     if errant and not confirmed:
         _diverged(root, state, host, errant, found)
         return
@@ -743,14 +753,33 @@ def _holder_gtid(root: str, host: str, port: int, state: DatabaseState,
         return None
 
 
+def _kept_dump(root: str, gtid_state: str) -> str | None:
+    """The rejoin's last dump, when this node's GTID state is the one it
+    holds and the file is still there"""
+    try:
+        with open(os.path.join(root, REJOIN_DUMP)) as fob:
+            recorded = json.load(fob)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(recorded, dict) or recorded.get("gtid") != gtid_state:
+        return None
+    path = recorded.get("path")
+    return path if isinstance(path, str) and os.path.isfile(path) else None
+
+
 def _dump(root: str, runner) -> str:
     """A dump of everything this node holds, compressed, under BACKUPS;
-    where it is, or `not kept (why)`"""
+    where it is, or `not kept (why)`. The kernel stops it at the room on
+    the disk (keel.system.dbdump)"""
+    from keel.system import dbdump
     directory = os.path.join(root, BACKUPS)
     try:
         os.makedirs(directory, mode=0o700, exist_ok=True)
+        problem, limit = dbdump.rejoin_guard(directory)
     except OSError as e:
         return f"not kept ({e.strerror})"
+    if problem:
+        return f"not kept ({problem})"
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     plain = os.path.join(directory, f"rejoin-{stamp}.sql")
     try:
@@ -759,7 +788,8 @@ def _dump(root: str, runner) -> str:
             done = runner(["mariadb-dump", "--all-databases",
                            "--single-transaction", "--gtid", "--routines",
                            "--events", "--triggers"], stdout=fob,
-                          stderr=subprocess.PIPE, check=False)
+                          stderr=subprocess.PIPE, check=False,
+                          preexec_fn=limit)
         if done.returncode != 0:
             os.remove(plain)
             return "not kept (mariadb-dump exited" \

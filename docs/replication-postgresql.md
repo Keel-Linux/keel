@@ -193,6 +193,25 @@ In keel 0.23.18. The numbers under "Measured" come from the CI job
   with the primary connects over `::1`, the way the appliance
   manifest has it. Nothing but the pair peer reaches 5432.
 
+## Dumps on the standby (interim backup)
+
+The rules are the rules of [docs/replication.md](replication.md), "Dumps on
+the standby": `keel-database-dump.timer`, `keel database dump`,
+`database.server.dump`, the room on the disk, the retention and the alerts.
+These items are different:
+
+- The command is `pg_dumpall`, run as the `postgres` user by peer
+  authentication, in a pipe to `zstd`. There is no credential.
+- The files are `/var/backups/keel/postgresql/dump-<UTC time>.sql.zst`.
+- **Each database is one snapshot, but the cluster is not.** `pg_dumpall`
+  dumps the databases one after the other. Two databases in one file can
+  be from different moments. The dump does not record a WAL position.
+- **A long dump on a standby can fail.** Replay can cancel the dump's
+  statement ("canceling statement due to conflict with recovery"). keel
+  does not pause replay for the dump: a dump that stops does not leave
+  a paused standby. A cancelled dump is a failed dump, with an alert, and
+  the next tick tries again.
+
 ## Case (a), the end to end test
 
 `tests/test_postgres_netns.py` runs `tests/postgres_netns.py` on

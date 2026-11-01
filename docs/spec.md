@@ -645,6 +645,10 @@ application reaches a database is the application's own configuration.
 | `database.server.replication.primary.port` | accepted | A port number. Absent means the engine's default: 3306, 5432, 6379 |
 | `database.server.replication.allowed_from` | accepted | A list of origins allowed to replicate from this node. Meaningful when the role is `primary`; see "A primary authorizes, it does not enumerate" |
 | `database.server.replication.secret` | accepted | The replication credential, by reference, with the same backends as `secrets`. What it unlocks differs per engine, see below |
+| `database.server.dump.enabled` | accepted | `true` or `false`, default `true`. Only with `appliance.vip`, and only for `mariadb` and `postgresql`. See [docs/replication.md](replication.md), "Dumps on the standby" |
+| `database.server.dump.every_hours` | accepted | Whole hours from 1 to 720, default 24 |
+| `database.server.dump.keep` | accepted | The dumps that stay, from 1 to 365, default 7 |
+| `database.server.dump.min_free_percent` | accepted | The part of the disk that a dump leaves free, from 1 to 90, default 10 |
 
 Three roles and no more. `multi_primary` and the shard roles are not in the
 list, and adding them later renames nothing that is in it, which is the point

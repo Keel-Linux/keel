@@ -224,6 +224,20 @@ def build_parser() -> argparse.ArgumentParser:
     add_common_options(watch_parser)
     add_root_option(watch_parser, "watch the database of")
     watch_parser.set_defaults(handler="keel.commands.database_watch")
+    dump_parser = database_actions.add_parser(
+        "dump",
+        help="dump this node's database while it is the replica of a pair,"
+        " within database.server.dump; what keel-database-dump.timer runs"
+        " (root)",
+    )
+    add_common_options(dump_parser)
+    add_root_option(dump_parser, "dump the database of")
+    dump_parser.add_argument(
+        "--if-due", action="store_true",
+        help="dump only when database.server.dump.every_hours is over;"
+        " what the timer's tick asks",
+    )
+    dump_parser.set_defaults(handler="keel.commands.database_dump")
     guard_parser = database_actions.add_parser(
         "guard",
         help="the ExecStartPre of the PostgreSQL unit on a pair (keel#156):"

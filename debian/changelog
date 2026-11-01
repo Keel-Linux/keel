@@ -1,3 +1,27 @@
+keel (0.23.80) unstable; urgency=medium
+
+  * keel database dump and keel-database-dump.timer now exist: docs/
+    replication.md described them and keel did not have them.  On the
+    replica of a MariaDB or PostgreSQL pair, one dump in a pipe to zstd,
+    mode 0600, with no credential on a command line.  The new
+    database.server.dump section sets enabled, every_hours, keep and
+    min_free_percent; the defaults are a daily dump and 7 files.  The
+    timer ticks hourly and the spec decides.
+  * A dump cannot fill the disk.  keel checks the room above
+    min_free_percent first, the kernel stops the dump at that room
+    (RLIMIT_FSIZE), and keel removes a partial file.  Only a good dump
+    removes old dumps, and it never removes a rejoin-* file.
+  * A failed dump, or a dump older than two intervals and one hour on
+    the replica, gives one alert through keel database watch (check
+    database-dump), and one at the recovery.  keel database status shows
+    the newest dump and the last problem.
+  * A diverged MariaDB node makes one rejoin dump for each GTID state.
+    It made one at each keel database watch: 223 files, 246 MB in 2.5
+    hours on a real node.  The rejoin dump of both engines now leaves 5%
+    of the disk free, and the kernel stops it at half of the room.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Mon, 03 Nov 2026 00:00:00 +0000
+
 keel (0.23.79) unstable; urgency=medium
 
   * keel spec validate, keel spec apply with the system phase and keel diff
