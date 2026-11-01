@@ -600,6 +600,19 @@ time
 (`sync.lock`); a sync that finds a network change waiting in its window
 leaves the members to the next one.
 
+### The sync lock has bounds
+
+`keel mesh members` and `keel mesh sync` hold
+`/var/lib/keel/mesh/sync.lock` while they apply a change. The lock file names
+the holder, its process and its start time. `keel mesh sync` does not wait: it
+names the holder and leaves the change to it. The members' channel waits at
+most 600 s, says for whom, and then leaves the announcement to the next
+`keel mesh sync`. Each step under the lock has its own bound
+([docs/apply.md](apply.md)), so the lock comes free (keel#276).
+
+The members' channel answers one request at a time, so an apply that it runs
+for a cluster message also delays the other requests by that time.
+
 ## keel mesh sync
 
 ```

@@ -80,6 +80,9 @@ WORKER_POLL = 0.2
 # survive, and announcements close together share one window
 SETTLE = 10.0
 WAIT_OVERLAY = 2.0
+# The listener writes a message at once. Half of one must not hold the root
+# side, which holds the sync lock's worker and the keys
+MESSAGE_WAIT = 30.0
 
 
 class Pending:
@@ -290,7 +293,7 @@ def message(conn: socket.socket, stop: threading.Event,
             continue
         if not first:
             return None
-        conn.settimeout(None)
+        conn.settimeout(MESSAGE_WAIT)
         rest = b"" if first == b"\n" else line(conn)
         return None if rest is None else first + rest
     return None

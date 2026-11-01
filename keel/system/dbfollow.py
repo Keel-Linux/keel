@@ -190,9 +190,12 @@ def follow(root: str, spec: str, confirmed: bool, found: Followed,
            alone: bool = False) -> None:
     """One run at a time: keel-database-follow.service and keel database
     watch never interleave between the proof and SET read_only OFF"""
-    with dbreadonly.replication_locked(root):
-        _follow(root, spec, confirmed, found, runner, output, wait, sleep,
-                alone)
+    try:
+        with dbreadonly.replication_locked(root):
+            _follow(root, spec, confirmed, found, runner, output, wait, sleep,
+                    alone)
+    except TimeoutError as e:
+        found.fail(str(e))
 
 
 class Flip:

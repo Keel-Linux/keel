@@ -1,3 +1,23 @@
+keel (0.23.78) unstable; urgency=medium
+
+  * A mesh join cannot wait for ever (keel#276). keel spec apply queues
+    keel-vip.service with --no-block once etcd's cluster exists, as it does
+    for etcd. Before, the start waited for etcd.service, etcd waited for a
+    majority, the majority needed a WireGuard peer, and the plan adds the
+    peers after this step. keel mesh members held the sync lock for all of
+    that time, so keel mesh sync could not add the peer either.
+  * Each command of keel spec apply --system now has a bound: 300 s for a
+    systemctl command, 3600 s for a database unit and 900 s for another
+    command, with no shorter time of its own. A long job says what it waits for, from systemctl list-jobs
+    --after. keel.network.live has bounds of 300 s and 60 s.
+  * The members' channel waits at most 600 s for the sync lock, and the lock
+    file names its holder. keel mesh sync names the holder when it finds the
+    lock taken. Half of a message from the listener stops the root side after
+    30 s. The lock of the replication has a bound of 7 h, and one client of a
+    seed a bound of 6 h.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Sun, 01 Nov 2026 12:00:00 +0000
+
 keel (0.23.77) unstable; urgency=medium
 
   * An upgrade from before 0.23.65 no longer stops a container whose spec

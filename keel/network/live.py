@@ -12,13 +12,20 @@ import subprocess
 from keel.network import marker
 
 SOCKETS = ("ss", "-Htnp", "state", "established")
+# What keel mesh and a revert wait for: a command that changes the machine,
+# and a question. keel mesh holds its locks during these calls.
+RUN_WAIT = 300.0
+OUTPUT_WAIT = 60.0
 
 
 def run(argv: tuple[str, ...]) -> str | None:
     """None on success, else what went wrong"""
     try:
         out = subprocess.run(list(argv), capture_output=True, text=True,
-                             check=False)
+                             check=False, timeout=RUN_WAIT)
+    except subprocess.TimeoutExpired:
+        return (f"{argv[0]} did not finish within {RUN_WAIT:g} s and was"
+                " killed")
     except OSError as e:
         return f"cannot run {argv[0]}: {e.strerror}"
     if out.returncode != 0:
@@ -31,8 +38,8 @@ def output(argv: tuple[str, ...]) -> str | None:
     """Standard output, or None when the command could not answer"""
     try:
         out = subprocess.run(list(argv), capture_output=True, text=True,
-                             check=False)
-    except OSError:
+                             check=False, timeout=OUTPUT_WAIT)
+    except (OSError, subprocess.TimeoutExpired):
         return None
     return out.stdout if out.returncode == 0 else None
 

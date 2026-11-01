@@ -134,10 +134,17 @@ def same_key(path: str, key: str, conf: str) -> str | None:
             " should not use, then apply again")
 
 
+# keel mesh reads the key under its sync lock
+WG_WAIT = 60
+
+
 def run_to(argv: tuple[str, ...], fob) -> str | None:
     try:
         out = subprocess.run(list(argv), stdout=fob,
-                             stderr=subprocess.PIPE, text=True, check=False)
+                             stderr=subprocess.PIPE, text=True, check=False,
+                             timeout=WG_WAIT)
+    except subprocess.TimeoutExpired:
+        return f"{argv[0]} did not finish within {WG_WAIT} s"
     except OSError:
         return NO_TOOLS
     if out.returncode != 0:
@@ -161,7 +168,10 @@ def public(path: str) -> tuple[str | None, str | None]:
     with key:
         try:
             out = subprocess.run(["wg", "pubkey"], stdin=key,
-                                 capture_output=True, text=True, check=False)
+                                 capture_output=True, text=True, check=False,
+                                 timeout=WG_WAIT)
+        except subprocess.TimeoutExpired:
+            return None, f"wg pubkey did not finish within {WG_WAIT} s"
         except OSError:
             return None, NO_TOOLS
     if out.returncode != 0:

@@ -129,7 +129,7 @@ class TestApply(Case):
     def test_with_etcd_s_cluster_the_unit_is_started(self):
         self.formed()
         step = self.plan("enabled", "inactive")
-        self.assertIn(("systemctl", "start", UNIT),
+        self.assertIn(("systemctl", "start", "--no-block", UNIT),
                       [a.argv for a in step.actions if isinstance(a, Run)])
 
 

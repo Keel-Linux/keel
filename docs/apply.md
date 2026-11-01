@@ -1084,6 +1084,18 @@ overlay enabled, apply writes from that state:
 | `/etc/sysctl.d/90-keel-etcd.conf` | `net.ipv4.tcp_retries2 = 5`: the kernel ends a peer connection that a cut stalled after about 14 s, and etcd dials again (keel#167); apply also sets it live with `sysctl -w`, with no restart. 0644 |
 | `/etc/systemd/system/etcd.service.d/keel.conf` | after `wg-quick@<interface>`, restarted on failure, `TimeoutStartSec=infinity` (etcd reports ready only with a quorum), and systemd's sandbox: no capability, `ProtectSystem=strict` with `/var/lib/etcd` writable, the kernel and namespace protections, `@system-service` system calls. Then `systemctl daemon-reload`. 0644 |
 
+keel-vip.service is ordered after etcd.service, so it is queued with
+`--no-block` too. A plan never waits for the majority of etcd: the plan adds
+the WireGuard peers after this step, and the majority can need those peers
+(keel#276).
+
+Each command of a plan has a bound. A systemctl command stops at 300 s (3600 s for a
+database unit, which can recover after a crash) and any other command at 900 s, when its action sets no shorter time. A job of
+systemd that still runs after 30 s is said on standard error with the jobs
+that it waits for. At the bound the step fails and says the same, the job
+stays queued, and the next steps run. One client of a database seed stops at
+6 h, and a wait for the lock of the replication at 7 h.
+
 etcd is started with `systemctl start --no-block`, and restarted
 (`--no-block`) when its environment or drop-in changes, but not for the
 `ETCD_INITIAL_*` lines once `/var/lib/etcd/default/member` exists: etcd
