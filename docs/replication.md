@@ -355,6 +355,49 @@ thread started and drained again, then the promotion.
 `keel-database-follow.path` starts follow when the claim is written,
 and follow looks for the VIP on `wg0` every 0.2 s.
 
+**A replica that lags does not take writes by itself** (keel#271). The
+drain proves that a node applied what it received, not that it received
+what the primary acknowledged, and `Seconds_Behind_Master` compares only
+what it received (0 at 8000 rows behind, on a real pair). So while a node
+holds the VIP and its server is writable, `keel-database-position.service`
+keeps in etcd, each 2 s, a record of its `gtid_binlog_pos` of about 4 s
+ago and whether it has a replica. The key is
+`/keel/<mesh>/etcd/database/<vip>`. A read-only holder writes nothing, so
+a lagging holder cannot write over the record that refused it.
+
+Before a replica that holds the VIP drains, follow compares what it
+received (`gtid_slave_pos`, `Gtid_IO_Pos`, its binary log state) with the
+record, by GTID:
+
+| The record | The old primary answers | Follow |
+| --- | --- | --- |
+| at or below this node, with a replica | not asked | drain and promote |
+| none (a holder of an older keel), or no etcd here | not asked | drain and promote |
+| above this node, or no replica, or not readable | at or below this node | drain and promote |
+| above this node, or no replica, or not readable | above this node | stays a read-only replica, goes on receiving from it, and promotes by itself once it caught up |
+| above this node, or no replica, or not readable | no answer | stays a read-only replica |
+
+A refusal goes through the monitor's channels once, shows in `keel
+database status` as `PROMOTION REFUSED`, and is the same at each follow.
+The VIP stays on this node, so a client gets error 1290. The operator
+ends it in one of these ways:
+
+- `keel database promote --accept-lost-writes` here takes writes without
+  what this node lacks. The old primary, when it comes back, is diverged.
+  The writes stay in its data and its dumps, and nothing puts them back.
+- `keel database promote` on the old primary, when it came back, moves the
+  VIP to the node that holds everything. The lagging node goes on as its
+  replica.
+
+The cost is availability: a primary lost while its replica is away or
+behind now stops the writes until an operator acts, or until it comes
+back and the replica caught up. What is left is a holder that acknowledges
+writes alone and dies within about 2 s of its last replica leaving,
+before the record says so. A cut does not reach this: it takes about
+12.6 s to end the dump thread, and the first commit that waits moves the
+position. `keel database status` on a replica shows the distance to the
+record, in transactions.
+
 **The database follows the VIP** (0020: everything that depends on the
 role follows the elected role). `keel-database-follow.path` watches
 `/var/lib/keel/vip/` and runs `keel database follow`, which makes the
@@ -362,7 +405,7 @@ server match the VIP state keel holds:
 
 | VIP state on this node | `keel database follow` |
 | --- | --- |
-| holds the VIP, newest epoch, the VIP on `wg0` | promote, as above, when the server is a replica or read only |
+| holds the VIP, newest epoch, the VIP on `wg0` | promote, as above, when the server is a replica or read only; a replica that lags stays read only (keel#271) |
 | its own claim the newest it knows, the VIP not on `wg0` | `read_only = ON`, the root lock, nothing else: not proven (keel#104) |
 | fenced, or released | `read_only = ON` at once, the root lock, then the rejoin below |
 | no claim known yet, on a paired node | `read_only = ON`, the root lock: a declared primary is not proven either (keel#104) |

@@ -756,7 +756,7 @@ the one decision no machine here can make. In this order:
 
 A replica whose SQL thread already stopped on an error is refused before
 anything changes: what it received and did not apply would be lost. Fix
-what stopped it and `START SLAVE` until `Seconds_Behind_Master` is 0,
+what stopped it and `START SLAVE` until `gtid_slave_pos` reaches the old primary's position,
 then promote; or, while the old primary is there, rebuild the replica
 from it with `--destroy-local-database`. Then it says two things:
 

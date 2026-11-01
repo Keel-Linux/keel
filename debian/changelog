@@ -1,3 +1,14 @@
+keel (0.23.81) unstable; urgency=medium
+
+  * A MariaDB replica that lags does not take writes by itself (keel#271).
+    The holder keeps its GTID position in etcd
+    (keel-database-position.service). A node that holds the VIP and lacks
+    what the record names, or whose old primary had no replica, stays a
+    read-only replica until it caught up or the operator runs keel database
+    promote --accept-lost-writes.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Mon, 03 Nov 2026 00:00:00 +0000
+
 keel (0.23.80) unstable; urgency=medium
 
   * keel database dump and keel-database-dump.timer now exist: docs/

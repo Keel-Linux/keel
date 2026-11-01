@@ -19,10 +19,8 @@ from keel.inspect.collect import database_servers
 from keel.inspect.dbreading import field_lines
 from keel.inspect.tree import Tree
 from keel.mesh.node import Node, NodeError
-from keel.system import dbdump, dbfollow, dbpair, dbpgstatus, dbtls, dbwatch
+from keel.system import dbdump, dbfollow, dbpair, dbpgstatus, dbposition, dbtls, dbwatch
 
-# the replica away (keel#270): Rpl_semi_sync_master_status alone does not
-# show it, since it stays ON with no replica connected
 FALLBACK = {
     dbwatch.NO_REPLICA: "no replica is connected, so each commit is"
     " acknowledged with no copy on the replica. A failover now loses these"
@@ -100,8 +98,27 @@ def lines(root: str, spec: str) -> list[str]:
     if reading.gtid.known:
         for name, value in reading.gtid.value.items():
             found.append(f"  gtid {name}: {value or '(empty)'}")
+    found += _distance(root, spec, pair, status, reading)
     found.append("  certificate: " + _certificate(dbtls.summary(root)))
     return found + _diverged(root) + vip_lines(root, spec)
+
+
+def _distance(root: str, spec: str, pair, status: dict, reading) -> list[str]:
+    """How far this replica is, by GTID (keel#271), and a refused
+    promotion. Seconds_Behind_Master compares only what it received"""
+    found = dbposition.status_lines(root)
+    if pair is None or not status or not reading.gtid.known:
+        return found
+    own = ",".join(part for part in (
+        status.get("Gtid_IO_Pos"), reading.gtid.value.get("slave_pos"))
+        if part)
+    try:
+        here = dbfollow._here(root, spec)
+        if dbposition.with_etcd(here):
+            found += dbposition.distance_lines(here, pair.vip, own)
+    except (NodeError, ValueError, OSError) as e:
+        found.append(f"  behind the holder's record: unknown ({e})")
+    return found
 
 
 def postgresql_lines(root: str, installed) -> list[str]:

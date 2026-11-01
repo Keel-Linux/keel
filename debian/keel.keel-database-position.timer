@@ -1,0 +1,11 @@
+# keel database position, started again each 30 s after it ended (keel#271)
+[Unit]
+Description=keel database: keep the holder's position in etcd
+
+[Timer]
+OnBootSec=1min
+OnUnitInactiveSec=30s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

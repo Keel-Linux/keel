@@ -1,0 +1,16 @@
+# keel database position (keel#271): while this node holds the VIP of a
+# MariaDB pair, its GTID position and whether it has a replica, kept in
+# etcd each 2 s, so that a lagging replica does not take writes after a
+# failover. It ends on a node with no such pair, and
+# keel-database-position.timer starts it again.
+[Unit]
+Description=keel database: the holder's position, in etcd
+After=network-online.target mariadb.service
+Wants=network-online.target
+ConditionPathExists=/var/lib/keel/database
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/keel database position
+Restart=on-failure
+RestartSec=5s

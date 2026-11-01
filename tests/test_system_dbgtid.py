@@ -34,5 +34,24 @@ class TestCarried(unittest.TestCase):
             dbgtid.carried("nonsense", "0-1-1")
 
 
+class TestBehind(unittest.TestCase):
+    """keel#271: the true distance, by domain, whatever the server id"""
+
+    def test_the_transactions_missing_in_each_domain(self):
+        self.assertEqual(dbgtid.behind("0-1-27978", "0-1-14614"),
+                         {0: 13364})
+        self.assertEqual(dbgtid.behind("0-1-10,1-1-5", "0-2-10"),
+                         {1: 5})
+
+    def test_a_node_at_or_above_is_not_behind(self):
+        self.assertEqual(dbgtid.behind("0-1-10", "0-1-10"), {})
+        self.assertEqual(dbgtid.behind("0-1-10", "0-2-11"), {})
+        self.assertEqual(dbgtid.behind("", "0-1-1"), {})
+
+    def test_a_value_that_is_no_gtid_raises(self):
+        with self.assertRaises(ValueError):
+            dbgtid.behind("nonsense", "0-1-1")
+
+
 if __name__ == "__main__":
     unittest.main()

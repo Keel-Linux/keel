@@ -90,7 +90,22 @@ def agent_main(root: str, path: str) -> None:
     VIP_COMMAND = vip_netns.command
     vip_netns.command = database_command
     FOLLOWER.start(root, path)
+    threading.Thread(target=publish_position, args=(root, path),
+                     daemon=True).start()
     vip_netns.agent(root, path)
+
+
+def publish_position(root: str, path: str) -> None:
+    """What keel-database-position.service and its timer do on a machine"""
+    from keel.system import dbfollow, dbposition, dbpositionunit
+    stop = threading.Event()
+    while True:
+        here = dbfollow._here(root, path)
+        dbposition.serve(here,
+                         lambda: dbpositionunit.pair_of(root, path, here),
+                         stop, lambda line: print(line, file=sys.stderr,
+                                                  flush=True))
+        time.sleep(5)
 
 
 class Follower:
@@ -275,7 +290,9 @@ def database_command(here, words: list[str]) -> dict | None:
                 contextlib.redirect_stderr(out):
             code = cli.main(["database", "promote", "--spec", path, "--root",
                              root] + (["--old-primary-gone"]
-                                      if "gone" in words else []))
+                                      if "gone" in words else [])
+                            + (["--accept-lost-writes"]
+                               if "accept" in words else []))
         return {"code": code, "out": out.getvalue().splitlines(),
                 "took_s": round(time.monotonic() - started, 2)}
     if words[:1] == ["followlog"]:
@@ -684,6 +701,7 @@ def play(report: dict, pids: list[int], pairs, roots: list[str],
     planned(report, pids, pairs, roots, "A", "k138_to_a")
     replica_away(report, pids)
     crashed(report, pids, roots)
+    lost_while_alone(report, pids, roots)
     report["alerts"] = [one.get("text", "")[:160] for one in HOOKS["alerts"]]
     for process in vip_netns.AGENTS.values():
         try:
@@ -948,6 +966,62 @@ def replica_away(report: dict, pids: list[int]) -> None:
     report["k270_back_s"] = wait_until(
         lambda: any("is back" in one for one in alerts()), 30, 1)
     report["k270_alerts"] = [one[:400] for one in alerts()]
+
+
+def lost_while_alone(report: dict, pids: list[int], roots: list[str]) -> None:
+    """keel#271, the case F2 of the evidence: the replica A cut, the
+    holder B acknowledges with no copy, B lost and A healed. A claims the
+    VIP and stays read only until the operator's act"""
+    import vip_netns
+    from vip_netns import agent_send, wait_until
+    b_root = roots[1]
+
+    def clients() -> str:
+        return status_value(agent_send, "B", "Rpl_semi_sync_master_clients")
+    wait_until(lambda: clients() == "1", 120, 1)
+    # A must catch up and be unfenced from crashed(): the fence stays
+    # until _unfence sees A's GTID at or past B's (keel#104)
+    wait_until(lambda: replica_status(agent_send, "A").get(
+        "Seconds_Behind_Master") == "0", 120, 1)
+    agent_send("A", "follow", 180)
+    seen = len(HOOKS["alerts"])
+    vip_netns.leg("to1", "100%")
+    sh("tc", "qdisc", "replace", "dev", "uplink", "root", "netem", "loss",
+       "100%", pid=pids[0])
+    insert = f"sql INSERT INTO {APP_DB}.t (v, at) VALUES ('alone', 0)"
+    report["k271_writes"] = [agent_send("B", insert, 120).get("code")
+                             for _ in range(5)]
+    report["k271_no_clients_s"] = wait_until(lambda: clients() == "0", 60, 1)
+    agent_send("B", insert, 120)
+    # the holder's record said so, then the holder is lost
+    time.sleep(6)
+    report["k271_b_gtid"] = agent_send("B", "sql SELECT @@gtid_binlog_pos")
+    sh("systemctl", "kill", "--signal=SIGKILL", service_of(b_root),
+       check=False)
+    sh("systemctl", "stop", f"keel-vip-test-{vip_netns.NAMES[1]}",
+       check=False)
+    vip_netns.leg("to2", "100%")
+    sh("tc", "qdisc", "replace", "dev", "uplink", "root", "netem", "loss",
+       "100%", pid=pids[1])
+    vip_netns.heal(pids, 0)
+
+    def refused() -> bool:
+        return any("PROMOTION REFUSED" in line for line in
+                   agent_send("A", "dbstatus").get("lines") or [])
+    report["k271_refused_s"] = wait_until(refused, 180, 2)
+    report["k271_status"] = agent_send("A", "dbstatus")
+    report["k271_read_only"] = agent_send("A", "sql SELECT @@read_only")
+    report["k271_a_gtid"] = agent_send("A", "sql SELECT @@gtid_binlog_pos")
+    # another watch's follow: the same answer
+    agent_send("A", "follow", 180)
+    report["k271_read_only_again"] = agent_send("A",
+                                                "sql SELECT @@read_only")
+    report["k271_alerts"] = [json.dumps(one)[:400]
+                             for one in HOOKS["alerts"][seen:]]
+    report["k271_accept"] = agent_send("A", "dbpromote accept", 300)
+    report["k271_read_only_after"] = agent_send("A",
+                                                "sql SELECT @@read_only")
+    report["k271_log"] = agent_send("A", "followlog")
 
 
 def crashed(report: dict, pids: list[int], roots: list[str]) -> None:

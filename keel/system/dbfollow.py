@@ -13,7 +13,7 @@ have no twin there:
 
 | the VIP here | what is done |
 | --- | --- |
-| held, by this node's newest claim, and on wg0 | the server made writable: a replica drained and promoted (keel.system.dbreadonly), read_only off, READ_ONLY ADMIN back; a server that replicates from nobody and is read only (restarted, or fenced) first waits up to REPLICA_WAIT for its replica (keel#242) |
+| held, by this node's newest claim, and on wg0 | the server made writable: a replica that lacks nothing the old primary's record names (keel.system.dbposition, keel#271) drained and promoted (keel.system.dbreadonly), read_only off, READ_ONLY ADMIN back; a server that replicates from nobody and is read only (restarted, or fenced) first waits up to REPLICA_WAIT for its replica (keel#242) |
 | held, by this node's newest claim, and not on wg0 | read_only on, the root lock; nothing else (keel#104) |
 | no claim, on a paired node | the same: read only until a claim is proven (keel#104) |
 | held by the other member; released or fenced here | read_only on at once, the root lock, then replication from the holder: a fresh server seeded, one already following it left alone, an old primary rejoined by GTID when it holds nothing the holder lacks, else left read only, reported and alerted |
@@ -75,7 +75,8 @@ from keel.mesh.node import Node, NodeError
 from keel.monitor import alerting
 from keel.network import live, wireguard
 from keel.spec.constants import DEFAULT_PORTS
-from keel.system import dbgtid, dbpair, dbpgrewind, dbreadonly, dbseed, dbtls
+from keel.system import dbgtid, dbpair, dbpgrewind, dbposition, dbreadonly
+from keel.system import dbseed, dbtls
 from keel.system import dbmariadb as mariadb
 from keel.system.actions import PromoteReplica, SeedReplica
 from keel.system.database import DRAIN_TIMEOUT, PRIMARY, REPLICA
@@ -304,7 +305,8 @@ def _follow_proof(root: str, spec: str, confirmed: bool, found: Followed,
         return
     elif role == PRIMARY:
         if not _primary(root, state, found, runner, sleep,
-                        lambda: _proven(root, doc, output, 0, sleep)):
+                        lambda: _proven(root, doc, output, 0, sleep),
+                        lambda: _lags(root, spec, state, found, runner)):
             _unproven(root, state, found, runner)
             return
     elif role == REPLICA:
@@ -484,10 +486,13 @@ def _read_only(root: str, state: DatabaseState, found: Followed,
 
 
 def _primary(root: str, state: DatabaseState, found: Followed,
-             runner, sleep=time.sleep, proven=lambda: True) -> bool:
+             runner, sleep=time.sleep, proven=lambda: True,
+             lags=lambda: False) -> bool:
     """The holder: writable, replicating from nobody. False when the VIP
     was no longer proven after the wait for the replica"""
     replicating = bool(state.status.lines())
+    if replicating and lags():
+        return True
     if replicating:
         problem = dbreadonly.promote(root, PromoteReplica(DRAIN_TIMEOUT),
                                      runner)
@@ -520,6 +525,41 @@ def _primary(root: str, state: DatabaseState, found: Followed,
         found.say("READ_ONLY ADMIN given back to the accounts the replica"
                   " took it from")
     _forget_divergence(root)
+    return True
+
+
+def _lags(root: str, spec: str, state: DatabaseState, found: Followed,
+          runner) -> bool:
+    """Whether this replica, which holds the VIP, lacks what the old
+    primary logged (keel#271). It then stays a read-only replica, and
+    each follow gives the same answer until it caught up or the operator
+    accepted the loss. Without etcd there is no automatic failover: the
+    VIP moved by the operator's own promote, and there is no record"""
+    here = _here(root, spec)
+    if not dbposition.with_etcd(here):
+        return False
+    fields = field_lines(state.status)
+    own = _ask(runner, APPLIED_QUESTION) or ""
+    own = ",".join(part for part in own.strip().split("\t") + [
+        fields.get("Gtid_IO_Pos", "")] if part)
+    vip = state.pair.vip
+
+    def old_primary() -> str | None:
+        host = fields.get("Master_Host") or state.pair.peer_address
+        port = int(fields.get("Master_Port") or DEFAULT_PORTS["mariadb"])
+        answer = _holder_gtid(root, host, port, state, runner)
+        return answer.strip().partition("\t")[0] if answer else None
+    why = dbposition.why_not(own, dbposition.read_record(here, vip),
+                             old_primary)
+    if why is None:
+        dbposition.forget(root)
+        return False
+    if dbposition.accepted(root):
+        found.say(dbposition.ACCEPTED_SAID.format(why=why))
+        dbposition.forget(root)
+        return False
+    found.fail(why)
+    dbposition.refused(root, vip, why, found.say)
     return True
 
 
@@ -597,13 +637,10 @@ def _unfence(root: str, host: str, port: int, state: DatabaseState,
     if theirs is None or mine is None:
         return
     try:
-        holder = dbgtid.newest(theirs.strip().partition("\t")[0])
-        applied = dbgtid.newest(",".join(
-            part for part in mine.strip().split("\t") if part))
+        if dbgtid.behind(theirs.strip().partition("\t")[0], ",".join(
+                part for part in mine.strip().split("\t") if part)):
+            return
     except ValueError:
-        return
-    if any(applied.get(domain, 0) < sequence
-           for domain, sequence in holder.items()):
         return
     if vipstate.unfenced(root, pair.vip, pair.own_key):
         found.say(UNFENCED_SAID)

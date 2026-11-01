@@ -18,7 +18,7 @@ from test_inspect_database import MARIADB_REPLICA_STATUS
 from vip_helpers import KEYS, VIP, Pair, address
 
 from keel.mesh import vippromote
-from keel.system import dbfollow, dbpair, dbsecret, dbtls, dbwatch
+from keel.system import dbfollow, dbpair, dbposition, dbsecret, dbtls, dbwatch
 from keel.system import dbmariadb as mariadb
 
 PRIMARY_SPEC = {"engine": "mariadb", "role": "primary",
@@ -28,6 +28,17 @@ REPLICA_SPEC = {"engine": "mariadb", "role": "replica",
 
 
 REAL_RUN = subprocess.run
+
+
+REPLICA_WITH_IO_POS = (
+    MARIADB_REPLICA_STATUS.replace("2001:db8:1::10", "{host}")
+    + "        Seconds_Behind_Master: 1\n"
+    + "         Master_Log_File: b.000002\n"
+    + "     Read_Master_Log_Pos: 10\n"
+    + "   Relay_Master_Log_File: b.000002\n"
+    + "     Exec_Master_Log_Pos: 10\n"
+    + "              Gtid_IO_Pos: 0-1-10\n"
+    + "          Last_SQL_Error: \n")
 
 
 class Server:
@@ -296,6 +307,61 @@ class TestThePrimary(FollowTestCase):
         self.assertNotIn("SET GLOBAL read_only = OFF;\n", server.sent)
         self.assertTrue(any("not proven" in one for one in found.lines),
                         found.lines)
+
+    def test_a_lagging_replica_that_takes_the_vip_stays_read_only(self):
+        """keel#271, the case K1: the holder left 27978, this node has
+        10, and it stays a replica: it goes on receiving, and no write
+        is taken. The next watch's follow gives the same answer"""
+        self.pair_nodes()
+        server = Server(replicating_from=address(1), read_only="ON",
+                        holder_down=True, binlog_state="0-1-10",
+                        slave_pos="0-1-10")
+        record = dbposition.Record("0-1-27978", False, "other")
+        with mock.patch.object(dbposition, "with_etcd", return_value=True), \
+                mock.patch.object(dbposition, "read_record",
+                                  return_value=record), \
+                mock.patch("keel.monitor.alerting.alert",
+                           return_value=True) as alerted:
+            for _ in range(2):
+                found = self.follow(0, server)
+                self.assertIn("27968", found.problem)
+                self.assertFalse(any("drained and promoted" in one
+                                     for one in found.lines))
+        self.assertEqual(alerted.call_count, 1)
+        self.assertNotIn("SET GLOBAL read_only = OFF;\n", server.sent)
+        self.assertFalse(any("STOP SLAVE" in one for one in server.events))
+        self.assertFalse(os.path.exists(os.path.join(
+            self.all[0].root, dbpair.ROLE_FILE)))
+
+    def test_the_operator_s_act_takes_the_lagging_replica_to_writes(self):
+        self.pair_nodes()
+        server = Server(replicating_from=address(1), read_only="ON",
+                        holder_down=True, binlog_state="0-1-10")
+        record = dbposition.Record("0-1-27978", False, "other")
+        with mock.patch.object(dbposition, "with_etcd", return_value=True), \
+                mock.patch.object(dbposition, "read_record",
+                                  return_value=record), \
+                dbposition.accepting(self.all[0].root):
+            found = self.follow(0, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertIn("accepted", " ".join(found.lines))
+        self.assertIn("drained and promoted", " ".join(found.lines))
+
+    def test_a_replica_that_received_all_of_it_is_promoted(self):
+        """What was received counts: the drain applies it next"""
+        self.pair_nodes()
+        server = Server(replicating_from=address(1), read_only="ON",
+                        binlog_state="0-1-5", slave_pos="0-1-5")
+        record = dbposition.Record("0-1-10", False, "other")
+        with mock.patch.object(dbposition, "with_etcd", return_value=True), \
+                mock.patch.object(dbposition, "read_record",
+                                  return_value=record), \
+                mock.patch.object(Server, "status",
+                                  lambda this: REPLICA_WITH_IO_POS.format(
+                                      host=address(1))):
+            found = self.follow(0, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertIn("drained and promoted", " ".join(found.lines))
 
     def test_a_replica_that_takes_the_vip_is_drained_and_promoted(self):
         self.pair_nodes()
