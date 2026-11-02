@@ -31,6 +31,7 @@ from keel.manifest import monit
 from keel.manifest.facts import gather
 from keel.manifest.resolve import overlay_units
 from keel.mesh import etcdstate
+from keel.spec import overlayrecord
 from keel.spec.validate_appliance import with_defaults
 from keel.system.fwstate import bridges_of, table_digest
 from keel.system.monitor import NOTIFY
@@ -60,6 +61,12 @@ LEGACY_VIP = (
 )
 NOT_LIVE = ("the table the kernel holds is asked of nft on the live system"
             " only")
+NOT_APPLIED = (
+    f"no successful apply is recorded (/{overlayrecord.RECORD}):"
+    " apply has not converged this appliance; see the [10keel-system]"
+    " lines in /var/log/inithooks.log, or run"
+    " keel spec apply --system --dry-run"
+)
 
 
 def appliance_fields(declared: dict, root: str) -> list[FieldDiff]:
@@ -104,7 +111,8 @@ def appliance_fields(declared: dict, root: str) -> list[FieldDiff]:
             continue
         status = SAME if value == wanted else DRIFT
         fields.append(FieldDiff(key, status, wanted, value or why))
-    return (fields + monit_fields(declared, resolved, states, tree)
+    applied = facts.recorded is not None
+    return (fields + monit_fields(declared, resolved, states, tree, applied)
             + firewall_fields(declared, resolved, states, tree)
             + etcd_fields(states, tree))
 
@@ -206,7 +214,7 @@ def firewall_fields(declared: dict, resolved, states: dict,
 
 
 def monit_fields(declared: dict, resolved, states: dict,
-                 tree: Tree) -> list[FieldDiff]:
+                 tree: Tree, applied: bool = True) -> list[FieldDiff]:
     wg = ((declared.get("network") or {}).get("overlay") or {}).get(
         "wireguard") or {}
     rendered = monit.render(resolved, states, wg.get("address"), NOTIFY,
@@ -214,6 +222,9 @@ def monit_fields(declared: dict, resolved, states: dict,
     file = tree.read(monit.PATH)
     if file.text == rendered.text:
         fields = [FieldDiff("derived.monit", SAME, RENDERED, RENDERED)]
+    elif not file.readable and not applied:
+        fields = [FieldDiff("derived.monit", DRIFT, RENDERED, None,
+                            note=NOT_APPLIED)]
     else:
         fields = [FieldDiff("derived.monit", DRIFT, RENDERED,
                             DIFFERS if file.readable else None)]

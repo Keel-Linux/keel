@@ -1,3 +1,18 @@
+keel (0.23.73) unstable; urgency=medium
+
+  * keel diff reported derived.monit as drift with no further context
+    when the monit file had never been written because apply had not
+    converged the appliance (keel#252). The overlay record
+    (var/lib/keel/spec/overlays.yaml) tells whether apply has run and
+    succeeded: it is written only after a run that does not fail. When
+    the file is absent and no record exists, diff still reports drift
+    (the file is expected) but adds a note that names the record file,
+    the first-boot log to check, and a dry-run command that shows what
+    apply would do. A file deleted after a successful apply stays bare
+    drift, as before.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Sat, 01 Nov 2026 01:10:00 +0000
+
 keel (0.23.72) unstable; urgency=medium
 
   * The VIP bridge drains messages on SIGTERM until the controller sends
