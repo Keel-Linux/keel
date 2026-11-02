@@ -1128,7 +1128,21 @@ def crashed(report: dict, pids: list[int], roots: list[str]) -> None:
     # keel-database-follow.service does at boot, before its VIP helper
     # told it of B's newer claim
     vip_netns.heal(pids, 0)
+    # while A was cut and still held the VIP, a watch run may have asked
+    # keel database follow, and follow starts the server of a holder that
+    # proves its claim (keel#154): that is correct when the server crashed
+    # and the network works. A start of an active unit does nothing and
+    # runs no guard, so the unit is stopped first, whatever follow did,
+    # and the report says what follow did
+    before = sh("systemctl", "is-active", service_of(a_root),
+                check=False).strip()
+    sh("systemctl", "stop", service_of(a_root), check=False)
     sh("systemctl", "reset-failed", service_of(a_root), check=False)
+    report["e_before_boot"] = {
+        "started_in_the_cut": before in ("active", "activating"),
+        "was": before,
+        "now": sh("systemctl", "is-active", service_of(a_root),
+                  check=False).strip()}
     # keel database guard refuses the start: A's own claim is not proven
     # (keel#156), so its server never takes a write as a primary
     started = subprocess.run(["systemctl", "start", service_of(a_root)],

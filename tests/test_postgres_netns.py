@@ -260,6 +260,11 @@ class TestAPostgresqlPairOnAPoorNetwork(unittest.TestCase):
                             or "rewound" in joined, boot)
         # keel#156: the start at boot is refused, so A never takes a
         # write as a primary; it starts later, fenced, as a standby
+        # the start must run the guard: the unit is stopped first, also
+        # when follow started the server in the cut (the report says so)
+        before = found["e_before_boot"]
+        print(f"(e) before the boot: {before}", file=sys.stderr)
+        self.assertEqual(before["now"], "inactive", before)
         start = found["e_boot_start"]
         self.assertNotEqual(start["code"], 0, start)
         self.assertTrue(any("not proven" in line for line in start["guard"]),
