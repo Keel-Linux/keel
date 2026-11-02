@@ -6,38 +6,48 @@ keel.commands, which confconsole calls directly. Every command runs
 without a terminal and without prompting.
 
 Exit codes are defined in keel.exits and documented in README.md.
+
+Decision 0070: each handler is stored as a dotted name string, and the
+one module it names is imported after parse_args, so keel --help does
+not load keel.commands or any command implementation.
 """
 
 import argparse
+import importlib
 import os
 import signal
 import sys
 
-from keel import __version__, commands, exits
-from keel.inspect import ROOT_DEFAULT, SECRETS_DIR_DEFAULT
-from keel.layers import (
+from keel import exits
+from keel.constants import (
     CACHE_DEFAULT,
     CACHE_ENV,
+    CHANNELS,
+    CONF_DEFAULT,
+    CONF_ENV,
+    DEFAULT_WINDOW,
     IMAGE_KEYRINGS_DEFAULT,
     IMAGE_KEYRINGS_ENV,
-    CHANNELS,
     KEYRING_DEFAULT,
     KEYRING_ENV,
     LAYERS_DEFAULT,
     LAYERS_ENV,
+    MANIFEST_KINDS,
+    ROOT_DEFAULT,
+    SECRETS_DIR_DEFAULT,
     SIGNER_ENV,
+    SPEC_DEFAULT,
+    SPEC_ENV,
     STATE_DEFAULT,
     STATE_ENV,
+    WIREGUARD_PORT,
 )
-from keel.manifest import KINDS as MANIFEST_KINDS
-from keel.mesh import parser as mesh_parser
-from keel.mesh import vipcli
-from keel.monitor.channelfile import PATH as NOTIFY_SETTINGS
-from keel.monitor.notify import CHECKS as NOTIFY_CHECKS
-from keel.monitor.notify import DIRECTIONS as NOTIFY_DIRECTIONS
-from keel.monitor.notify import LEVELS as NOTIFY_LEVELS
-from keel.spec import CONF_DEFAULT, CONF_ENV, SPEC_DEFAULT, SPEC_ENV
-from keel.system import DEFAULT_WINDOW
+from keel.monitor.constants import (
+    CHECKS as NOTIFY_CHECKS,
+    DIRECTIONS as NOTIFY_DIRECTIONS,
+    LEVELS as NOTIFY_LEVELS,
+    PATH as NOTIFY_SETTINGS,
+)
 
 
 DIFF_FORMATS = ("text", "json")
@@ -51,6 +61,24 @@ class Parser(argparse.ArgumentParser):
         self.print_usage(sys.stderr)
         print(f"Error: {message}", file=sys.stderr)
         raise SystemExit(exits.USAGE)
+
+
+class _VersionAction(argparse.Action):
+    """Print the version without importing importlib.metadata at parse time
+
+    keel.version() loads importlib.metadata on demand (decision 0070).
+    """
+
+    def __init__(self, option_strings, dest=argparse.SUPPRESS,
+                 default=argparse.SUPPRESS,
+                 help="show program's version number and exit"):
+        super().__init__(option_strings=option_strings, dest=dest,
+                         default=default, nargs=0, help=help)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        import keel
+        parser._print_message(keel.version() + "\n", sys.stdout)
+        parser.exit()
 
 
 def spec_default() -> str:
@@ -104,7 +132,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="keel",
         description="Declarative management of one appliance instance",
     )
-    parser.add_argument("--version", action="version", version=__version__)
+    parser.add_argument("--version", action=_VersionAction)
     subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
 
     spec_parser = subparsers.add_parser(
@@ -115,7 +143,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     validate_parser = _add_spec_action(
         spec_actions, "validate", "check the spec and report every error",
-        commands.spec_validate,
+        "keel.commands.spec_validate",
     )
     validate_parser.add_argument(
         "--no-secret-files",
@@ -128,14 +156,14 @@ def build_parser() -> argparse.ArgumentParser:
     _add_spec_action(
         spec_actions, "render",
         "print the conf that apply would write, secrets masked",
-        commands.spec_render,
+        "keel.commands.spec_render",
     )
     apply_parser = _add_spec_action(
         spec_actions, "apply",
         "write the conf, leaving an existing non empty conf alone; with"
         " --system also converge the system state, with --system-only that"
         " state alone",
-        commands.spec_apply,
+        "keel.commands.spec_apply",
     )
     add_apply_options(apply_parser)
 
@@ -168,7 +196,7 @@ def build_parser() -> argparse.ArgumentParser:
         " the newer claim",
     )
     add_root_option(promote_parser, "promote")
-    promote_parser.set_defaults(handler=commands.database_promote)
+    promote_parser.set_defaults(handler="keel.commands.database_promote")
     follow_parser = database_actions.add_parser(
         "follow",
         help="make the server follow the pair's VIP (decisions 0020, 0049):"
@@ -186,7 +214,7 @@ def build_parser() -> argparse.ArgumentParser:
         " (a dump is kept first under /var/backups/keel/mariadb)",
     )
     add_root_option(follow_parser, "follow the VIP of")
-    follow_parser.set_defaults(handler=commands.database_follow)
+    follow_parser.set_defaults(handler="keel.commands.database_follow")
     watch_parser = database_actions.add_parser(
         "watch",
         help="report the semi-synchronous fallback and its recovery through"
@@ -195,7 +223,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_common_options(watch_parser)
     add_root_option(watch_parser, "watch the database of")
-    watch_parser.set_defaults(handler=commands.database_watch)
+    watch_parser.set_defaults(handler="keel.commands.database_watch")
     guard_parser = database_actions.add_parser(
         "guard",
         help="the ExecStartPre of the PostgreSQL unit on a pair (keel#156):"
@@ -205,7 +233,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_common_options(guard_parser)
     add_root_option(guard_parser, "guard the database of")
-    guard_parser.set_defaults(handler=commands.database_guard)
+    guard_parser.set_defaults(handler="keel.commands.database_guard")
     status_parser = database_actions.add_parser(
         "status",
         help="the role from the VIP and from the server, semi-synchronous"
@@ -214,7 +242,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_common_options(status_parser)
     add_root_option(status_parser, "read the database of")
-    status_parser.set_defaults(handler=commands.database_status)
+    status_parser.set_defaults(handler="keel.commands.database_status")
 
     network_parser = subparsers.add_parser(
         "network", help="a network change apply made, waiting to be kept;"
@@ -230,7 +258,7 @@ def build_parser() -> argparse.ArgumentParser:
         " from a console (decision 0018)",
     )
     add_root_option(confirm_parser, "confirm the change of")
-    confirm_parser.set_defaults(handler=commands.network_confirm)
+    confirm_parser.set_defaults(handler="keel.commands.network_confirm")
     revert_parser = network_actions.add_parser(
         "revert",
         help="put back the interfaces file a pending change replaced; what"
@@ -243,7 +271,7 @@ def build_parser() -> argparse.ArgumentParser:
         " the boot unit, which runs before networking",
     )
     add_root_option(revert_parser, "revert the change of")
-    revert_parser.set_defaults(handler=commands.network_revert)
+    revert_parser.set_defaults(handler="keel.commands.network_revert")
     mtu_parser = network_actions.add_parser(
         "mtu",
         help="set the MTU of each WireGuard interface that is up to the"
@@ -251,8 +279,10 @@ def build_parser() -> argparse.ArgumentParser:
         " package runs when it is upgraded",
     )
     add_root_option(mtu_parser, "read the WireGuard files of")
-    mtu_parser.set_defaults(handler=commands.network_mtu)
+    mtu_parser.set_defaults(handler="keel.commands.network_mtu")
     add_wireguard_parser(network_actions)
+    from keel.mesh import parser as mesh_parser
+    from keel.mesh import vipcli
     mesh_options = mesh_parser.Options(
         add_common_options, add_root_option, port_number, window_seconds)
     mesh_parser.add(subparsers, mesh_options)
@@ -266,27 +296,27 @@ def build_parser() -> argparse.ArgumentParser:
         " writes for monit runs (decision 0021)",
     )
     add_notify_options(notify_parser)
-    notify_parser.set_defaults(handler=commands.notify)
+    notify_parser.set_defaults(handler="keel.commands.notify")
 
     inspect_parser = _add_command(
         subparsers, "inspect",
         "write a spec from the running machine, or from an offline root,"
         " reporting what could not be inferred",
-        commands.inspect,
+        "keel.commands.inspect",
     )
     add_inspect_options(inspect_parser)
     diff_parser = _add_command(
         subparsers, "diff",
         "report drift between the spec and the running machine, or an"
         " offline root",
-        commands.diff,
+        "keel.commands.diff",
     )
     add_diff_options(diff_parser)
     verify_parser = _add_command(
         subparsers, "verify",
         "check the layers and their package lists against their manifests,"
         " and with --root the packages installed there",
-        commands.verify,
+        "keel.commands.verify",
     )
     add_layer_options(verify_parser)
     add_verify_options(verify_parser)
@@ -294,14 +324,14 @@ def build_parser() -> argparse.ArgumentParser:
     pull_parser = _add_command(
         subparsers, "pull",
         "fetch the layers of an appliance that the cache does not have",
-        commands.pull,
+        "keel.commands.pull",
     )
     add_pull_options(pull_parser)
     assemble_parser = _add_command(
         subparsers, "assemble",
         "extract cached layers into a rootfs and pack a Proxmox template"
         " (root only)",
-        commands.assemble,
+        "keel.commands.assemble",
     )
     add_assemble_options(assemble_parser)
     add_manifest_parser(subparsers)
@@ -330,7 +360,7 @@ def add_manifest_parser(subparsers) -> None:
         " looked up under --root (default: every installed manifest)",
     )
     add_manifest_options(validate_parser)
-    validate_parser.set_defaults(handler=commands.manifest_validate)
+    validate_parser.set_defaults(handler="keel.commands.manifest_validate")
     show_parser = manifest_actions.add_parser(
         "show",
         help="print a manifest as its file says it, or with --resolved its"
@@ -345,7 +375,7 @@ def add_manifest_parser(subparsers) -> None:
         " hooks the chain resolves to (appliances only)",
     )
     add_manifest_options(show_parser)
-    show_parser.set_defaults(handler=commands.manifest_show)
+    show_parser.set_defaults(handler="keel.commands.manifest_show")
 
 
 def add_manifest_options(parser: argparse.ArgumentParser) -> None:
@@ -383,13 +413,14 @@ def add_wireguard_parser(network_actions) -> None:
         f" ${SPEC_ENV} or {SPEC_DEFAULT}; without it, wg0's default)",
     )
     add_root_option(key_parser, "read the key of")
-    key_parser.set_defaults(handler=commands.network_wireguard_key)
+    key_parser.set_defaults(handler="keel.commands.network_wireguard_key")
     suggest_parser = wireguard_actions.add_parser(
         "suggest-address",
         help="print a fresh unique local IPv6 address (RFC 4193) with its"
         " /64, for the first node of a set; the others take ::2, ::3",
     )
-    suggest_parser.set_defaults(handler=commands.network_wireguard_suggest)
+    suggest_parser.set_defaults(
+        handler="keel.commands.network_wireguard_suggest")
 
 
 def port_number(text: str) -> int:
@@ -754,7 +785,7 @@ def add_inspect_options(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_spec_action(
-    subparsers, name: str, help_text: str, handler
+    subparsers, name: str, help_text: str, handler: str
 ) -> argparse.ArgumentParser:
     parser = subparsers.add_parser(name, help=help_text)
     add_common_options(parser)
@@ -763,12 +794,19 @@ def _add_spec_action(
 
 
 def _add_command(
-    subparsers, name: str, help_text: str, handler
+    subparsers, name: str, help_text: str, handler: str
 ) -> argparse.ArgumentParser:
     parser = subparsers.add_parser(name, help=help_text)
     add_common_options(parser)
     parser.set_defaults(handler=handler)
     return parser
+
+
+def _resolve_handler(dotted: str):
+    """Import the module and return the callable a dotted name points at"""
+    module_path, _, attr = dotted.rpartition(".")
+    module = importlib.import_module(module_path)
+    return getattr(module, attr)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -801,10 +839,16 @@ def main(argv: list[str] | None = None) -> int:
             "--destroy-local-database requires --system or --system-only:"
             " the database phase runs there"
         )
+    # Resolve the dotted name to a callable after the checks above, so
+    # usage errors stay cheap and the import happens only for a command
+    # that will run.
+    if isinstance(handler, str):
+        handler = _resolve_handler(handler)
     if args.command == "pull":
         # Asked here so a combination that cannot resolve is a usage
         # error before the mirror is touched, rather than a 404 for a
         # path that was never going to exist.
+        from keel import commands
         try:
             commands.resolution(args)
         except ValueError as e:

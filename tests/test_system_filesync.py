@@ -648,7 +648,7 @@ class TestTheUndeclaredOverlay(SyncCase):
         from keel import commands, exits
         document = doc()
         del document["overlays"]
-        with mock.patch("keel.commands.system.observe") as observed, \
+        with mock.patch("keel.system.observe") as observed, \
                 mock.patch("keel.commands.error") as said:
             code = commands.apply_system(document, self.root, True)
         self.assertEqual(code, exits.SPEC_INVALID)

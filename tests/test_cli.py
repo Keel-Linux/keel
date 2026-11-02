@@ -401,8 +401,8 @@ class TestPullAndAssemble(CLITestCase):
         self.assertIn("run keel pull first", err)
 
     def test_assemble_reports_an_os_error_as_assemble_failed(self):
-        with mock.patch.object(commands.layers, "assemble",
-                               side_effect=OSError("zstd: not found")):
+        with mock.patch("keel.layers.assemble",
+                        side_effect=OSError("zstd: not found")):
             code, _, err = self.assemble()
         self.assertEqual(code, exits.ASSEMBLE_FAILED)
         self.assertEqual(err, "Error: assemble: zstd: not found\n")
