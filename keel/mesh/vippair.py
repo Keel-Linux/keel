@@ -208,6 +208,17 @@ def kept_vips(root: str) -> tuple[str, ...]:
     return tuple(found)
 
 
+def recorded_vips(root: str) -> tuple[str, ...]:
+    """The VIPs this node has a pair record file for, readable or not: a
+    damaged record is still a pair, and the plan says what to do with it"""
+    try:
+        names = os.listdir(path(root, DIR))
+    except FileNotFoundError:
+        return ()
+    return tuple(sorted(address(name[:-len(SUFFIX)]) for name in names
+                        if name.endswith(SUFFIX)))
+
+
 def write(root: str, pair: Pair) -> None:
     from keel.mesh import vip as vipstate
     vipstate.ensure(root)

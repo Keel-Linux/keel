@@ -22,6 +22,8 @@ from keel.manifest.facts import gather as gather_facts
 from keel.spec import overlayrecord
 from keel.spec.validate_appliance import default_warnings, with_defaults
 from keel.spec.validate_appliance import is_name as is_manifest_name
+from keel.spec.validate_pair import pair_problems
+from keel.system.ovstate import overlay_of
 
 
 def warn(message: str) -> None:
@@ -34,7 +36,7 @@ def error(message: str) -> None:
 
 def read_spec(
     path: str, check_secret_files: bool = True,
-    root: str = ROOT_DEFAULT,
+    root: str = ROOT_DEFAULT, check_pair: bool = False,
 ) -> tuple[dict | None, int]:
     """Load and validate a spec file
 
@@ -59,6 +61,10 @@ def read_spec(
     about, with the default it takes; the document returned is the spec
     as written, and apply and diff fill the defaults in themselves
     (keel.spec.validate_appliance.with_defaults).
+
+    `check_pair` also holds the spec against the pair record under `root`
+    (keel.spec.validate_pair). The conf phase and the mesh commands do not
+    ask for it, because they read the spec before a record can exist.
     """
     if not os.path.exists(path):
         print(f"{path}: not found, nothing to do", file=sys.stderr)
@@ -77,6 +83,8 @@ def read_spec(
     facts = manifest_facts(doc, root)
     errors = spec.validate(doc, check_secret_files=check_secret_files,
                            facts=facts, paired_vips=paired_vips(root))
+    if check_pair:
+        errors = errors + pair_problems(doc, recorded_vips(root))
     if errors:
         for message in errors:
             error(f"{path}: {message}")
@@ -85,6 +93,12 @@ def read_spec(
     for message in default_warnings(doc, facts, defaulted):
         warn(f"{path}: {message}")
     return doc, exits.OK
+
+
+def recorded_vips(root: str) -> tuple[str, ...]:
+    """The VIPs the machine under `root` has a pair record file for"""
+    from keel.mesh.vippair import recorded_vips as recorded
+    return recorded(root)
 
 
 def paired_vips(root: str) -> tuple[str, ...]:
@@ -115,7 +129,8 @@ def spec_validate(args) -> int:
     """
     check_secret_files = not getattr(args, "no_secret_files", False)
     doc, code = read_spec(args.spec, check_secret_files,
-                          getattr(args, "root", ROOT_DEFAULT))
+                          getattr(args, "root", ROOT_DEFAULT),
+                          check_pair=True)
     if doc is None:
         return code
     checked = "checked" if check_secret_files else "not checked"
@@ -158,7 +173,8 @@ def spec_apply(args) -> int:
     dry_run = getattr(args, "dry_run", False)
     root = getattr(args, "root", ROOT_DEFAULT)
     no_secrets = dry_run or system_only
-    doc, code = read_spec(args.spec, not no_secrets, root)
+    doc, code = read_spec(args.spec, not no_secrets, root,
+                          check_pair=with_system)
     if doc is None:
         return code
 
@@ -697,7 +713,7 @@ def diff(args) -> int:
     json, and nothing is written anywhere. Drift decides the exit code
     before unknown fields do (docs/diff.md).
     """
-    doc, code = read_spec(args.spec, False, args.root)
+    doc, code = read_spec(args.spec, False, args.root, check_pair=True)
     if doc is None:
         return code
     from keel import diff as drift

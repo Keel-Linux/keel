@@ -1,3 +1,17 @@
+keel (0.23.79) unstable; urgency=medium
+
+  * keel spec validate, keel spec apply with the system phase and keel diff
+    refuse a replica with appliance.vip, no replication.primary and no pair
+    record, with exit 3 and the remedy in the message (keel#267). Before
+    this, validate said ok, and apply refused later at the database step.
+    The same commands refuse, on a node with no pair record, a primary host
+    that is the VIP or this node's own overlay address, role standalone
+    beside a VIP, and a VIP with overlays.vip or overlays.wireguard disabled.
+    A node with a pair record is not refused, so a running pair continues.
+    The conf phase and the mesh commands do not apply these rules.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Mon, 03 Nov 2026 00:00:00 +0000
+
 keel (0.23.78) unstable; urgency=medium
 
   * A mesh join cannot wait for ever (keel#276). keel spec apply queues
