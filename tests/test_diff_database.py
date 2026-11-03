@@ -642,3 +642,14 @@ class TestListenSocketNote(unittest.TestCase):
         result = self._note((drift,), declared, {"mariadb.socket": unit})
         self.assertIn("previous note", result[0].note)
         self.assertIn("socket activation", result[0].note)
+
+
+class TestDumpIsNotCompared(unittest.TestCase):
+    def test_the_dump_settings_are_not_drift(self):
+        found = verdicts(
+            {"database": {"server": {"engine": "mariadb",
+                                     "dump": {"keep": 2, "every_hours": 6}}}},
+            observe(MARIADB_STANDALONE))
+        self.assertEqual(found["database.server.dump.keep"], NOT_COMPARED)
+        self.assertEqual(found["database.server.dump.every_hours"],
+                         NOT_COMPARED)

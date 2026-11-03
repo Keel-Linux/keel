@@ -264,5 +264,23 @@ class TestSyncCommit(unittest.TestCase):
         self.assertIn("not readable", self.out[-1])
 
 
+class TestDumpCheck(unittest.TestCase):
+    def test_the_watch_checks_the_dump_of_a_pair(self):
+        root = tempfile.mkdtemp()
+        with mock.patch.object(dbwatch, "Node") as node, \
+                mock.patch.object(dbwatch.dbpair, "observe_pair",
+                                  return_value=PAIR), \
+                mock.patch.object(dbwatch, "semi_sync", return_value=None), \
+                mock.patch.object(dbwatch, "certificate", return_value=True), \
+                mock.patch("keel.system.filesync.flip_pending",
+                           return_value=False), \
+                mock.patch("keel.system.filesync_watch.watch_counts"), \
+                mock.patch("keel.system.dbdump.watch") as checked:
+            node.return_value.document.return_value = {}
+            dbwatch.watch(root, "spec", print, print)
+        checked.assert_called_once()
+        self.assertEqual(checked.call_args.args[:3], (root, {}, PAIR))
+
+
 if __name__ == "__main__":
     unittest.main()

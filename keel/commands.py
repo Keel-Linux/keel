@@ -562,6 +562,17 @@ def database_watch(args) -> int:
     return dbwatch.main(args)
 
 
+def database_dump(args) -> int:
+    from keel import system
+    from keel.system import dbdump
+    root = getattr(args, "root", ROOT_DEFAULT)
+    refusal = system.needs_root(root, "database dump")
+    if refusal:
+        error(refusal)
+        return exits.APPLY_NEEDS_ROOT
+    return dbdump.main(args)
+
+
 def database_status(args) -> int:
     from keel.system import dbstatus
     return dbstatus.main(args)

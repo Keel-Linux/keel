@@ -58,6 +58,12 @@ SECRET_PREFIXES = (
 # the file, ready for the day the switch is turned on, and are not
 # compared meanwhile: nothing on the machine is supposed to match them.
 DISABLED_FEATURES = {"tls.acme": "enabled", "monitor": "enabled"}
+# What keel database dump reads and nothing on the machine shows: the
+# numbers are limits on a command, and keel database status and the watch
+# say how the dumps do.
+DUMP_FIELD = "database.server.dump"
+DUMP_REASON = ("settings of keel database dump; keel database status says"
+               " how the dumps do")
 # Fields diff does not compare and never repeats: the channels of the
 # monitor (decision 0021), whose URLs can be credentials. apply writes
 # them to /etc/keel/monitor.json, root only, for keel notify.
@@ -522,6 +528,8 @@ def not_compared(section: str, wanted: dict[str, object]) -> dict[str, str]:
     skipped.update(disabled(section, wanted))
     skipped.update(other_role(wanted))
     skipped.update(secret_references(wanted))
+    skipped.update({path: DUMP_REASON for path in wanted
+                    if _under(path, DUMP_FIELD)})
     return skipped
 
 

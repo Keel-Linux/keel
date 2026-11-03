@@ -882,19 +882,25 @@ def _forget_divergence(root: str) -> None:
 
 def _dump(root: str, runner) -> str:
     """A dump of everything this node holds, compressed, under BACKUPS;
-    where it is, or `not kept (why)`"""
+    where it is, or `not kept (why)`. The kernel stops it at the room on
+    the disk (keel.system.dbdump)"""
+    from keel.system import dbdump
     directory = os.path.join(root, BACKUPS)
     try:
         os.makedirs(directory, mode=0o700, exist_ok=True)
+        problem, limit = dbdump.rejoin_guard(directory)
     except OSError as e:
         return f"not kept ({e.strerror})"
+    if problem:
+        return f"not kept ({problem})"
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     plain = os.path.join(directory, f"rejoin-{stamp}.sql")
     try:
         fd = os.open(plain, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "wb") as fob:
             done = runner(dbpostgres.AS_POSTGRES + ("pg_dumpall",),
-                          stdout=fob, stderr=subprocess.PIPE, check=False)
+                          stdout=fob, stderr=subprocess.PIPE, check=False,
+                          preexec_fn=limit)
         if done.returncode != 0:
             os.remove(plain)
             return "not kept (pg_dumpall exited" \

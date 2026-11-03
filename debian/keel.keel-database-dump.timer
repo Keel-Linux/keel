@@ -1,0 +1,12 @@
+# The tick of keel database dump: each hour, and the command reads
+# database.server.dump.every_hours in the spec to say whether a dump is due
+[Unit]
+Description=keel database: the tick of the dump on the standby
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -165,6 +165,9 @@ def watch(root: str, spec: str, out: Callable[[str], None],
     filesync_watch.watch_counts(
         root, doc, out, lambda title, text, check, level: alerting.alert(
             root, err, title, text, check, level))
+    from keel.system import dbdump
+    # a failed dump or one too old, on the replica
+    dbdump.watch(root, doc, pair, err)
     return code
 
 

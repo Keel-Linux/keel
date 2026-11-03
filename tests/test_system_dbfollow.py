@@ -96,6 +96,7 @@ class Server:
                                    b"'0-1-10';\n")
             return subprocess.CompletedProcess(argv, 0, b"", b"")
         if argv[0] == "zstd":
+            os.replace(argv[-1], argv[-1] + ".zst")
             return subprocess.CompletedProcess(argv, 0, b"", b"")
         remote = any(one.startswith("--defaults-extra-file") for one in argv)
         asked = argv[-1] if "--execute" in argv else ""
@@ -429,6 +430,71 @@ class TestTheReplica(FollowTestCase):
         self.assertIn("seeded from", joined)
         self.assertTrue(any("DROP DATABASE IF EXISTS `shop`" in one
                             for one in server.sent))
+
+    def test_a_diverged_node_dumps_once_and_not_at_each_run(self):
+        # 223 files, 246 MB in 2.5 hours on a real node (keel 0.23.68):
+        # the watch runs follow every 30 s, and a read-only node's GTID
+        # state does not change, so the dump it has still holds all of it
+        self.pair_nodes()
+        server = Server(binlog_state="0-2-25", binlog_pos="0-2-25",
+                        holder_state="0-1-5,0-2-20")
+        with mock.patch("keel.monitor.alerting.alert", return_value=True):
+            for _ in range(3):
+                found = self.follow(1, server)
+        self.assertIn("diverged", found.problem)
+        self.assertEqual(sum(one[0] == "mariadb-dump"
+                             for one in server.argv), 1)
+        kept = os.listdir(os.path.join(self.all[1].root, dbfollow.BACKUPS))
+        self.assertEqual(len(kept), 1, kept)
+        self.assertIn("is kept at", "\n".join(found.lines))
+
+    def test_a_node_with_a_new_gtid_state_is_dumped_again(self):
+        self.pair_nodes()
+        with mock.patch("keel.monitor.alerting.alert", return_value=True):
+            first = Server(binlog_state="0-2-25", binlog_pos="0-2-25",
+                           holder_state="0-1-5,0-2-20")
+            self.follow(1, first)
+            later = Server(binlog_state="0-2-26", binlog_pos="0-2-26",
+                           holder_state="0-1-5,0-2-20")
+            self.follow(1, later)
+        self.assertEqual(sum(one[0] == "mariadb-dump"
+                             for one in later.argv), 1)
+
+    def test_a_kept_dump_that_was_deleted_is_made_again(self):
+        self.pair_nodes()
+        server = Server(binlog_state="0-2-25", binlog_pos="0-2-25",
+                        holder_state="0-1-5,0-2-20")
+        with mock.patch("keel.monitor.alerting.alert", return_value=True):
+            self.follow(1, server)
+            where = os.path.join(self.all[1].root, dbfollow.BACKUPS)
+            for name in os.listdir(where):
+                os.remove(os.path.join(where, name))
+            self.follow(1, server)
+        self.assertEqual(sum(one[0] == "mariadb-dump"
+                             for one in server.argv), 2)
+
+    def test_an_unreadable_record_of_the_kept_dump_reads_as_none(self):
+        self.pair_nodes()
+        root = self.all[1].root
+        path = os.path.join(root, dbfollow.REJOIN_DUMP)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fob:
+            fob.write("not json")
+        self.assertIsNone(dbfollow._kept_dump(root, "0-2-25"))
+        with open(path, "w") as fob:
+            fob.write("[1]")
+        self.assertIsNone(dbfollow._kept_dump(root, "0-2-25"))
+
+    def test_a_disk_with_no_room_keeps_no_dump_and_stops_the_rejoin(self):
+        self.pair_nodes()
+        server = Server(read_only="OFF", binlog_state="0-2-20",
+                        binlog_pos="0-2-20", holder_state="0-1-5,0-2-20")
+        with mock.patch("keel.system.dbdump.rejoin_guard",
+                        return_value=("no room here", None)):
+            found = self.follow(1, server)
+        self.assertIn("no room here", found.problem)
+        self.assertFalse(any(one[0] == "mariadb-dump" for one in server.argv))
+        self.assertFalse(any("CHANGE MASTER" in one for one in server.sent))
 
     def test_a_dump_that_cannot_be_kept_stops_the_rejoin(self):
         self.pair_nodes()

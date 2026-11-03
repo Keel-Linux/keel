@@ -19,7 +19,7 @@ from keel.inspect.collect import database_servers
 from keel.inspect.dbreading import field_lines
 from keel.inspect.tree import Tree
 from keel.mesh.node import Node, NodeError
-from keel.system import dbfollow, dbpair, dbpgstatus, dbtls, dbwatch
+from keel.system import dbdump, dbfollow, dbpair, dbpgstatus, dbtls, dbwatch
 
 # the replica away (keel#270): Rpl_semi_sync_master_status alone does not
 # show it, since it stays ON with no replica connected
@@ -54,6 +54,7 @@ def lines(root: str, spec: str) -> list[str]:
                      f" ({pair.peer_key or 'no pair record'})")
         if pair.holder_address:
             found.append(f"  the primary's address: {pair.holder_address}")
+        found.extend(dbdump.status_lines(root, doc))
     servers = {one.engine.name: one for one in database_servers(tree)}
     installed = servers.get("mariadb")
     if installed is None and "postgresql" in servers:
