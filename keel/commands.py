@@ -11,6 +11,8 @@ the CLI parser can be built without loading the library.
 
 from __future__ import annotations
 
+import contextlib
+import dataclasses
 import os
 import sys
 
@@ -514,10 +516,27 @@ def database_promote(args) -> int:
         print(outcome.summary())
         return exits.APPLY_FAILED if outcome.failed else exits.OK
 
-    code = promote_vip(args, doc, root, dry_run, database_step)
+    from keel.system import dbposition
+    accepting = (dbposition.accepting(root)
+                 if getattr(args, "accept_lost_writes", False) and not dry_run
+                 else contextlib.nullcontext())
+    with accepting:
+        code = promote_vip(args, doc, root, dry_run, database_step)
     if not reached and gone and not dry_run and engine == "postgresql":
         dbpgfollow.unmark_alone(root)
     return code
+
+
+def database_position(args) -> int:
+    """The holder's position kept in etcd (keel.system.dbposition)"""
+    from keel import system
+    root = getattr(args, "root", ROOT_DEFAULT)
+    refusal = system.needs_root(root, "database position")
+    if refusal:
+        error(refusal)
+        return exits.APPLY_NEEDS_ROOT
+    from keel.system import dbpositionunit
+    return dbpositionunit.main(root, args.spec)
 
 
 def database_follow(args) -> int:

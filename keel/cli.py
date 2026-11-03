@@ -195,6 +195,13 @@ def build_parser() -> argparse.ArgumentParser:
         " is alive but cannot be reached stays writable until it learns"
         " the newer claim",
     )
+    promote_parser.add_argument(
+        "--accept-lost-writes",
+        action="store_true",
+        help="MariaDB pair: take writes although this node lacks what the"
+        " old primary logged (keel#271). The writes it lacks stay in the"
+        " old primary's data and its dump; that node then diverges",
+    )
     add_root_option(promote_parser, "promote")
     promote_parser.set_defaults(handler="keel.commands.database_promote")
     follow_parser = database_actions.add_parser(
@@ -248,6 +255,15 @@ def build_parser() -> argparse.ArgumentParser:
     add_common_options(guard_parser)
     add_root_option(guard_parser, "guard the database of")
     guard_parser.set_defaults(handler="keel.commands.database_guard")
+    position_parser = database_actions.add_parser(
+        "position",
+        help="while this node holds the VIP of a MariaDB pair, keep its"
+        " position in etcd for the other node's failover (keel#271); what"
+        " keel-database-position.service runs (root)",
+    )
+    add_common_options(position_parser)
+    add_root_option(position_parser, "publish the position of")
+    position_parser.set_defaults(handler="keel.commands.database_position")
     status_parser = database_actions.add_parser(
         "status",
         help="the role from the VIP and from the server, semi-synchronous"

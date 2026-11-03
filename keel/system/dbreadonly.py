@@ -122,7 +122,8 @@ NOT_REPLICATING = (
 STOPPED = (
     "the SQL thread stopped ({error}), and promoting would discard what it"
     " received and did not apply. Fix what stopped it and START SLAVE"
-    " until Seconds_Behind_Master is 0, then promote; or, while the old"
+    " until gtid_slave_pos reaches the old primary's position, then"
+    " promote; or, while the old"
     " primary is there, rebuild this replica from it with `keel spec"
     " apply --system-only --destroy-local-database`. Nothing was changed"
 )
@@ -134,7 +135,7 @@ STOPPED_DRAINING = (
 SLOW = (
     "the SQL thread did not apply everything it had received within"
     " {timeout} s. Nothing was promoted; run keel database promote again"
-    " once Seconds_Behind_Master is 0"
+    " once gtid_slave_pos reaches Gtid_IO_Pos"
 )
 RESUMED = ". The I/O thread was started again"
 RESUME_FAILED = (

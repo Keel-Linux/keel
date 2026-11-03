@@ -225,6 +225,21 @@ class TestAMariadbPairOnAPoorNetwork(unittest.TestCase):
         self.assertIsNotNone(found["k270_alert_s"], found.get("k270_alerts"))
         self.assertIsNotNone(found["k270_back_s"], found["k270_alerts"])
 
+    def test_a_node_that_lacks_acknowledged_writes_stays_read_only(self):
+        """keel#271, a real server and a real cut: the holder lost while
+        its replica was away. The other node holds the VIP and takes no
+        write until the operator's act"""
+        found = self.found
+        log = found.get("k271_log")
+        self.assertIsNotNone(found.get("k271_refused_s"), log)
+        self.assertEqual(found["k271_read_only"]["out"], "1", log)
+        self.assertEqual(found["k271_read_only_again"]["out"], "1", log)
+        self.assertTrue(any("may lack writes" in one
+                            for one in found["k271_alerts"]),
+                        found["k271_alerts"])
+        self.assertEqual(found["k271_accept"]["code"], 0, found["k271_accept"])
+        self.assertEqual(found["k271_read_only_after"]["out"], "0", log)
+
     def test_the_unplanned_write_downtime_and_no_acked_row_lost(self):
         """keel#108, keel#118: the promote with the old primary gone and
         the database following the VIP at once, measured at 250 ms; with

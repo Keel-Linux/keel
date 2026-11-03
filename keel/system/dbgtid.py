@@ -82,6 +82,16 @@ def newest(text: str) -> dict[int, int]:
     return found
 
 
+def behind(theirs: str, ours: str) -> dict[int, int]:
+    """Per GTID domain, how many sequences `ours` lacks of `theirs`; empty
+    when it lacks none (gtid_strict_mode keeps the sequences of a domain
+    in order on both nodes). Raises ValueError for no GTID list"""
+    mine = newest(ours)
+    return {domain: sequence - mine.get(domain, 0)
+            for domain, sequence in newest(theirs).items()
+            if mine.get(domain, 0) < sequence}
+
+
 def describe(found: list[str]) -> str:
     """One line naming each errant GTID by domain, server id and sequence"""
     parts = []
