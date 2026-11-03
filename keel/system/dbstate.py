@@ -362,8 +362,12 @@ def _ready(name: str, root: str, probe: tuple, start: bool) -> str:
     if not (start and name == "postgresql"):
         return dbready.ready(probe[0], probe[1], start, dbready.READY_TIMEOUT)
     from keel.system import dbreadonly
-    with dbreadonly.replication_locked(root):
-        return dbready.ready(probe[0], probe[1], start, dbready.READY_TIMEOUT)
+    try:
+        with dbreadonly.replication_locked(root):
+            return dbready.ready(probe[0], probe[1], start,
+                                 dbready.READY_TIMEOUT)
+    except TimeoutError as e:
+        return str(e)
 
 
 def _schemas_question(name: str) -> tuple[str, ...]:

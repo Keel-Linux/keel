@@ -60,6 +60,10 @@ OPTIONS = "client.cnf"
 DUMP = "primary.sql"
 OPTIONS_MODE = 0o600
 CONNECT_TIMEOUT = "--connect-timeout=10"
+# The bound of one client of a seed. A copy over a poor link is long, and
+# a stalled connection must still end: keel mesh can run a seed under its
+# sync lock.
+SEED_WAIT = 21600.0
 # The dump reads only its last lines for the position, which mariadb-dump
 # writes after the data; this much holds them with room to spare.
 TAIL_BYTES = 65536
@@ -400,13 +404,16 @@ def _run(runner, argv, text=None, stdin=None, stdout=None, output=None):
     them or the options file's content.
     """
     kwargs = {"stdout": stdout if stdout is not None else subprocess.PIPE,
-              "stderr": subprocess.PIPE, "check": False}
+              "stderr": subprocess.PIPE, "check": False,
+              "timeout": SEED_WAIT}
     if text is not None:
         kwargs["input"] = text.encode()
     elif stdin is not None:
         kwargs["stdin"] = stdin
     try:
         out = runner(list(argv), **kwargs)
+    except subprocess.TimeoutExpired:
+        return f"{argv[0]} did not finish within {SEED_WAIT:g} s and was killed"
     except OSError as e:
         return f"cannot run {argv[0]}: {e.strerror}"
     if output is not None:

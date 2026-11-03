@@ -77,6 +77,9 @@ class Rendered:
     problem: str | None = None
 
 
+RENDER_WAIT = 60
+
+
 def render(library: str, iface: str, hostname: str,
            env: dict[str, str]) -> Rendered:
     """Run the library's functions for one interface and these variables"""
@@ -87,7 +90,10 @@ def render(library: str, iface: str, hostname: str,
     argv += [env.get(name, "") for name in VARIABLES]
     try:
         out = subprocess.run(argv, capture_output=True, text=True,
-                             check=False)
+                             check=False, timeout=RENDER_WAIT)
+    except subprocess.TimeoutExpired:
+        return Rendered(problem=f"{library} did not finish within"
+                        f" {RENDER_WAIT} s")
     except OSError as e:
         return Rendered(problem=f"cannot run bash: {e.strerror}")
     if out.returncode != 0:

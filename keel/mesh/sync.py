@@ -79,6 +79,12 @@ BACKOFF = timedelta(hours=1)
 UNREACHED = f"{DIR}/unreached.json"
 SYNC_LOCK = f"{DIR}/sync.lock"
 PARALLEL = 8
+# How long the members' channel waits for the sync lock. Each step that a
+# holder runs has its own bound (keel.system.effects, keel.network.live), so
+# the lock comes free. A wait that ends leaves the announcement to the next
+# keel mesh sync, which asks the peers again.
+LOCK_WAIT = 600.0
+LOCK_POLL = 1.0
 
 
 @dataclass
@@ -104,18 +110,47 @@ class Syncer:
         return wireguard.interface(self.node.overlay())
 
 
+def holder(root: str) -> str:
+    """Who took the sync lock last: the holder, when a try to take it
+    failed. The lock file holds this, written under the lock"""
+    try:
+        with open(path(root, SYNC_LOCK)) as fob:
+            return fob.read().strip() or "an unknown process"
+    except OSError:
+        return "an unknown process"
+
+
 @contextmanager
-def sync_lock(root: str, wait: bool) -> Iterator[bool]:
-    """Whether this process holds the lock of the members' changes: one
-    sync at a time. Not the mesh's own lock, which an invite takes."""
+def sync_lock(root: str, wait: float, what: str = "keel mesh sync",
+              say: Callable[[str], None] | None = None,
+              clock: Callable[[], float] = time.monotonic
+              ) -> Iterator[bool]:
+    """Whether this process holds the lock of the members' changes after
+    at most `wait` seconds: one sync at a time. `what` is the name that a
+    process that waits reads. Not the mesh's own lock, which an invite
+    takes."""
     invites.ensure(root)
     fd = os.open(path(root, SYNC_LOCK), os.O_RDWR | os.O_CREAT, FILE_MODE)
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
-        except BlockingIOError:
-            yield False
-            return
+        deadline = clock() + wait
+        said = False
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                left = deadline - clock()
+                if left <= 0:
+                    yield False
+                    return
+                if say and not said:
+                    say(f"{what} waits at most {wait:g} s for the sync lock,"
+                        f" which {holder(root)} holds")
+                    said = True
+                time.sleep(min(LOCK_POLL, left))
+        os.ftruncate(fd, 0)
+        os.pwrite(fd, f"{what} (pid {os.getpid()}, since"
+                  f" {datetime.now(timezone.utc):%H:%M:%S} UTC)\n".encode(), 0)
         yield True
     finally:
         os.close(fd)
@@ -241,10 +276,11 @@ def pull(syncer: Syncer, hosts: tuple[str, ...] = ()) -> int:
             syncer.err(f"{', '.join(sorted(strangers))}: not a peer of this"
                        " node; keel mesh sync asks its peers only")
             return exits.MESH_REFUSED
-    with sync_lock(syncer.root, False) as held:
+    with sync_lock(syncer.root, 0) as held:
         if not held:
-            syncer.err("another keel mesh sync is adding members; this one"
-                       " leaves it to finish")
+            syncer.err(f"another keel mesh sync is adding members:"
+                       f" {holder(syncer.root)} holds the sync lock; this"
+                       " one leaves it to finish")
             return exits.OK
         rosters = asked(syncer, chosen)
         if not rosters:
@@ -419,7 +455,14 @@ def announced(syncer: Syncer, waiting: list[tuple[str, Roster]]) -> int:
     if public is None:
         syncer.err(problem)
         return exits.MESH_REFUSED
-    with sync_lock(syncer.root, True):
+    with sync_lock(syncer.root, LOCK_WAIT, "the members' channel",
+                   syncer.err) as held:
+        if not held:
+            syncer.err(f"{holder(syncer.root)} still holds the sync lock"
+                       f" after {LOCK_WAIT:g} s: this announcement is not"
+                       " applied, and the next keel mesh sync brings its"
+                       " members")
+            return exits.MESH_REFUSED
         return absorb(syncer, [found for _, found in waiting], public,
                       fetched=False)
 

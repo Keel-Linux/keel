@@ -59,6 +59,13 @@ from keel.system.monitor import NOTIFY, reload
 
 MONIT_FIELD = "derived.monit"
 VIP = "vip"
+# keel-vip.service is ordered after etcd.service, and etcd says that it
+# started only when a majority runs. A start that waits for that job stops
+# this plan before plan_overlay adds the peers that the majority can need,
+# so the peer waited for the start and the start for the peer.
+VIP_QUEUED = ("queue it: its job runs after etcd.service, which is ready only"
+              " when a majority of its cluster runs, and this run does not"
+              " wait for that majority")
 VIP_WAITS = (
     "keel-vip.service waits for etcd's cluster (cluster.json): it starts"
     " once etcd forms; without etcd, keel vip check (keel-vip-check.timer)"
@@ -180,7 +187,8 @@ def plan_overlay(name: str, wanted: str | None, units: tuple[str, ...],
             actions += start(systemctl, unit, found, False, False)
         elif on:
             actions += start(systemctl, unit, found, live, made,
-                             name in (ETCD, filesync.OVERLAY))
+                             name in (ETCD, filesync.OVERLAY, VIP),
+                             VIP_QUEUED if name == VIP else None)
         else:
             actions += stop(systemctl, unit, found, live)
     if on:
@@ -198,9 +206,11 @@ def plan_overlay(name: str, wanted: str | None, units: tuple[str, ...],
 
 
 def start(systemctl: tuple[str, ...], unit: str, found, live: bool,
-          made: bool, no_block: bool = False) -> list[Action]:
+          made: bool, no_block: bool = False,
+          why: str | None = None) -> list[Action]:
     """`no_block` for etcd, which says it started only once a majority
-    of its cluster runs"""
+    of its cluster runs, and for what is ordered after etcd; `why` is
+    what the line says about the job that this run does not wait for"""
     actions: list[Action] = []
     later = ("--no-block",) if no_block else ()
     if not found.is_enabled and not found.is_fixed:
@@ -208,7 +218,8 @@ def start(systemctl: tuple[str, ...], unit: str, found, live: bool,
                            f"enable {unit}: the overlay is enabled"))
     if live and not found.is_running:
         actions.append(Run(("systemctl", "start", *later, unit),
-                           f"start {unit}"))
+                           f"start {unit}: {why}" if why
+                           else f"start {unit}"))
     elif live and made:
         actions.append(Run(("systemctl", "restart", *later, unit),
                            f"restart {unit}: its configuration changed"

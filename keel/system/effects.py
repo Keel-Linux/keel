@@ -8,8 +8,11 @@ on with the next field.
 """
 
 import os
+import shlex
 import signal
 import subprocess
+import sys
+import threading
 
 from keel.inspect import constants as paths
 from keel.inspect.accounts import passwd_entries
@@ -41,10 +44,90 @@ from keel.system import crowdsec, dbpgpromote, dbpgseed, dbreadonly, \
     dbseed, fwinstall
 
 NOT_RUNNABLE = 127
+# How long this run waits for a job of systemd. The job stays queued when
+# the wait ends. A plan that waits longer holds what its caller holds: keel
+# mesh holds the sync lock during an apply, and the next steps add the peers.
+UNIT_WAIT = 300.0
+# A database server can recover for a long time after a crash, and the steps
+# that follow need the server up
+DATABASE_UNIT_WAIT = 3600.0
+DATABASE_UNITS = ("mariadb", "mysql", "postgresql")
+# How long this run waits for any other command that sets no timeout
+COMMAND_WAIT = 900.0
+# When a job that still runs is said, while the wait goes on
+NOTICE_AFTER = 30.0
+JOBS_WAIT = 5
+WAITING_FOR = "waiting for job"
 LIVE_ADDED = "done with wg set, live: peers added, no other peer touched"
 LIVE_CHANGED = ("done with wg set, live: the other peers kept their"
                 " sessions")
 BOUNCED = "done with wg-quick down, then up"
+
+
+def bound(argv: tuple[str, ...]) -> float:
+    """How long a command that sets no timeout may run"""
+    if argv[0] != "systemctl":
+        return COMMAND_WAIT
+    if any(unit.startswith(DATABASE_UNITS) for unit in _units(argv)):
+        return DATABASE_UNIT_WAIT
+    return UNIT_WAIT
+
+
+def _units(argv: tuple[str, ...]) -> tuple[str, ...]:
+    """The units a systemctl command names"""
+    if argv[0] != "systemctl":
+        return ()
+    return tuple(one for one in argv[1:]
+                 if not one.startswith("-") and "." in one)
+
+
+def jobs_waited_for(text: str, units: tuple[str, ...]) -> tuple[str, ...]:
+    """The jobs that the jobs of `units` wait for, from `systemctl
+    list-jobs --after`: a line of a job, then one line for each job that
+    it waits for"""
+    found = []
+    ours = False
+    for line in text.splitlines():
+        if WAITING_FOR in line:
+            if ours:
+                found.append(line.partition("(")[2].partition(")")[0])
+        else:
+            ours = any(unit in line.split() for unit in units)
+    return tuple(one for one in found if one)
+
+
+def _what_it_waits_for(units: tuple[str, ...]) -> str:
+    """A sentence from systemd's job queue: what the jobs of `units` wait
+    for. The question has its own bound: it is asked during a wait"""
+    try:
+        out = subprocess.run(
+            ["systemctl", "list-jobs", "--after", "--no-legend", "--plain",
+             "--full"], capture_output=True, text=True, check=False,
+            timeout=JOBS_WAIT)
+    except (OSError, subprocess.TimeoutExpired):
+        return "systemd did not say what it waits for"
+    found = jobs_waited_for(out.stdout, units)
+    if not found:
+        return "systemd names no job that it waits for"
+    return f"it waits for {', '.join(found)}"
+
+
+def _say_the_wait(argv: tuple[str, ...], units: tuple[str, ...],
+                  limit: float) -> None:
+    """A job of systemd that still runs at NOTICE_AFTER, on standard
+    error, which keel mesh does not hold back: apply's own lines come at
+    its end"""
+    print(f"keel: {shlex.join(argv)} still runs after {NOTICE_AFTER:g} s, and"
+          f" stops at {limit:g} s: {_what_it_waits_for(units)}",
+          file=sys.stderr)
+
+
+def _left_behind(units: tuple[str, ...]) -> str:
+    """What a killed systemctl leaves: its job stays in systemd's queue"""
+    if not units:
+        return ""
+    return (f"; the job of {', '.join(units)} stays queued, and"
+            f" {_what_it_waits_for(units)}")
 
 
 class Effects:
@@ -149,17 +232,30 @@ class Effects:
         failure either: the client quotes the statement it choked on, so
         the reason is taken from the stream and the statements are not
         echoed back by keel. A command that runs past `timeout` is killed
-        and fails.
+        and fails. With no `timeout`, the bound of its kind applies: no
+        command of an apply waits for ever.
         """
         if timeout is not None:
             return self.run_within(argv, timeout)
+        limit = bound(argv)
+        units = _units(argv)
+        notice = threading.Timer(NOTICE_AFTER, _say_the_wait,
+                                 (argv, units, limit))
+        notice.daemon = True
+        if units and limit > NOTICE_AFTER:
+            notice.start()
         try:
             out = subprocess.run(
                 list(argv), capture_output=True, text=True, check=False,
-                input=stdin,
+                input=stdin, timeout=limit,
             )
+        except subprocess.TimeoutExpired:
+            return (f"{argv[0]} did not finish within {limit:g} s and was"
+                    f" killed{_left_behind(units)}")
         except OSError as e:
             return f"cannot run {argv[0]}: {e.strerror}"
+        finally:
+            notice.cancel()
         if out.returncode != 0:
             detail = out.stderr.strip() or out.stdout.strip()
             return f"{argv[0]} exited {out.returncode}: {detail}"

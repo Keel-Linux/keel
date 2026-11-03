@@ -60,6 +60,10 @@ POLL_SECONDS = 1.0
 QUIESCE_TIMEOUT = 15
 # the lock follow and spec apply take around the replication's statements
 REPLICATION_LOCK = "var/lib/keel/database/follow.lock"
+# longer than one client of a seed may run (keel.system.dbseed.SEED_WAIT)
+REPLICATION_WAIT = 25200.0
+# short: a promote waits for this lock, and a poll adds to its downtime
+REPLICATION_POLL = 0.05
 IO_STOP = "STOP SLAVE IO_THREAD"
 # subprocess.run as the module found it: a runner that is anything else
 # (a test's) runs the stop to its end itself
@@ -377,6 +381,23 @@ def _held() -> dict:
     return found
 
 
+def _take(fd: int) -> None:
+    """The lock of the replication, or TimeoutError at REPLICATION_WAIT"""
+    deadline = time.monotonic() + REPLICATION_WAIT
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise TimeoutError(
+                    "the lock of the replication is still held after"
+                    f" {REPLICATION_WAIT:g} s: a seed or a follow runs on"
+                    " this node") from None
+            time.sleep(min(REPLICATION_POLL, left))
+
+
 @contextlib.contextmanager
 def replication_locked(root: str) -> Iterator[None]:
     """One writer of the replication's statements at a time: keel
@@ -386,7 +407,9 @@ def replication_locked(root: str) -> Iterator[None]:
     Reentrant in one thread: the follow holds it and its observation
     starts the server under it. flock locks an open file description,
     so a second open of the file in the same thread would wait for the
-    first one forever. Another thread or process waits."""
+    first one forever. Another thread or process waits, at most
+    REPLICATION_WAIT seconds, and then gets TimeoutError: the holder can be
+    a seed, whose clients stop at dbseed.SEED_WAIT."""
     path = os.path.join(root, REPLICATION_LOCK)
     held = _held()
     if held.get(path):
@@ -399,7 +422,7 @@ def replication_locked(root: str) -> Iterator[None]:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        _take(fd)
         held[path] = 1
         try:
             yield

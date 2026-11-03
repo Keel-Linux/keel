@@ -866,7 +866,7 @@ class TestNoClaimAndNoAddress(FollowTestCase):
         with mock.patch.object(dbfollow.dbreadonly.fcntl, "flock",
                                side_effect=flock):
             self.follow(0, Server())
-        self.assertEqual(taken, [fcntl.LOCK_EX])
+        self.assertEqual(taken, [fcntl.LOCK_EX | fcntl.LOCK_NB])
         self.assertTrue(os.path.exists(os.path.join(
             self.all[0].root, dbfollow.FOLLOW_LOCK)))
 
