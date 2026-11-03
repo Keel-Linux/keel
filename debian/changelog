@@ -1,3 +1,12 @@
+keel (0.23.76) unstable; urgency=medium
+
+  * keel database watch alerts when a MariaDB primary has no replica and
+    acknowledges alone (keel#270). Rpl_semi_sync_master_status stays ON in
+    this form; the sign is Rpl_semi_sync_master_clients 0. keel database
+    status shows a FALLBACK line. An alert no channel took is tried again.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Mon, 02 Nov 2026 09:00:00 +0000
+
 keel (0.23.75) unstable; urgency=medium
 
   * The CLI builds its parser without loading the library (decision

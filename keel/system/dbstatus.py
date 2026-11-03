@@ -19,7 +19,18 @@ from keel.inspect.collect import database_servers
 from keel.inspect.dbreading import field_lines
 from keel.inspect.tree import Tree
 from keel.mesh.node import Node, NodeError
-from keel.system import dbfollow, dbpair, dbpgstatus, dbtls
+from keel.system import dbfollow, dbpair, dbpgstatus, dbtls, dbwatch
+
+# the replica away (keel#270): Rpl_semi_sync_master_status alone does not
+# show it, since it stays ON with no replica connected
+FALLBACK = {
+    dbwatch.NO_REPLICA: "no replica is connected, so each commit is"
+    " acknowledged with no copy on the replica. A failover now loses these"
+    " commits",
+    dbwatch.OFF: "the replica did not acknowledge within the timeout, so"
+    " each commit is acknowledged with no copy on the replica until it"
+    " caught up. A failover now loses these commits",
+}
 
 
 def lines(root: str, spec: str) -> list[str]:
@@ -63,6 +74,11 @@ def lines(root: str, spec: str) -> list[str]:
                      f" {values.get('clients')} replica(s) acknowledging,"
                      f" {values.get('acknowledged')} commits acknowledged,"
                      f" {values.get('unacknowledged')} not")
+        role = pair.role if pair is not None else None
+        fallback = FALLBACK.get(dbwatch.commits(
+            values, role, reading.read_only.value is True))
+        if role == dbpair.PRIMARY and fallback:
+            found.append(f"  FALLBACK: {fallback}")
     else:
         found.append(f"  semi-synchronous: {reading.semi_sync.problem}")
     status = field_lines(installed.answers.get("status") or

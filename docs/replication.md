@@ -127,18 +127,39 @@ from nobody. A commit on the primary returns once the replica has
 **The fallback.** With no acknowledgement within 30 s the primary
 commits asynchronously (`Rpl_semi_sync_master_status: OFF`) and stays
 so until the replica is back and caught up, when MariaDB turns it on
-again by itself. Writes continue (the maintainer's answer). keel reports
-it:
+again by itself. Writes continue (the maintainer's answer).
+
+**The fallback has a second form, and a cut takes it** (keel#270). When
+the last replica disconnects, the server releases the commits that wait
+and acknowledges the next commits at once (`wait_no_slave = OFF`). It
+does not turn the status off, so `Rpl_semi_sync_master_status` stays
+`ON`. The sign is `Rpl_semi_sync_master_clients` 0. In MariaDB 11.8 this
+is `Repl_semi_sync_master::remove_slave()` and the start of `commit_trx()`
+in `sql/semisync_master.cc`. A cut reaches this form before the timeout:
+`net.ipv4.tcp_retries2 = 5`, which keel sets for etcd (keel#167), ends the
+dump thread to the cut replica after about 12.6 s. So the longest wait of
+a commit on a cut measured 15 s on a real pair, not 30 s
+(`evidence/2026-11-01-keel-0.23.68-mariadb-faults.md`, case F1). The
+timeout runs only for a replica that stays connected and does not
+acknowledge, and for a replica that comes back behind.
+
+In both forms an acknowledged write is on one node only, until the
+replica caught up. The fallback stays, with an alert (the maintainer's
+decision of 2026-11-01, keeping 0031). keel reports it:
 
 - `keel inspect` reports `database.server.semi_sync` (`on`, `off`, the
   clients, the transactions acknowledged and not) and `keel diff` on a
   paired primary reports `off` as **drift**: "the replica does not
   acknowledge; commits are asynchronous and a failover loses them";
+- `keel database status` on the primary shows a `FALLBACK:` line in both
+  forms;
 - `keel-database-watch.timer` runs `keel database watch` every 30 s,
-  which alerts on the change to `off` and on the recovery, through the
-  monitor's channels (0021, 0040) as `keel mesh etcd tend` alerts, and
+  which alerts on the change to either form and on the recovery, through
+  the monitor's channels (0021, 0040) as `keel mesh etcd tend` alerts, and
   records the state in `/var/lib/keel/database/semi-sync` so a lasting
-  fallback alerts once, not every 30 s.
+  fallback alerts once, not every 30 s. It does not record an alert that
+  no channel took, so it tries again at the next run. A node with no
+  channel writes the line to the journal only: set a channel.
 
 **The timeout is longer than the VIP's release** (keel#186). Until
 keel 0.23.36 it was 10 s, the maintainer's answer of 2026-10-03. The
@@ -495,7 +516,7 @@ read; Webmin itself is out of scope here.
 | the role hook, `keel database follow`: the follow table, the seed, the rejoin by GTID, the divergence | `keel.system.dbfollow`, `keel.system.dbgtid` |
 | the database leaf of the mesh root | `keel.system.dbtls`; the root's side `keel.mesh.etcdstate.database_grant`, asked through `issue` with `kind: database` (`keel.mesh.etcdserve`) |
 | the shared credential | `keel.system.dbsecret`; the `secret` message on `POST /v1/vip` (`keel.mesh.vipserve`) |
-| the fallback and its recovery alerted, the certificate renewed, a role followed again | `keel.system.dbwatch`, `keel database watch`, `keel-database-watch.timer` (30 s) |
+| the fallback in both forms and its recovery alerted, the certificate renewed, a role followed again | `keel.system.dbwatch`, `keel database watch`, `keel-database-watch.timer` (30 s) |
 | the operator's screen | `keel.system.dbstatus`, `keel database status` |
 | the units | `keel-database-follow.path` on `/var/lib/keel/vip`, `keel-database-follow.service` (also at boot), `keel-database-watch.timer` |
 | what inspect, diff and the role file say | `keel.inspect.database`, `keel.inspect.dbengines`, `keel.diff.compare`, `/var/lib/keel/role` |

@@ -4,14 +4,18 @@
 Run by keel-database-watch.timer every 30 s on a node that declares
 appliance.vip:
 
-- **the fallback to asynchronous replication**, on the primary: when
-  `Rpl_semi_sync_master_status` turns OFF the replica stopped
-  acknowledging within the 10 s, commits go on without it, and a failover
-  now loses what it has not received. Alerted once through the monitor's
-  channels (keel.monitor.alerting), and once more when it is back ON;
-  the state between runs is /var/lib/keel/database/semi-sync, so a
-  lasting fallback is one alert, not one every 30 s. keel diff reports
-  the same as drift (docs/diff.md);
+- **the fallback to asynchronous replication**, on the primary, in
+  either form (`commits`): `Rpl_semi_sync_master_status` OFF, a replica
+  that stayed connected and did not acknowledge within the timeout; or
+  status ON with `Rpl_semi_sync_master_clients` 0, no replica connected,
+  so each commit is acknowledged at once with no copy (keel#270: a cut
+  takes this path, since the dump thread ends before the timeout). A
+  failover now loses what the replica has not received. Alerted once
+  through the monitor's channels (keel.monitor.alerting), and once more
+  when commits wait again; the state between runs is
+  /var/lib/keel/database/semi-sync, so a lasting fallback is one alert,
+  not one every 30 s. An alert that no channel took is tried again at
+  the next run. keel diff reports the same as drift (docs/diff.md);
 - **the synchronous commit's wait, and the primary that commits
   alone**, on a PostgreSQL primary (0054). After keel database promote
   --old-primary-gone the primary commits alone; the watch alerts at
@@ -60,12 +64,23 @@ STATE = "var/lib/keel/database/semi-sync"
 CHECK = "database-semi-sync"
 FELL_BACK = "semi-synchronous replication fell back to asynchronous"
 BACK = "semi-synchronous replication is back"
+# what `commits` says, and what the state file records
+WAITS, OFF, NO_REPLICA = "on", "off", "no replica"
 FELL_BACK_TEXT = (
     "{host}, the primary of {vip}: the replica did not acknowledge a commit"
     " within {timeout} s, so the primary commits without it"
     " (Rpl_semi_sync_master_status OFF). Writes go on; a failover now"
     " loses the commits the replica has not received. It turns"
     " semi-synchronous again by itself once the replica is back and caught"
+    " up. keel database status on both nodes says what the replica does."
+)
+NO_REPLICA_TEXT = (
+    "{host}, the primary of {vip}: no replica is connected, so each commit"
+    " is acknowledged at once with no copy on the replica"
+    " ({unacknowledged} such commits so far). The status variable"
+    " Rpl_semi_sync_master_status stays ON; the sign is"
+    " Rpl_semi_sync_master_clients 0. A failover now loses these commits."
+    " Commits wait again by themselves once the replica is back and caught"
     " up. keel database status on both nodes says what the replica does."
 )
 BACK_TEXT = ("{host}, the primary of {vip}: the replica acknowledges again;"
@@ -287,30 +302,57 @@ def _sync_postgresql(root: str, pair: dbpair.PairState, reading, out, err,
     return reading
 
 
+def commits(values: dict, role: str | None, read_only: bool) -> str:
+    """What a commit does here, from the semi-synchronous status: WAITS,
+    OFF, or NO_REPLICA, where the status variable stays ON (keel#270).
+    Only a writable holder acknowledges a commit: a replica has no client
+    by design, and a read-only holder gives an error, not an OK"""
+    if str(values.get("master", "")).lower() != "on":
+        return OFF
+    if role == dbpair.PRIMARY and not read_only and \
+            str(values.get("clients", "")).strip() == "0":
+        return NO_REPLICA
+    return WAITS
+
+
 def _semi_sync_mariadb(root: str, pair: dbpair.PairState, reading,
                        out, err):
     """The fallback to asynchronous replication, on the primary"""
-    master = str(reading.semi_sync.value.get("master", "")).lower()
-    now = "on" if master == "on" else "off"
-    before = _read_state(root)
+    values = reading.semi_sync.value
     role = pair.role
+    now = commits(values, role, reading.read_only.value is True)
+    before = _read_state(root).get("semi_sync")
     out(f"database watch: role {role or 'unclaimed'}, semi-synchronous"
-        f" {now} (was {before.get('semi_sync') or 'unknown'})")
-    # off is alerted at its first sight too; "back" only after an off
-    # that was seen, never at the pair's first watch
-    if role == dbpair.PRIMARY and now != before.get("semi_sync"):
-        host = os.uname().nodename
-        if now == "off":
-            alerting.alert(root, err, FELL_BACK, FELL_BACK_TEXT.format(
-                host=host, vip=pair.vip,
-                timeout=mariadb.SEMI_SYNC_TIMEOUT_MS // 1000), CHECK)
-        elif before.get("semi_sync") == "off":
-            alerting.alert(root, err, BACK, BACK_TEXT.format(
-                host=host, vip=pair.vip), CHECK, "recovery")
-    _write_state(root, {"semi_sync": now, "role": role,
-                        "at": datetime.now(timezone.utc).strftime(
-                            "%Y-%m-%dT%H:%M:%SZ")})
+        f" {now} (was {before or 'unknown'})")
+    told = True
+    # the fallback is alerted at its first sight too; "back" only after a
+    # fallback that was seen, never at the pair's first watch. The two
+    # forms are one fallback: a replica that comes back behind goes from
+    # one to the other
+    fell = now != WAITS
+    fallen = before in (OFF, NO_REPLICA)
+    if role == dbpair.PRIMARY and fell and not fallen:
+        told = alerting.alert(root, err, FELL_BACK, _fallback_text(
+            now, values, pair.vip), CHECK)
+    elif role == dbpair.PRIMARY and fallen and not fell:
+        alerting.alert(root, err, BACK, BACK_TEXT.format(
+            host=os.uname().nodename, vip=pair.vip), CHECK, "recovery")
+    # not recorded when no channel took it, so the next run tries again
+    if told:
+        _write_state(root, {"semi_sync": now, "role": role,
+                            "at": datetime.now(timezone.utc).strftime(
+                                "%Y-%m-%dT%H:%M:%SZ")})
     return reading
+
+
+def _fallback_text(now: str, values: dict, vip: str) -> str:
+    host = os.uname().nodename
+    if now == NO_REPLICA:
+        return NO_REPLICA_TEXT.format(
+            host=host, vip=vip,
+            unacknowledged=values.get("unacknowledged", "unknown"))
+    return FELL_BACK_TEXT.format(
+        host=host, vip=vip, timeout=mariadb.SEMI_SYNC_TIMEOUT_MS // 1000)
 
 
 def certificate(root: str, doc: dict, spec: str, pair: dbpair.PairState,
