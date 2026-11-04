@@ -18,6 +18,7 @@ from keel.inspect import constants as paths
 from keel.inspect.collect import database_servers
 from keel.inspect.dbreading import field_lines
 from keel.inspect.tree import Tree
+from keel.system import bootrefusal
 from keel.mesh.node import Node, NodeError
 from keel.system import dbdump, dbfollow, dbpair, dbpgstatus, dbposition, dbtls, dbwatch
 
@@ -168,6 +169,9 @@ def _shown(value) -> str:
 
 def main(args, out: Callable[[str], None] = print) -> int:
     root = os.path.abspath(getattr(args, "root", paths.ROOT_DEFAULT))
+    found = bootrefusal.read(root)
+    if found is not None:
+        out(found.line())
     for line in lines(root, args.spec):
         out(line)
     return exits.OK

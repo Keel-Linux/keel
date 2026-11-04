@@ -130,6 +130,7 @@ def spec_validate(args) -> int:
     validates a spec on a machine that does not hold the secrets.
     """
     check_secret_files = not getattr(args, "no_secret_files", False)
+    warn_first_boot(getattr(args, "root", ROOT_DEFAULT))
     doc, code = read_spec(args.spec, check_secret_files,
                           getattr(args, "root", ROOT_DEFAULT),
                           check_pair=True)
@@ -197,7 +198,7 @@ def spec_apply(args) -> int:
             return code
     if not with_system:
         return exits.OK
-    return apply_system(
+    code = apply_system(
         doc, root, dry_run, phase_label(system_only),
         getattr(args, "destroy_local_database", False),
         getattr(args, "defer_certificate", False),
@@ -206,6 +207,10 @@ def spec_apply(args) -> int:
         getattr(args, "skip_uplink", False),
         spec_path=args.spec,
     )
+    if code == exits.OK and not dry_run:
+        from keel.system import bootrefusal
+        bootrefusal.clear(root)
+    return code
 
 
 def phase_label(system_only: bool) -> str:
@@ -452,7 +457,13 @@ def notify(args) -> int:
         str(settings.get("address") or ""), settings.get("details") is True,
         notifier.run_probe,
     )
-    deliveries = notifier.send(settings, message, args.level)
+    return deliver(settings, reason, message, args.level, args.settings)
+
+
+def deliver(settings: dict, reason: str, message: notifier.Message,
+            level: str, settings_path: str) -> int:
+    """Send to each channel, else to syslog and root's mailbox"""
+    deliveries = notifier.send(settings, message, level)
     for delivery in deliveries:
         if delivery.problem is None:
             print(delivery.line())
@@ -461,13 +472,48 @@ def notify(args) -> int:
     if any(delivery.problem is None for delivery in deliveries):
         return exits.OK
     reason = reason or ("every channel failed" if deliveries
-                        else f"{args.settings} declares no channel")
+                        else f"{settings_path} declares no channel")
     took = notifier.last_resort(message, reason)
     if took:
         error(f"notify: {reason}; told {' and '.join(took)} instead")
     else:
         error(f"notify: {reason}; syslog and root's mailbox failed too")
     return exits.NOTIFY_FAILED
+
+
+def spec_record_refusal(args) -> int:
+    """What firstboot.d/10keel-system runs when keel refused the spec: keep
+    the refusal (keel#268) and fire one alert. The reason comes on standard
+    input. The channels may not exist yet, because the phase that writes them
+    did not run, so the alert then goes to syslog and root's mailbox"""
+    from keel.system import bootrefusal
+    root = os.path.abspath(args.root)
+    reason = sys.stdin.read()
+    if not bootrefusal.record(root, args.spec, reason):
+        return exits.OK
+    found = bootrefusal.read(root)
+    try:
+        settings, problem = channelfile.load(args.settings), ""
+    except spec.SpecError as e:
+        settings, problem = {}, str(e)
+    host = str(settings.get("host") or notifier.hostname())
+    message = notifier.Message(
+        f"[critical] {host}: first boot refused its spec",
+        f"{host}: {found.line()}",
+        {"host": host, "address": str(settings.get("address") or ""),
+         "check": "first_boot", "target": args.spec, "direction": "",
+         "value": "", "threshold": "", "level": "critical", "service": "",
+         "event": "spec refused"})
+    deliver(settings, problem, message, "critical", args.settings)
+    return exits.OK
+
+
+def warn_first_boot(root: str) -> None:
+    """Say a refused first boot on a command that may not reach keel diff"""
+    from keel.system import bootrefusal
+    found = bootrefusal.read(root)
+    if found is not None:
+        warn(found.line())
 
 
 def database_promote(args) -> int:
@@ -745,6 +791,8 @@ def diff(args) -> int:
     """
     doc, code = read_spec(args.spec, False, args.root, check_pair=True)
     if doc is None:
+        if code != exits.OK:
+            warn_first_boot(args.root)
         return code
     from keel import diff as drift
     comparison = drift.diff_root(doc, args.root)

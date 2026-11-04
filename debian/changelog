@@ -1,3 +1,13 @@
+keel (0.23.82) unstable; urgency=medium
+
+  * A first boot that refuses its spec now leaves a signal (keel#268). The
+    boot continues. The refusal stays in
+    /var/lib/keel/first-boot-refused.json. keel diff reports it as drift, and
+    keel spec validate and keel database status say it. It fires one alert. A
+    keel spec apply with the system phase that succeeds removes it.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Tue, 04 Nov 2026 00:00:00 +0000
+
 keel (0.23.81) unstable; urgency=medium
 
   * A MariaDB replica that lags does not take writes by itself (keel#271).

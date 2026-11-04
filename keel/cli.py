@@ -153,6 +153,17 @@ def build_parser() -> argparse.ArgumentParser:
         " that does not hold the secrets (default: check the files)",
     )
     add_root_option(validate_parser, "read the appliance manifests of")
+    refusal_parser = _add_spec_action(
+        spec_actions, "record-refusal",
+        "keep a refusal of the first boot and alert once, with the reason on"
+        " standard input; what firstboot.d/10keel-system runs (keel#268)",
+        "keel.commands.spec_record_refusal",
+    )
+    add_root_option(refusal_parser, "keep the refusal on")
+    refusal_parser.add_argument(
+        "--settings", default=NOTIFY_SETTINGS, metavar="FILE",
+        help="the channels of the alert (default: %(default)s)",
+    )
     _add_spec_action(
         spec_actions, "render",
         "print the conf that apply would write, secrets masked",

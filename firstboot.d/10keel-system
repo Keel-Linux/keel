@@ -104,6 +104,13 @@ while IFS= read -r line; do
     fi
 done <<< "$output"
 
+# 3 is keel's SPEC_INVALID: the spec itself was refused. Keep that where keel
+# diff can show it, with one alert, and a later apply clears it (keel#268).
+if [[ "$status" -eq 3 ]]; then
+    printf '%s\n' "$output" | "$KEEL" spec record-refusal --spec "$spec" \
+        || warn "could not record the refusal of $spec"
+fi
+
 if [[ "$status" -ne 0 ]]; then
     warn "keel spec apply --system-only exited $status:" \
          "$spec is not fully converged, the boot carries on"
