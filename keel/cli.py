@@ -231,6 +231,14 @@ def build_parser() -> argparse.ArgumentParser:
         " be reseeded from the holder, its errant transactions discarded"
         " (a dump is kept first under /var/backups/keel/mariadb)",
     )
+    follow_parser.add_argument(
+        "--needed",
+        action="store_true",
+        help="change nothing: exit 1 when the spec declares no"
+        " appliance.vip, so there is nothing to follow (the witness of a"
+        " pair), else 0; the ExecCondition of"
+        " keel-database-follow.service",
+    )
     add_root_option(follow_parser, "follow the VIP of")
     follow_parser.set_defaults(handler="keel.commands.database_follow")
     watch_parser = database_actions.add_parser(

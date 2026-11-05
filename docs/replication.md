@@ -455,6 +455,17 @@ each watch run (keel#154, [docs/vip.md](vip.md)). The path unit is the seam
 between the VIP's helper, which holds `CAP_NET_ADMIN` alone and cannot
 run `runuser`, and the database, which needs root.
 
+**The witness has nothing to follow** (decisions 0057 and 0076). A
+cloud advanced witness is a Keel Core node with no `appliance.vip` and
+no database, but its `/var/lib/keel/vip/` exists, because it routes the
+VIPs of the pairs. `keel-database-follow.service` runs `keel database
+follow --needed` as its `ExecCondition`: that exits 1 when the spec
+declares no `appliance.vip`, and systemd skips the unit, so it is never
+failed there (keel#211). It exits 0 when the spec declares one, and also
+when the spec cannot be read, so that the follow runs and says why.
+`keel database follow` itself says "nothing to follow" and exits 0 on
+such a node.
+
 **The VIP fence after a rejoin or a reseed** (keel#192, the twin of
 keel#166 for PostgreSQL). A node that lost the VIP while it was cut
 off is fenced: it takes the VIP again only by `keel vip promote` there
