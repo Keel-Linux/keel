@@ -58,6 +58,11 @@ class ManifestFacts:
     resolved: Any = None
     defaults: dict = field(default_factory=dict)
     recorded: frozenset[str] | None = None
+    # the installation modes the chain allows, and whether the appliance
+    # may be the cloud advanced witness (decision 0076); what confconsole
+    # offers on its Mode and Role screens
+    modes: tuple[str, ...] = INSTALLATION_MODES
+    witness: bool = False
 
 
 def is_name(value: Any) -> bool:

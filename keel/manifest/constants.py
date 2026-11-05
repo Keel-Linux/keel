@@ -99,8 +99,12 @@ COMMON_KEYS = ("manifest_version", "kind", "name", "title", "summary")
 OVERLAY_KEYS = ("requires", "provides", "processes", "checks", "data",
                 "secrets", "hooks", "screen")
 APP_SECTIONS = ("services", "state", "workers", "web")
+# `modes` and `witness` (decision 0076): the installation modes the
+# appliance may be installed in, all three when it says nothing, and
+# whether it may be the cloud advanced witness, which only Core may be
 APPLIANCE_KEYS = ("base", "overlays", "processes", "checks", "secrets",
-                  "options", "hooks") + APP_SECTIONS
+                  "options", "hooks") + APP_SECTIONS + ("modes", "witness")
+WITNESS_MODE = "cloud_advanced"
 KIND_KEYS = {OVERLAY: OVERLAY_KEYS, APPLIANCE: APPLIANCE_KEYS}
 HOOK_KEYS = {OVERLAY: ("first_boot", "state"),
              APPLIANCE: ("first_boot", "migrate")}

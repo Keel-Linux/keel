@@ -67,6 +67,10 @@ class Resolved:
     hooks: tuple[Owned, ...]
     application: Owned | None
     state_paths: tuple[Owned, ...] = ()
+    # the installation modes the whole chain allows, in the order of
+    # 0028, and whether the appliance itself may be the witness (0076)
+    modes: tuple[str, ...] = MODES
+    witness: bool = False
 
 
 def overlay_units(resolved: Resolved, overlay: str) -> tuple[str, ...]:
@@ -100,6 +104,8 @@ def resolve(catalog, top: dict) -> tuple[Resolved | None, list[str]]:
     errors = builder.errors + builder.requires_errors()
     application, paths, more = _application(chain, top["name"], builder)
     errors.extend(more)
+    modes, more = chain_modes(chain, top["name"])
+    errors.extend(more)
     return Resolved(
         name=top["name"], title=top["title"],
         chain=tuple(doc["name"] for doc in chain),
@@ -109,8 +115,39 @@ def resolve(catalog, top: dict) -> tuple[Resolved | None, list[str]]:
         secrets=tuple(builder.items["secret"].values()),
         options=tuple(builder.items["option"].values()),
         hooks=tuple(builder.hooks), application=application,
-        state_paths=paths,
+        state_paths=paths, modes=modes,
+        witness=top.get("witness") is True,
     ), errors
+
+
+def declared_modes(doc: dict) -> tuple[str, ...]:
+    """The modes one manifest allows: its `modes`, all three when it
+    says nothing (0076). What is not a mode of 0028 is passed over:
+    validation reports it"""
+    found = doc.get("modes", MODES)
+    if not isinstance(found, list | tuple):
+        return MODES
+    return tuple(mode for mode in MODES if mode in found)
+
+
+def chain_modes(chain: list[dict], top: str) -> tuple[tuple[str, ...],
+                                                       list[str]]:
+    """The modes the chain allows, bottom first. Each appliance narrows
+    the modes of its base: one that says nothing takes them, and one
+    that names a mode its base does not allow is an error"""
+    allowed, errors = MODES, []
+    base = None
+    for doc in chain:
+        own = declared_modes(doc)
+        if "modes" in doc and base is not None:
+            where = _where(doc["name"], top)
+            errors.extend(
+                f"{where}modes: {mode} is not a mode of the base {base}"
+                f" (it allows {', '.join(allowed)})"
+                for mode in own if mode not in allowed)
+        allowed = tuple(mode for mode in allowed if mode in own)
+        base = doc["name"]
+    return allowed, errors
 
 
 def _chain(catalog, top: dict) -> tuple[list[dict] | None, list[str]]:
