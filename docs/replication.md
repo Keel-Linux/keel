@@ -455,6 +455,32 @@ each watch run (keel#154, [docs/vip.md](vip.md)). The path unit is the seam
 between the VIP's helper, which holds `CAP_NET_ADMIN` alone and cannot
 run `runuser`, and the database, which needs root.
 
+**A pair of files only** (decision 0076, point 4). Keel Web in a cloud
+mode has no database, but its two nodes declare the same
+`appliance.vip` and replicate the site files with syncthing (0050). On
+a node in `cloud_simple` or `cloud_advanced` that declares
+`appliance.vip` and no `database.server`, and whose appliance
+replicates a path for its mode with `overlays.syncthing: enabled`,
+`keel database follow` takes the direction of the folders from the VIP
+(keel.system.filefollow):
+
+| VIP state on this node | the folders |
+| --- | --- |
+| holds the VIP, newest epoch, not in doubt, the VIP on `wg0` | send |
+| its own claim, but in doubt or the VIP not on `wg0` | paused: not proven (keel#104) |
+| another member holds it, or this node released it or is fenced | receive |
+| no claim yet | paused, until `keel vip promote` on the node that is to send |
+
+`/var/lib/keel/role` then says `replicates=files`. `keel vip promote` on
+the other node moves the VIP; `keel-database-follow.path` runs the
+follow on both nodes, and the direction flips. `keel database watch`
+follows again when the role file is not the VIP's, or when the holder
+no longer carries the VIP on `wg0`; it renews no database certificate
+there. Before 0076 such a node was refused: "this node declares no
+database.server". Any other node without a database keeps that refusal
+(a Core pair that replicates nothing, a node in `simple`), and a node
+with no `appliance.vip` has nothing to follow.
+
 **The witness has nothing to follow** (decisions 0057 and 0076). A
 cloud advanced witness is a Keel Core node with no `appliance.vip` and
 no database, but its `/var/lib/keel/vip/` exists, because it routes the

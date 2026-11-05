@@ -261,6 +261,13 @@ def _follow_proof(root: str, spec: str, confirmed: bool, found: Followed,
     state = observe_database(root, doc, start=proof is not False,
                              spec=spec)
     if state is None:
+        from keel.system import filefollow
+        if filefollow.applies(root, doc):
+            # a pair of files only (0076): the folders follow the VIP
+            flip.pair, flip.role = filefollow.follow(
+                root, doc, found,
+                lambda: _proven(root, doc, output, wait, sleep))
+            return
         declared = (doc.get("appliance") or {}).get("vip")
         if not declared and found.nothing_without_vip:
             found.say(f"nothing to follow: {NO_PAIR}")
@@ -857,6 +864,12 @@ def _dump(root: str, runner) -> str:
     except OSError as e:
         return f"not kept ({e.strerror or e})"
     return plain + ".zst"
+
+
+def write_public(root: str, relative: str, text: str) -> None:
+    """A file every user may read, as the role file is (the Webmin
+    banner reads it); keel.system.filefollow writes the role file too"""
+    _write(root, relative, text, DROPIN_MODE)
 
 
 def _write(root: str, relative: str, text: str, mode: int) -> None:

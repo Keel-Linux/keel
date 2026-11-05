@@ -142,8 +142,11 @@ def allowed_hosts(pair: PairState, server: dict) -> list[str] | None:
     return [pair.peer_address] if pair.peer_address else None
 
 
-def role_text(role: str, vip: str, files: bool = False) -> str:
-    replicated = "database,files" if files else "database"
+def role_text(role: str, vip: str, files: bool = False,
+              database: bool = True) -> str:
+    """`database` False for a pair of files only (decision 0076)"""
+    replicated = ",".join(name for name, kept in (
+        ("database", database), ("files", files)) if kept)
     return ROLE_TEXT.format(role=role, replicates=replicated, vip=vip)
 
 
