@@ -60,6 +60,8 @@ class Pending:
     # its address is reserved in etcd too (keel.mesh.addrreserve), so
     # its join is admitted only while that reservation names it
     etcd_reserved: bool = False
+    # the VIP its token carries (decision 0076), None for none
+    vip: str | None = None
 
     def expired(self, now: datetime) -> bool:
         return now >= self.expires
@@ -198,9 +200,18 @@ def read(root: str, invite_id: str) -> Pending | None:
             tls_key=str(data["tls_key"]),
             consumed=consumed(data.get("consumed", False)),
             etcd_reserved=consumed(data.get("etcd_reserved", False)),
+            vip=vip_of(data.get("vip")),
         )
     except (OSError, ValueError, KeyError, TypeError):
         return None
+
+
+def vip_of(value: object) -> str | None:
+    """The VIP of the file, as keel writes it; absent (an invite of an
+    older keel) or null is none"""
+    if value is None:
+        return None
+    return str(ipaddress.IPv6Address(str(value)))
 
 
 def consumed(value: object) -> bool:
@@ -221,6 +232,7 @@ def dumps(pending: Pending) -> str:
         "tls_key": pending.tls_key,
         "consumed": pending.consumed,
         "etcd_reserved": pending.etcd_reserved,
+        "vip": pending.vip,
     }, indent=2) + "\n"
 
 

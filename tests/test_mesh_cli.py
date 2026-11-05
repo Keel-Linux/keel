@@ -480,7 +480,7 @@ class TestJoinDryRun(Case):
         good = self.token()
         for text, words in ((expired, "expired"),
                             (good[:-3], "mistyped or truncated"),
-                            ("keel2:AAAA", "later format")):
+                            ("keel3:AAAA", "later format")):
             with self.subTest(words=words):
                 code, out, err = self.join(text, "--dry-run")
                 self.assertEqual((code, out),

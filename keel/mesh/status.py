@@ -14,7 +14,7 @@ shown. Nothing secret is printed.
 
 import ipaddress
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timezone
 
 from keel.diff.handshakes import NOT_HELD, STALE, UNREACHABLE
 from keel.mesh import identity, invites
@@ -118,3 +118,83 @@ def lines(overlay: dict | None, root: str, now: datetime,
         found.append(f"  {one.invite_id}  {address}  TCP {one.https_port}"
                      f"  until {shown(one.expires)}  {used}")
     return found
+
+
+ISO_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def report(overlay: dict | None, root: str, now: datetime,
+           output: Reader | None) -> dict:
+    """What `status --json` gives of the mesh (docs/mesh.md, "The
+    contract for confconsole"); `output` None off the live system, and
+    every field that needs it is then None"""
+    if not overlay or not overlay.get("address"):
+        return {"in_mesh": False, "address": None, "interface": None,
+                "port": None, "identity": identity_hex(root),
+                "public_key": None, "members": [], "invites": []}
+    iface = wireguard.interface(overlay)
+    endpoints = handshakes = {}
+    public = None
+    if output is not None:
+        public = (output(("wg", "show", iface, "public-key")) or "").strip() \
+            or None
+        endpoints = table(output(("wg", "show", iface, "endpoints")))
+        handshakes = table(output(("wg", "show", iface,
+                                   "latest-handshakes")))
+    members = []
+    for peer in overlay.get("peers") or []:
+        key = str(peer.get("public_key"))
+        live_key = next((one for one in endpoints | handshakes
+                         if same_key(one, key)), None)
+        endpoint = endpoints.get(live_key) or peer.get("endpoint")
+        seen = handshakes.get(live_key) if live_key else None
+        members.append({
+            "public_key": key,
+            "address": host_of(allowed(peer)),
+            "allowed_ips": list(allowed(peer)),
+            "endpoint": None if endpoint in (None, "(none)") else
+            str(endpoint),
+            "handshake_age": age(seen, now),
+            "reachable": None if output is None else
+            drift_of(seen, now, iface) is None,
+        })
+    return {
+        "in_mesh": True, "address": str(overlay["address"]),
+        "interface": iface, "port": wireguard.port(overlay),
+        "identity": identity_hex(root), "public_key": public,
+        "members": members,
+        "invites": [{
+            "invite_id": one.invite_id, "assigned": one.address,
+            "https_port": one.https_port,
+            "expires": one.expires.astimezone(timezone.utc).strftime(
+                ISO_FORMAT),
+            "used": one.consumed, "vip": one.vip}
+            for one in invites.pending(root, now)],
+    }
+
+
+def identity_hex(root: str) -> str | None:
+    try:
+        found = identity.read(root)
+    except ValueError:
+        return None
+    return found.hex() if found else None
+
+
+def host_of(nets: list[str]) -> str | None:
+    """A peer's overlay address: the first IPv6 /128 it is given"""
+    for net in nets:
+        try:
+            found = ipaddress.ip_network(net)
+        except ValueError:
+            continue
+        if found.version == 6 and found.prefixlen == 128:
+            return str(found.network_address)
+    return None
+
+
+def age(value: str | None, now: datetime) -> int | None:
+    """Seconds since a handshake `wg show` gives, None with none"""
+    if value is None or not value.isdecimal() or value == "0":
+        return None
+    return max(int(now.timestamp()) - int(value), 0)

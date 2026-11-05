@@ -61,6 +61,12 @@ def add(subparsers, options: Options) -> None:
         help="the TCP port the join request goes to (default: %(default)s,"
         " the number of WireGuard's UDP port)",
     )
+    invite_parser.add_argument(
+        "--json", action="store_true",
+        help="print one line of JSON instead of the join line: the line,"
+        " the token, the VIP it carries, the expiry (docs/mesh.md, \"The"
+        " contract for confconsole\")",
+    )
     options.root(invite_parser, "read the overlay of and keep the invite in")
     invite_parser.set_defaults(handler="keel.mesh.commands.mesh_invite")
     join_parser = mesh_actions.add_parser(
@@ -71,7 +77,8 @@ def add(subparsers, options: Options) -> None:
     options.common(join_parser)
     join_parser.add_argument(
         "token", metavar="TOKEN",
-        help="the keel1: token keel mesh invite printed, or - to read it"
+        help="the keel1: or keel2: token keel mesh invite printed, or - to"
+        " read it"
         " from standard input, which keeps it out of the process list",
     )
     join_parser.add_argument(
@@ -188,6 +195,12 @@ def actions(mesh_actions, options: Options) -> None:
         " invites; never a secret",
     )
     options.common(status_parser)
+    status_parser.add_argument(
+        "--json", action="store_true",
+        help="print one line of JSON: the members, the invites, etcd's"
+        " voters, the VIP proposed and declared, and whether the mesh is"
+        " ready (docs/mesh.md, \"The contract for confconsole\")",
+    )
     options.root(status_parser, "read the mesh of")
     status_parser.set_defaults(handler="keel.mesh.commands.mesh_status")
     serve_parser = mesh_actions.add_parser(

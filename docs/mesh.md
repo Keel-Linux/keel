@@ -91,7 +91,7 @@ applied.
 ## keel mesh invite
 
 ```
-keel mesh invite [--endpoint ADDRESS]... [--port PORT]
+keel mesh invite [--endpoint ADDRESS]... [--port PORT] [--json]
 ```
 
 Root, on a node whose spec declares `network.overlay.wireguard` and whose
@@ -124,8 +124,11 @@ It:
    cannot start is removed and no line is printed;
 7. opens the port where keel's firewall exists (below);
 8. prints the `keel mesh join` line, alone, on standard output; what it
-   reserved, until when, and whether the port was opened go to standard
-   error, never the token.
+   reserved, until when, the VIP the token carries ("The VIP"), and
+   whether the port was opened go to standard error, never the token.
+   With `--json`, standard output holds one JSON object instead of the
+   line ("The contract for confconsole"), and standard error is the
+   same.
 
 `--port` is the TCP port the join request goes to, 51820 by default,
 the number of WireGuard's UDP port, so a provider's firewall needs one
@@ -210,6 +213,38 @@ allocates from it. Spec validation refuses a node address or a peer's
 range ...: that range is for VIPs, and no node is invited from it. Run
 keel mesh invite on a node outside that range`.
 
+### The VIP
+
+In a cloud mode the invite also carries the **VIP** of the pair, so the
+operator never types it (decision 0076, point 3). When this node's spec
+has `installation.mode` `cloud_simple` or `cloud_advanced`, and does not
+set `overlays.vip: disabled` (the witness of 0057 does, and its
+invites carry no VIP), `invite` proposes, in this order:
+
+1. this node's own `appliance.vip`, when its spec declares one;
+2. else the VIP of an invite of this node that is still pending, so the
+   two invites of a cloud advanced mesh carry the same VIP;
+3. else the lowest free address of the overlay's VIP range,
+   `<prefix>::ffff:1` first ([docs/vip.md](vip.md)). Not free: a VIP
+   this node keeps a state file or a pair record for (it took a claim
+   of it, or routes it), its own `appliance.vip`, and, when this node is
+   in a formed etcd cluster, a VIP reserved there
+   (`/keel/<mesh>/vips/<vip>/pair`). etcd that does not answer is said
+   on standard error, and the VIP is proposed from what this node knows:
+   `keel vip pair` refuses a VIP another pair reserved.
+
+The VIP goes into the token (a `keel2:` token, "The token") and into the
+pending invite, and standard error says `the invite carries the VIP
+fd2a:9c41:7e03::ffff:1: write it as appliance.vip on both nodes of the
+pair`. With no VIP proposed (a mode that is not a cloud one, the VIP
+disabled, an overlay narrower than a /96, or a full range) the token is a
+`keel1:` one, as before, and in a cloud mode standard error says why.
+
+`invite` writes nothing into a spec. The screen of the inviting node
+writes the VIP as its own `appliance.vip` (when it declares none yet),
+and the screen of the joining node writes the VIP that `join` received
+("The contract for confconsole").
+
 ## keel mesh join
 
 ```
@@ -278,6 +313,19 @@ certificate
 ("etcd"): `forms with` at the third cloud advanced member, `joins as a
 learner with` from the fourth, or how many ready members are known
 before the third.
+
+When the token carries a VIP ("The VIP"), a join that confirmed keeps it
+in `/var/lib/keel/mesh/proposed-vip.json` and prints one more line on
+standard output:
+
+```
+vip: fd2a:9c41:7e03::ffff:1, proposed by the inviter for the pair (appliance.vip on both nodes; keel mesh status --json gives it)
+```
+
+`join` does not write `appliance.vip`: the witness joins with such a
+token too, and declares none. A later join with a token that carries a
+VIP replaces the record; a join that is refused or reverts leaves it as
+it was. `--dry-run` says the VIP on standard error.
 
 A join that fails after the request was accepted (the tunnel never
 answers within the window, say) reverts on both sides by itself, and
@@ -1145,7 +1193,7 @@ tolerance.
 ## keel mesh status
 
 ```
-keel mesh status
+keel mesh status [--json]
 ```
 
 This node's overlay, the mesh's identity, its public key, each peer of the spec with its
@@ -1161,6 +1209,130 @@ with how many of the three ready members are known; or each member of
 the cluster (its name, overlay address, voter or learner, healthy or
 why not), the leader they report (`members disagree` when they do not),
 and a warning with two voters. Off the live system etcd is not asked.
+
+With `--json`, the same facts as one JSON object on standard output
+("The contract for confconsole"), and nothing else.
+
+## The contract for confconsole
+
+The Mode, Invite a node, Join a mesh and Cloud screens of confconsole
+(decision 0076) call these commands and read what they print. Each
+command runs as root and prompts for nothing. This section is the
+contract: a field is added, never renamed or removed, while `format` is
+1. A screen reads what it knows and passes over the rest.
+
+**On the inviting node:**
+
+```
+keel mesh create                  # once, on the first node
+keel mesh invite --json           # once per new node
+keel mesh status --json           # polled, until the new member is there
+```
+
+`keel mesh invite --json` prints, on exit 0, one line of JSON:
+
+```json
+{"format": 1,
+ "line": "keel mesh join - <<< keel2:...",
+ "token": "keel2:...",
+ "vip": "fd2a:9c41:7e03::ffff:1",
+ "expires": "2026-11-05T13:00:00Z",
+ "invite_id": "3f9c0a1b2c3d4e5f",
+ "assigned": "fd2a:9c41:7e03::4e1a/64",
+ "https_port": 51820}
+```
+
+| Field | Value |
+| --- | --- |
+| `format` | 1 |
+| `line` | what the screen shows the operator, to copy to the new node: the line without `--json` |
+| `token` | the token alone, `keel1:` or `keel2:`; secret: shown on screen, never logged or written to a file |
+| `vip` | the VIP the token carries ("The VIP"), or `null`. The screen writes it as this node's `appliance.vip` when the spec declares none |
+| `expires` | when the token expires, UTC, ISO 8601 with `Z` |
+| `invite_id` | the pending invite, as `keel mesh status` lists it |
+| `assigned` | the overlay address reserved for the new node, with its prefix length |
+| `https_port` | the TCP port the join request goes to |
+
+On any other exit, standard output is empty and standard error says why
+(exit codes below).
+
+**On the joining node:**
+
+```
+keel mesh join - <<< TOKEN        # the line, or the token alone on standard input
+keel mesh status --json           # the VIP received, the members, etcd
+```
+
+The screen writes `vip.proposed` of the status as the node's
+`appliance.vip`, on a data node (not on a witness), then runs `keel vip
+pair` with the inviter's overlay address (`members[].address` of the
+inviter) once etcd has formed in cloud advanced (`etcd.voters` 3), and
+`keel spec apply --system-only`. The node that is to hold the VIP first
+runs `keel vip promote`: nothing claims a VIP before that, and a pair of
+files only keeps its folders paused until then
+([docs/replication.md](replication.md)). In cloud advanced, a promote
+after etcd formed makes the claim on an etcd lease; a claim made before
+etcd stays without one (keel#161).
+
+`keel mesh status --json` prints, on exit 0, one line of JSON:
+
+```json
+{"format": 1,
+ "live": true,
+ "mode": "cloud_advanced",
+ "in_mesh": true,
+ "address": "fd2a:9c41:7e03::1/64",
+ "interface": "wg0",
+ "port": 51820,
+ "identity": "6b65...",
+ "public_key": "nb9/izIukqWXM7gnBpe7hki4jKZZChWOW1wEfONn82E=",
+ "members": [{"public_key": "FHKH10gO...=",
+              "address": "fd2a:9c41:7e03::4e1a",
+              "allowed_ips": ["fd2a:9c41:7e03::4e1a/128"],
+              "endpoint": "[2001:db8:2::20]:51820",
+              "handshake_age": 12,
+              "reachable": true}],
+ "invites": [{"invite_id": "3f9c0a1b2c3d4e5f",
+              "assigned": "fd2a:9c41:7e03::4e1a/64",
+              "https_port": 51820,
+              "expires": "2026-11-05T13:00:00Z",
+              "used": false,
+              "vip": "fd2a:9c41:7e03::ffff:1"}],
+ "etcd": {"state": "formed", "voters": 3, "learners": 0,
+          "healthy_voters": 3, "ready_known": null, "why": null,
+          "members": [{"name": "fd2a9c417e03--1",
+                       "address": "fd2a:9c41:7e03::1",
+                       "voter": true, "healthy": true, "why": null}],
+          "leader": "fd2a9c417e03--1"},
+ "vip": {"declared": "fd2a:9c41:7e03::ffff:1",
+         "proposed": "fd2a:9c41:7e03::ffff:1",
+         "role": "primary", "holder": "fd2a:9c41:7e03::1"},
+ "ready": true}
+```
+
+| Field | Value |
+| --- | --- |
+| `format` | 1 |
+| `live` | `false` under `--root`: no handshake, no `wg`, no etcd is asked, and every field that needs them is `null` |
+| `mode` | `installation.mode` of the spec, or `null` |
+| `in_mesh` | whether the spec declares an overlay address; when `false`, `members` and `invites` are empty and `etcd.state` is `"off"` |
+| `address`, `interface`, `port` | this node's overlay address with its length, its interface and its WireGuard UDP port |
+| `identity` | the mesh's identity in hex, or `null` |
+| `public_key` | this node's WireGuard key as `wg show` gives it, or `null` |
+| `members[]` | each peer of the spec: its key, its overlay address (its first IPv6 `/128`), its `allowed_ips`, its endpoint (as WireGuard saw it last, else the spec's, else `null`), `handshake_age` in seconds (`null` with no handshake), and `reachable`: a handshake within the drift bound of `keel diff` (`null` off the live system) |
+| `invites[]` | each pending invite: id, reserved address, port, expiry, `used` (consumed, waiting for its confirmation), and the VIP it carries or `null` |
+| `etcd.state` | `"off"` (this node runs no etcd: not cloud advanced), `"not_formed"`, `"formed"`, `"unreachable"` (this member does not answer; `etcd.why` says why), or `"error"` (its state cannot be read; `etcd.why`) |
+| `etcd.voters`, `etcd.learners`, `etcd.healthy_voters` | counts from the cluster's member list, when `formed` and live; else `null` |
+| `etcd.ready_known` | before etcd forms, how many of the 3 ready members this node knows; else `null` |
+| `etcd.members[]`, `etcd.leader` | each member (name, overlay address, voter or learner, healthy, and why not), and the leader they report (`null` when none or they disagree) |
+| `vip.declared` | this node's `appliance.vip`, or `null` |
+| `vip.proposed` | the VIP the last confirmed join received ("keel mesh join"), else the VIP of a pending invite of this node, else `null` |
+| `vip.role` | `"primary"` when this node holds the declared VIP, `"replica"` when it declares one and does not, `null` without one |
+| `vip.holder` | the overlay address of the node that holds the declared VIP, as this node knows it, or `null` |
+| `ready` | live only, else `null`. `true` when this node is in the mesh, has at least one member, and every member is `reachable`; in cloud advanced also when etcd is `formed` with 3 voters or more, all healthy. The screens wait for it before the next step |
+
+The text forms of `invite` and `status`, without `--json`, stay as above:
+evidence scripts read them.
 
 ## The protocol
 
@@ -1369,15 +1541,25 @@ well, 256.
 | invite id | 8 | which pending invite this is; derived from the secret |
 | secret | 32 | 256 random bits, used once; the HMAC key is derived from it |
 | expiry | 4 | seconds since the epoch, UTC |
+| VIP | 16 | `keel2:` only: the pair's VIP ("The VIP") |
 | checksum | 4 | a truncated or mistyped paste is refused before anything is sent |
+
+A token that carries a VIP is a **`keel2:`** token: the same fields and
+the VIP after the expiry, the checksum over `keel2:` and the fields
+(decision 0076). It is about 22 characters longer. An invite with no
+VIP still prints a `keel1:` token, and every keel reads it as before. A
+keel older than 0.23.83 refuses a `keel2:` token and names the format,
+as 0048 says: join with a keel as new as the inviter's. The VIP must be
+an address of the token's VIP range and not its host 0, or `join`
+refuses the token (exit 23).
 
 `join` refuses, each with its reason and exit 23:
 
 - more than 1024 characters, before anything is decoded (a token is
   about 256);
-- text that does not start with `keel1:` (the whole `keel mesh join`
-  line pasted, say), and a `keel2:` or later token, naming the keel it
-  needs;
+- text that does not start with `keel1:` or `keel2:` (the whole `keel
+  mesh join` line pasted, say), and a `keel3:` or later token, naming
+  the keel it needs;
 - a character outside base64url, and any token whose checksum does not
   match: one character changed, or the end cut off;
 - a layout that does not match its flags, unknown flags or an unknown
@@ -1404,7 +1586,8 @@ backup set.
 
 | Path | What it holds |
 | --- | --- |
-| `invites/<id>.json` | one pending invite: the reserved address, the expiry, the HTTPS port, the invite's certificate and TLS key, and the HMAC key |
+| `invites/<id>.json` | one pending invite: the reserved address, the expiry, the HTTPS port, the invite's certificate and TLS key, the HMAC key, and the VIP its token carries (`vip`, absent or `null` for none) |
+| `proposed-vip.json` | the VIP the last confirmed join received, the invite and the inviter's overlay address it came from, and when (decision 0076) |
 | `identity` | the mesh's identity, 16 bytes in hex |
 | `node.key` | this node's Ed25519 signing key, PEM, never printed |
 | `trust.json` | the members this node trusts (signing key, root or not, admission evidence), and the tombstones |
