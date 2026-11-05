@@ -644,5 +644,49 @@ class TestStatus(Mesh):
                       etcdcare.status(a)[0])
 
 
+class TestReport(Mesh):
+    """The same facts as data, for keel mesh status --json (0076)"""
+
+    def test_off_not_formed_and_damaged(self):
+        a, = self.members(1, modes=("cloud_simple",))
+        self.assertEqual(etcdcare.report(a), etcdcare.report_off())
+        b, = self.members(1)
+        etcd.created(b)
+        found = etcdcare.report(b)
+        self.assertEqual((found["state"], found["ready_known"]),
+                         ("not_formed", 1))
+        with mock.patch("keel.mesh.etcdstate.cluster",
+                        side_effect=etcdstate.StateError("damaged")):
+            found = etcdcare.report(b)
+        self.assertEqual((found["state"], found["why"]), ("error", "damaged"))
+
+    def test_voters_health_and_leader(self):
+        fake = FakeEtcd([voter(0), voter(1), voter(2, name=False)])
+        a, = self.members(1, etcd=fake)
+        etcdstate.save_cluster(a.root, Cluster("new", (), MESH.hex()))
+        self.assertEqual(etcdcare.report(a, live=False)["state"], "formed")
+        self.assertIsNone(etcdcare.report(a, live=False)["voters"])
+        url = f"https://[{address(1)}]:2379"
+        fake.leaders = {f"https://[{address(0)}]:2379": "2", url: "2"}
+        fake.healthy[url] = (True, "")
+        found = etcdcare.report(a)
+        self.assertEqual((found["state"], found["voters"], found["learners"]),
+                         ("formed", 3, 0))
+        self.assertEqual(found["healthy_voters"], 2)
+        self.assertEqual(found["leader"],
+                         f"keel-{address(1).replace(':', '-')}")
+        third = found["members"][2]
+        self.assertEqual((third["name"], third["healthy"], third["why"]),
+                         (None, False, "not started"))
+        fake.leaders[url] = "1"
+        self.assertIsNone(etcdcare.report(a)["leader"])
+        fake.refuse["status"] = "timed out"
+        self.assertIsNone(etcdcare.report(a)["leader"])
+        fake.refuse["connect"] = "no member answered"
+        found = etcdcare.report(a)
+        self.assertEqual((found["state"], found["why"]),
+                         ("unreachable", "no member answered"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -43,4 +43,6 @@ def gather(root: str, name: str) -> ManifestFacts:
         defaults={state.name: dict(state.states)
                   for state in resolved.overlays},
         recorded=overlayrecord.read(root, name),
+        modes=resolved.modes,
+        witness=resolved.witness,
     )

@@ -37,6 +37,7 @@ from keel.manifest.constants import (
     STATES,
     VAR_RE,
     VAR_TEXT,
+    WITNESS_MODE,
     COMMON_KEYS,
 )
 from keel.manifest.fields import (
@@ -339,6 +340,7 @@ def _appliance_errors(doc: dict) -> list[str]:
         errors.append("base: none is for core only")
     elif base != NO_BASE and not NAME_RE.fullmatch(base):
         errors.append(f"base: {quote(base)} is not an appliance name")
+    errors.extend(_modes_errors(doc))
     overlays = doc.get("overlays")
     if overlays is None:
         return errors
@@ -351,6 +353,36 @@ def _appliance_errors(doc: dict) -> list[str]:
                           " name")
             continue
         errors.extend(_states_errors(f"overlays.{overlay}", states))
+    return errors
+
+
+def _modes_errors(doc: dict) -> list[str]:
+    """`modes` and `witness` (decision 0076): a list of the modes of
+    0028, each once, and the witness for Core in cloud advanced only"""
+    errors = []
+    modes = doc.get("modes", list(MODES))
+    error = list_error("modes", modes)
+    if error:
+        errors.append(error)
+        modes = list(MODES)
+    elif not modes:
+        errors.append("modes: must name at least one mode")
+    for index, mode in enumerate(modes):
+        error = choice_error(f"modes[{index}]", mode, MODES)
+        if error:
+            errors.append(error)
+        elif mode in modes[:index]:
+            errors.append(f"modes[{index}]: {mode} is listed twice")
+    if "witness" not in doc:
+        return errors
+    error = bool_error("witness", doc["witness"])
+    if error:
+        return errors + [error]
+    if doc["witness"] and doc.get("name") != CORE:
+        errors.append(f"witness: only Keel Core ({CORE}) may be the cloud"
+                      " advanced witness (decisions 0057, 0076)")
+    elif doc["witness"] and WITNESS_MODE not in modes:
+        errors.append(f"witness: true needs {WITNESS_MODE} in modes")
     return errors
 
 

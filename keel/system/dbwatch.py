@@ -144,11 +144,18 @@ def watch(root: str, spec: str, out: Callable[[str], None],
             " to watch")
         return exits.OK
     code = exits.OK
-    reading = semi_sync(root, pair, out, err)
-    if not certificate(root, doc, spec, pair, out, err):
-        code = exits.APPLY_FAILED
-    from keel.system import filesync
-    mismatch = reading is not None and needs_follow(root, pair, reading, doc)
+    from keel.system import filefollow, filesync
+    from keel.system.dbstate import declared_server
+    if declared_server(doc):
+        reading = semi_sync(root, pair, out, err)
+        if not certificate(root, doc, spec, pair, out, err):
+            code = exits.APPLY_FAILED
+        mismatch = reading is not None and needs_follow(root, pair, reading,
+                                                        doc)
+    else:
+        # a pair of files only (decision 0076): no server, no certificate
+        # of a server; the folders' role against the VIP's
+        mismatch = filefollow.mismatch(root, doc, pair)
     if mismatch or filesync.flip_pending(root, doc):
         from keel.system import dbfollow
         out("database watch: the server does not match the VIP's role;"

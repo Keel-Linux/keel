@@ -594,6 +594,9 @@ def database_follow(args) -> int:
     if refusal:
         error(refusal)
         return exits.APPLY_NEEDS_ROOT
+    if getattr(args, "needed", False):
+        return dbfollow.needed(os.path.abspath(root), args.spec, lambda line:
+                               print(f"database.server.role: {line}"))
     found = dbfollow.Followed(lambda line: print(
         f"database.server.role: {line}"))
     found.nothing_without_vip = True

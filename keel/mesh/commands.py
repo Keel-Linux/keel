@@ -14,6 +14,7 @@ nothing here prompts, so confconsole calls the same commands.
 """
 
 import ipaddress
+import json
 import os
 import secrets
 import signal
@@ -34,6 +35,7 @@ from keel.mesh import (
     allocate,
     bridge,
     certificate,
+    contract,
     create,
     endpoint,
     etcd,
@@ -54,6 +56,7 @@ from keel.mesh import (
     sync,
     vipnode,
     vippromote,
+    vippropose,
 )
 from keel.mesh.etcdclient import EtcdError
 from keel.mesh.etcdstate import CLIENT_PORT, StateError
@@ -116,19 +119,57 @@ def mesh_invite(args) -> int:
         assigned="", mesh_id=mesh_id, invite_id=invite_id(secret),
         expires=now + LIFETIME, secret=secret, etcd=state,
         etcd_port=CLIENT_PORT if state == "running" else None)
+    proposal = vip_proposal(root, doc, member)
+    said: dict = {}
+
+    def propose(others):
+        said["proposal"] = proposal(others)
+        return said["proposal"]
     try:
         made, line = invite(root, now, draft, overlay, (tls_key, cert),
                             reserved_vips(root, doc),
-                            address_claim(member, draft, now))
+                            address_claim(member, draft, now), propose)
     except (allocate.AllocationError, TokenError, invites.InviteError) as e:
         error(str(e))
         return exits.MESH_REFUSED
     opened, code = listening(made, args.spec, root, now)
     if code != exits.OK:
         return code
-    print(f"keel mesh join - <<< {line}")
-    report(made, opened)
+    if getattr(args, "json", False):
+        print(json.dumps(contract.invite(made, line)))
+    else:
+        print(f"keel mesh join - <<< {line}")
+    report(made, opened, said.get("proposal"), doc)
     return exits.OK
+
+
+def cloud_mode(doc: dict | None) -> bool:
+    return ((doc or {}).get("installation") or {}).get("mode") in \
+        vippropose.CLOUD_MODES
+
+
+def vip_proposal(root: str, doc: dict, member: etcd.Etcd) -> Callable[
+        [tuple[invites.Pending, ...]], vippropose.Proposal]:
+    """What the invite asks, under the mesh's lock, for the VIP it
+    carries (keel.mesh.vippropose): with etcd, the VIPs reserved there
+    are taken too, and an etcd that does not answer is said"""
+    def reserved() -> list[str]:
+        def ready() -> bool:
+            try:
+                return etcd.ready(member.node.document())
+            except NodeError:
+                return False
+        if not addrreserve.formed(root, ready):
+            return []
+        try:
+            return vippropose.etcd_reserved(member.local(),
+                                            addrreserve.mesh_of(root))
+        except (EtcdError, StateError, ValueError) as e:
+            err(f"etcd did not answer for the VIPs reserved there ({e}):"
+                " the VIP is proposed from what this node knows, and keel"
+                " vip pair refuses one another pair reserved")
+            return []
+    return lambda others: vippropose.proposed(root, doc, others, reserved)
 
 
 def invite_identity(root: str, path: str) -> bytes:
@@ -166,14 +207,18 @@ def listening(made: invites.Pending, path: str, root: str,
 
 def invite(root: str, now: datetime, draft: Token, overlay: dict,
            tls: tuple[str, str], reserved: tuple[str, ...] = (),
-           claim: Callable[[str], bool] | None = None) -> tuple[
+           claim: Callable[[str], bool] | None = None,
+           propose: Callable[[tuple[invites.Pending, ...]],
+                             vippropose.Proposal] | None = None) -> tuple[
                invites.Pending, str]:
     """The pending invite, reserved, and its token
 
     `claim(address)` reserves the drawn address in etcd, False when
     another invite holds it there (keel.mesh.addrreserve); None before
-    etcd. The token is written before the invite is, so one that cannot
-    be written reserves nothing.
+    etcd. `propose(others)` is the VIP the token carries, given the
+    other pending invites (keel.mesh.vippropose); None carries none. The
+    token is written before the invite is, so one that cannot be written
+    reserves nothing.
     """
     lines: list[str] = []
 
@@ -184,15 +229,16 @@ def invite(root: str, now: datetime, draft: Token, overlay: dict,
                     f"invite {one.invite_id} is pending on TCP port"
                     f" {one.https_port} until {shown(one.expires)}: give"
                     " this one another with --port, or wait")
+        vip = propose(others).vip if propose else None
         assigned = drawn(draft.address, allocate.taken(overlay) + list(
             reserved) + [str(ipaddress.IPv6Interface(one.address).ip)
                          for one in others], claim)
-        lines.append(encode(replace(draft, assigned=assigned)))
+        lines.append(encode(replace(draft, assigned=assigned, vip=vip)))
         return invites.Pending(
             invite_id=draft.invite_id, address=assigned,
             expires=draft.expires, https_port=draft.https_port,
             certificate=tls[1], hmac_key=hmac_key(draft.secret),
-            tls_key=tls[0], etcd_reserved=claim is not None)
+            tls_key=tls[0], etcd_reserved=claim is not None, vip=vip)
 
     made = invites.reserve(root, now, make)
     return made, lines[0]
@@ -248,7 +294,9 @@ def reserved_vips(root: str, doc: dict) -> tuple[str, ...]:
     return vipstate.known(root) + ((own,) if own else ())
 
 
-def report(made: invites.Pending, opened: str) -> None:
+def report(made: invites.Pending, opened: str,
+           proposal: vippropose.Proposal | None = None,
+           doc: dict | None = None) -> None:
     """What the invite did, on standard error: never the token"""
     print("on the new node, keel mesh join - reads the token from standard"
           " input, out of the process list and the shell's history",
@@ -257,6 +305,11 @@ def report(made: invites.Pending, opened: str) -> None:
           f" node until {shown(made.expires)}, the listener on TCP port"
           f" {made.https_port} ({inviting.unit(made.invite_id)})",
           file=sys.stderr)
+    if made.vip:
+        print(f"the invite carries the VIP {made.vip}: write it as"
+              " appliance.vip on both nodes of the pair", file=sys.stderr)
+    elif proposal is not None and cloud_mode(doc):
+        print(f"the invite carries no VIP: {proposal.why}", file=sys.stderr)
     print(opened, file=sys.stderr)
 
 
@@ -379,7 +432,20 @@ def mesh_join(args) -> int:
     except (NodeError, ValueError) as e:
         error(str(e))
         return exits.MESH_REFUSED
-    return joining.run(joining.Joiner(node, token, utcnow, out, err), own)
+    code = joining.run(joining.Joiner(node, token, utcnow, out, err), own)
+    if code == exits.OK and token.vip:
+        joined_vip(node.root, token)
+    return code
+
+
+def joined_vip(root: str, token: Token) -> None:
+    """The VIP the token carried, kept for keel mesh status and the
+    screen that writes appliance.vip (decision 0076); join itself never
+    writes it, since a witness joins with such a token too"""
+    vippropose.keep(root, token.vip, token.invite_id, token.address,
+                    utcnow())
+    out(f"vip: {token.vip}, proposed by the inviter for the pair"
+        " (appliance.vip on both nodes; keel mesh status --json gives it)")
 
 
 def join_dry_run(args) -> int:
@@ -411,6 +477,10 @@ def join_dry_run(args) -> int:
           f" overlay, joining {token.prefix()} through {token.endpoint()}"
           f" (invite {token.invite_id}, valid until {shown(token.expires)},"
           f" etcd: {token.etcd})", file=sys.stderr)
+    if token.vip:
+        print(f"the token carries the VIP {token.vip} for the pair"
+              " (appliance.vip; the join keeps it, and writes no spec"
+              " field for it)", file=sys.stderr)
     return exits.OK
 
 
@@ -550,11 +620,17 @@ def mesh_status(args) -> int:
     """The peers, their handshakes and the pending invites; no secret"""
     root = os.path.abspath(args.root)
     overlay = None
+    doc = {"version": 1}
     if os.path.exists(args.spec):
         doc, code = read_spec(args.spec, False, root)
         if doc is None:
             return code
         overlay = overlay_of(doc)
+    if getattr(args, "json", False):
+        print(json.dumps(contract.mesh_status(
+            root, args.spec, doc, overlay, root == ROOT_DEFAULT, utcnow(),
+            err)))
+        return exits.OK
     for line in status.lines(overlay, root, utcnow(),
                              live.output if root == ROOT_DEFAULT else None):
         print(line)

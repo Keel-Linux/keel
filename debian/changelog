@@ -1,3 +1,25 @@
+keel (0.23.83) unstable; urgency=medium
+
+  * keel mesh invite proposes the VIP of the pair in a cloud mode and puts
+    it in the token (decision 0076): the declared appliance.vip, else the
+    VIP of a pending invite, else the first free address of the VIP range.
+    A token with a VIP is a keel2: token; one without stays keel1:. keel
+    mesh join keeps the VIP of a confirmed join and prints it. keel mesh
+    invite --json and keel mesh status --json give the screens of
+    confconsole one line of JSON each (docs/mesh.md, "The contract for
+    confconsole").
+  * Manifest v1 has two optional keys of an appliance: modes (the
+    installation modes it allows, all three by default) and witness (only
+    core). keel.manifest.facts.gather gives them as modes and witness.
+  * A pair of files only (Keel Web in a cloud mode, no database) takes the
+    direction of its syncthing folders from the VIP: the holder sends, the
+    other node receives. keel database follow refused such a node before.
+  * keel-database-follow.service has ExecCondition=keel database follow
+    --needed, so a node with no appliance.vip, the witness, skips it and it
+    is never failed there (keel#211).
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Wed, 05 Nov 2026 00:00:00 +0000
+
 keel (0.23.82) unstable; urgency=medium
 
   * A first boot that refuses its spec now leaves a signal (keel#268). The

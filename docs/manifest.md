@@ -86,6 +86,38 @@ Rules 25 to 27 check an instance spec against the manifests; `keel spec
 validate` runs them, and so does every command that reads a spec naming
 an appliance, against the manifests under its root.
 
+### modes and witness (decision 0076)
+
+Two optional keys of an appliance manifest, which an overlay manifest
+does not have:
+
+| Key | Meaning |
+| --- | --- |
+| `modes` | The installation modes of decision 0028 that the appliance may be installed in: a list of `simple`, `cloud_simple` and `cloud_advanced`, at least one, each once. Without the key, all three. confconsole's Mode screen offers only these |
+| `witness` | `true` or `false`, `false` without the key: whether the appliance may be the cloud advanced witness (decisions 0057, 0076). Only Keel Core (`core`) may say `true`, and only when `cloud_advanced` is in its `modes`. confconsole's Role screen offers Witness only then |
+
+```yaml
+# /usr/share/keel/appliances/redis.yaml: one node only
+modes: [simple]
+# /usr/share/keel/appliances/core.yaml
+witness: true
+```
+
+The chain narrows `modes`: an appliance is installed only in a mode that
+its base allows too. An appliance without the key takes the modes of its
+base, and one that names a mode its base does not allow is an error of
+the chain (`modes: cloud_simple is not a mode of the base redis (it
+allows simple)`). `witness` is not inherited: an appliance built on Core
+is not a witness. The two values are in the facts that
+`keel.manifest.facts.gather(root, name)` gives, as `modes` (a tuple in
+the order above) and `witness` (a boolean); a chain that does not
+resolve gives all three modes, no witness, and its `problems`.
+
+`spec validate` does not refuse a spec whose `installation.mode` is not
+in `modes`: a machine installed before an appliance named its modes must
+keep working. A keel older than 0.23.83 refuses both keys as unknown, so
+a manifest that writes them needs `keel (>= 0.23.83)`.
+
 **States are words.** A YAML 1.1 reader (PyYAML, which keel uses) reads an
 unquoted `on`, `off`, `yes` or `no` as a boolean, so a state written `on`
 arrives as `True`. It is refused with that explanation rather than taken

@@ -24,7 +24,13 @@ guessing at it.
     invite id        8   derived from the secret, never the secret
     secret          32   the one use secret: the HMAC key's source
     expiry           4   seconds since the epoch, UTC
+    VIP             16   keel2: only, the pair's VIP (decision 0076)
     checksum         4
+
+A token that carries the pair's VIP is a `keel2:` token: the fields
+above with the VIP after the expiry, its checksum over `keel2:`. A token
+without one is a `keel1:` token, as before, so a keel that reads only
+`keel1:` still joins a mesh whose inviter proposes no VIP.
 
 The secret is the only value here that is not public. It is in no repr
 of a Token and no message of a TokenError; neither is the token's text,
@@ -38,13 +44,18 @@ import hmac
 import ipaddress
 import re
 import struct
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 
 from keel.network.wireguard import KEY_BYTES, key_bytes
 
 VERSION = 1
 PREFIX = f"keel{VERSION}:"
+# the layout with the pair's VIP (decision 0076); the newest this reads
+VIP_VERSION = 2
+VIP_PREFIX = f"keel{VIP_VERSION}:"
+NEWEST = VIP_VERSION
+VIP_BYTES = 16
 SECRET_BYTES = 32
 FINGERPRINT_BYTES = 32
 MESH_ID_BYTES = 16
@@ -100,6 +111,8 @@ class Token:
     secret: bytes = field(repr=False)
     etcd: str = "none"
     etcd_port: int | None = None
+    # the VIP the inviter proposes for the pair (0076); None for none
+    vip: str | None = None
 
     def prefix(self) -> ipaddress.IPv6Network:
         return ipaddress.IPv6Interface(self.address).network
@@ -129,8 +142,8 @@ def derive(secret: bytes, label: bytes) -> bytes:
     return hmac.new(secret, label, hashlib.sha256).digest()
 
 
-def checksum(payload: bytes) -> bytes:
-    return hashlib.sha256(PREFIX.encode() + payload).digest()[
+def checksum(payload: bytes, prefix: str = PREFIX) -> bytes:
+    return hashlib.sha256(prefix.encode() + payload).digest()[
         :CHECKSUM_BYTES]
 
 
@@ -152,8 +165,12 @@ def encode(token: Token) -> str:
         payload += PORT.pack(token.etcd_port)
     payload += TAIL.pack(bytes.fromhex(token.invite_id), token.secret,
                          int(token.expires.timestamp()))
-    whole = payload + checksum(payload)
-    return PREFIX + base64.urlsafe_b64encode(whole).decode().rstrip("=")
+    prefix = PREFIX
+    if token.vip is not None:
+        prefix = VIP_PREFIX
+        payload += ipaddress.IPv6Address(token.vip).packed
+    whole = payload + checksum(payload, prefix)
+    return prefix + base64.urlsafe_b64encode(whole).decode().rstrip("=")
 
 
 def parse(text: str, now: datetime) -> Token:
@@ -166,8 +183,8 @@ def parse(text: str, now: datetime) -> Token:
     if len(text) > MAX_TEXT:
         raise TokenError(f"not a keel mesh token: more than {MAX_TEXT}"
                          " characters, and a token is about 256")
-    payload = unwrap(text.strip())
-    token = unpack(payload)
+    prefix, payload = unwrap(text.strip())
+    token = unpack(payload, prefix == VIP_PREFIX)
     check(token)
     if now >= token.expires:
         raise TokenError(
@@ -176,19 +193,22 @@ def parse(text: str, now: datetime) -> Token:
     return token
 
 
-def unwrap(text: str) -> bytes:
-    """The fields of the token, its checksum checked and removed"""
-    if not text.startswith(PREFIX):
+def unwrap(text: str) -> tuple[str, bytes]:
+    """The token's prefix and its fields, its checksum checked and
+    removed"""
+    prefix = next((one for one in (PREFIX, VIP_PREFIX)
+                   if text.startswith(one)), None)
+    if prefix is None:
         found = VERSIONED_RE.match(text)
-        if found and int(found.group(1)) > VERSION:
+        if found and int(found.group(1)) > NEWEST:
             raise TokenError(
                 f"a {found.group(0)} token is of a later format than this"
-                f" keel reads ({PREFIX}): join with a keel as new as the"
-                " inviting node's")
+                f" keel reads ({PREFIX} and {VIP_PREFIX}): join with a keel"
+                " as new as the inviting node's")
         raise TokenError(f"not a keel mesh token: a token starts with"
-                         f" {PREFIX} (paste the token alone, not the whole"
-                         " line)")
-    body = text[len(PREFIX):]
+                         f" {PREFIX} or {VIP_PREFIX} (paste the token alone,"
+                         " not the whole line)")
+    body = text[len(prefix):]
     if not BODY_RE.match(body):
         raise TokenError("the token holds a character base64url does not"
                          " use: it was changed in the copy")
@@ -198,16 +218,22 @@ def unwrap(text: str) -> bytes:
         whole = b""
     payload, found = whole[:-CHECKSUM_BYTES], whole[-CHECKSUM_BYTES:]
     if len(whole) <= CHECKSUM_BYTES or not hmac.compare_digest(
-            found, checksum(payload)):
+            found, checksum(payload, prefix)):
         raise TokenError("the token is mistyped or truncated: its checksum"
                          " does not match; copy the whole line again")
-    return payload
+    return prefix, payload
 
 
-def unpack(payload: bytes) -> Token:
-    """The fields, in the order of the module's table"""
+def unpack(payload: bytes, with_vip: bool = False) -> Token:
+    """The fields, in the order of the module's table; the VIP last, in
+    a keel2: token"""
     try:
-        return fields(payload)
+        if not with_vip:
+            return fields(payload)
+        if len(payload) <= VIP_BYTES:
+            raise ValueError(f"{len(payload)} bytes: no room for the VIP")
+        return replace(fields(payload[:-VIP_BYTES]), vip=str(
+            ipaddress.IPv6Address(payload[-VIP_BYTES:])))
     except (struct.error, IndexError, ValueError) as e:
         raise TokenError(f"the token is malformed: {e}") from None
 
@@ -270,6 +296,7 @@ def problems(token: Token):
             yield f"the {name} is not {size} bytes"
     yield from overlay_problems(token.address, token.assigned)
     yield from etcd_problems(token.etcd, token.etcd_port)
+    yield from vip_problems(token.vip, token.address)
     if token.invite_id != invite_id(token.secret):
         yield "its invite id is not the one its secret gives"
     if token.expires.utcoffset() != timedelta(0):
@@ -323,6 +350,23 @@ def etcd_problems(state: str, port: int | None):
         yield "an etcd port goes with a running etcd, and only with it"
     elif port is not None and not 1 <= port <= 65535:
         yield f"etcd port {port} is not a port number"
+
+
+def vip_problems(vip: str | None, address: str):
+    """The VIP a keel2: token carries: an address of the VIP range of
+    the token's overlay, not its host 0 (keel.mesh.vip.misplaced)"""
+    if vip is None:
+        return
+    from keel.mesh.vip import misplaced
+    try:
+        found = ipaddress.IPv6Address(vip)
+        prefix = ipaddress.IPv6Interface(address).network
+    except ValueError as e:
+        yield f"the VIP: {e}"
+        return
+    why = misplaced(str(found), prefix)
+    if why:
+        yield f"the VIP: {why}"
 
 
 def shown(when: datetime) -> str:

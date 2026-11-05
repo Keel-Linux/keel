@@ -336,6 +336,55 @@ def status(etcd: Etcd, live: bool = True) -> list[str]:
     return members_lines(client, listed) + notes
 
 
+def report_off() -> dict:
+    """etcd's part of `status --json` on a node that runs none"""
+    return {"state": "off", "voters": None, "learners": None,
+            "healthy_voters": None, "ready_known": None, "members": [],
+            "leader": None, "why": None}
+
+
+def report(etcd: Etcd, live: bool = True) -> dict:
+    """What `keel mesh status --json` gives of etcd (docs/mesh.md, "The
+    contract for confconsole"): the same facts as status, as data"""
+    found = report_off()
+    try:
+        doc = etcd.node.document()
+        formed = etcdstate.cluster(etcd.root)
+    except (NodeError, StateError) as e:
+        return {**found, "state": "error", "why": str(e)}
+    if not ready(doc):
+        return found
+    if formed is None:
+        return {**found, "state": "not_formed",
+                "ready_known": len(known_ready(etcd))}
+    if not live:
+        return {**found, "state": "formed"}
+    try:
+        client = etcd.local()
+        listed = client.members()
+    except EtcdError as e:
+        return {**found, "state": "unreachable", "why": str(e)}
+    members, leaders = [], set()
+    for one in listed:
+        url = one.client_urls[0] if one.client_urls else None
+        healthy, why = client.health(url) if url else (False, "not started")
+        if url and healthy:
+            try:
+                leaders.add(client.status(url).leader)
+            except EtcdError:
+                pass
+        members.append({"name": one.name or None, "address": one.address,
+                        "voter": not one.learner, "healthy": healthy,
+                        "why": None if healthy else why})
+    leader = next((one for one in listed if one.id in leaders), None)
+    voters = [one for one in members if one["voter"]]
+    return {**found, "state": "formed", "voters": len(voters),
+            "learners": len(members) - len(voters),
+            "healthy_voters": sum(1 for one in voters if one["healthy"]),
+            "members": members,
+            "leader": leader.name if leader and len(leaders) == 1 else None}
+
+
 def certificates(etcd: Etcd) -> list[str]:
     """What status says of this member's certificates and its queue"""
     lines = []

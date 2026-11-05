@@ -122,7 +122,7 @@ class TestRefused(unittest.TestCase):
                      "not a keel mesh token")
 
     def test_a_later_version_names_itself(self):
-        self.refused("keel2:AAAA", "keel2")
+        self.refused("keel3:AAAA", "keel3")
 
     def test_a_join_answer_is_not_a_token(self):
         self.refused("keel1a:AAAA", "not a keel mesh token")
@@ -255,6 +255,60 @@ class TestInconsistent(unittest.TestCase):
 
     def test_a_naive_expiry(self):
         self.refused("UTC", expires=datetime(2026, 10, 3, 13, 0))
+
+
+VIP = "fd00:6b65:1::ffff:1"
+
+
+class TestTheVip(unittest.TestCase):
+    """A token that carries the pair's VIP is a keel2: one (0076); one
+    without a VIP stays keel1:, which every keel reads"""
+
+    def test_a_vip_makes_a_keel2_token_that_reads_back(self):
+        made = token(vip=VIP)
+        text = encode(made)
+        self.assertRegex(text, r"^keel2:[A-Za-z0-9_-]+$")
+        self.assertLessEqual(len(text), 290)
+        self.assertEqual(parse(text, NOW), made)
+        self.assertEqual(parse(text, NOW).vip, VIP)
+
+    def test_without_a_vip_the_token_is_keel1_as_before(self):
+        text = encode(token())
+        self.assertTrue(text.startswith("keel1:"))
+        self.assertIsNone(parse(text, NOW).vip)
+
+    def test_the_checksum_covers_the_prefix(self):
+        text = encode(token(vip=VIP))
+        with self.assertRaises(TokenError) as raised:
+            parse("keel1:" + text[len("keel2:"):], NOW)
+        self.assertIn("checksum", str(raised.exception))
+
+    def test_a_keel2_token_without_its_vip_is_malformed(self):
+        payload = body(encode(token()))[:-mesh_token.CHECKSUM_BYTES]
+        whole = payload + mesh_token.checksum(payload, "keel2:")
+        text = "keel2:" + base64.urlsafe_b64encode(whole).decode().rstrip("=")
+        with self.assertRaises(TokenError) as raised:
+            parse(text, NOW)
+        self.assertIn("malformed", str(raised.exception))
+
+    def test_a_vip_outside_the_vip_range_is_refused(self):
+        for vip, words in (("fd00:6b65:1::7", "outside the VIP range"),
+                           ("fd00:6b65:1::ffff:0", "host 0"),
+                           ("fd00:6b65:2::ffff:1", "outside the overlay"),
+                           ("not one", "VIP")):
+            with self.subTest(vip=vip), self.assertRaises(TokenError) as e:
+                encode(token(vip=vip))
+            self.assertIn(words, str(e.exception))
+
+    def test_a_vip_in_a_token_that_parse_refuses_is_named(self):
+        made = token(vip=VIP)
+        payload = body(encode(made))[:-mesh_token.CHECKSUM_BYTES]
+        bad = payload[:-16] + bytes(16)
+        whole = bad + mesh_token.checksum(bad, "keel2:")
+        text = "keel2:" + base64.urlsafe_b64encode(whole).decode().rstrip("=")
+        with self.assertRaises(TokenError) as raised:
+            parse(text, NOW)
+        self.assertIn("VIP", str(raised.exception))
 
 
 class TestSecret(unittest.TestCase):
