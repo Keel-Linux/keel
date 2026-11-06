@@ -325,7 +325,8 @@ def _follow_proof(root: str, spec: str, confirmed: bool, found: Followed,
             root, state, server, role, confirmed, found, runner,
             proven=lambda: proof if proof is not None else _proven(
                 root, doc, output, wait, sleep),
-            alone=alone)
+            alone=alone,
+            mode=str((doc.get("installation") or {}).get("mode") or ""))
     elif role == PRIMARY and vipstate.unconfirmed(root, pair.vip):
         # the holder's doubt (keel#195): read only and fenced until a
         # renewal of its lease is confirmed; the role file is left

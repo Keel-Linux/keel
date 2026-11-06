@@ -232,9 +232,12 @@ class FollowTestCase(Pair):
         return None, "no key"
 
     def pair_nodes(self, claim: int | None = 0,
-                   mode: str = "cloud_advanced", etcd: str = "disabled"):
+                   mode: str = "cloud_advanced", etcd: str = "disabled",
+                   had_role: bool = True):
         """A and B paired, their specs declaring the database; A claims
-        the VIP, and B's follow sees A as the holder"""
+        the VIP, and B's follow sees A as the holder. B had a role in the
+        pair before (its role file), as an old primary has: a node with
+        none at its first pairing is seeded (TestTheFirstPairing)"""
         self.nodes(mode=mode, etcd=etcd)
         layout = dbtls.LAYOUTS["postgresql"]
         for index, server in ((0, PRIMARY_SPEC), (1, REPLICA_SPEC)):
@@ -258,6 +261,9 @@ class FollowTestCase(Pair):
                 os.makedirs(os.path.dirname(target), exist_ok=True)
                 with open(target, "w") as fob:
                     fob.write("x")
+        if had_role:
+            dbpgfollow._write(self.all[1].root, dbpair.ROLE_FILE,
+                              dbpair.role_text("primary", VIP), 0o644)
         if claim is not None:
             vippromote.promote(self.all[claim], False,
                                self.said[claim].append)
@@ -863,6 +869,91 @@ class TestTheReplica(FollowTestCase):
         self.assertIn("declares no appliance.vip", found.problem)
 
 
+class TestTheFirstPairing(FollowTestCase):
+    """The standby of a cloud mode at its first pairing holds the
+    databases of its own first boot: Odoo wrote to the local cluster
+    before the role was known, and both nodes came from one image, so
+    the system identifiers are the same (BR1 9360 and BR2 9361, keel
+    0.23.84). pg_rewind could not run, and follow refused the node as a
+    diverged old primary; the primary's synchronous commit then waited
+    for a standby that never came. A node that never had a role in the
+    pair (no role file) loses nothing of the pair: it is dumped and
+    seeded from the holder, as a MariaDB replica is (keel 0.23.84)"""
+
+    FIRST_BOOT = {"timeline": "1", "holder_timeline": "1",
+                  "system": "7705069944881121780",
+                  "holder_system": "7705069944881121780"}
+
+    def test_a_first_pairing_is_dumped_and_seeded(self):
+        self.pair_nodes(mode="cloud_simple", had_role=False)
+        server = Server(**self.FIRST_BOOT)
+        found = self.follow(1, server)
+        self.assertIsNone(found.problem, found.lines)
+        joined = "\n".join(found.lines)
+        self.assertIn("first pairing", joined)
+        self.assertIn("seeded from", joined)
+        self.assertTrue(self.ran(server, "pg_basebackup"))
+        kept = os.listdir(os.path.join(self.all[1].root,
+                                       dbpgfollow.BACKUPS))
+        self.assertTrue(any(one.startswith("first-boot-schemas-")
+                            for one in kept), kept)
+        dump = next(os.path.join(self.all[1].root, dbpgfollow.BACKUPS, one)
+                    for one in kept if one.startswith("first-boot"))
+        self.assertEqual(os.stat(dump).st_mode & 0o777, 0o600)
+        self.assertIn(dump, joined)
+        dumped = next(n for n, argv in enumerate(server.argv)
+                      if "pg_dumpall" in argv)
+        seeded = next(n for n, argv in enumerate(server.argv)
+                      if "pg_basebackup" in " ".join(argv))
+        self.assertLess(dumped, seeded)
+        self.assertIsNone(dbfollow.diverged(self.all[1].root))
+
+    def test_a_node_refused_before_is_seeded_once_it_runs_0_23_86(self):
+        # 9361: the divergence record of 0.23.84 stands, and no role file
+        self.pair_nodes(mode="cloud_simple", had_role=False)
+        dbpgfollow._write(self.all[1].root, dbfollow.DIVERGED, json.dumps({
+            "own_timeline": "1", "holder_timeline": "1",
+            "own_system": "7705069944881121780",
+            "holder_system": "7705069944881121780",
+            "holder": address(0), "dump": ""}) + "\n", 0o600)
+        server = Server(in_recovery=True, **self.FIRST_BOOT)
+        found = self.follow(1, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertTrue(self.ran(server, "pg_basebackup"))
+
+    def test_a_node_that_had_a_role_in_the_pair_stays_refused(self):
+        for role in ("primary", "replica"):
+            with self.subTest(role=role):
+                self.pair_nodes(mode="cloud_simple", had_role=False)
+                dbpgfollow._write(self.all[1].root, dbpair.ROLE_FILE,
+                                  dbpair.role_text(role, VIP), 0o644)
+                server = Server(**self.FIRST_BOOT)
+                with mock.patch("keel.monitor.alerting.alert",
+                                return_value=True):
+                    found = self.follow(1, server)
+                self.assertIn("diverged", found.problem)
+                self.assertFalse(self.ran(server, "pg_basebackup"))
+
+    def test_a_simple_installation_stays_refused(self):
+        self.pair_nodes(mode="cloud_simple", had_role=False)
+        here = self.all[1]
+        doc = here.node.document()
+        doc["installation"]["mode"] = "simple"
+        here.node.write(doc)
+        server = Server(**self.FIRST_BOOT)
+        with mock.patch("keel.monitor.alerting.alert", return_value=True):
+            found = self.follow(1, server)
+        self.assertIsNotNone(found.problem)
+        self.assertFalse(self.ran(server, "pg_basebackup"))
+
+    def test_a_dump_that_cannot_be_kept_seeds_nothing(self):
+        self.pair_nodes(mode="cloud_simple", had_role=False)
+        server = Server(dump_fails=True, **self.FIRST_BOOT)
+        found = self.follow(1, server)
+        self.assertIn("not kept", found.problem)
+        self.assertFalse(self.ran(server, "pg_basebackup"))
+
+
 class TestThePromoteOfAFencedStandby(FollowTestCase):
     """keel vip promote on a standby that follows nobody (BR1 9368 and
     BR2 9369, keel 0.23.84): the replica was promoted, and at once the
@@ -994,6 +1085,9 @@ class TestWithoutEtcd(FollowTestCase):
         --old-primary-gone while A was away; A is back, its VIP gone
         from wg0 by the reboot, its own claim the newest it knows"""
         self.pair_nodes(claim=0)
+        # A's follow recorded its role while it was the primary
+        dbpgfollow._write(self.all[0].root, dbpair.ROLE_FILE,
+                          dbpair.role_text("primary", VIP), 0o644)
         self.down.add(address(0))
         vippromote.promote(self.all[1], True, self.said[1].append)
         self.down.discard(address(0))

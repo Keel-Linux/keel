@@ -50,6 +50,19 @@ In keel 0.23.18. The numbers under "Measured" come from the CI job
   taken once per divergence, because a fenced node takes no write
   after it. A node holding no user database is seeded without any
   confirmation.
+- **The first pairing of a cloud standby** (keel 0.23.86). The first
+  boot of a cloud mode runs the application's hooks before the role is
+  known, so the standby holds its own databases, and the nodes of one
+  image have the same system identifier. When the node is the standby
+  of `cloud_simple` or `cloud_advanced` and has no role file
+  (`/var/lib/keel/role`, which each follow that proves a role writes),
+  it never had a role in the pair. Follow then keeps a dump of
+  everything it holds in
+  `/var/backups/keel/postgresql/first-boot-schemas-<time>.sql.zst` (mode
+  0600), writes the path to the journal, and takes the base backup of
+  the holder. A node with a role file keeps the rejoin and the refusal
+  above. The holder's row uses the same proof for a fenced holder
+  that never had a role (keel#152).
 - **A fenced standby does not take the VIP** (keel 0.23.85). `keel vip
   promote` and `keel database promote` refuse, with exit code 24
   (MESH_REFUSED), on a node whose server is a standby that follows
