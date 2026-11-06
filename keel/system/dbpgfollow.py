@@ -85,21 +85,23 @@ PairSeed = dbpgseed.PairAction
 
 
 def follow(root: str, state: DatabaseState, server: dict, role: str,
-           confirmed: bool, found, runner, proven, alone: bool = False) -> bool:
+           confirmed: bool, found, runner, proven, alone: bool = False,
+           mode: str = "") -> bool:
     """The PostgreSQL rows; `proven` is the caller's wait for this
     node's own claim to carry, and the ROLE_FILE write stays with it
     (keel.system.dbfollow). Returns whether the ROLE_FILE may record
     the role: an unproven claim never does (keel#104), the way a
     MariaDB primary that is read only on a stale claim records nothing.
     `alone` is keel database promote --old-primary-gone: the holder
-    then commits alone while no standby streams (_alone)"""
+    then commits alone while no standby streams (_alone). `mode` is the
+    spec's installation.mode, which the first pairing needs"""
     if role == dbpair.PRIMARY and not proven():
         _unproven(root, state, found, runner)
         return False
     if role == dbpair.PRIMARY:
         _primary(root, state, found, runner, alone)
     elif role == REPLICA:
-        _replica(root, server, state, confirmed, found, runner)
+        _replica(root, server, state, confirmed, found, runner, mode)
     else:
         found.fail(f"no role to follow: the VIP has no claim and the spec"
                    f" declares {role or 'none'}")
@@ -424,7 +426,7 @@ def _ensure_grants(found, runner) -> None:
 
 
 def _replica(root: str, server: dict, state: DatabaseState,
-             confirmed: bool, found, runner) -> None:
+             confirmed: bool, found, runner, mode: str = "") -> None:
     """The other node: a standby of the holder, seeded or reseeded"""
     pair = state.pair
     host = dbpair.primary_host(pair, server)
@@ -457,6 +459,9 @@ def _replica(root: str, server: dict, state: DatabaseState,
         _seed(root, host, port, state, found, runner)
         if found.problem is None:
             _unfence(root, state, host, port, found, runner)
+        return
+    if not confirmed and _first_pairing(root, mode):
+        _first_seed(root, host, port, state, held, found, runner)
         return
     own = _own_timeline(root, runner)
     identified = _holder_identity(root, host, port, state, runner)
@@ -913,7 +918,51 @@ def _forget_divergence(root: str) -> None:
         pass
 
 
-def _dump(root: str, runner) -> str:
+CLOUD_MODES = ("cloud_simple", "cloud_advanced")
+FIRST_BOOT_DUMP = "first-boot-schemas"
+
+
+def _first_pairing(root: str, mode: str) -> bool:
+    """Whether this standby, which holds databases, is at its first
+    pairing in a cloud mode: it never had a role in the pair, so it
+    holds only what its own first boot wrote
+
+    The headless first boot of a cloud mode runs the application's hooks
+    before the role is known (Odoo makes its database), and the nodes of
+    one image share the cluster's system identifier, so the node reads
+    as a diverged old primary of the same history (BR2 9361, keel
+    0.23.84). The role file (dbpair.ROLE_FILE) is written by each follow
+    that proved a role, primary or standby, so its absence is the proof
+    that this node was never a member of the pair; the holder's row uses
+    the same proof (_fenced_may_write). The twin of the MariaDB rule
+    (keel.system.dbfollow._first_pairing), which reads GTIDs instead"""
+    if mode not in CLOUD_MODES:
+        return False
+    return not os.path.exists(os.path.join(root, dbpair.ROLE_FILE))
+
+
+def _first_seed(root: str, host: str, port: int, state: DatabaseState,
+                held: list[str], found, runner) -> None:
+    """The first pairing: a dump of everything this node holds, kept
+    (0020), then the base backup of the holder"""
+    kept = _kept_dump(root) or _dump(root, runner, FIRST_BOOT_DUMP)
+    if kept.startswith("not kept"):
+        found.fail(f"a dump of what this node holds was {kept}; nothing"
+                   " else was changed")
+        return
+    line = (f"first pairing: this standby never had a role in the pair,"
+            f" so its first-boot databases ({', '.join(held)}) are"
+            f" replaced by a copy of [{host}]:{port}; the dump of them is"
+            f" kept at {kept}")
+    found.say(line)
+    from keel.system import dbfollow as mariadb_follow
+    mariadb_follow._journal(f"database.server.role: {line}")
+    _seed(root, host, port, state, found, runner)
+    if found.problem is None:
+        _unfence(root, state, host, port, found, runner)
+
+
+def _dump(root: str, runner, name: str = "rejoin") -> str:
     """A dump of everything this node holds, compressed, under BACKUPS;
     where it is, or `not kept (why)`. The kernel stops it at the room on
     the disk (keel.system.dbdump)"""
@@ -927,7 +976,7 @@ def _dump(root: str, runner) -> str:
     if problem:
         return f"not kept ({problem})"
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    plain = os.path.join(directory, f"rejoin-{stamp}.sql")
+    plain = os.path.join(directory, f"{name}-{stamp}.sql")
     try:
         fd = os.open(plain, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "wb") as fob:

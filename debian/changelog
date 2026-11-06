@@ -1,3 +1,22 @@
+keel (0.23.86) unstable; urgency=medium
+
+  * keel database follow seeds the PostgreSQL standby of a cloud mode at
+    its first pairing. The first boot of a cloud mode runs the
+    application's hooks before the role is known, so the standby held
+    its own Odoo database. The nodes of one image have the same system
+    identifier, so follow read the standby as a diverged old primary and
+    refused it. The primary then waited for a standby that never came,
+    and its writes did not finish (BR1 9360 and BR2 9361, keel 0.23.84).
+    Now, when the node is the standby of cloud_simple or cloud_advanced
+    and has no role file (it never had a role in the pair), follow keeps
+    a dump of everything it holds in
+    /var/backups/keel/postgresql/first-boot-schemas-<time>.sql.zst (mode
+    0600), writes the path to the journal, and takes the base backup of
+    the holder. A node with a role file keeps the rejoin or the refusal
+    of 0054 (docs/replication-postgresql.md).
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Fri, 06 Nov 2026 00:00:00 +0000
+
 keel (0.23.85) unstable; urgency=medium
 
   * The first pairing of a cloud replica writes one line to the journal
