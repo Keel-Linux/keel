@@ -175,25 +175,30 @@ class TestAPostgresqlPairOnAPoorNetwork(unittest.TestCase):
                                  found[name])
 
     def test_b_a_commit_waits_for_the_cut_replica_and_is_alerted(self):
-        """No timeout and no fallback (0054): the commit waits while the
-        replica is cut off, the primary keeps the VIP, the watch alerts
-        within the 10 s wait and one watch run, and the commit is
-        acknowledged after the heal"""
+        """0054, amended 2026-11-06: the commit waits while the replica
+        is cut off, the primary keeps the VIP, the watch alerts within
+        the 10 s wait and one watch run; after SYNC_FALLBACK_S the
+        primary falls back to asynchronous commits, the commit is
+        acknowledged during the cut and the fallback alerted, and after
+        the heal the synchronous line comes back"""
+        from keel.system import dbwatch
         found = self.found
         print(f"(b): alerted {found['b_waits_alerted_s']} s after the cut;"
-              f" acknowledged {found['b_ack_after_heal_s']} s after the"
-              f" heal; synchronous again {found['b_sync_after_heal_s']} s",
+              f" fell back {found['b_fell_back_alerted_s']} s after it;"
+              f" acknowledged {found['b_ack_after_cut_s']} s after the"
+              f" cut; synchronous again {found['b_sync_after_heal_s']} s",
               file=sys.stderr)
         self.assertIsNotNone(found["b_sync_before_s"], found)
         self.assertIsNotNone(found["b_waits_alerted_s"], found["b_alerts"])
         self.assertLess(found["b_waits_alerted_s"], 45, found["b_alerts"])
         self.assertTrue(found["b_pending_at_alert"], found["b_cut_write"])
-        self.assertTrue(found["b_pending_at_heal"], found["b_cut_write"])
+        self.assertIsNotNone(found["b_fell_back_alerted_s"],
+                             found["b_alerts"])
+        self.assertGreaterEqual(found["b_fell_back_alerted_s"],
+                                dbwatch.SYNC_FALLBACK_S, found["b_alerts"])
+        self.assertTrue(found["b_acked_before_heal"], found["b_cut_write"])
         self.assertTrue(found["b_a_holds_vip"], found)
         self.assertTrue(found["b_cut_write"]["ok"], found["b_cut_write"])
-        # the walreceiver is back within its own timeout (60 s) and one
-        # retry (5 s), whatever TCP's backoff was
-        self.assertLess(found["b_ack_after_heal_s"], 90, found)
         self.assertIsNotNone(found["b_sync_after_heal_s"], found)
         self.assertIsNotNone(found["b_back_alerted_s"], found["b_alerts"])
         self.assertEqual(found["b_row_on_b"], "1", found)

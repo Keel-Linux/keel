@@ -152,9 +152,12 @@ def _configuration(server: dict, state: DatabaseState,
     # a primary that commits alone after keel database promote
     # --old-primary-gone is follow's runtime state, not drift: follow
     # writes the synchronous line back once a standby streams (0054)
+    # and so is the watch's fallback to asynchronous commits (0054,
+    # amended 2026-11-06): the watch writes the line back itself
     pair_kept = state.pair_dropin.readable and \
         state.pair_dropin.text in (pair_wanted,
-                                   dbpostgres.alone_text(pair_wanted))
+                                   dbpostgres.alone_text(pair_wanted),
+                                   dbpostgres.fallback_text(pair_wanted))
     # the text of keel before 0.23.44 lacks wal_keep_size, which the
     # server takes on a reload: written, never a restart (a primary
     # that serves clients is not restarted for it), and a primary that
@@ -162,9 +165,12 @@ def _configuration(server: dict, state: DatabaseState,
     pair_older = dbpostgres.pair_dropin_text(ident_path, legacy=True)
     pair_reload = state.pair_dropin.readable and \
         state.pair_dropin.text in (pair_older,
-                                   dbpostgres.alone_text(pair_older))
+                                   dbpostgres.alone_text(pair_older),
+                                   dbpostgres.fallback_text(pair_older))
     if pair_reload and dbpostgres.commits_alone(state.pair_dropin.text):
         pair_wanted = dbpostgres.alone_text(pair_wanted)
+    elif pair_reload and dbpostgres.fell_back(state.pair_dropin.text):
+        pair_wanted = dbpostgres.fallback_text(pair_wanted)
     hba_kept = state.hba.readable and state.hba.text == hba_wanted
     ident_kept = state.ident.readable and \
         state.ident.text == ident_wanted

@@ -25,18 +25,26 @@ In keel 0.23.18. The numbers under "Measured" come from the CI job
   restore from. The replica is the copy, the empty `standby.signal`
   in its data directory and a follow drop-in (`primary_conninfo`, the
   pair's slot `keel`); a promotion is one statement, `pg_promote()`.
-- **Synchronous commit has no timeout and no fallback.**
-  `synchronous_standby_names = 'FIRST 1 (keel)'` and
-  `synchronous_commit = on`: a commit is acknowledged once the
-  standby of application_name `keel` received and flushed it, about
-  one round trip, 250 ms in the design case. While the replica is
-  away the primary waits; there is no asynchronous fallback to report
-  as drift, the way the 10 s timeout of MariaDB's semi-synchronous
-  replication is one (one exception: the new primary after
-  `--old-primary-gone` or after the old primary's lease expired, below). `keel database watch` alerts instead, once,
-  when no standby streams from the primary or a commit waited more
-  than 10 s for it, and once more when the standby acknowledges
-  again (the state file's key `sync_commit`).
+- **Synchronous commit falls back after 30 s** (0054, amended by the
+  maintainer on 2026-11-06). `synchronous_standby_names = 'FIRST 1
+  (keel)'` and `synchronous_commit = on`: a commit is acknowledged once
+  the standby of application_name `keel` received and flushed it,
+  about one round trip, 250 ms in the design case. When no standby
+  streams from the primary, or a commit waited more than 10 s for it,
+  `keel database watch` alerts once. When that wait lasted
+  `SYNC_FALLBACK_S` (30 s, the MariaDB pair's semi-synchronous
+  timeout), the watch empties `synchronous_standby_names` in the pair
+  drop-in and reloads the server: the waiting commits finish, the
+  primary commits asynchronously, and the fallback is alerted once
+  (the check `database-sync-commit`, through the monitor's channels).
+  When a standby streams again, the watch writes the pair's line back,
+  reloads, and alerts that once. `keel spec apply` and `keel diff`
+  take the fallback as runtime state, not drift. The watch runs every
+  30 s, so a commit waits between 30 and 60 s, plus the 10 s of the
+  wait's detection when the standby is cut and not stopped. The new
+  primary after `--old-primary-gone`, or after the old primary's lease
+  expired, commits alone at once (below). The state file's keys are
+  `sync_commit` and `since`.
 - **The replication slot `keel`** on the primary keeps its WAL while
   the replica is away; the walreceiver names itself `keel`.
 - **The rejoin after a promotion is `pg_rewind` when it can, else a
@@ -274,11 +282,13 @@ standby is killed after 30 s, never cancelled: a cancelled wait
 answers success with a warning that the commit is only local.
 
 - **(b) The replica cut off.** B is cut off from everyone, both ways,
-  for 40 s. A keeps the VIP: C renews its lease, and B holds no lease
-  to release, so nothing is fenced. A commit on A waits for B, with
-  no timeout and no fallback. A's watch alerts. After the heal, the
-  commit is acknowledged, A has its synchronous standby again, the
-  watch alerts the end, and the row is on B.
+  until A fell back. A keeps the VIP: C renews its lease, and B holds
+  no lease to release, so nothing is fenced. A commit on A waits for
+  B, and A's watch alerts. After `SYNC_FALLBACK_S` of waiting, A falls
+  back to asynchronous commits: the commit is acknowledged during the
+  cut and the fallback alerted (keel 0.23.88). After the heal, A has
+  its synchronous standby again, the watch alerts the end, and the row
+  is on B.
 - **(c) The unplanned failover, the application writing.** A is cut
   off, so the write in flight on it waits for B and is in A's WAL
   unacknowledged. Then A's server and its VIP helper are killed. No
@@ -316,8 +326,9 @@ answers success with a warning that the commit is only local.
 
 ## The one exception: the new primary after the old primary is gone
 
-0054 says the pair's synchronous commit has no timeout and no
-fallback. There is one exception (decided 2026-10-14 under the
+0054 said the pair's synchronous commit has no timeout and no
+fallback; since 2026-11-06 the watch falls back after 30 s (above).
+The new primary does not wait those 30 s in one case (decided 2026-10-14 under the
 maintainer's delegation, and widened by the maintainer on 2026-10-15;
 the handbook records both under 0054). The new primary commits alone
 when one of these says that the old primary is gone:
@@ -386,9 +397,9 @@ reseed. The rewind is measured in the handbook's evidence file
 | (a) the walreceiver streaming, after B's apply | 0.5 s |
 | (a) a write on the primary through its loopback: connect and the synchronous commit | 0.47 to 0.74 s |
 | (a) a write visible on the replica, from its acknowledgement | 0.17 to 0.36 s (polled through the agent) |
-| (b) the commit on A, with B cut off for 40 s | waits the whole cut: no timeout, no fallback |
+| (b) the commit on A, with B cut off | acknowledged during the cut, after the fallback: 30 s of waiting and up to one watch run (keel 0.23.88) |
 | (b) A's watch alerts that its commits wait | 13.5 to 20.5 s after the cut |
-| (b) the waiting commit acknowledged, after the heal | 20.9 to 22.2 s (TCP's retry after the cut) |
+| (b) the fallback to asynchronous commits | alerted once, at the acknowledgement (keel 0.23.88) |
 | (b) A synchronous again, the end alerted | at the acknowledgement; at the next watch |
 | (c) `keel database promote --old-primary-gone` on B | 35.0 to 43.8 s: most of it the wait for A's lease (0049) |
 | (c) B carries the VIP; B out of recovery | 35.3 s after the cut; 0.3 s later |

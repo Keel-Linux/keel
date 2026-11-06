@@ -164,14 +164,38 @@ ALONE_LINES = (
 )
 
 
+# the fallback of 0054's amendment of 2026-11-06: keel database watch
+# writes it when no standby acknowledged for its timeout, and writes the
+# pair's line back once a standby streams again
+FALLBACK_LINES = (
+    "# keel database watch: no standby acknowledged in time, so this\n"
+    "# primary commits asynchronously until a standby streams again;\n"
+    "# keel then writes the pair's synchronous line back (0054, amended\n"
+    "# 2026-11-06)\n"
+    "synchronous_standby_names = ''\n"
+)
+
+
+def fallback_text(text: str) -> str:
+    """The pair drop-in's text with the primary fallen back to
+    asynchronous commits"""
+    return text.replace(SYNC_LINE, FALLBACK_LINES)
+
+
+def fell_back(text: str) -> bool:
+    return FALLBACK_LINES in text
+
+
 def alone_text(text: str) -> str:
     """The pair drop-in's text with the primary committing alone"""
     return text.replace(SYNC_LINE, ALONE_LINES)
 
 
 def synchronous_text(text: str) -> str:
-    """The pair drop-in's text with the pair's synchronous line back"""
-    return text.replace(ALONE_LINES, SYNC_LINE)
+    """The pair drop-in's text with the pair's synchronous line back,
+    after either the operator's alone or the watch's fallback"""
+    return text.replace(ALONE_LINES, SYNC_LINE).replace(FALLBACK_LINES,
+                                                        SYNC_LINE)
 
 
 def commits_alone(text: str) -> bool:
