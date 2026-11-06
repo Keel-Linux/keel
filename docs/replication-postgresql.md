@@ -118,10 +118,14 @@ In keel 0.23.18. The numbers under "Measured" come from the CI job
   standby of the holder.
 - **When the rewind is not tried or refuses.** Follow does not stop
   the server if its `wal_log_hints` and `data_checksums` are both
-  off, if `full_page_writes` is off, if `pg_rewind` is not
-  installed, or if the holder is itself a standby. It says why,
-  records the divergence as before, and waits for the confirmed
-  reseed. If `pg_rewind` fails before it prints `need to copy`, it
+  off, if `full_page_writes` is off, or if `pg_rewind` is not
+  installed. It says why, records the divergence as before, and waits
+  for the confirmed reseed. If the holder is itself a standby (its
+  follow has not promoted it yet), follow records nothing and fails, so
+  keel-database-follow.service runs it again 30 s later, at most 10
+  times in 15 minutes (keel 0.23.89). Before, nothing ran follow again,
+  because the VIP did not move again. After 300 s of waiting, follow
+  alerts once (check `database-rewind-wait`). If `pg_rewind` fails before it prints `need to copy`, it
   changed nothing: the server starts again as the fenced standby it
   was, and the same reseed path applies. The refusal is marked
   (`/var/lib/keel/database/rewind-refused`), because the server is

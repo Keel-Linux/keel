@@ -87,8 +87,25 @@ class Outcome(NamedTuple):
 REJOINED = Outcome(rejoined=True)
 HALT = Outcome(halt=True)
 FALLBACK = Outcome()
-# the holder is a standby that is not promoted yet: nothing is recorded
+# the holder is a standby that is not promoted yet: nothing is recorded,
+# and the run fails so that keel-database-follow.service runs it again
+# (Restart=on-failure, bounded): the VIP does not move again, so nothing
+# else would (BR1 9356 and 9360, keel 0.23.87 and 0.23.88)
 WAIT = Outcome(halt=True)
+# when this node first found the holder not promoted, in seconds since
+# the epoch; removed once the holder answers as a primary
+WAIT_MARK = "var/lib/keel/database/rewind-wait"
+# the unit's bound: 10 starts 30 s apart (keel-database-follow.service)
+WAIT_ALERT_S = 300
+WAIT_TITLE = "the old primary waits for a holder that is not promoted"
+WAIT_TEXT = (
+    "{host}: the VIP's holder at [{holder}]:{port} has been a standby for"
+    " {waited:.0f} s, so this old primary cannot rejoin it and follows"
+    " nobody: the pair has no writable server, or this node is no copy"
+    " of it. Run `keel database follow` on the holder, or `keel database"
+    " status` on both nodes to see what each server is."
+)
+WAIT_CHECK = "database-rewind-wait"
 
 
 def broken(root: str) -> bool:
@@ -199,9 +216,10 @@ def rejoin(root: str, host: str, port: int, password: str, tls: str,
             pgpass = dbpgseed.write_pgpass(directory, host, port, password)
             _, problem = dbpgseed._probe(pgpass, host, port, runner, tls)
             if problem and "is itself a standby" in problem:
-                found.say(f"{problem}: the holder is not promoted yet,"
-                          " and the next run asks again")
+                found.say(problem)
+                _waiting(root, host, port, found)
                 return WAIT
+            _forget_wait(root)
             if problem:
                 found.say(f"no pg_rewind: {problem}")
                 return FALLBACK
@@ -295,6 +313,56 @@ def _failed(root: str, unit: str, detail: str, found, runner) -> Outcome:
     alerting.alert(root, lambda line: found.say(line), UNUSABLE_TITLE,
                    UNUSABLE.format(detail=detail), UNUSABLE_CHECK)
     return HALT
+
+
+def _waiting(root: str, host: str, port: int, found) -> None:
+    """The holder is not promoted yet: a failure, so the unit runs the
+    follow again, and an alert once the wait outlasted the unit's bound"""
+    since = _waited_since(root)
+    now = time.time()
+    if since is None:
+        _mark(root, f"{now:.0f}\n")
+        since = now
+    waited = now - since
+    found.fail(f"the holder at [{host}]:{port} is not promoted yet"
+               f" ({waited:.0f} s); keel-database-follow.service asks"
+               " again in 30 s")
+    if waited < WAIT_ALERT_S or _wait_alerted(root):
+        return
+    alerting.alert(root, lambda line: found.say(line), WAIT_TITLE,
+                   WAIT_TEXT.format(host=os.uname().nodename, holder=host,
+                                    port=port, waited=waited), WAIT_CHECK)
+    _mark(root, f"{since:.0f}\nalerted\n")
+
+
+def _waited_since(root: str) -> float | None:
+    try:
+        with open(os.path.join(root, WAIT_MARK)) as fob:
+            return float(fob.readline().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _wait_alerted(root: str) -> bool:
+    try:
+        with open(os.path.join(root, WAIT_MARK)) as fob:
+            return "alerted" in fob.read()
+    except OSError:
+        return False
+
+
+def _mark(root: str, text: str) -> None:
+    target = os.path.join(root, WAIT_MARK)
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    with open(target, "w") as fob:
+        fob.write(text)
+
+
+def _forget_wait(root: str) -> None:
+    try:
+        os.remove(os.path.join(root, WAIT_MARK))
+    except FileNotFoundError:
+        pass
 
 
 def _not_streaming(dropdir: str, unit: str, host: str, port: int, found,
