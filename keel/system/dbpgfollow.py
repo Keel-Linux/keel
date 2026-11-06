@@ -159,6 +159,39 @@ def _primary(root: str, state: DatabaseState, found, runner,
     _forget_divergence(root)
 
 
+FENCED_PROMOTE = (
+    "refused: this node's PostgreSQL is a fenced standby that follows"
+    " nobody: it has not rejoined the holder, and it may lack the writes"
+    " the other member took. Holding the VIP, it would take no writes,"
+    " and the pair would have no writable server. Wait until keel"
+    " database follow rejoins it (keel database status), or, when the"
+    " other member is gone, run keel database promote --old-primary-gone"
+)
+
+
+def promote_refusal(root: str, doc: dict, alone: bool) -> str | None:
+    """Why `keel vip promote` may not take the VIP here, or None: this
+    node's PostgreSQL is a standby that follows nobody (_fence), which
+    follow would leave refused as the holder (_fenced_may_write). An
+    old primary claimed the VIP back before it rejoined (BR1 9368 and
+    BR2 9369, keel 0.23.84). `alone` is --old-primary-gone of keel
+    database promote. A server that cannot be read is not refused: the
+    promote then does what it did before"""
+    server = (doc.get("database") or {}).get("server") or {}
+    if not isinstance(server, dict) or server.get("engine") != "postgresql":
+        return None
+    from keel.system.dbstate import observe_database
+    try:
+        state = observe_database(root, doc)
+    except (OSError, ValueError):
+        return None
+    if state is None or state.down or \
+            state.reading.role.value != REPLICA or \
+            not _fenced(root, state):
+        return None
+    return FENCED_PROMOTE if _fenced_may_write(root, alone) is None else None
+
+
 def _fenced(root: str, state: DatabaseState) -> bool:
     """Whether this standby follows nobody: no primary in its reading
     and no follow drop-in, what _fence leaves"""

@@ -547,7 +547,8 @@ all of these are true:
 
 Before the drop, a dump of everything the node holds is kept under
 `/var/backups/keel/mariadb/first-boot-schemas-<time>.sql.zst` (mode
-0600), and follow says where. A node with GTIDs of its own keeps the
+0600). Follow says where, and from keel 0.23.85 it also writes the
+path to the journal (identifier `keel`). A node with GTIDs of its own keeps the
 rows above: rejoined when nothing is errant, else read only and
 alerted, never dropped automatically. This is the question of 0049 (does
 the node hold writes the other lacks?) applied to the first boot, and it

@@ -678,6 +678,20 @@ class TestTheFirstPairing(FollowTestCase):
                         next(i for i, one in enumerate(server.events)
                              if "DROP DATABASE" in one))
 
+    def test_the_journal_says_where_the_first_boot_dump_is(self):
+        # keel spec apply's output goes to the console of the first boot,
+        # and the journal had no line of the seed (BR2 9357, 0.23.84)
+        self.pair_nodes(mode="cloud_simple")
+        with mock.patch.object(dbfollow.syslog, "syslog") as logged:
+            found = self.follow(1, self.first())
+        self.assertIsNone(found.problem, found.lines)
+        (priority, message), = [one.args for one in logged.call_args_list]
+        self.assertEqual(priority, dbfollow.syslog.LOG_WARNING)
+        kept = os.path.join(self.all[1].root, dbfollow.BACKUPS,
+                            self.dumps()[0])
+        self.assertIn(kept, message)
+        self.assertIn("wordpress, keel_check", message)
+
     def test_cloud_advanced_is_a_cloud_mode_too(self):
         self.pair_nodes(mode="cloud_advanced")
         server = self.first()
@@ -779,6 +793,190 @@ class TestTheFirstPairing(FollowTestCase):
         self.assertFalse(first(doc, "7\tjunk\t\n", ""))
         self.assertFalse(first(doc, "7\n", ""))
         self.assertTrue(first(doc, "7\t\t\n", "0-1-3"))
+
+
+class FailingServer(Server):
+    """A Server whose answer to one question is an error"""
+
+    def __init__(self, failing: str, **values):
+        super().__init__(**values)
+        self.failing = failing
+
+    def __call__(self, argv, **kwargs):
+        argv = list(argv)
+        asked = argv[-1] if "--execute" in argv else ""
+        stdin = kwargs.get("input") or ""
+        if self.failing and (self.failing in asked or self.failing in stdin
+                             or argv[:1] == [self.failing]):
+            self.argv.append(argv)
+            if stdin:
+                self.sent.append(stdin)
+            empty = "" if kwargs.get("text") else b""
+            error = "ERROR 1 failed" if kwargs.get("text") else b"no"
+            return subprocess.CompletedProcess(argv, 1, empty, error)
+        return super().__call__(argv, **kwargs)
+
+
+class TestTheRejoinsErrors(FollowTestCase):
+    """Each error of the rejoin stops it and changes nothing"""
+
+    OLD_PRIMARY = {"read_only": "OFF", "binlog_state": "0-2-20",
+                   "binlog_pos": "0-2-20", "holder_state": "0-1-5,0-2-20"}
+
+    def test_a_gtid_state_that_cannot_be_read_changes_nothing(self):
+        self.pair_nodes()
+        server = FailingServer("gtid_binlog_state, @@gtid_binlog_pos",
+                               **self.OLD_PRIMARY)
+        found = self.follow(1, server)
+        self.assertIn("GTID state could not be read", found.problem)
+        self.assertFalse(any("CHANGE MASTER" in one for one in server.sent))
+
+    def test_a_holder_gtid_state_that_is_no_gtid_changes_nothing(self):
+        self.pair_nodes()
+        values = dict(self.OLD_PRIMARY, holder_state="junk")
+        found = self.follow(1, Server(**values))
+        self.assertIn("a GTID state could not be read", found.problem)
+
+    def test_a_change_master_that_fails_is_said(self):
+        self.pair_nodes()
+        server = FailingServer("CHANGE MASTER", **self.OLD_PRIMARY)
+        found = self.follow(1, server)
+        self.assertIn("failed", found.problem)
+        self.assertNotIn("rejoined", "\n".join(found.lines))
+
+    def test_a_zstd_that_fails_keeps_the_plain_dump(self):
+        self.pair_nodes()
+        server = FailingServer("zstd", **self.OLD_PRIMARY)
+        found = self.follow(1, server)
+        self.assertIsNone(found.problem, found.lines)
+        kept = os.listdir(os.path.join(self.all[1].root, dbfollow.BACKUPS))
+        self.assertTrue(kept[0].endswith(".sql"), kept)
+
+    def test_a_backup_directory_that_cannot_be_made_keeps_no_dump(self):
+        self.pair_nodes()
+        with mock.patch("keel.system.dbfollow.os.makedirs",
+                        side_effect=PermissionError(13, "Permission denied")):
+            self.assertEqual(dbfollow._dump(self.all[1].root, Server()),
+                             "not kept (Permission denied)")
+
+    def test_a_dump_that_cannot_be_run_keeps_no_dump(self):
+        self.pair_nodes()
+
+        def runner(argv, **kwargs):
+            raise OSError(2, "No such file or directory")
+        self.assertEqual(dbfollow._dump(self.all[1].root, runner),
+                         "not kept (No such file or directory)")
+
+
+class TestTheRefusals(FollowTestCase):
+    """What follow refuses on, each said once"""
+
+    def test_a_fence_that_fails_is_said(self):
+        self.pair_nodes()
+        with mock.patch.object(dbfollow.dbreadonly, "fence",
+                               return_value="kill failed"):
+            found = self.follow(1, Server(schemas=""))
+        self.assertIn("kill failed", found.problem)
+
+    def test_a_lock_that_fails_is_said(self):
+        self.pair_nodes()
+        with mock.patch.object(dbfollow.dbreadonly, "lock",
+                               return_value="revoke failed"):
+            found = self.follow(1, Server(schemas="", read_only="ON"))
+        self.assertIn("revoke failed", found.problem)
+
+    def test_a_promotion_that_fails_is_said(self):
+        self.pair_nodes()
+        with mock.patch.object(dbfollow.dbreadonly, "promote",
+                               return_value="drain failed"):
+            found = self.follow(0, Server(replicating_from=address(1),
+                                          read_only="ON"))
+        self.assertIn("drain failed", found.problem)
+
+    def test_a_holder_that_cannot_be_made_writable_says_so(self):
+        self.pair_nodes()
+        found = self.follow(0, FailingServer("read_only = OFF",
+                                             read_only="ON"))
+        self.assertIn("failed", found.problem)
+
+    def test_a_privilege_that_cannot_be_given_back_is_said(self):
+        self.pair_nodes()
+        record = os.path.join(self.all[0].root, dbfollow.dbreadonly.RECORD)
+        os.makedirs(os.path.dirname(record), exist_ok=True)
+        with open(record, "w") as fob:
+            fob.write("root\tlocalhost\n")
+        with mock.patch.object(dbfollow.dbreadonly, "unlock",
+                               return_value="grant failed"):
+            found = self.follow(0, Server())
+        self.assertIn("grant failed", found.problem)
+
+    def test_a_replica_without_the_credential_follows_nobody(self):
+        self.pair_nodes()
+        os.remove(os.path.join(self.all[1].root, dbsecret.SECRET))
+        server = Server(schemas="")
+        found = self.follow(1, server)
+        self.assertIsNotNone(found.problem)
+        self.assertFalse(any("CHANGE MASTER" in one for one in server.sent))
+
+    def test_a_seed_that_fails_is_said(self):
+        self.pair_nodes()
+        with mock.patch.object(dbfollow.dbseed, "seed",
+                               return_value="the copy failed"):
+            found = self.follow(1, Server(schemas=""))
+        self.assertIn("the copy failed", found.problem)
+
+    def test_a_follow_that_waits_too_long_for_its_lock_is_refused(self):
+        self.pair_nodes()
+        here = self.all[1]
+        found = dbfollow.Followed()
+        with mock.patch.object(dbfollow.dbreadonly, "replication_locked",
+                               side_effect=TimeoutError("locked")):
+            dbfollow.follow(here.root, here.node.path, False, found)
+        self.assertIn("locked", found.problem)
+
+    def test_a_spec_that_cannot_be_read_is_refused(self):
+        self.pair_nodes()
+        found = dbfollow.Followed()
+        dbfollow.follow(self.all[1].root, "/nonexistent/instance.yaml",
+                        False, found, runner=Server())
+        self.assertIsNotNone(found.problem)
+
+
+class TestTheHelpers(unittest.TestCase):
+    def test_ask_is_none_when_the_client_cannot_run_or_fails(self):
+        def missing(argv, **kwargs):
+            raise OSError(2, "No such file or directory")
+        self.assertIsNone(dbfollow._ask(missing, ("mariadb",)))
+        failing = FailingServer("mariadb")
+        self.assertIsNone(dbfollow._ask(failing, ("mariadb", "-e", "x")))
+
+    def test_send_says_why_it_failed(self):
+        def missing(argv, **kwargs):
+            raise OSError(2, "No such file or directory")
+        self.assertIn("No such file", dbfollow._send(missing, "SELECT 1"))
+
+        def silent(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 3, "", "")
+        self.assertEqual(dbfollow._send(silent, "SELECT 1"), "exited 3")
+
+    def test_a_record_that_names_nothing_is_described_as_unknown(self):
+        self.assertEqual(dbfollow.described({}), "unknown")
+        self.assertEqual(dbfollow.described(
+            {"holder_timeline": 3, "own_timeline": 2}),
+            "timeline 2 against the holder's 3")
+
+    def test_the_holder_cannot_be_asked_without_a_spool(self):
+        state = mock.Mock()
+        with mock.patch.object(dbfollow.dbseed, "spool",
+                               side_effect=OSError(28, "No space")):
+            self.assertIsNone(dbfollow._holder_gtid("/", "h", 1, state,
+                                                    Server()))
+
+    def test_status_fields_read_a_status(self):
+        from keel.inspect.tree import File
+        self.assertEqual(
+            dbfollow.status_fields(File("", "  Master_Host: h\n"))
+            .get("Master_Host"), "h")
 
 
 class TestTheFenceOfACaughtUpReplica(FollowTestCase):

@@ -665,9 +665,9 @@ def promote_vip(args, doc: dict, root: str, dry_run: bool,
         print(f"would move the VIP {appliance['vip']} to this node first"
               " (keel vip promote)")
         return then()
-    return vippromote.promote(vipcli.here_of(args),
-                              getattr(args, "old_primary_gone", False),
-                              print, then)
+    gone = getattr(args, "old_primary_gone", False)
+    return vippromote.promote(vipcli.here_of(args), gone, print, then,
+                              alone=gone)
 
 
 def manifest_validate(args) -> int:

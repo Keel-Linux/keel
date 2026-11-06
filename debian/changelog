@@ -1,3 +1,20 @@
+keel (0.23.85) unstable; urgency=medium
+
+  * The first pairing of a cloud replica writes one line to the journal
+    (identifier keel): the schemas it drops and the path of the dump it
+    keeps. Before, only the output of the command said it. When keel spec
+    apply of the first boot does the seed, that output goes to the
+    console, and the journal had no line (BR2 CT 9357, keel 0.23.84).
+  * keel vip promote and keel database promote refuse (exit code 24) on a
+    node whose PostgreSQL is a standby that follows nobody and that has
+    not rejoined the holder. An old primary that claimed the VIP back
+    before its rejoin held the VIP as a fenced standby, the other node
+    was a standby too, and no server took writes (BR1 9368 and BR2 9369,
+    keel 0.23.84). keel database promote --old-primary-gone still takes
+    the VIP when the other member is gone.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Fri, 06 Nov 2026 00:00:00 +0000
+
 keel (0.23.84) unstable; urgency=medium
 
   * keel database follow seeds the MariaDB replica of a cloud mode at its

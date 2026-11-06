@@ -77,11 +77,14 @@ def with_etcd(here: Here) -> bool:
 
 
 def promote(here: Here, gone: bool, out: Callable[[str], None],
-            then: Callable[[], int] | None = None) -> int:
+            then: Callable[[], int] | None = None,
+            alone: bool = False) -> int:
     """`keel vip promote`: this node becomes the VIP's holder. `then`
     runs once the promote succeeded, before the late asks of a gone old
     primary are joined: keel database promote makes the database
-    writable there, not after the members' channel's timeout (keel#169)"""
+    writable there, not after the members' channel's timeout (keel#169).
+    `alone` is keel database promote --old-primary-gone: a fenced
+    PostgreSQL standby may take the VIP then, and only then"""
     def after(code: int) -> int:
         return then() if then is not None and code == exits.OK else code
     try:
@@ -94,6 +97,12 @@ def promote(here: Here, gone: bool, out: Callable[[str], None],
                                    vippair.kept_vips(here.root))
         if problem:
             out(problem)
+            return exits.MESH_REFUSED
+        from keel.system import dbpgfollow
+        refusal = dbpgfollow.promote_refusal(here.root, here.node.document(),
+                                             alone)
+        if refusal:
+            out(refusal)
             return exits.MESH_REFUSED
         if not with_etcd(here):
             return after(promoted(here, vip, gone, out))
