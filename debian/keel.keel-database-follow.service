@@ -9,16 +9,25 @@
 # whose spec declares no appliance.vip (the witness of a pair, decisions
 # 0057 and 0076) the ExecCondition exits 1, and systemd skips the unit:
 # it is never failed there (keel#211). systemd 243 and later.
+# A refusal in the join window (the database certificate not in place
+# yet, the holder not answering over TLS) is retried each 30 s, at most
+# 10 starts in 15 minutes: a replica that streams does not stay failed,
+# and a lasting refusal (a diverged node) still ends failed. A retry
+# keeps the dump it has and alerts no more (keel.system.dbfollow).
 [Unit]
 Description=keel database: the server follows the pair's VIP
 After=network-online.target wg-quick@wg0.service mariadb.service keel-vip.service
 Wants=network-online.target
 ConditionPathExists=/var/lib/keel/vip
+StartLimitIntervalSec=15min
+StartLimitBurst=10
 
 [Service]
 Type=oneshot
 ExecCondition=/usr/bin/keel database follow --needed
 ExecStart=/usr/bin/keel database follow
+Restart=on-failure
+RestartSec=30s
 
 [Install]
 WantedBy=multi-user.target

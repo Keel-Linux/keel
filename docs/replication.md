@@ -526,6 +526,34 @@ own address, under TLS.
   reseeds from the holder (the dump above is kept first), or reconciles
   by hand and runs `keel database follow` again.
 
+**The first pairing of a cloud replica (keel 0.23.84).** The headless
+first boot of a cloud mode runs the application's hooks before the role
+is known. Each hook makes a local schema with `sql_log_bin=0`, so the
+replica holds its own WordPress, salts and users, which the holder lacks
+and never sends. Before 0.23.84, follow found these schemas, did not
+seed, and rejoined by GTID with nothing errant: the replica kept its own
+databases, and later UPDATEs of rows with the same ids made the two
+databases diverge silently (the pair 9386/9387, 2026-11-06). Now follow
+seeds such a replica from the holder, and drops its held schemas, when
+all of these are true:
+
+- `installation.mode` is `cloud_simple` or `cloud_advanced`, and the
+  node is the replica;
+- it never replicated: `SHOW REPLICA STATUS` is empty and
+  `gtid_slave_pos` is empty;
+- no GTID of its own `@@server_id` is in `@@gtid_binlog_state` or
+  `@@gtid_current_pos`, and nothing is errant: nothing it wrote was
+  logged.
+
+Before the drop, a dump of everything the node holds is kept under
+`/var/backups/keel/mariadb/first-boot-schemas-<time>.sql.zst` (mode
+0600), and follow says where. A node with GTIDs of its own keeps the
+rows above: rejoined when nothing is errant, else read only and
+alerted, never dropped automatically. This is the question of 0049 (does
+the node hold writes the other lacks?) applied to the first boot, and it
+answers 0013's "refuse unless the database is empty or confirmed": what
+the node holds is only what its own first boot made.
+
 The spec is not rewritten by the rejoin: the role in the spec is the one
 chosen at installation (0020), `inspect` writes the observed role out,
 and keel#69 (one writer for instance.yaml) is open. 0049's "writes
@@ -608,7 +636,7 @@ last dump, there is no dump. During the dump, the kernel stops `zstd` at
 that room (`RLIMIT_FSIZE`), and keel removes the file. After a good dump,
 only the newest `keep` dumps stay. A failed dump removes nothing.
 
-**A rejoin's dump.** `rejoin-*` files are not in the retention and keel
+**A rejoin's dump.** `rejoin-*` and `first-boot-schemas-*` files are not in the retention and keel
 never removes them: such a file can be the only copy of a diverged node's
 writes. The operator removes them after the reseed. A MariaDB rejoin does
 not dump again while the node's GTID state does not change. Before 0.23.71,

@@ -68,6 +68,33 @@ class TestFollowUnit(unittest.TestCase):
                             for line in after), after)
 
 
+class TestFollowRetries(unittest.TestCase):
+    """A refusal in the join window (the certificate not in place yet,
+    the holder not answering over TLS) is retried, so a replica that
+    streams does not stay failed (BR2 CT 9365, 2026-11-06); the retries
+    are bounded, so a lasting refusal (a diverged node) still ends failed"""
+
+    def unit(self) -> dict[str, str]:
+        path = join(dirname(CONTROL), "keel.keel-database-follow.service")
+        found = {}
+        with open(path) as fob:
+            for line in fob:
+                key, sep, value = line.strip().partition("=")
+                if sep and not line.startswith("#"):
+                    found[key] = value
+        return found
+
+    def test_a_failed_follow_is_started_again(self):
+        unit = self.unit()
+        self.assertEqual(unit.get("Restart"), "on-failure")
+        self.assertTrue(unit.get("RestartSec"))
+
+    def test_the_retries_are_bounded(self):
+        unit = self.unit()
+        self.assertTrue(unit.get("StartLimitIntervalSec"))
+        self.assertGreater(int(unit.get("StartLimitBurst", "0")), 1)
+
+
 class TestFastStop(unittest.TestCase):
     """keel#219: a stop of postgresql@.service that arrives while its start
     still runs does not run ExecStop, and systemd sends SIGTERM to the

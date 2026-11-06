@@ -1,3 +1,26 @@
+keel (0.23.84) unstable; urgency=medium
+
+  * keel database follow seeds the MariaDB replica of a cloud mode at its
+    first pairing. The first boot of a cloud mode runs the application's
+    hooks before the role is known, with sql_log_bin=0, so the replica
+    held its own schemas. Follow rejoined it by GTID, and the replica
+    kept its own WordPress and never got the primary's (the pair
+    9386/9387, 2026-11-06). Now, when the node is the replica of
+    cloud_simple or cloud_advanced, never replicated (no replica status,
+    no gtid_slave_pos) and has no GTID of its own server id, follow keeps
+    a dump of everything it holds in
+    /var/backups/keel/mariadb/first-boot-schemas-<time>.sql.zst (mode
+    0600), says where, drops the held schemas and seeds from the holder.
+    A node with GTIDs of its own keeps the rejoin or the refusal of 0049.
+    It is never dropped automatically (docs/replication.md).
+  * keel-database-follow.service starts again 30 s after a failure, at
+    most 10 times in 15 minutes. A refusal in the join window (the
+    database certificate not in place yet, the holder not answering over
+    TLS) does not leave a good replica "failed". A lasting refusal, such
+    as a diverged node, still ends failed.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Fri, 06 Nov 2026 00:00:00 +0000
+
 keel (0.23.83) unstable; urgency=medium
 
   * keel mesh invite proposes the VIP of the pair in a cloud mode and puts
