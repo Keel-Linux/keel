@@ -171,6 +171,16 @@ def whose(value: Value, pair: Pair, signer_of: SignerOf) -> str | None:
     return None if found.names(pair) else foreign(found)
 
 
+# what reserve, held_for and kept say when etcd did not answer: a
+# timeout, which keel vip pair tries again (keel.mesh.vippromote.pair)
+TRANSIENT = ("could not be reserved in etcd (", "etcd did not answer (")
+
+
+def transient(problem: str) -> bool:
+    """Whether a refusal is etcd's timeout, not the pair's state"""
+    return any(mark in problem for mark in TRANSIENT)
+
+
 def reserve(client: Client, pair: Pair, by: str, sign: Signer,
             signer_of: SignerOf) -> str | None:
     """`pair.vip` reserved for `pair`'s members, signed by `by`, on a

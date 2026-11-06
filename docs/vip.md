@@ -61,6 +61,12 @@ signed lets its VIP go when the lease ends. When that last step fails,
 `keel vip pair` says so and exits non-zero; run it again: it finds the
 pair's reservation and keeps it.
 
+**A timeout of etcd is tried again** (keel 0.23.89). When etcd does not
+answer in time, on this node or on the member asked to sign, `keel vip
+pair` says so and tries again after 2, 4, 8, 16, then 30 s, for up to
+120 s. A cluster that forms over a poor link answers late. Every other
+refusal is said at once.
+
 `keel vip unpair VIP` **releases** a VIP no longer used: remove
 `appliance.vip` from the spec of both members and apply first, then run
 it on either member. It deletes the pair's reservation only at the
