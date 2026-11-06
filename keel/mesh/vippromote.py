@@ -98,7 +98,8 @@ def promote(here: Here, gone: bool, out: Callable[[str], None],
     def after(code: int) -> int:
         return then() if then is not None and code == exits.OK else code
     try:
-        vip = vipstate.declared(here.node.document())
+        document = here.node.document()
+        vip = vipstate.declared(document)
         if vip is None:
             out("this node declares no appliance.vip: it replicates nothing,"
                 " and has no VIP to take")
@@ -109,8 +110,7 @@ def promote(here: Here, gone: bool, out: Callable[[str], None],
             out(problem)
             return exits.MESH_REFUSED
         from keel.system import dbpgfollow
-        refusal = dbpgfollow.promote_refusal(here.root, here.node.document(),
-                                             alone)
+        refusal = dbpgfollow.promote_refusal(here.root, document, alone)
         if refusal:
             out(refusal)
             return exits.MESH_REFUSED
