@@ -120,6 +120,7 @@ class Follower:
 
     def start(self, root: str, path: str) -> None:
         self.root, self.path = root, path
+        timed_steps()
         self.thread = threading.Thread(target=self.run, daemon=True)
         self.thread.start()
 
@@ -156,9 +157,11 @@ class Follower:
             found = dbfollow.Followed()
             dbfollow.follow(self.root, self.path, False, found)
             self.runs += 1
+            steps = ", ".join(STEPS)
+            STEPS.clear()
             self.log.append(f"{time.time():.3f} follow ({why}; waited"
                             f" {began - seen:.2f} s, ran"
-                            f" {time.time() - began:.2f} s):"
+                            f" {time.time() - began:.2f} s: {steps}):"
                             f" {found.problem or 'ok'}: {found.lines}")
             print(self.log[-1], file=sys.stderr, flush=True)
             return {"problem": found.problem, "lines": found.lines}
@@ -178,6 +181,38 @@ class Follower:
 
 FOLLOWER = Follower()
 LOCK = threading.RLock()
+# the steps of a follow, timed: the log of each follow names the slow one
+STEPS: list[str] = []
+
+
+def timed_steps() -> None:
+    """Wrap the steps of keel database follow so that each run logs how
+    long each took (the planned and unplanned promote timings)"""
+    import functools
+    from keel.system import dbfollow, dbreadonly
+
+    def wrap(module, name, label):
+        inner = getattr(module, name)
+
+        @functools.wraps(inner)
+        def timed(*args, **kwargs):
+            began = time.time()
+            try:
+                return inner(*args, **kwargs)
+            finally:
+                STEPS.append(f"{label} {time.time() - began:.2f}")
+        setattr(module, name, timed)
+    for module, name, label in (
+            (dbfollow, "_learn", "learn"),
+            (dbfollow, "_early_proof", "early_proof"),
+            (dbfollow, "observe_database", "observe"),
+            (dbfollow, "_proven", "proven"),
+            (dbfollow, "_lags", "lags"),
+            (dbreadonly, "promote", "promote"),
+            (dbfollow, "_replica_back", "replica_back"),
+            (dbfollow, "_filesync_flip", "flip"),
+            (dbfollow, "_warn_undeclared", "undeclared")):
+        wrap(module, name, label)
 
 
 def sql(statement: str, user: str | None = None,
