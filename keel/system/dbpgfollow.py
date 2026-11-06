@@ -390,6 +390,23 @@ def commit_alone(root: str, runner) -> str:
     return _rewrite(root, dbpostgres.alone_text, runner)[0]
 
 
+def fall_back(root: str, runner) -> str:
+    """The fallback of 0054's amendment (2026-11-06): the pair drop-in
+    with an empty synchronous_standby_names, reloaded, written by keel
+    database watch when no standby acknowledged in time; why not, or an
+    empty string. The waiting commits finish at the reload"""
+    return _rewrite(root, dbpostgres.fallback_text, runner)[0]
+
+
+def fell_back(root: str) -> bool:
+    """Whether the pair drop-in says that the watch fell back"""
+    try:
+        with open(_pair_dropin(root)) as fob:
+            return dbpostgres.fell_back(fob.read())
+    except OSError:
+        return False
+
+
 def synchronous_again(root: str, runner) -> tuple[str, bool]:
     """The pair's synchronous line back, reloaded, when the drop-in has
     the primary committing alone; why not, and whether it changed"""

@@ -33,8 +33,11 @@ writes while it is in recovery, and `keel diff` clean on both. Then
 cases (b) to (e), the PostgreSQL wording of docs/replication.md's:
 
 - (b) the replica cut off: the primary keeps the VIP, a commit on it
-  waits (no timeout, no fallback: 0054), the primary's watch alerts,
-  and after the heal the commit is acknowledged and the end alerted;
+  waits, the primary's watch alerts, and after SYNC_FALLBACK_S the
+  primary falls back to asynchronous commits (0054, amended
+  2026-11-06): the commit is acknowledged during the cut and the
+  fallback alerted; after the heal the synchronous line comes back and
+  that is alerted;
 - (c) the primary cut off and killed while the application writes:
   B's VIP controller claims once the lease of A's claim expired, and
   B commits alone with no operator (keel#165), the downtime, and no
@@ -854,9 +857,11 @@ def alerted(name: str, title: str, since: int) -> list[dict]:
 def replica_cut(report: dict, pids: list[int], roots: list[str]) -> None:
     """(b): the replica B cut off, both ways. A keeps the VIP (its lease
     is renewed through C, the majority); with etcd nothing is fenced,
-    since B holds no lease. A commit on A waits for B, with no timeout
-    and no fallback to asynchronous (0054): A's watch alerts, and once
-    the link heals the commit is acknowledged, the end alerted"""
+    since B holds no lease. A commit on A waits for B, and A's watch
+    alerts; after SYNC_FALLBACK_S of waiting A falls back to
+    asynchronous commits (0054, amended 2026-11-06), so the commit is
+    acknowledged during the cut and the fallback alerted. Once the link
+    heals the synchronous line comes back, the end alerted"""
     import vip_netns
     from keel.system import dbwatch
     from vip_netns import wait_until
@@ -876,14 +881,15 @@ def replica_cut(report: dict, pids: list[int], roots: list[str]) -> None:
         lambda: alerted("A", dbwatch.SYNC_WAITS, since), 120, 0.5)
     report["b_pending_at_alert"] = writing.is_alive()
     report["b_a_holds_vip"] = vip_netns.holds(pids[0])
-    # cut for 40 s in all, the alert's 10 s and a watch run past it
-    time.sleep(max(0.0, cut_at + 40 - time.time()))
-    report["b_pending_at_heal"] = writing.is_alive()
+    report["b_fell_back_alerted_s"] = wait_until(
+        lambda: alerted("A", dbwatch.SYNC_FELL_BACK, since), 150, 0.5)
+    writing.join(60)
+    report["b_acked_before_heal"] = not writing.is_alive()
     healed_at = vip_netns.heal(pids, 1)
     writing.join(600)
     report["b_cut_write"] = pending
     report["b_cut_s"] = round(healed_at - cut_at, 2)
-    report["b_ack_after_heal_s"] = round(pending["end"] - healed_at, 2) \
+    report["b_ack_after_cut_s"] = round(pending["end"] - cut_at, 2) \
         if pending.get("ok") else None
     report["b_sync_after_heal_s"] = wait_until(
         lambda: sync_standbys(a_root) == "1", 180, 1)

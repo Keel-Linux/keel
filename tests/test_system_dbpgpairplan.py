@@ -189,6 +189,19 @@ class TestThePairPlan(unittest.TestCase):
             [type(one) for one in plan[0].actions],
             [EnsureDatabaseTls, Note])
 
+    def test_a_primary_that_fell_back_is_not_drift(self):
+        """The watch's fallback to asynchronous commits (0054, amended
+        2026-11-06) is runtime state too: an apply that wrote the line
+        back would make every commit wait again for the absent standby"""
+        dropin, pair_dropin, hba, ident = wanted_files(DOC, state())
+        plan = plan_database(
+            DOC, state(dropin=dropin,
+                       pair_dropin=dbpostgres.fallback_text(pair_dropin),
+                       hba=hba, ident=ident, nonlocal_bind="1"), False)
+        self.assertEqual(
+            [type(one) for one in plan[0].actions],
+            [EnsureDatabaseTls, Note])
+
     def test_an_hba_change_alone_reloads(self):
         dropin, pair_dropin, _, ident = wanted_files(DOC, state())
         plan = plan_database(
@@ -248,6 +261,19 @@ class TestThePairPlan(unittest.TestCase):
         runs = [one.argv for one in only(plan[0], Run)]
         self.assertNotIn(("systemctl", "restart", dbpostgres.boot_unit()),
                          runs)
+
+    def test_an_older_pair_dropin_that_fell_back_stays_fallen_back(self):
+        dropin, _, hba, ident = wanted_files(DOC, state())
+        ident_path = os.path.join(paths.ROOT_DEFAULT, state().ident.path)
+        older = dbpostgres.fallback_text(
+            dbpostgres.pair_dropin_text(ident_path, legacy=True))
+        plan = plan_database(
+            DOC, state(dropin=dropin, pair_dropin=older, hba=hba,
+                       ident=ident, nonlocal_bind="1"), False)
+        written = {one.path: one.content
+                   for one in only(plan[0], WriteFile)}
+        self.assertIn("wal_keep_size = 256MB\n", written[PG_PAIR])
+        self.assertTrue(dbpostgres.fell_back(written[PG_PAIR]))
 
     def test_a_name_origin_gets_a_line_but_pins_no_certificate(self):
         doc = {

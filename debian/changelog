@@ -1,3 +1,19 @@
+keel (0.23.88) unstable; urgency=medium
+
+  * A PostgreSQL primary whose synchronous standby is away falls back to
+    asynchronous commits after 30 s, with an alert, as a MariaDB primary
+    does (decision 0054, amended by the maintainer on 2026-11-06). Before,
+    the commits waited without end: an Odoo primary with no standby
+    took no write (BR1 9360, keel 0.23.84). keel database watch alerts
+    once when the commits wait. When the wait lasted 30 s, it empties
+    synchronous_standby_names in the pair drop-in and reloads the server,
+    so the waiting commits finish, and it alerts the fallback once. When
+    a standby streams again, it writes the pair's line back and alerts
+    that once. keel spec apply and keel diff take the fallback as
+    runtime state, not drift (docs/replication-postgresql.md).
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Fri, 06 Nov 2026 00:00:00 +0000
+
 keel (0.23.87) unstable; urgency=medium
 
   * keel database follow does not stop the PostgreSQL server of a node

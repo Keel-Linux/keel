@@ -2,6 +2,7 @@
 """keel database watch (keel.system.dbwatch): the semi-synchronous read
 is engine-aware, and a node with no server says so plainly"""
 
+import os
 import subprocess
 import tempfile
 import unittest
@@ -262,6 +263,119 @@ class TestSyncCommit(unittest.TestCase):
         self.answer = " 1 |  0\n"
         self.ask().assert_not_called()
         self.assertIn("not readable", self.out[-1])
+
+
+class TestTheSyncFallback(TestSyncCommit):
+    """0054 amended 2026-11-06 (the maintainer: "b"): a primary whose
+    standby is away falls back to asynchronous commits after
+    SYNC_FALLBACK_S, with an alert, as MariaDB does (0031); the
+    synchronous line comes back once the standby streams again. Before,
+    every write of an Odoo primary waited without end for a standby that
+    never came (BR1 9360, keel 0.23.84)"""
+
+    def at(self, seconds: float):
+        from datetime import datetime, timedelta, timezone
+        start = datetime(2026, 11, 6, 12, 0, tzinfo=timezone.utc)
+        return mock.patch.object(dbwatch, "_now",
+                                 return_value=start + timedelta(
+                                     seconds=seconds))
+
+    def test_no_standby_ever_falls_back_after_the_timeout(self):
+        self.answer = "0\t0\t0\t0\n"
+        with self.at(0), mock.patch("keel.system.dbpgfollow.fall_back",
+                                    return_value="") as fell:
+            alerted = self.ask()
+        fell.assert_not_called()
+        self.assertEqual(alerted.call_args.args[2], dbwatch.SYNC_WAITS)
+        with self.at(dbwatch.SYNC_FALLBACK_S - 1), \
+                mock.patch("keel.system.dbpgfollow.fall_back",
+                           return_value="") as fell:
+            self.ask().assert_not_called()
+        fell.assert_not_called()
+        with self.at(dbwatch.SYNC_FALLBACK_S), \
+                mock.patch("keel.system.dbpgfollow.fall_back",
+                           return_value="") as fell:
+            alerted = self.ask()
+        fell.assert_called_once()
+        self.assertEqual(alerted.call_count, 1)
+        self.assertEqual(alerted.call_args.args[2], dbwatch.SYNC_FELL_BACK)
+        self.assertIn(f"{dbwatch.SYNC_FALLBACK_S} s",
+                      alerted.call_args.args[3])
+        self.assertIn("fell back", self.out[-1])
+
+    def test_a_primary_that_fell_back_is_alerted_once(self):
+        self.answer = "0\t0\t1\t0\n"
+        with mock.patch("keel.system.dbpgfollow.fell_back",
+                        return_value=True):
+            first = self.ask()
+            second = self.ask()
+        self.assertEqual(first.call_args.args[2], dbwatch.SYNC_FELL_BACK)
+        second.assert_not_called()
+        self.assertIn("asynchronous", self.out[-1])
+
+    def test_the_standby_back_brings_the_synchronous_line_back(self):
+        self.answer = "0\t0\t1\t0\n"
+        with mock.patch("keel.system.dbpgfollow.fell_back",
+                        return_value=True):
+            self.ask()
+        self.answer = "0\t0\t1\t1\n"
+        with mock.patch("keel.system.dbpgfollow.synchronous_again",
+                        return_value=("", True)) as again:
+            alerted = self.ask()
+        again.assert_called_once()
+        self.assertEqual(alerted.call_args.args[2], dbwatch.SYNC_BACK)
+
+    def test_a_fallback_that_cannot_be_written_stays_a_wait(self):
+        self.answer = "0\t0\t0\t0\n"
+        with self.at(0):
+            self.ask()
+        with self.at(dbwatch.SYNC_FALLBACK_S), \
+                mock.patch("keel.system.dbpgfollow.fall_back",
+                           return_value="the pair drop-in cannot be read"):
+            self.ask().assert_not_called()
+        self.assertIn("cannot be read", " ".join(self.out))
+        self.assertIn("synchronous commit waiting", self.out[-1])
+
+    def test_a_wait_that_was_not_seen_before_starts_the_clock(self):
+        self.answer = "0\t0\t0\t0\n"
+        dbwatch._write_state(self.root, {"sync_commit": "flowing"})
+        with self.at(dbwatch.SYNC_FALLBACK_S * 10), \
+                mock.patch("keel.system.dbpgfollow.fall_back",
+                           return_value="") as fell:
+            self.ask()
+        fell.assert_not_called()
+
+
+class TestTheFallbackDropin(unittest.TestCase):
+    def test_the_fallback_and_its_end_rewrite_the_pair_s_line(self):
+        from keel.system import dbpostgres
+        text = dbpostgres.pair_dropin_text()
+        fell = dbpostgres.fallback_text(text)
+        self.assertIn("synchronous_standby_names = ''", fell)
+        self.assertTrue(dbpostgres.fell_back(fell))
+        self.assertFalse(dbpostgres.commits_alone(fell))
+        self.assertEqual(dbpostgres.synchronous_text(fell), text)
+        self.assertFalse(dbpostgres.fell_back(text))
+
+    def test_fell_back_reads_the_pair_drop_in(self):
+        from keel.system import dbpgfollow, dbpostgres
+        root = tempfile.mkdtemp()
+        self.assertFalse(dbpgfollow.fell_back(root))
+        with mock.patch.object(dbpgfollow, "_pair_dropin",
+                               return_value=os.path.join(root, "pair.conf")):
+            with open(os.path.join(root, "pair.conf"), "w") as fob:
+                fob.write(dbpostgres.fallback_text(
+                    dbpostgres.pair_dropin_text()))
+            self.assertTrue(dbpgfollow.fell_back(root))
+            ran = []
+            with open(os.path.join(root, "pair.conf"), "w") as fob:
+                fob.write(dbpostgres.pair_dropin_text())
+            self.assertEqual(dbpgfollow.fall_back(
+                root, lambda argv, **kw: ran.append(argv) or
+                subprocess.CompletedProcess(argv, 0, b"", b"")), "")
+            self.assertTrue(dbpgfollow.fell_back(root))
+            self.assertTrue(any("pg_reload_conf()" in " ".join(one)
+                                for one in ran))
 
 
 class TestDumpCheck(unittest.TestCase):

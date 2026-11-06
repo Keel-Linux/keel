@@ -21,11 +21,15 @@ appliance.vip:
   --old-primary-gone the primary commits alone; the watch alerts at
   each run while it does, and writes the pair's synchronous line back
   once a standby streams again. Otherwise:
-  the pair's synchronous commit has no timeout and no fallback, so when
-  no standby streams from the primary, or a commit waited for it longer
-  than SYNC_WAIT_ALERT_S, writes do not finish. Alerted once, and once
-  more when the standby acknowledges again; the state between runs is
-  the same file, its key `sync_commit`;
+  when no standby streams from the primary, or a commit waited for it
+  longer than SYNC_WAIT_ALERT_S, commits wait. Alerted once. When the
+  wait lasted SYNC_FALLBACK_S, the primary falls back to asynchronous
+  commits (0054, amended 2026-11-06, as MariaDB does under 0031): the
+  pair drop-in's synchronous_standby_names is emptied and reloaded, the
+  waiting commits finish, and the fallback is alerted once. When a
+  standby streams again, the pair's line is written back and that is
+  alerted once. The state between runs is the same file, its keys
+  `sync_commit` and `since`;
 - **the database certificate**, renewed with a third of its life left
   (keel.system.dbtls), through the members' channel; a renewal that
   cannot be had is alerted;
@@ -91,6 +95,10 @@ SYNC_CHECK = "database-sync-commit"
 # case's 250 ms); a wait this long is the standby away, not the link:
 # the twin of MariaDB's 10 s semi-synchronous timeout
 SYNC_WAIT_ALERT_S = 10
+# how long the primary's commits wait for an absent standby before it
+# falls back to asynchronous commits (0054, amended 2026-11-06): the
+# MariaDB pair's semi-synchronous timeout (dbmariadb.SEMI_SYNC_TIMEOUT_MS)
+SYNC_FALLBACK_S = 30
 # one constant text, nothing spliced in: the standby's name is
 # dbpostgres.SLOT and the wait SYNC_WAIT_ALERT_S (a unit test keeps
 # them in step)
@@ -108,6 +116,15 @@ SYNC_SQL = (
 SYNC_WAITS = "the primary's commits wait for the standby"
 SYNC_BACK = "the standby acknowledges the primary's commits again"
 SYNC_ALONE = "the primary commits alone, with no standby"
+SYNC_FELL_BACK = "the primary's commits fell back to asynchronous"
+SYNC_FELL_BACK_TEXT = (
+    "{host}, the primary of {vip}: no standby acknowledged its commits for"
+    " {timeout} s, so it commits asynchronously (decision 0054, amended"
+    " 2026-11-06). Writes go on; a failover now loses the commits the"
+    " standby has not received. keel makes each commit wait for the"
+    " standby again by itself once the standby streams again. keel"
+    " database status on both nodes says what the standby does."
+)
 SYNC_ALONE_TEXT = (
     "{host}, the primary of {vip}: it commits alone. keel database promote"
     " --old-primary-gone said the old primary is gone, so this primary"
@@ -119,13 +136,13 @@ SYNC_ALONE_TEXT = (
     " the primary commits alone."
 )
 SYNC_WAITS_TEXT = (
-    "{host}, the primary of {vip}: {why}. The pair's synchronous commit"
-    " has no timeout and no fallback (decision 0054): a commit finishes"
-    " only once the standby received and flushed it, so writes wait."
-    " They finish by themselves once the standby streams again: heal its"
-    " link, or reseed the other node with `keel spec apply --system-only"
-    " --destroy-local-database` there. keel database status on both"
-    " nodes says what the standby does."
+    "{host}, the primary of {vip}: {why}. A commit finishes only once the"
+    " standby received and flushed it, so writes wait. After {timeout} s"
+    " the primary falls back to asynchronous commits (decision 0054,"
+    " amended 2026-11-06). Heal the standby's link, or reseed the other"
+    " node with `keel spec apply --system-only --destroy-local-database`"
+    " there. keel database status on both nodes says what the standby"
+    " does."
 )
 SYNC_BACK_TEXT = ("{host}, the primary of {vip}: the standby acknowledges"
                   " again; commits finish.")
@@ -280,6 +297,9 @@ def _sync_postgresql(root: str, pair: dbpair.PairState, reading, out, err,
         alone = 1 if problem else 0
         standbys = 0 if problem else 1
     if alone:
+        from keel.system import dbpgfollow
+        if dbpgfollow.fell_back(root):
+            return _fell_back(root, pair, reading, before, out, err)
         out("database watch: role primary, synchronous commit alone"
             f" (was {before.get('sync_commit') or 'unknown'})")
         alerting.alert(root, err, SYNC_ALONE, SYNC_ALONE_TEXT.format(
@@ -296,20 +316,63 @@ def _sync_postgresql(root: str, pair: dbpair.PairState, reading, out, err,
     else:
         why = ""
     now = "waiting" if why else "flowing"
+    since = before.get("since") if before.get("sync_commit") == "waiting" \
+        else None
+    since = since or _stamp(_now())
+    if now == "waiting" and _waited(since) >= SYNC_FALLBACK_S:
+        from keel.system import dbpgfollow
+        problem = dbpgfollow.fall_back(root, runner)
+        if not problem:
+            return _fell_back(root, pair, reading, before, out, err)
+        out(f"database watch: the fallback to asynchronous commits could"
+            f" not be written: {problem}")
     out(f"database watch: role primary, synchronous commit {now}"
         f" (was {before.get('sync_commit') or 'unknown'})"
         + (f": {why}" if why else ""))
     if now != before.get("sync_commit"):
         if now == "waiting":
             alerting.alert(root, err, SYNC_WAITS, SYNC_WAITS_TEXT.format(
-                host=host, vip=pair.vip, why=why), SYNC_CHECK)
-        elif before.get("sync_commit") in ("waiting", "alone"):
+                host=host, vip=pair.vip, why=why, timeout=SYNC_FALLBACK_S),
+                SYNC_CHECK)
+        elif before.get("sync_commit") in ("waiting", "alone", "fallback"):
             alerting.alert(root, err, SYNC_BACK, SYNC_BACK_TEXT.format(
                 host=host, vip=pair.vip), SYNC_CHECK, "recovery")
     _write_state(root, {"sync_commit": now, "role": pair.role,
-                        "at": datetime.now(timezone.utc).strftime(
-                            "%Y-%m-%dT%H:%M:%SZ")})
+                        "at": _stamp(_now()), "since": since})
     return reading
+
+
+def _fell_back(root: str, pair, reading, before: dict, out, err):
+    """The primary commits asynchronously: said at each run, alerted
+    once, when it begins"""
+    out("database watch: role primary, synchronous commit fell back:"
+        " commits are asynchronous until a standby streams again"
+        f" (was {before.get('sync_commit') or 'unknown'})")
+    if before.get("sync_commit") != "fallback":
+        alerting.alert(root, err, SYNC_FELL_BACK, SYNC_FELL_BACK_TEXT.format(
+            host=os.uname().nodename, vip=pair.vip,
+            timeout=SYNC_FALLBACK_S), SYNC_CHECK)
+    _write_state(root, {"sync_commit": "fallback", "role": pair.role,
+                        "at": _stamp(_now())})
+    return reading
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _stamp(when: datetime) -> str:
+    return when.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _waited(since: str) -> float:
+    """Seconds since `since`, a _stamp; 0 when it cannot be read"""
+    try:
+        began = datetime.strptime(since, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return 0.0
+    return (_now() - began).total_seconds()
 
 
 def commits(values: dict, role: str | None, read_only: bool) -> str:
