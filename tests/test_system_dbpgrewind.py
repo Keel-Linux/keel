@@ -201,6 +201,7 @@ class TestTheRewind(FollowTestCase):
 
     def test_a_wait_mark_that_cannot_be_read_reads_as_none(self):
         self.assertIsNone(dbpgrewind._waited_since("/nonexistent"))
+        self.assertFalse(dbpgrewind._wait_alerted("/nonexistent"))
 
     def test_a_holder_that_the_probe_cannot_ask_keeps_the_fallback(self):
         server, found, alerted = self.follow_old_primary(
