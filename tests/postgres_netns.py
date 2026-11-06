@@ -735,7 +735,12 @@ def play(report: dict, pids: list[int], pairs, roots: list[str],
     report["a_lag_s"] = max((one["lag_s"] for one in lags
                              if one["lag_s"] is not None), default=None)
     # the pair's synchronous commit: the primary acknowledges a commit
-    # once the standby of application_name keel received and flushed it
+    # once the standby of application_name keel received and flushed it.
+    # A's watch may have fallen back while B's seed ran longer than its
+    # 30 s (0054, amended 2026-11-06); it writes the line back at its
+    # next run once B streams
+    report["a_sync_back_s"] = wait_until(
+        lambda: sync_standbys(roots[0]) == "1", 120, 1)
     report["a_sync"] = agent_send("A", "sql SHOW synchronous_standby_names")
     report["a_slot"] = agent_send(
         "A", "sql SELECT slot_name, active FROM pg_replication_slots")
