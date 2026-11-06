@@ -50,6 +50,15 @@ In keel 0.23.18. The numbers under "Measured" come from the CI job
   taken once per divergence, because a fenced node takes no write
   after it. A node holding no user database is seeded without any
   confirmation.
+- **A fenced standby does not take the VIP** (keel 0.23.85). `keel vip
+  promote` and `keel database promote` refuse, with exit code 24
+  (MESH_REFUSED), on a node whose server is a standby that follows
+  nobody and that follow would keep refused as the holder. The old
+  primary then waits for its rejoin. Before 0.23.85, an old primary
+  that claimed the VIP back before it rejoined held the VIP with no
+  writes, and the other node was a standby too (BR1 9368 and BR2
+  9369). `keel database promote --old-primary-gone` still takes the
+  VIP when the other member is gone.
 - **The rewind** (`keel.system.dbpgrewind`). After the dump, follow
   stops the fenced server and runs `pg_rewind --progress` against the
   holder. Then it writes the follow drop-in and `standby.signal`,

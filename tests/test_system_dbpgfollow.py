@@ -21,6 +21,7 @@ from unittest import mock
 from test_system_dbpgpairplan import CLAIMED, DOC, state
 from vip_helpers import KEYS, VIP, Pair, address
 
+from keel import exits
 from keel.mesh import vipnode, vippromote
 from keel.mesh import vip as vipstate
 from keel.system import dbfollow, dbpair, dbpgcost, dbpgfollow, dbpgpromote, \
@@ -860,6 +861,82 @@ class TestTheReplica(FollowTestCase):
         self.nodes(vips=(None, None), paired=False)
         found = self.follow(2, Server())
         self.assertIn("declares no appliance.vip", found.problem)
+
+
+class TestThePromoteOfAFencedStandby(FollowTestCase):
+    """keel vip promote on a standby that follows nobody (BR1 9368 and
+    BR2 9369, keel 0.23.84): the replica was promoted, and at once the
+    old primary claimed the VIP back before it rejoined. It then held
+    the VIP as a fenced standby that takes no writes, the other node was
+    a standby too, and no server of the pair took writes. The promote
+    refuses there: follow would leave the holder refused (above)"""
+
+    FENCED = TestThePrimary.FENCED
+
+    def promote(self, index: int, server: Server, gone: bool = False,
+                alone: bool = False) -> tuple[int, list[str]]:
+        here = self.all[index]
+        said: list[str] = []
+        with mock.patch("keel.inspect.constants.ROOT_DEFAULT", here.root), \
+                mock.patch("keel.inspect.collect.paths.ROOT_DEFAULT",
+                           here.root), \
+                mock.patch("keel.system.dbstate.paths.ROOT_DEFAULT",
+                           here.root), \
+                mock.patch("keel.inspect.collect.subprocess.run", server), \
+                mock.patch("keel.system.dbready.ready", return_value=""), \
+                mock.patch("keel.system.dbready.enabled",
+                           return_value="enabled"):
+            code = vippromote.promote(here, gone, said.append, alone=alone)
+        return code, said
+
+    def old_primary(self) -> None:
+        """A was the primary; B holds the VIP now"""
+        self.pair_nodes(claim=1)
+        dbpgfollow._write(self.all[0].root, dbpair.ROLE_FILE,
+                          dbpair.role_text("primary", VIP), 0o644)
+
+    def newest_holder(self) -> str:
+        held = vipstate.read(self.all[0].root, VIP)
+        return f"{held.claim.holder} {held.claim.epoch}" if held and held.claim else ""
+
+    def test_a_fenced_old_primary_is_refused_the_vip(self):
+        self.old_primary()
+        before = self.newest_holder()
+        code, said = self.promote(0, Server(**self.FENCED))
+        self.assertEqual(code, exits.MESH_REFUSED, said)
+        text = " ".join(said)
+        self.assertIn("follows nobody", text)
+        self.assertIn("--old-primary-gone", text)
+        self.assertEqual(self.newest_holder(), before)
+
+    def test_the_operator_s_old_primary_gone_lets_it_promote(self):
+        self.old_primary()
+        code, said = self.promote(0, Server(**self.FENCED), gone=True,
+                                  alone=True)
+        self.assertNotIn("follows nobody", " ".join(said))
+
+    def test_a_fenced_node_that_never_had_a_role_may_promote(self):
+        # keel#152: follow makes such a holder writable, nothing is lost
+        self.pair_nodes(claim=1)
+        code, said = self.promote(0, Server(**self.FENCED))
+        self.assertNotIn("follows nobody", " ".join(said))
+
+    def test_a_standby_that_follows_the_holder_may_promote(self):
+        self.old_primary()
+        receiver = f"user=repl host={address(1)} port=5432 " \
+                   "password=******** sslmode=verify-full\n"
+        code, said = self.promote(0, Server(in_recovery=True,
+                                            receiver=receiver))
+        self.assertNotIn("follows nobody", " ".join(said))
+
+    def test_the_guard_says_nothing_without_a_postgresql_server(self):
+        self.assertIsNone(dbpgfollow.promote_refusal("/", {}, False))
+        self.assertIsNone(dbpgfollow.promote_refusal(
+            "/", {"database": {"server": {"engine": "mariadb"}}}, False))
+        doc = {"database": {"server": {"engine": "postgresql"}}}
+        with mock.patch("keel.system.dbstate.observe_database",
+                        side_effect=OSError(5, "I/O error")):
+            self.assertIsNone(dbpgfollow.promote_refusal("/", doc, False))
 
 
 class TestTheRecord(unittest.TestCase):
