@@ -615,13 +615,39 @@ class TestThePrimary(FollowTestCase):
         server; a stopped server takes no writes and the stop is
         reversed by the next follow once the VIP is proven"""
         self.pair_nodes(claim=None)
+        # it had a role in the pair: its VIP state may have been removed
+        dbpgfollow._write(self.all[0].root, dbpair.ROLE_FILE,
+                          dbpair.role_text("primary", VIP), 0o644)
         server = Server()
         found = self.follow(0, server)
         self.assertIsNone(found.problem, found.lines)
         self.assertIn(["systemctl", "stop", UNIT],
                       server.argv)
         self.assertIn("stopped", " ".join(found.lines))
+
+    def test_the_first_primary_is_not_stopped_before_its_first_claim(self):
+        """A late join (BR1 9365, keel 0.23.85): the pair record came
+        before the primary's first claim, follow stopped its server, and
+        the Take the VIP step of keel spec apply then failed on the
+        PostgreSQL steps. No node of the pair has claimed and this node
+        never had a role in it, so nothing can be taken from another
+        holder: the server runs until the first claim"""
+        self.pair_nodes(claim=None)
+        server = Server()
+        found = self.follow(0, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertFalse(any(one[:2] == ["systemctl", "stop"]
+                             for one in server.argv), server.argv)
+        self.assertIn("first claim", " ".join(found.lines))
         self.assertNotIn("role=primary", self.role_file(0))
+
+    def test_a_first_primary_stopped_before_is_started_again(self):
+        # 9365 after 0.23.85: the server is down, nothing claimed yet
+        self.pair_nodes(claim=None)
+        with mock.patch.object(dbfollow, "observe_database",
+                               wraps=dbfollow.observe_database) as observed:
+            self.follow(0, Server())
+        self.assertTrue(observed.call_args.kwargs["start"])
 
     def test_an_unproven_standby_is_left_to_recover(self):
         """In recovery it refuses writes on its own: the unproven row

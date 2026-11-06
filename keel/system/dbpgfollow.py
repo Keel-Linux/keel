@@ -108,6 +108,26 @@ def follow(root: str, state: DatabaseState, server: dict, role: str,
     return True
 
 
+FIRST_CLAIM_SAID = (
+    "not stopped: no node of the pair has claimed {vip} yet and this node"
+    " never had a role in the pair, so its server runs until its first"
+    " claim (keel spec apply takes the VIP)"
+)
+
+
+def before_first_claim(root: str, pair) -> bool:
+    """Whether this node waits for the pair's first claim: it took no
+    claim, its own or another node's, and it never had a role in the
+    pair (no dbpair.ROLE_FILE, which each follow that proves a role
+    writes). No other node holds the VIP then, so nothing written here
+    can be lost to another holder, and the server is not stopped: a
+    stopped server made the Take the VIP step of keel spec apply fail
+    when the replica joined late (BR1 9365, keel 0.23.85). A node that
+    had a role and lost its VIP state is still stopped (keel#104)"""
+    return pair is not None and not pair.claimed and \
+        not os.path.exists(os.path.join(root, dbpair.ROLE_FILE))
+
+
 def _unproven(root: str, state: DatabaseState, found, runner) -> None:
     """This node's own claim, not proven: a primary is stopped (a
     stopped server takes no writes), a standby refuses them already,
@@ -115,6 +135,9 @@ def _unproven(root: str, state: DatabaseState, found, runner) -> None:
     if state.reading.role.value == REPLICA:
         found.say("in recovery: this node takes no writes until"
                   f" {state.pair.vip} is proven on wg0")
+        return
+    if before_first_claim(root, state.pair):
+        found.say(FIRST_CLAIM_SAID.format(vip=state.pair.vip))
         return
     problem = _run(runner, ("systemctl", "stop", dbpostgres.service(root)))
     if problem:

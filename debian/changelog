@@ -1,3 +1,17 @@
+keel (0.23.87) unstable; urgency=medium
+
+  * keel database follow does not stop the PostgreSQL server of a node
+    that waits for the pair's first claim: it took no claim, its own or
+    another node's, and it has no role file. When the replica joined
+    late, the pair record came before the primary's first claim. Follow
+    stopped the primary's server, the Take the VIP step of keel spec
+    apply then failed on the PostgreSQL steps, and no node held the VIP
+    (BR1 9365 and BR2 9366, keel 0.23.85). Such a server now runs, and
+    is started again, until the first claim. A node that had a role in
+    the pair and lost its VIP state is still stopped (keel#104).
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Fri, 06 Nov 2026 00:00:00 +0000
+
 keel (0.23.86) unstable; urgency=medium
 
   * keel database follow seeds the PostgreSQL standby of a cloud mode at
