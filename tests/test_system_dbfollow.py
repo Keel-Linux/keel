@@ -678,6 +678,20 @@ class TestTheFirstPairing(FollowTestCase):
                         next(i for i, one in enumerate(server.events)
                              if "DROP DATABASE" in one))
 
+    def test_the_journal_says_where_the_first_boot_dump_is(self):
+        # keel spec apply's output goes to the console of the first boot,
+        # and the journal had no line of the seed (BR2 9357, 0.23.84)
+        self.pair_nodes(mode="cloud_simple")
+        with mock.patch.object(dbfollow.syslog, "syslog") as logged:
+            found = self.follow(1, self.first())
+        self.assertIsNone(found.problem, found.lines)
+        (priority, message), = [one.args for one in logged.call_args_list]
+        self.assertEqual(priority, dbfollow.syslog.LOG_WARNING)
+        kept = os.path.join(self.all[1].root, dbfollow.BACKUPS,
+                            self.dumps()[0])
+        self.assertIn(kept, message)
+        self.assertIn("wordpress, keel_check", message)
+
     def test_cloud_advanced_is_a_cloud_mode_too(self):
         self.pair_nodes(mode="cloud_advanced")
         server = self.first()

@@ -63,6 +63,7 @@ import json
 import os
 import subprocess
 import sys
+import syslog
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -793,6 +794,9 @@ def _rejoin(root: str, host: str, port: int, state: DatabaseState,
                   f" no write of its own, so its first-boot schemas"
                   f" ({', '.join(held)}) are replaced by a copy of"
                   f" [{host}]:{port}; the dump of them is kept at {kept}")
+        _journal(f"database.server.role: first pairing: the first-boot"
+                 f" schemas {', '.join(held)} are replaced by a copy of"
+                 f" [{host}]:{port}; the dump of them is kept at {kept}")
         _seed(root, host, port, state, tuple(held), found, runner)
         return
     statements = mariadb.replicate_from(
@@ -805,6 +809,14 @@ def _rejoin(root: str, host: str, port: int, state: DatabaseState,
     found.say(f"rejoined: no errant GTID, replicating from [{host}]:{port}"
               f" over TLS from {own_pos or 'the start'}")
     _forget_divergence(root)
+
+
+def _journal(line: str) -> None:
+    """One line in the journal, whichever command runs follow: the output
+    of keel spec apply goes to the console of the first boot, and the
+    dump of the first pairing must be found later (keel 0.23.85)"""
+    syslog.openlog("keel", 0, syslog.LOG_DAEMON)
+    syslog.syslog(syslog.LOG_WARNING, line)
 
 
 def _diverged(root: str, state: DatabaseState, holder: str,
