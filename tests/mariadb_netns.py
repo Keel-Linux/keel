@@ -123,6 +123,12 @@ class Follower:
         timed_steps()
         self.thread = threading.Thread(target=self.run, daemon=True)
         self.thread.start()
+        # the watch in a thread of its own: on a machine
+        # keel-database-watch.timer and keel-database-follow.path start
+        # two units, and only follow's own lock (replication_locked, per
+        # thread and file descriptor) orders the two. On one thread a
+        # follow waited for a whole watch run (7 to 16 s seen in CI)
+        threading.Thread(target=self.watching, daemon=True).start()
 
     def stamp(self) -> float:
         found = 0.0
@@ -137,15 +143,15 @@ class Follower:
 
     def run(self) -> None:
         last = self.stamp()
-        watched = time.monotonic()
         while not self.stop.wait(0.5):
             now = self.stamp()
             if now != last and now:
                 last = now
                 self.follow("the VIP's state changed", time.time())
-            if time.monotonic() - watched >= WATCH_EVERY:
-                watched = time.monotonic()
-                self.watch()
+
+    def watching(self) -> None:
+        while not self.stop.wait(WATCH_EVERY):
+            self.watch()
 
     def follow(self, why: str, seen: float | None = None) -> dict:
         """`seen` is when the VIP's state change was seen: the log says
@@ -172,10 +178,9 @@ class Follower:
         import argparse
         from keel.system import dbwatch
         said: list[str] = []
-        with LOCK:
-            began = time.time()
-            code = dbwatch.watch(self.root, self.path, said.append,
-                                 said.append)
+        # not under LOCK: the watch's own follow takes follow's lock
+        began = time.time()
+        code = dbwatch.watch(self.root, self.path, said.append, said.append)
         self.log.append(f"{time.time():.3f} watch (ran"
                         f" {time.time() - began:.2f} s): {code}: {said}")
         print(self.log[-1], file=sys.stderr, flush=True)
