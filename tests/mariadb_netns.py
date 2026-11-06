@@ -149,16 +149,18 @@ class Follower:
 
     def follow(self, why: str, seen: float | None = None) -> dict:
         """`seen` is when the VIP's state change was seen: the log says
-        how long the follow waited for the lock and how long it ran"""
+        how long the follow waited for the lock, how long it ran, and
+        how long each of its steps took"""
         from keel.system import dbfollow
         seen = seen or time.time()
         with LOCK:
             began = time.time()
+            STEPS.done = []
             found = dbfollow.Followed()
             dbfollow.follow(self.root, self.path, False, found)
+            steps = ", ".join(STEPS.done)
+            STEPS.done = None
             self.runs += 1
-            steps = ", ".join(STEPS)
-            STEPS.clear()
             self.log.append(f"{time.time():.3f} follow ({why}; waited"
                             f" {began - seen:.2f} s, ran"
                             f" {time.time() - began:.2f} s: {steps}):"
@@ -181,18 +183,20 @@ class Follower:
 
 FOLLOWER = Follower()
 LOCK = threading.RLock()
-# the steps of a follow, timed: the log of each follow names the slow one
-STEPS: list[str] = []
+# the steps of a follow that FOLLOWER runs, timed, in its own thread only
+STEPS = threading.local()
 
 
 def timed_steps() -> None:
-    """Wrap the steps of keel database follow so that each run logs how
-    long each took (the planned and unplanned promote timings)"""
+    """Wrap the steps of keel database follow that exist in this keel so
+    that each follow FOLLOWER runs logs how long each took"""
     import functools
     from keel.system import dbfollow, dbreadonly
 
     def wrap(module, name, label):
-        inner = getattr(module, name)
+        inner = getattr(module, name, None)
+        if inner is None:
+            return
 
         @functools.wraps(inner)
         def timed(*args, **kwargs):
@@ -200,7 +204,9 @@ def timed_steps() -> None:
             try:
                 return inner(*args, **kwargs)
             finally:
-                STEPS.append(f"{label} {time.time() - began:.2f}")
+                done = getattr(STEPS, "done", None)
+                if done is not None:
+                    done.append(f"{label} {time.time() - began:.2f}")
         setattr(module, name, timed)
     for module, name, label in (
             (dbfollow, "_learn", "learn"),
