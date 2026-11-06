@@ -141,18 +141,24 @@ class Follower:
             now = self.stamp()
             if now != last and now:
                 last = now
-                self.follow("the VIP's state changed")
+                self.follow("the VIP's state changed", time.time())
             if time.monotonic() - watched >= WATCH_EVERY:
                 watched = time.monotonic()
                 self.watch()
 
-    def follow(self, why: str) -> dict:
+    def follow(self, why: str, seen: float | None = None) -> dict:
+        """`seen` is when the VIP's state change was seen: the log says
+        how long the follow waited for the lock and how long it ran"""
         from keel.system import dbfollow
+        seen = seen or time.time()
         with LOCK:
+            began = time.time()
             found = dbfollow.Followed()
             dbfollow.follow(self.root, self.path, False, found)
             self.runs += 1
-            self.log.append(f"{time.time():.3f} follow ({why}):"
+            self.log.append(f"{time.time():.3f} follow ({why}; waited"
+                            f" {began - seen:.2f} s, ran"
+                            f" {time.time() - began:.2f} s):"
                             f" {found.problem or 'ok'}: {found.lines}")
             print(self.log[-1], file=sys.stderr, flush=True)
             return {"problem": found.problem, "lines": found.lines}
@@ -162,9 +168,11 @@ class Follower:
         from keel.system import dbwatch
         said: list[str] = []
         with LOCK:
+            began = time.time()
             code = dbwatch.watch(self.root, self.path, said.append,
                                  said.append)
-        self.log.append(f"{time.time():.3f} watch: {code}: {said}")
+        self.log.append(f"{time.time():.3f} watch (ran"
+                        f" {time.time() - began:.2f} s): {code}: {said}")
         print(self.log[-1], file=sys.stderr, flush=True)
 
 
