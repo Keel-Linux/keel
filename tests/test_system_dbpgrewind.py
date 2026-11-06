@@ -8,6 +8,7 @@ walreceiver. The real run is tests/postgres_netns.py.
 """
 
 import os
+import time
 import unittest
 from unittest import mock
 
@@ -154,21 +155,52 @@ class TestTheRewind(FollowTestCase):
     def test_a_holder_that_is_not_promoted_yet_is_waited_for(self):
         """The VIP lands before the holder's follow promotes it: the old
         primary is back for a few seconds while the holder is a standby.
-        No divergence is recorded and no alert is sent; the next run
-        asks again"""
+        No divergence is recorded and no alert is sent. The run fails, so
+        keel-database-follow.service runs it again (Restart=on-failure,
+        bounded): nothing else runs follow, since the VIP does not move
+        again (BR1 9356 and 9360, keel 0.23.87 and 0.23.88: the old
+        primary stayed a standby that follows nobody)"""
         server, found, alerted = self.follow_old_primary(
             old_primary(holder_standby=True))
-        self.assertIsNone(found.problem, found.lines)
+        self.assertIn("not promoted yet", found.problem or "", found.lines)
         self.assertIn("is itself a standby", " ".join(found.lines))
-        self.assertIn("not promoted yet", " ".join(found.lines))
         self.assertNotIn(["systemctl", "stop", UNIT], server.argv)
         self.assertIsNone(dbfollow.diverged(self.all[1].root))
         alerted.assert_not_called()
-        # the next run, the holder promoted: rewound
+        self.assertTrue(os.path.exists(os.path.join(
+            self.all[1].root, dbpgrewind.WAIT_MARK)))
+        # the next run, the holder promoted: rewound, the wait forgotten
         server.holder_standby = False
         found = self.follow(1, server)
         self.assertIsNone(found.problem, found.lines)
         self.assertIn("rewound against", " ".join(found.lines))
+        self.assertFalse(os.path.exists(os.path.join(
+            self.all[1].root, dbpgrewind.WAIT_MARK)))
+
+    def test_a_holder_that_stays_a_standby_is_alerted_once(self):
+        """The retries of the unit are bounded; a holder that is still
+        a standby after WAIT_ALERT_S is alerted, once"""
+        server, found, alerted = self.follow_old_primary(
+            old_primary(holder_standby=True))
+        alerted.assert_not_called()
+        mark = os.path.join(self.all[1].root, dbpgrewind.WAIT_MARK)
+        past = time.time() - dbpgrewind.WAIT_ALERT_S - 1
+        with open(mark, "w") as fob:
+            fob.write(f"{past:.0f}\n")
+        for _ in range(2):
+            with mock.patch("keel.monitor.alerting.alert",
+                            return_value=True) as alerted:
+                found = self.follow(1, server)
+            self.assertIn("not promoted yet", found.problem or "")
+            if _ == 0:
+                alerted.assert_called_once()
+                self.assertEqual(alerted.call_args.args[2],
+                                 dbpgrewind.WAIT_TITLE)
+            else:
+                alerted.assert_not_called()
+
+    def test_a_wait_mark_that_cannot_be_read_reads_as_none(self):
+        self.assertIsNone(dbpgrewind._waited_since("/nonexistent"))
 
     def test_a_holder_that_the_probe_cannot_ask_keeps_the_fallback(self):
         server, found, alerted = self.follow_old_primary(

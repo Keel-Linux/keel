@@ -37,6 +37,7 @@ routes it to, whether this node is fenced, and the lease.
 
 import json
 import threading
+import time
 from collections.abc import Callable
 from datetime import datetime
 
@@ -64,6 +65,15 @@ CARRY_WAIT = 15.0
 GONE_WAIT = vipetcd.TTL + 20.0
 POLL = 0.5
 ACCEPTED = ("applied", "known")
+# how long keel vip pair retries a timeout of etcd, and the longest wait
+# between two tries: a cluster that forms over a poor link answers late
+# (BR2 9387, keel 0.23.87: one read timed out and the replica never
+# paired). Every other refusal is said at once
+PAIR_RETRY_S = 120
+PAIR_BACKOFF_S = 2
+PAIR_BACKOFF_MAX_S = 30
+_sleep = time.sleep
+_clock = time.monotonic
 
 
 def with_etcd(here: Here) -> bool:
@@ -88,7 +98,8 @@ def promote(here: Here, gone: bool, out: Callable[[str], None],
     def after(code: int) -> int:
         return then() if then is not None and code == exits.OK else code
     try:
-        vip = vipstate.declared(here.node.document())
+        document = here.node.document()
+        vip = vipstate.declared(document)
         if vip is None:
             out("this node declares no appliance.vip: it replicates nothing,"
                 " and has no VIP to take")
@@ -99,8 +110,7 @@ def promote(here: Here, gone: bool, out: Callable[[str], None],
             out(problem)
             return exits.MESH_REFUSED
         from keel.system import dbpgfollow
-        refusal = dbpgfollow.promote_refusal(here.root, here.node.document(),
-                                             alone)
+        refusal = dbpgfollow.promote_refusal(here.root, document, alone)
         if refusal:
             out(refusal)
             return exits.MESH_REFUSED
@@ -140,9 +150,33 @@ def without_waiting(here: Here, vip: str) -> Here:
     return vipnode.bounded(here, other) if other else here
 
 
-def pair(here: Here, at: str, out: Callable[[str], None]) -> int:
+def pair(here: Here, at: str, out: Callable[[str], None],
+         sleep=None, clock=None) -> int:
     """`keel vip pair ADDRESS`: the pair record of this node's VIP with
-    the peer at ADDRESS, signed by both and kept by both"""
+    the peer at ADDRESS, signed by both and kept by both. A timeout of
+    etcd, here or at the member asked to sign, is tried again with a
+    backoff for up to PAIR_RETRY_S; the reservation a try made is this
+    pair's, so the next try finds it"""
+    sleep = sleep or _sleep
+    clock = clock or _clock
+    deadline = clock() + PAIR_RETRY_S
+    wait = PAIR_BACKOFF_S
+    while True:
+        said: list[str] = []
+        code = _pair_once(here, at, said.append)
+        if code == exits.OK or \
+                not any(vipreserve.transient(line) for line in said) or \
+                clock() + wait > deadline:
+            for line in said:
+                out(line)
+            return code
+        out(f"keel vip pair: etcd did not answer in time; trying again in"
+            f" {wait} s")
+        sleep(wait)
+        wait = min(wait * 2, PAIR_BACKOFF_MAX_S)
+
+
+def _pair_once(here: Here, at: str, out: Callable[[str], None]) -> int:
     try:
         vip = vipstate.declared(here.node.document())
         if vip is None:

@@ -1,3 +1,21 @@
+keel (0.23.89) unstable; urgency=medium
+
+  * keel database follow fails, and keel-database-follow.service runs it
+    again 30 s later (at most 10 times in 15 minutes), when the VIP's
+    holder is still a standby that its own follow has not promoted yet.
+    Before, follow said "the next run asks again", but nothing ran it
+    again, because the VIP did not move again. The old primary stayed a
+    standby that follows nobody, and the promote back was refused (BR1
+    9360, keel 0.23.87; BR1 9356, keel 0.23.88). After 300 s of waiting,
+    follow alerts once (check database-rewind-wait).
+  * keel vip pair tries a timeout of etcd again, here or at the member
+    asked to sign, with a backoff (2, 4, 8, 16, then 30 s) for up to
+    120 s. Every other refusal is said at once. On BR2 9387 (LNMP, cloud
+    advanced, keel 0.23.87), etcd was still forming, one read timed out,
+    keel vip pair refused, and the replica never paired.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Fri, 06 Nov 2026 00:00:00 +0000
+
 keel (0.23.88) unstable; urgency=medium
 
   * A PostgreSQL primary whose synchronous standby is away falls back to

@@ -49,6 +49,17 @@ class WithEtcd(Pair):
                              return_value=["(granted)"])
         self.announce = patcher.start()
         self.addCleanup(patcher.stop)
+        # keel vip pair's retries of a timeout of etcd wait on no clock
+        now = [0.0]
+        patcher = mock.patch("keel.mesh.vippromote._sleep",
+                             side_effect=lambda seconds: now.__setitem__(
+                                 0, now[0] + seconds))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        patcher = mock.patch("keel.mesh.vippromote._clock",
+                             side_effect=lambda: now[0])
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def pair(self, index: int, at: str) -> tuple[int, str]:
         said: list[str] = []
@@ -67,6 +78,34 @@ class WithEtcd(Pair):
 
     def held(self) -> dict:
         return json.loads(self.kv.kvs[KEY][0].decode())
+
+    def refuse_first(self, calls: int) -> list[float]:
+        """etcd's reads time out `calls` times, then answer (a cluster
+        that forms over a poor link); the waits of the retries"""
+        original = self.kv.prefix
+        left = [calls]
+
+        def prefix(*args, **kwargs):
+            if left[0]:
+                left[0] -= 1
+                raise EtcdError("etcdctl get: no answer within 2.5 s")
+            return original(*args, **kwargs)
+        patcher = mock.patch.object(self.kv, "prefix", side_effect=prefix)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return []
+
+    def pair_waiting(self, index: int, at: str):
+        waits: list[float] = []
+        now = [0.0]
+
+        def sleep(seconds):
+            waits.append(seconds)
+            now[0] += seconds
+        said: list[str] = []
+        code = vippromote.pair(self.all[index], at, said.append,
+                               sleep=sleep, clock=lambda: now[0])
+        return code, "\n".join(said), waits
 
 
 class TestKeelVipPairReserves(WithEtcd):
@@ -150,6 +189,47 @@ class TestKeelVipPairReserves(WithEtcd):
         self.assertEqual(code, exits.MESH_REFUSED)
         self.assertIn("could not be reserved in etcd", out)
         self.assertIsNone(vippair.read(self.all[1].root, VIP))
+
+    def test_an_etcd_that_answers_late_is_waited_for(self):
+        """lnmp cloud_advanced, BR1 9386 and BR2 9387, keel 0.23.87: etcd
+        was forming, its read timed out once, keel vip pair refused, and
+        the replica never paired. A timeout of etcd is retried"""
+        self.refuse_first(2)
+        code, out, waits = self.pair_waiting(0, address(1))
+        self.assertEqual(code, exits.OK, out)
+        self.assertEqual(waits, [2, 4])
+        self.assertIn("trying again", out)
+        self.assertIsNotNone(vippair.read(self.all[1].root, VIP))
+
+    def test_the_member_asked_to_sign_that_times_out_is_asked_again(self):
+        # the reserve reads once; the member asked to sign reads next
+        original = self.kv.prefix
+        seen = [0]
+
+        def prefix(*args, **kwargs):
+            seen[0] += 1
+            if seen[0] == 2:
+                raise EtcdError("etcdctl get: no answer within 2.5 s")
+            return original(*args, **kwargs)
+        with mock.patch.object(self.kv, "prefix", side_effect=prefix):
+            code, out, waits = self.pair_waiting(0, address(1))
+        self.assertEqual(code, exits.OK, out)
+        self.assertEqual(len(waits), 1)
+
+    def test_an_etcd_that_never_answers_is_refused_within_the_bound(self):
+        self.kv.refuse = "prefix"
+        code, out, waits = self.pair_waiting(0, address(1))
+        self.assertEqual(code, exits.MESH_REFUSED)
+        self.assertIn("could not be reserved in etcd", out)
+        self.assertLessEqual(sum(waits), vippromote.PAIR_RETRY_S)
+        self.assertGreater(len(waits), 2)
+        self.assertLessEqual(max(waits), vippromote.PAIR_BACKOFF_MAX_S)
+
+    def test_a_refusal_that_is_not_etcd_s_timeout_is_not_retried(self):
+        self.kv.put(KEY, self.signed_by(2, OTHERS))
+        code, out, waits = self.pair_waiting(0, address(1))
+        self.assertEqual(code, exits.MESH_REFUSED)
+        self.assertEqual(waits, [])
 
     def test_a_reservation_written_between_the_read_and_the_swap(self):
         """the swap fails on a key that appeared meanwhile; whose it is
@@ -253,6 +333,14 @@ class TestKeptForGood(WithEtcd):
                         raise EtcdError("request timed out")
                     return original(compare, puts, deletes)
                 self.kv.swap = second_fails
+                if fault == "etcd":
+                    # a timeout of etcd is tried again (keel 0.23.89):
+                    # the record is made on both, the next try keeps it
+                    code, out, waits = self.pair_waiting(0, address(1))
+                    self.assertEqual(code, exits.OK, out)
+                    self.assertEqual(waits, [vippromote.PAIR_BACKOFF_S])
+                    self.assertIsNone(self.kv.kvs[KEY][2])
+                    continue
                 code, out = self.pair(0, address(1))
                 self.assertEqual(code, exits.APPLY_FAILED)
                 self.assertIn("is not kept for good", out)
