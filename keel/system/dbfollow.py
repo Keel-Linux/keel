@@ -443,6 +443,11 @@ def _early_proof(root: str, doc: dict, output, wait: float,
     if pair is None or \
             dbpair.role_of(pair, str(server.get("role") or "")) != PRIMARY:
         return None
+    from keel.system import dbpgfollow
+    if dbpgfollow.before_first_claim(root, pair):
+        # the node that makes the mesh, before its first claim: its
+        # server runs for the Take the VIP step (BR1 9365, keel 0.23.85)
+        return None
     return _proven(root, doc, output, wait, sleep)
 
 

@@ -50,6 +50,13 @@ In keel 0.23.18. The numbers under "Measured" come from the CI job
   taken once per divergence, because a fenced node takes no write
   after it. A node holding no user database is seeded without any
   confirmation.
+- **The first claim of the pair** (keel 0.23.87). An unproven claim
+  stops the server (keel#104). A node that took no claim, its own or
+  another node's, and that has no role file waits for the pair's first
+  claim: no other node holds the VIP, so its server runs, and is
+  started again, until `keel spec apply` takes the VIP. Before 0.23.87,
+  a replica that joined late made follow stop the primary's server, and
+  the Take the VIP step failed (BR1 9365).
 - **The first pairing of a cloud standby** (keel 0.23.86). The first
   boot of a cloud mode runs the application's hooks before the role is
   known, so the standby holds its own databases, and the nodes of one
