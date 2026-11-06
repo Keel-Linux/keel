@@ -52,8 +52,14 @@ class Server:
                  sql_running: str = "Yes", holder_down: bool = False,
                  bypass: str = "'root'@'localhost'\n'admin'@'localhost'\n",
                  dump_fails: bool = False, slave_pos: str = "",
-                 log_bin: str = "1", clients: tuple = ()):
+                 log_bin: str = "1", clients: tuple = (),
+                 server_id: str | None = None):
         self.log_bin = log_bin
+        # an old primary by default: its binary log is its own writes, so
+        # its server id is the one of its newest GTID
+        newest = [one for one in binlog_state.split(",") if one]
+        self.server_id = server_id or (
+            newest[-1].split("-")[1] if newest else "1")
         # the semi-synchronous replicas each status read finds, in turn;
         # one when the turns are used up
         self.clients = list(clients)
@@ -130,6 +136,10 @@ class Server:
             out = self.status()
         elif asked == "SELECT @@log_bin":
             out = f"{self.log_bin}\n"
+        elif asked == dbfollow.OWN_QUESTION[-1]:
+            current = ",".join(one for one in (self.binlog_pos,
+                                               self.slave_pos) if one)
+            out = f"{self.server_id}\t{current}\t{self.slave_pos}\n"
         elif "gtid_binlog_state, @@gtid_slave_pos" in asked:
             out = f"{self.binlog_state}\t{self.slave_pos}\n"
         elif "gtid_binlog_state, @@gtid_binlog_pos" in asked:
@@ -615,6 +625,160 @@ class TestTheReplica(FollowTestCase):
         with mock.patch.object(dbfollow, "follow") as inner:
             self.assertIsNone(dbfollow.followed(here.root, here.node.path))
         inner.assert_called_once()
+
+
+class TestTheFirstPairing(FollowTestCase):
+    """The replica of a cloud mode at its first pairing holds the schemas
+    of its own first boot: the application's hooks ran before the role was
+    known, with sql_log_bin=0. It never replicated and logged no write of
+    its own, so it holds nothing the holder lacks (0049): it is seeded
+    from the holder, its first-boot schemas dumped first (0020). Found on
+    the real pair 9386/9387, 2026-11-06: rejoined by GTID instead, it kept
+    its own WordPress and never got the primary's"""
+
+    FIRST_BOOT = "wordpress\nkeel_check\n"
+
+    def first(self, **changes) -> Server:
+        values = {"schemas": self.FIRST_BOOT, "binlog_state": "",
+                  "binlog_pos": "", "server_id": "1347191389",
+                  "holder_state": "0-901478219-4",
+                  "holder_pos": ""}
+        values.update(changes)
+        return Server(**values)
+
+    def dumps(self) -> list[str]:
+        where = os.path.join(self.all[1].root, dbfollow.BACKUPS)
+        return sorted(os.listdir(where)) if os.path.isdir(where) else []
+
+    def assert_nothing_dropped(self, server: Server) -> None:
+        self.assertFalse(any("DROP DATABASE" in one for one in server.sent),
+                         server.sent)
+
+    def test_a_first_pairing_dumps_the_first_boot_schemas_and_seeds(self):
+        self.pair_nodes(mode="cloud_simple")
+        server = self.first()
+        found = self.follow(1, server)
+        self.assertIsNone(found.problem, found.lines)
+        joined = "\n".join(found.lines)
+        self.assertNotIn("rejoined", joined)
+        self.assertIn(f"seeded from [{address(0)}]:3306", joined)
+        self.assertIn("first pairing", joined)
+        for schema in ("wordpress", "keel_check"):
+            self.assertTrue(any(f"DROP DATABASE IF EXISTS `{schema}`" in one
+                                for one in server.sent), server.sent)
+        kept = self.dumps()
+        self.assertEqual(len(kept), 1, kept)
+        self.assertTrue(kept[0].startswith("first-boot-schemas-"), kept)
+        path = os.path.join(self.all[1].root, dbfollow.BACKUPS, kept[0])
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        self.assertIn(path, joined)
+        # the local dump (its last option --triggers) was taken before
+        # anything was dropped
+        self.assertLess(server.events.index("--triggers"),
+                        next(i for i, one in enumerate(server.events)
+                             if "DROP DATABASE" in one))
+
+    def test_cloud_advanced_is_a_cloud_mode_too(self):
+        self.pair_nodes(mode="cloud_advanced")
+        server = self.first()
+        found = self.follow(1, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertIn("seeded from", "\n".join(found.lines))
+
+    def test_a_node_that_logged_writes_of_its_own_is_never_dropped(self):
+        self.pair_nodes(mode="cloud_simple")
+        server = self.first(binlog_state="0-1347191389-3",
+                            binlog_pos="0-1347191389-3",
+                            holder_state="0-1347191389-3,0-901478219-4")
+        found = self.follow(1, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertIn("rejoined: no errant GTID", "\n".join(found.lines))
+        self.assert_nothing_dropped(server)
+
+    def test_a_node_with_errant_writes_of_its_own_stays_diverged(self):
+        self.pair_nodes(mode="cloud_simple")
+        server = self.first(binlog_state="0-1347191389-3",
+                            binlog_pos="0-1347191389-3")
+        with mock.patch("keel.monitor.alerting.alert", return_value=True):
+            found = self.follow(1, server)
+        self.assertIn("diverged", found.problem)
+        self.assert_nothing_dropped(server)
+        self.assertFalse(any("CHANGE MASTER" in one for one in server.sent))
+
+    def test_errant_gtids_of_another_server_id_are_not_dropped(self):
+        # the packaged server_id of a first boot (keel.system.dbready):
+        # writes it logged are not this server id's, and still errant
+        self.pair_nodes(mode="cloud_simple")
+        server = self.first(binlog_state="0-1-7", binlog_pos="0-1-7")
+        with mock.patch("keel.monitor.alerting.alert", return_value=True):
+            found = self.follow(1, server)
+        self.assertIn("diverged", found.problem)
+        self.assert_nothing_dropped(server)
+
+    def test_a_node_that_replicated_before_rejoins_by_gtid(self):
+        self.pair_nodes(mode="cloud_simple")
+        server = self.first(binlog_state="0-901478219-3",
+                            binlog_pos="0-901478219-3",
+                            slave_pos="0-901478219-3")
+        found = self.follow(1, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertIn("rejoined: no errant GTID", "\n".join(found.lines))
+        self.assert_nothing_dropped(server)
+
+    def test_a_simple_installation_is_never_dropped(self):
+        self.pair_nodes(mode="cloud_simple")
+        here = self.all[1]
+        doc = here.node.document()
+        doc["installation"]["mode"] = "simple"
+        here.node.write(doc)
+        server = self.first()
+        found = self.follow(1, server)
+        self.assertIn("rejoined", "\n".join(found.lines))
+        self.assert_nothing_dropped(server)
+
+    def test_a_server_with_no_binary_log_waits_and_drops_nothing(self):
+        self.pair_nodes(mode="cloud_simple")
+        server = self.first(log_bin="0")
+        found = self.follow(1, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertIn(dbfollow.WAITS_FOR_BINARY_LOG, found.lines)
+        self.assert_nothing_dropped(server)
+        self.assertFalse(any("CHANGE MASTER" in one for one in server.sent))
+        # the next follow, once the log is on, still seeds: the dump the
+        # first run kept is used, not taken again
+        later = self.first()
+        found = self.follow(1, later)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertIn("seeded from", "\n".join(found.lines))
+        self.assertEqual(len(self.dumps()), 1, self.dumps())
+
+    def test_a_server_id_that_cannot_be_read_rejoins_as_before(self):
+        self.pair_nodes(mode="cloud_simple")
+        server = self.first(server_id="not a number")
+        found = self.follow(1, server)
+        self.assertIn("rejoined", "\n".join(found.lines))
+        self.assert_nothing_dropped(server)
+
+    def test_a_dump_that_cannot_be_kept_drops_nothing(self):
+        self.pair_nodes(mode="cloud_simple")
+        server = self.first(dump_fails=True)
+        found = self.follow(1, server)
+        self.assertIn("not kept", found.problem)
+        self.assert_nothing_dropped(server)
+
+    def test_the_first_pairing_rule(self):
+        first = dbfollow._first_pairing
+        doc = {"installation": {"mode": "cloud_simple"}}
+        self.assertTrue(first(doc, "7\t\t\n", ""))
+        self.assertFalse(first({"installation": {}}, "7\t\t\n", ""))
+        self.assertFalse(first({}, "7\t\t\n", ""))
+        self.assertFalse(first(doc, None, ""))
+        self.assertFalse(first(doc, "7\t\t\n", "0-7-1"))
+        self.assertFalse(first(doc, "7\t0-7-1\t\n", ""))
+        self.assertFalse(first(doc, "7\t0-1-1\t0-1-1\n", "0-1-1"))
+        self.assertFalse(first(doc, "7\tjunk\t\n", ""))
+        self.assertFalse(first(doc, "7\n", ""))
+        self.assertTrue(first(doc, "7\t\t\n", "0-1-3"))
 
 
 class TestTheFenceOfACaughtUpReplica(FollowTestCase):

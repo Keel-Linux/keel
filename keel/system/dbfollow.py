@@ -16,7 +16,7 @@ have no twin there:
 | held, by this node's newest claim, and on wg0 | the server made writable: a replica that lacks nothing the old primary's record names (keel.system.dbposition, keel#271) drained and promoted (keel.system.dbreadonly), read_only off, READ_ONLY ADMIN back; a server that replicates from nobody and is read only (restarted, or fenced) first waits up to REPLICA_WAIT for its replica (keel#242) |
 | held, by this node's newest claim, and not on wg0 | read_only on, the root lock; nothing else (keel#104) |
 | no claim, on a paired node | the same: read only until a claim is proven (keel#104) |
-| held by the other member; released or fenced here | read_only on at once, the root lock, then replication from the holder: a fresh server seeded, one already following it left alone, an old primary rejoined by GTID when it holds nothing the holder lacks, else left read only, reported and alerted |
+| held by the other member; released or fenced here | read_only on at once, the root lock, then replication from the holder: a fresh server seeded, one already following it left alone, a replica of a cloud mode at its first pairing (it never replicated and logged no write of its own) seeded with its first-boot schemas dropped after a dump, an old primary rejoined by GTID when it holds nothing the holder lacks, else left read only, reported and alerted |
 | no claim yet, declared replica | the replica's row above, from the other member (0020) |
 
 A claim of this node's own is not a proof that it holds the VIP now: a
@@ -98,6 +98,13 @@ DROPIN_MODE = 0o644
 GTID_QUESTION = mariadb.QUIET_CLIENT + (
     "--execute", "SELECT @@gtid_binlog_state, @@gtid_binlog_pos")
 LOG_BIN_QUESTION = mariadb.QUIET_CLIENT + ("--execute", "SELECT @@log_bin")
+# what the first pairing asks of this server (keel 0.23.84): its server
+# id, its current position and its slave position
+OWN_QUESTION = mariadb.QUIET_CLIENT + (
+    "--execute", "SELECT @@server_id, @@gtid_current_pos, @@gtid_slave_pos")
+CLOUD_MODES = ("cloud_simple", "cloud_advanced")
+FIRST_BOOT_DUMP = "first-boot-schemas"
+REJOIN_DUMP_NAME = "rejoin"
 WAITS_FOR_BINARY_LOG = (
     "this server writes no binary log yet, so the copy of the holder waits:"
     " keel spec apply writes the pair's configuration and then copies it"
@@ -642,7 +649,46 @@ def _replica(root: str, doc: dict, server: dict, state: DatabaseState,
     if not held and not state.status.lines():
         _seed(root, host, port, state, (), found, runner)
         return
-    _rejoin(root, host, port, state, held, confirmed, found, runner)
+    _rejoin(root, host, port, state, held, confirmed, found, runner, doc)
+
+
+def _first_pairing(doc: dict, own: str | None, binlog_state: str) -> bool:
+    """Whether this replica, which holds schemas, is at its first pairing
+    in a cloud mode and wrote nothing of its own that was logged
+
+    The headless first boot of a cloud mode runs the application's hooks
+    before the role is known, each with sql_log_bin=0 (40wordpress,
+    45laravel, 40lnmp-check): the replica holds a WordPress, salts and
+    users of its own, that the holder lacks and never sends. All hold:
+
+    - the spec's installation.mode is a cloud mode (this is the replica
+      row of follow, so the role is the replica);
+    - it never replicated: SHOW REPLICA STATUS is empty (the caller) and
+      gtid_slave_pos is empty;
+    - no GTID of its own server id is in gtid_binlog_state or
+      gtid_current_pos: nothing it wrote was logged.
+
+    `own` is the answer to OWN_QUESTION. A node that logged writes of its
+    own keeps the GTID path of 0049: rejoined when nothing is errant, else
+    refused and alerted, never dropped by itself. 0013's "refuse unless
+    empty or confirmed" is the question 0049 settled for the old primary:
+    does the node hold writes the other lacks? This node holds only what
+    its own first boot made, unlogged, and the dump of 0020 is kept first
+    """
+    mode = (doc.get("installation") or {}).get("mode")
+    if mode not in CLOUD_MODES or own is None:
+        return False
+    fields = own.strip("\n").split("\t")
+    if len(fields) != 3:
+        return False
+    server_id, current, slave = (one.strip() for one in fields)
+    if slave or not server_id.isdigit():
+        return False
+    try:
+        logged = set(dbgtid.parse(binlog_state)) | set(dbgtid.parse(current))
+    except ValueError:
+        return False
+    return all(server != int(server_id) for _, server in logged)
 
 
 def _unfence(root: str, host: str, port: int, state: DatabaseState,
@@ -698,8 +744,10 @@ def _seed(root: str, host: str, port: int, state: DatabaseState,
 
 def _rejoin(root: str, host: str, port: int, state: DatabaseState,
             held: list[str], confirmed: bool, found: Followed,
-            runner) -> None:
-    """An old primary, or a replica of another node: by GTID"""
+            runner, doc: dict | None = None) -> None:
+    """An old primary, or a replica of another node: by GTID. A replica
+    at its first pairing (_first_pairing) is seeded instead, its held
+    schemas dropped after the dump"""
     own = _ask(runner, GTID_QUESTION)
     if own is None:
         found.fail("this node's GTID state could not be read")
@@ -716,12 +764,15 @@ def _rejoin(root: str, host: str, port: int, state: DatabaseState,
     except ValueError as e:
         found.fail(f"a GTID state could not be read: {e}")
         return
+    first = not errant and not state.status.lines() and _first_pairing(
+        doc or {}, _ask(runner, OWN_QUESTION), own_state)
     kept = _kept_dump(root, own_state)
     if kept:
         found.say(f"a dump of what this node holds is kept at {kept}"
                   " (its GTID state did not move since)")
     else:
-        kept = _dump(root, runner)
+        kept = _dump(root, runner,
+                     FIRST_BOOT_DUMP if first else REJOIN_DUMP_NAME)
         if kept.startswith("not kept"):
             found.fail(f"a dump of what this node holds was {kept}; nothing"
                        " was changed")
@@ -735,6 +786,13 @@ def _rejoin(root: str, host: str, port: int, state: DatabaseState,
     if errant:
         found.say(f"confirmed with --destroy-local-database: {len(errant)}"
                   f" errant GTID(s) discarded ({dbgtid.describe(errant)})")
+        _seed(root, host, port, state, tuple(held), found, runner)
+        return
+    if first:
+        found.say(f"first pairing: this replica never replicated and logged"
+                  f" no write of its own, so its first-boot schemas"
+                  f" ({', '.join(held)}) are replaced by a copy of"
+                  f" [{host}]:{port}; the dump of them is kept at {kept}")
         _seed(root, host, port, state, tuple(held), found, runner)
         return
     statements = mariadb.replicate_from(
@@ -830,10 +888,10 @@ def _kept_dump(root: str, gtid_state: str) -> str | None:
     return path if isinstance(path, str) and os.path.isfile(path) else None
 
 
-def _dump(root: str, runner) -> str:
-    """A dump of everything this node holds, compressed, under BACKUPS;
-    where it is, or `not kept (why)`. The kernel stops it at the room on
-    the disk (keel.system.dbdump)"""
+def _dump(root: str, runner, name: str = REJOIN_DUMP_NAME) -> str:
+    """A dump of everything this node holds, compressed, under BACKUPS
+    (mode 0600, the directory 0700); where it is, or `not kept (why)`.
+    The kernel stops it at the room on the disk (keel.system.dbdump)"""
     from keel.system import dbdump
     directory = os.path.join(root, BACKUPS)
     try:
@@ -844,7 +902,7 @@ def _dump(root: str, runner) -> str:
     if problem:
         return f"not kept ({problem})"
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    plain = os.path.join(directory, f"rejoin-{stamp}.sql")
+    plain = os.path.join(directory, f"{name}-{stamp}.sql")
     try:
         fd = os.open(plain, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "wb") as fob:
