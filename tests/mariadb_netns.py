@@ -215,6 +215,9 @@ def timed_steps() -> None:
             (dbfollow, "_proven", "proven"),
             (dbfollow, "_lags", "lags"),
             (dbreadonly, "promote", "promote"),
+            (dbreadonly, "_stop_shown", "stop_shown"),
+            (dbreadonly, "_drain", "drain"),
+            (dbreadonly, "_promote_in_order", "in_order"),
             (dbfollow, "_replica_back", "replica_back"),
             (dbfollow, "_filesync_flip", "flip"),
             (dbfollow, "_warn_undeclared", "undeclared")):
