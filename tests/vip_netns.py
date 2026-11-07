@@ -122,12 +122,34 @@ TOOLS = "/var/lib/keel-vip-test/bin"
 LISTENER_HOME = os.environ.get("KEEL_VIP_LISTENER_HOME") or ""
 
 
+def entered(pid: int, wait: float = 10.0) -> None:
+    """Wait until process `pid` is in a network namespace of its own
+
+    `unshare -n` has not always unshared yet when Popen returns. A veth
+    end moved to its pid then stays in this namespace, and the next step
+    in the child finds no device: "Cannot find device uplink" (the
+    postgres job, CI 2026-11-06, under load)"""
+    own = os.readlink("/proc/self/ns/net")
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            if os.readlink(f"/proc/{pid}/ns/net") != own:
+                return
+        except OSError:
+            pass
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"process {pid} entered no network namespace"
+                               f" of its own within {wait:g} s")
+        time.sleep(0.01)
+
+
 def child(index: int) -> int:
     """A namespace joined to this one by a veth on its own /64"""
     found = subprocess.Popen(["unshare", "-n", "sleep", "3600"],
                              stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL)
     CHILDREN.append(found)
+    entered(found.pid)
     n = index + 1
     net = UPLINK.format(n=n)
     sh("ip", "link", "add", f"to{n}", "type", "veth", "peer", "name",

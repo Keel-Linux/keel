@@ -40,6 +40,17 @@ DRIVER = os.path.join(REPO, "tests", "postgres_netns.py")
 SCRATCH = "/var/tmp/keel-postgres-netns"
 
 
+# the driver's bound: a run takes 8 to 15 minutes on CI. It stays well
+# inside the job's own 50 minutes, apt and the image included, so that a
+# run that hangs ends with what it said, not killed with the job
+DRIVER_TIMEOUT = 1800
+
+
+def _text(found) -> str:
+    if isinstance(found, bytes):
+        return found.decode(errors="replace")
+    return found or ""
+
 class TestAPostgresqlPairOnAPoorNetwork(unittest.TestCase):
     found: dict = {}
 
@@ -70,11 +81,20 @@ class TestAPostgresqlPairOnAPoorNetwork(unittest.TestCase):
             self.skipTest("neither root, user namespaces nor sudo -n")
         os.makedirs(SCRATCH, exist_ok=True)
         os.chmod(SCRATCH, 0o1777)
-        done = subprocess.run(
-            prefix + ["env", f"PATH={path}:/usr/sbin:{os.environ.get('PATH', '')}",
-                      f"PYTHONPATH={REPO}:{REPO}/tests", f"TMPDIR={SCRATCH}",
-                      sys.executable, DRIVER],
-            capture_output=True, text=True, check=False, timeout=2700)
+        try:
+            done = subprocess.run(
+                prefix + ["env",
+                          f"PATH={path}:/usr/sbin:"
+                          f"{os.environ.get('PATH', '')}",
+                          f"PYTHONPATH={REPO}:{REPO}/tests",
+                          f"TMPDIR={SCRATCH}", sys.executable, DRIVER],
+                capture_output=True, text=True, check=False,
+                timeout=DRIVER_TIMEOUT)
+        except subprocess.TimeoutExpired as e:
+            # what the driver said so far: a run that hangs is reported,
+            # not killed silently with the job (CI 2026-11-06, 50 min)
+            self.fail(f"{DRIVER} did not end within {DRIVER_TIMEOUT} s:\n"
+                      f"{_text(e.stdout)[-4000:]}\n{_text(e.stderr)[-8000:]}")
         for line in done.stdout.splitlines():
             if line.startswith("RESULT "):
                 print(line, file=sys.stderr)
