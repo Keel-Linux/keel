@@ -237,6 +237,20 @@ class TestFailure(Base):
                                                     "exited 4")
         self.assertEqual(leftovers, [])
 
+    def test_a_pack_that_fails_is_named_when_the_dump_dies_of_it(self):
+        """A pack that ends breaks the dump's pipe, and the dump then dies
+        too (EPIPE, or SIGPIPE for mariadb-dump). Which of the two ended
+        first was a race, and the message named the dump: the cause, the
+        pack, was lost (test_a_failed_pack_leaves_no_file failed so on
+        CI). A dump larger than the pipe's buffer always hits it"""
+        big = (sys.executable, "-c",
+               "import sys; sys.stdout.write('x' * 4000000)")
+        with mock.patch.object(dbdump, "PACK", fails(4)), \
+                mock.patch.dict(dbdump.COMMANDS, {"mariadb": big}):
+            leftovers, _ = self.assert_failed_clean(
+                self.run_dump(), "exited 4", "server gone")
+        self.assertEqual(leftovers, [])
+
     def test_an_empty_dump_is_no_backup(self):
         with mock.patch.dict(dbdump.COMMANDS,
                              {"mariadb": (sys.executable, "-c", "pass")}):

@@ -1,3 +1,13 @@
+keel (0.23.91) unstable; urgency=medium
+
+  * keel database dump names the pack (zstd) first when it fails. A pack
+    that ends breaks the pipe of the dump, and the dump then dies too.
+    Before, the message named whichever of the two ended first, often the
+    dump, so the cause was lost. Now it names the pack, and then the
+    dump's own exit status when the dump also failed.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Sat, 07 Nov 2026 00:00:00 +0000
+
 keel (0.23.90) unstable; urgency=medium
 
   * The check of keel#271 (a replica that takes the VIP must not lack what
