@@ -343,6 +343,36 @@ class TestThePrimary(FollowTestCase):
         self.assertFalse(os.path.exists(os.path.join(
             self.all[0].root, dbpair.ROLE_FILE)))
 
+    def test_the_record_and_the_own_position_are_asked_together(self):
+        """keel#271's check is on the path of every promote: the read of
+        the record in etcd (a round trip to the leader over the overlay)
+        and the read of this server's position run at the same time, not
+        one after the other (test_mariadb_netns: 0.5 to 1.9 s on CI)"""
+        import threading
+        self.pair_nodes()
+        server = Server(replicating_from=address(1), read_only="ON",
+                        binlog_state="0-1-10", slave_pos="0-1-10")
+        record = dbposition.Record("0-1-10", False, "other")
+        asked = threading.Event()
+        overlapped = []
+        original = server.__call__
+
+        def answering(argv, **kwargs):
+            if argv[-1] == dbfollow.APPLIED_QUESTION[-1]:
+                overlapped.append(asked.wait(2))
+            return original(argv, **kwargs)
+
+        def reading(here, vip):
+            asked.set()
+            return record
+        with mock.patch.object(dbposition, "with_etcd", return_value=True), \
+                mock.patch.object(dbposition, "read_record",
+                                  side_effect=reading):
+            found = self.follow(0, answering)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertIn("drained and promoted", " ".join(found.lines))
+        self.assertEqual(overlapped, [True])
+
     def test_the_operator_s_act_takes_the_lagging_replica_to_writes(self):
         self.pair_nodes()
         server = Server(replicating_from=address(1), read_only="ON",

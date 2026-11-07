@@ -120,8 +120,15 @@ class Follower:
 
     def start(self, root: str, path: str) -> None:
         self.root, self.path = root, path
+        timed_steps()
         self.thread = threading.Thread(target=self.run, daemon=True)
         self.thread.start()
+        # the watch in a thread of its own: on a machine
+        # keel-database-watch.timer and keel-database-follow.path start
+        # two units, and only follow's own lock (replication_locked, per
+        # thread and file descriptor) orders the two. On one thread a
+        # follow waited for a whole watch run (7 to 16 s seen in CI)
+        threading.Thread(target=self.watching, daemon=True).start()
 
     def stamp(self) -> float:
         found = 0.0
@@ -136,23 +143,35 @@ class Follower:
 
     def run(self) -> None:
         last = self.stamp()
-        watched = time.monotonic()
-        while not self.stop.wait(0.5):
+        # keel-database-follow.path is inotify on a machine: a poll this
+        # short stands for it (0.5 s added up to half a second)
+        while not self.stop.wait(0.1):
             now = self.stamp()
             if now != last and now:
                 last = now
-                self.follow("the VIP's state changed")
-            if time.monotonic() - watched >= WATCH_EVERY:
-                watched = time.monotonic()
-                self.watch()
+                self.follow("the VIP's state changed", time.time())
 
-    def follow(self, why: str) -> dict:
+    def watching(self) -> None:
+        while not self.stop.wait(WATCH_EVERY):
+            self.watch()
+
+    def follow(self, why: str, seen: float | None = None) -> dict:
+        """`seen` is when the VIP's state change was seen: the log says
+        how long the follow waited for the lock, how long it ran, and
+        how long each of its steps took"""
         from keel.system import dbfollow
+        seen = seen or time.time()
         with LOCK:
+            began = time.time()
+            STEPS.done = []
             found = dbfollow.Followed()
             dbfollow.follow(self.root, self.path, False, found)
+            steps = ", ".join(STEPS.done)
+            STEPS.done = None
             self.runs += 1
-            self.log.append(f"{time.time():.3f} follow ({why}):"
+            self.log.append(f"{time.time():.3f} follow ({why}; waited"
+                            f" {began - seen:.2f} s, ran"
+                            f" {time.time() - began:.2f} s: {steps}):"
                             f" {found.problem or 'ok'}: {found.lines}")
             print(self.log[-1], file=sys.stderr, flush=True)
             return {"problem": found.problem, "lines": found.lines}
@@ -161,15 +180,55 @@ class Follower:
         import argparse
         from keel.system import dbwatch
         said: list[str] = []
-        with LOCK:
-            code = dbwatch.watch(self.root, self.path, said.append,
-                                 said.append)
-        self.log.append(f"{time.time():.3f} watch: {code}: {said}")
+        # not under LOCK: the watch's own follow takes follow's lock
+        began = time.time()
+        code = dbwatch.watch(self.root, self.path, said.append, said.append)
+        self.log.append(f"{time.time():.3f} watch (ran"
+                        f" {time.time() - began:.2f} s): {code}: {said}")
         print(self.log[-1], file=sys.stderr, flush=True)
 
 
 FOLLOWER = Follower()
 LOCK = threading.RLock()
+# the steps of a follow that FOLLOWER runs, timed, in its own thread only
+STEPS = threading.local()
+
+
+def timed_steps() -> None:
+    """Wrap the steps of keel database follow that exist in this keel so
+    that each follow FOLLOWER runs logs how long each took"""
+    import functools
+    from keel.system import dbfollow, dbreadonly
+
+    def wrap(module, name, label):
+        inner = getattr(module, name, None)
+        if inner is None:
+            return
+
+        @functools.wraps(inner)
+        def timed(*args, **kwargs):
+            began = time.time()
+            try:
+                return inner(*args, **kwargs)
+            finally:
+                done = getattr(STEPS, "done", None)
+                if done is not None:
+                    done.append(f"{label} {time.time() - began:.2f}")
+        setattr(module, name, timed)
+    for module, name, label in (
+            (dbfollow, "_learn", "learn"),
+            (dbfollow, "_early_proof", "early_proof"),
+            (dbfollow, "observe_database", "observe"),
+            (dbfollow, "_proven", "proven"),
+            (dbfollow, "_lags", "lags"),
+            (dbreadonly, "promote", "promote"),
+            (dbreadonly, "_stop_shown", "stop_shown"),
+            (dbreadonly, "_drain", "drain"),
+            (dbreadonly, "_promote_in_order", "in_order"),
+            (dbfollow, "_replica_back", "replica_back"),
+            (dbfollow, "_filesync_flip", "flip"),
+            (dbfollow, "_warn_undeclared", "undeclared")):
+        wrap(module, name, label)
 
 
 def sql(statement: str, user: str | None = None,

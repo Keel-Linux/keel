@@ -579,18 +579,24 @@ def _lags(root: str, spec: str, state: DatabaseState, found: Followed,
     if not dbposition.with_etcd(here):
         return False
     fields = field_lines(state.status)
-    own = _ask(runner, APPLIED_QUESTION) or ""
-    own = ",".join(part for part in own.strip().split("\t") + [
-        fields.get("Gtid_IO_Pos", "")] if part)
     vip = state.pair.vip
+    # the record in etcd (a round trip to the leader over the overlay)
+    # read while this server is asked its position: the check is on the
+    # path of every promote (test_mariadb_netns, 0.5 to 1.9 s apart)
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        record = pool.submit(dbposition.read_record, here, vip)
+        own = _ask(runner, APPLIED_QUESTION) or ""
+        own = ",".join(part for part in own.strip().split("\t") + [
+            fields.get("Gtid_IO_Pos", "")] if part)
+        recorded = record.result()
 
     def old_primary() -> str | None:
         host = fields.get("Master_Host") or state.pair.peer_address
         port = int(fields.get("Master_Port") or DEFAULT_PORTS["mariadb"])
         answer = _holder_gtid(root, host, port, state, runner)
         return answer.strip().partition("\t")[0] if answer else None
-    why = dbposition.why_not(own, dbposition.read_record(here, vip),
-                             old_primary)
+    why = dbposition.why_not(own, recorded, old_primary)
     if why is None:
         dbposition.forget(root)
         return False
