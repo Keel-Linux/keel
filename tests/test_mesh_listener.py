@@ -285,6 +285,36 @@ class TestAFailedConnection(unittest.TestCase):
         self.assertEqual(order, ["release", "close"])
 
 
+    def test_the_handshake_has_the_deadline_and_the_request_its_reads(self):
+        """On the design link a handshake segment lost twice waits for
+        TCP's retransmissions; READ_TIMEOUT cut such joins after 5 s
+        (the mesh jobs of CI). The handshake has REQUEST_DEADLINE, the
+        reads of the request READ_TIMEOUT"""
+        timeouts = []
+
+        class Tls:
+            def do_handshake(self):
+                timeouts.append("handshake")
+
+            def settimeout(self, seconds):
+                timeouts.append(seconds)
+
+            def close(self):
+                pass
+
+        class Raw:
+            def settimeout(self, seconds):
+                timeouts.append(seconds)
+
+        class Context:
+            def wrap_socket(self, raw, **kwargs):
+                return Tls()
+        with mock.patch.object(listener, "Handler"):
+            listener.serve_one(mock.Mock(), Context(), Raw(), "::1", "::1",
+                               lambda: None)
+        self.assertEqual(timeouts, [listener.REQUEST_DEADLINE, "handshake",
+                                    listener.READ_TIMEOUT])
+
     def test_a_failed_handshake_is_said_with_its_source(self):
         """The mesh job's join failed on an EOF in the handshake, and
         nothing said which side ended it: the listener says it"""

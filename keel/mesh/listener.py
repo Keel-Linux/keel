@@ -14,7 +14,12 @@ listener can therefore forge nothing the root side accepts.
 Against someone scanning or holding the port:
 
 - a request's whole reading, TLS handshake included, has a deadline
-  (REQUEST_DEADLINE), and every read a timeout;
+  (REQUEST_DEADLINE), and every read of the request a timeout
+  (READ_TIMEOUT). The handshake has only the deadline: on the design
+  link (250 ms, 2 % loss) a segment of it lost twice waits for TCP's
+  retransmissions, 1 s and then 2 s more, and READ_TIMEOUT cut such
+  joins (the mesh jobs of CI, 2026-11-07: "the handshake operation
+  timed out" after 5.00 s, and the joiner saw an end of file);
 - at most SLOTS connections are read at once, and OVERLAY_SLOTS more
   are kept for connections to this node's overlay address, which only
   the mesh's peers reach, so a join's confirmation is never starved;
@@ -329,7 +334,8 @@ def serve_one(listener: Listener, context, raw: socket.socket, source: str,
     read.start()
     began = time.monotonic()
     try:
-        raw.settimeout(READ_TIMEOUT)
+        # the handshake has the request's deadline only (see above)
+        raw.settimeout(REQUEST_DEADLINE)
         # keel#245: wrap_socket closes the descriptor when the handshake
         # fails, before release runs; split the handshake so that the
         # close below comes after release.  Side effect: shut() now
@@ -339,6 +345,7 @@ def serve_one(listener: Listener, context, raw: socket.socket, source: str,
                                   do_handshake_on_connect=False)
         held.append(tls)
         tls.do_handshake()
+        tls.settimeout(READ_TIMEOUT)
         Handler(tls, (source, 0),
                 Connection(listener, local, read, release))
     except (OSError, ValueError) as e:
