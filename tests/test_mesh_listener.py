@@ -285,6 +285,34 @@ class TestAFailedConnection(unittest.TestCase):
         self.assertEqual(order, ["release", "close"])
 
 
+    def test_a_failed_handshake_is_said_with_its_source(self):
+        """The mesh job's join failed on an EOF in the handshake, and
+        nothing said which side ended it: the listener says it"""
+        said = []
+
+        class Tls:
+            def do_handshake(self):
+                raise OSError("unexpected EOF")
+
+            def close(self):
+                pass
+
+        class Raw:
+            def settimeout(self, seconds):
+                pass
+
+        class Context:
+            def wrap_socket(self, raw, **kwargs):
+                return Tls()
+        front = mock.Mock(log=said.append)
+        front.name = "invite x"
+        listener.serve_one(front, Context(), Raw(), "2001:db8::2", "::1",
+                           lambda: None)
+        self.assertEqual(len(said), 1, said)
+        self.assertIn("invite x: the connection from [2001:db8::2] ended",
+                      said[0])
+        self.assertIn("unexpected EOF", said[0])
+
     def test_the_members_channel_frees_its_slot_first_too(self):
         from keel.mesh import memberlink
         order = []

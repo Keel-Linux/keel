@@ -251,6 +251,11 @@ class TestAMariadbPairOnAPoorNetwork(unittest.TestCase):
         its replica was away. The other node holds the VIP and takes no
         write until the operator's act"""
         found = self.found
+        # the case's own precondition: A unfenced before the cut, or it
+        # never claims (0049); when it is not, say why first
+        self.assertIsNotNone(found.get("k271_unfenced_s"), {
+            key: found.get(key) for key in (
+                "k271_fence_a", "k271_fence_b", "k271_fence_log")})
         log = found.get("k271_log")
         self.assertIsNotNone(found.get("k271_refused_s"), log)
         self.assertEqual(found["k271_read_only"]["out"], "1", log)

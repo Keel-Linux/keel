@@ -1,3 +1,14 @@
+keel (0.23.93) unstable; urgency=medium
+
+  * The listener of an invite says why it ended a connection: a TLS
+    handshake or request that failed, with the source and the time it
+    took, or a connection closed unread (the source has one open
+    already, it was refused too often, or every slot is busy). Before,
+    it closed such connections and said nothing, so a join that failed
+    on an end of file in the handshake could not be explained.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Sat, 07 Nov 2026 00:00:00 +0000
+
 keel (0.23.92) unstable; urgency=medium
 
   * The package makes /etc/keel/secrets, mode 0700, owned by root, when it

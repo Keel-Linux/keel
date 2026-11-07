@@ -66,6 +66,8 @@ import threading
 import time
 from datetime import datetime, timezone
 
+from netns_wait import entered
+
 import etcd_netns
 import vip_overlap
 from etcd_netns import (
@@ -120,27 +122,6 @@ RUN_BASE = "/run/keel-vip-test"
 # /run is mounted noexec: the helper's copy of wg is under /var/lib
 TOOLS = "/var/lib/keel-vip-test/bin"
 LISTENER_HOME = os.environ.get("KEEL_VIP_LISTENER_HOME") or ""
-
-
-def entered(pid: int, wait: float = 10.0) -> None:
-    """Wait until process `pid` is in a network namespace of its own
-
-    `unshare -n` has not always unshared yet when Popen returns. A veth
-    end moved to its pid then stays in this namespace, and the next step
-    in the child finds no device: "Cannot find device uplink" (the
-    postgres job, CI 2026-11-06, under load)"""
-    own = os.readlink("/proc/self/ns/net")
-    deadline = time.monotonic() + wait
-    while True:
-        try:
-            if os.readlink(f"/proc/{pid}/ns/net") != own:
-                return
-        except OSError:
-            pass
-        if time.monotonic() >= deadline:
-            raise RuntimeError(f"process {pid} entered no network namespace"
-                               f" of its own within {wait:g} s")
-        time.sleep(0.01)
 
 
 def child(index: int) -> int:
@@ -269,11 +250,13 @@ def sampler(pids: list[int], out: list[dict], stop: threading.Event) -> None:
 
 
 def pinger(pid: int, log: str) -> subprocess.Popen:
-    """C pings the VIP every 50 ms, each answer timestamped"""
+    """C pings the VIP every 50 ms, each answer timestamped, and each
+    ping left unanswered said too (-O): a gap with unanswered pings is
+    the path's, a gap with none is the pinger that did not run"""
     with open(log, "w") as fob:
         found = subprocess.Popen(
             ["nsenter", "-t", str(pid), "-n", "ping", "-6", "-D", "-n",
-             "-i", PING, "-W", "1", VIP], stdout=fob,
+             "-O", "-i", PING, "-W", "1", VIP], stdout=fob,
             stderr=subprocess.STDOUT)
     OTHERS.append(found)
     return found

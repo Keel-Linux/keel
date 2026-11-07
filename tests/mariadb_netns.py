@@ -1042,7 +1042,25 @@ def lost_while_alone(report: dict, pids: list[int], roots: list[str]) -> None:
     # until _unfence sees A's GTID at or past B's (keel#104)
     wait_until(lambda: replica_status(agent_send, "A").get(
         "Seconds_Behind_Master") == "0", 120, 1)
-    agent_send("A", "follow", 180)
+
+    def unfenced() -> bool:
+        """A follow, then whether A's VIP state is unfenced: a fenced
+        node never claims by itself (0049), so the case needs it. One
+        follow did not always clear it, and the case went on with A
+        fenced: it never claimed, and nothing was refused (runs 698, 700
+        and 830 of CI)"""
+        agent_send("A", "follow", 180)
+        lines = agent_send("A", "dbstatus").get("lines") or [""]
+        return "fenced" not in lines[0]
+    report["k271_unfenced_s"] = wait_until(unfenced, 120, 5)
+    if report["k271_unfenced_s"] is None:
+        # why _unfence did not clear it: the holder's GTIDs and A's
+        report["k271_fence_b"] = agent_send(
+            "B", "sql SELECT @@gtid_binlog_state")
+        report["k271_fence_a"] = agent_send(
+            "A", "sql SELECT @@gtid_binlog_state, @@gtid_slave_pos")
+        report["k271_fence_log"] = agent_send("A", "followlog")
+        return
     seen = len(HOOKS["alerts"])
     vip_netns.leg("to1", "100%")
     sh("tc", "qdisc", "replace", "dev", "uplink", "root", "netem", "loss",
