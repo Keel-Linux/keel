@@ -4,7 +4,15 @@
 # keel writes sets MTU = 1280 (keel#119), and only wg-quick up reads it,
 # so an interface up before the upgrade kept its old MTU until a reboot.
 # A failure here is said and never fails the upgrade.
+#
+# It also makes /etc/keel/secrets, root only (mode 0700), where the
+# spec's secret files go (the monitor's tokens, decision 0063): without
+# it the operator made it by hand first. One that exists is left as it is.
 set -e
+
+if [ "$1" = "configure" ] && [ ! -d "${DPKG_ROOT:-}/etc/keel/secrets" ]; then
+    install -d -m 0700 "${DPKG_ROOT:-}/etc/keel/secrets"
+fi
 
 if [ "$1" = "configure" ] && command -v keel >/dev/null 2>&1; then
     keel network mtu || echo "keel: the overlay's MTU was not set; keel spec apply --system sets it" >&2

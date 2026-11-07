@@ -1,3 +1,16 @@
+keel (0.23.92) unstable; urgency=medium
+
+  * The package makes /etc/keel/secrets, mode 0700, owned by root, when it
+    is not there. The spec's secret files go there, for example the
+    tokens of the monitor's channels (decision 0063). Before, the
+    operator made it by hand first. A directory that exists is left as
+    it is.
+  * A secret file that exists but cannot be read, or that is not UTF-8
+    text, now gives an error that names the file, not a traceback. keel
+    notify said only "UnicodeDecodeError" for such a token file.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Sat, 07 Nov 2026 00:00:00 +0000
+
 keel (0.23.91) unstable; urgency=medium
 
   * keel database dump names the pack (zstd) first when it fails. A pack

@@ -606,8 +606,10 @@ class TestSend(ChannelTestCase):
         )
         found = notify.send(doc, self.message(), "warn", self.context,
                             self.server.url)
+        # the file is named, not only the exception's class
         self.assertEqual([d.line() for d in found], [
-            "telegram: failed: UnicodeDecodeError", "webhook: sent"])
+            f"telegram: failed: {binary}: secret file is not UTF-8 text",
+            "webhook: sent"])
 
     def test_no_channel_is_no_delivery(self):
         self.assertEqual(notify.send({}, self.message(), "warn"), [])

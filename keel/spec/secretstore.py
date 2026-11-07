@@ -58,11 +58,18 @@ def read_secret_file(path: str) -> str:
     error = secret_file_error(path)
     if error:
         raise SpecError(error)
-    with open(path, "rb") as fob:
-        data = fob.read()
+    try:
+        with open(path, "rb") as fob:
+            data = fob.read()
+    except OSError as e:
+        raise SpecError(f"{path}: secret file cannot be read:"
+                        f" {e.strerror or e}") from e
     if data.endswith(b"\n"):
         data = data[:-1]
-    return data.decode()
+    try:
+        return data.decode()
+    except UnicodeDecodeError as e:
+        raise SpecError(f"{path}: secret file is not UTF-8 text") from e
 
 
 def secret_file_error(path: str) -> str | None:
