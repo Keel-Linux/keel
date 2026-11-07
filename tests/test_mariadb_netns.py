@@ -18,12 +18,15 @@ KEEL_MARIADB_NETNS.
 
 import json
 import os
+import re
 import subprocess
 import sys
 import unittest
 
 import wgtools
 from test_etcd_netns import etcd_dir
+
+from keel.system import dbposition
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DRIVER = os.path.join(REPO, "tests", "mariadb_netns.py")
@@ -33,6 +36,24 @@ DRIVER = os.path.join(REPO, "tests", "mariadb_netns.py")
 SCRATCH = "/var/tmp/keel-mariadb-netns"
 
 
+
+
+FOLLOW_LINE = re.compile(r"^\d+\.\d+ follow \(.*?; waited [\d.]+ s, ran"
+                         r" [\d.]+ s: (.*?)\):")
+
+
+def promoting_follow(out: list[str]) -> float:
+    """The seconds keel#271's check (the step `lags`) took in the follow
+    that promoted, from the harness log in a promote's output; 0 when no
+    follow of the output promoted or the check did not run"""
+    for line in reversed(out):
+        found = FOLLOW_LINE.match(line)
+        if not found or "drained and promoted" not in line:
+            continue
+        steps = [one.rsplit(" ", 1) for one in found.group(1).split(", ")
+                 if " " in one]
+        return sum(float(took) for name, took in steps if name == "lags")
+    return 0.0
 class TestAMariadbPairOnAPoorNetwork(unittest.TestCase):
     found: dict = {}
 
@@ -255,8 +276,16 @@ class TestAMariadbPairOnAPoorNetwork(unittest.TestCase):
         said = " ".join(self.found["k104_promote"]["out"])
         self.assertIn("no answer within 1.5 s", said)
         self.assertNotIn("timed out", said)
-        # follow does not lag the VIP (keel#118: 7.5 s on real nodes)
-        self.assertLess(found["writable_after_carried_s"], 3.0, found)
+        # follow does not lag the VIP (keel#118: 7.5 s on real nodes).
+        # The budget was set before keel#271 put its check on the path of
+        # every promote (a read of etcd over the overlay, deliberate): an
+        # A/B run on one afternoon gave 1.6 to 2.6 s without it, and the
+        # check took 0.4 to 1.9 s more. So the check is bounded by itself,
+        # and the budget holds for the rest of the follow
+        lags = promoting_follow(self.found["k104_promote"]["out"])
+        self.assertLess(lags, dbposition.SAMPLE_TIMEOUT, found)
+        self.assertLess(found["writable_after_carried_s"] - lags, 3.0,
+                        (found, lags))
         # with etcd the old primary's lease must expire before the claim
         # (0049); after the VIP lands, the writes resume within 5 s, the
         # most the maintainer tolerates (keel#148): the client's part adds
@@ -290,7 +319,11 @@ class TestAMariadbPairOnAPoorNetwork(unittest.TestCase):
                 # 250 ms across three CI runs
                 switchover = marks.get("new_writable", 99) - \
                     marks.get("old_dropped", 0)
-                self.assertLess(switchover, 8.0, marks)
+                # keel#271's check (see the unplanned case) is bounded by
+                # itself, and the 8 s budget holds for the rest
+                lags = promoting_follow(self.found[key]["out"])
+                self.assertLess(lags, dbposition.SAMPLE_TIMEOUT, marks)
+                self.assertLess(switchover - lags, 8.0, (marks, lags))
                 # no single write waited the old 10 s symptom
                 self.assertLess(found["longest_write_s"], 10.0, found)
                 self.assertEqual(self.found[f"{key}_missing"], [], found)

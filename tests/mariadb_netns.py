@@ -143,7 +143,9 @@ class Follower:
 
     def run(self) -> None:
         last = self.stamp()
-        while not self.stop.wait(0.5):
+        # keel-database-follow.path is inotify on a machine: a poll this
+        # short stands for it (0.5 s added up to half a second)
+        while not self.stop.wait(0.1):
             now = self.stamp()
             if now != last and now:
                 last = now
