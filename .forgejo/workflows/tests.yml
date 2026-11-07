@@ -34,10 +34,10 @@ jobs:
           else
             fails=$((fails + 1))
             echo "LOOP $n FAIL"
-            grep -E "FAILED|RuntimeError" /tmp/run.log | cut -c1-1500
+            grep -E "FAILED|RuntimeError" /tmp/run.log | cut -c1-1500 || true
           fi
-          cat /tmp/keel-mesh-listener-*/listener.log 2>/dev/null | grep -c "handshake operation timed out" | sed "s/^/LOOP $n handshake timeouts: /"
-          cat /tmp/keel-mesh-listener-*/listener.log 2>/dev/null | grep "ended after [1-9]" | cut -c1-300
+          (cat /tmp/keel-mesh-listener-*/listener.log 2>/dev/null | grep -c "handshake operation timed out" || true) | sed "s/^/LOOP $n handshake timeouts: /"
+          cat /tmp/keel-mesh-listener-*/listener.log 2>/dev/null | grep "ended after [1-9]" | cut -c1-300 || true
           rm -rf /tmp/keel-mesh-listener-* /tmp/keel-mesh-*
         done
         echo "LOOP fails=$fails of 20"
