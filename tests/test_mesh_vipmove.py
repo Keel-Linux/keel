@@ -21,6 +21,13 @@ MESH_HEX = bytes(range(16)).hex()
 
 
 class TestPromote(Pair):
+    def setUp(self):
+        super().setUp()
+        # an announcement left in the background by a test that failed
+        # before it joined it is joined here: test_a_member_outside_the_
+        # pair_still_learns_the_claim_after counted it as its own (2 != 1)
+        self.addCleanup(vippromote.announced, 30)
+
     def promote(self, index: int, gone: bool = False) -> tuple[int, str]:
         said: list[str] = []
         code = vippromote.promote(self.all[index], gone, said.append)
@@ -137,17 +144,33 @@ class TestPromote(Pair):
         10 s timeouts to every promote. Only the other member of the
         pair gates the handover; the others are told after, in the
         background, and what they said is logged"""
-        import time as clock
+        import threading
         from unittest import mock
         self.nodes()
         self.promote(0)
-        self.slow(1, address(2), 1.0, answers=False)
-        started = clock.monotonic()
+        # the member outside the pair answers only once the promote has
+        # returned, and then as a dead node does: a promote that waited
+        # for it would block on the gate. A bound of 0.8 s against a 1 s
+        # delay failed on a busy CI runner, where the promote's own work
+        # (openssl signs and verifies) took 0.83 and 0.92 s
+        gate, ended = threading.Event(), threading.Event()
+        real = self.all[1].exchange
+
+        def exchange(at: str, iface: str, body: bytes) -> bytes:
+            if at != address(2):
+                return real(at, iface, body)
+            try:
+                gate.wait(30)
+                raise LinkError(f"[{at}]:51821 through {iface}: timed out")
+            finally:
+                ended.set()
+        self.all[1].exchange = exchange
         with mock.patch.object(vippromote, "BACKGROUND", True):
             code, said = self.promote(1)
-        took = clock.monotonic() - started
+        returned_first = not ended.is_set()
+        gate.set()
         self.assertEqual(code, exits.OK, said)
-        self.assertLess(took, 0.8, said)
+        self.assertTrue(returned_first, said)
         self.assertTrue(self.carried(1))
         self.assertFalse(self.carried(0))
         self.assertIn(f"released by {address(0)}", said)

@@ -220,10 +220,16 @@ def _pipe(argv: tuple[str, ...], target: str, limit: int) -> None:
             raise DumpFailed(f"stopped at the free-space limit of {limit}"
                              " bytes: the dump is larger than the room on"
                              " the disk")
+        # a pack that ends breaks the dump's pipe, and the dump dies of
+        # it too (EPIPE, or SIGPIPE): the pack is the cause and is named
+        # first, the dump's own words after it
+        if packed != 0:
+            also = f"; {argv[0]} exited {dumped}: {_tail(dump_err)}" \
+                if dumped != 0 else ""
+            raise DumpFailed(f"{PACK[0]} exited {packed}:"
+                             f" {_tail(pack_err)}{also}")
         if dumped != 0:
             raise DumpFailed(f"{argv[0]} exited {dumped}: {_tail(dump_err)}")
-        if packed != 0:
-            raise DumpFailed(f"{PACK[0]} exited {packed}: {_tail(pack_err)}")
         output.flush()
         os.fsync(output.fileno())
 
