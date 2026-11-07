@@ -347,6 +347,10 @@ class TestTheSyncFallback(TestSyncCommit):
 
 
 class TestTheFallbackDropin(unittest.TestCase):
+    def test_a_since_that_cannot_be_read_counts_as_no_wait(self):
+        self.assertEqual(dbwatch._waited("not a time"), 0.0)
+        self.assertEqual(dbwatch._waited(None), 0.0)
+
     def test_the_fallback_and_its_end_rewrite_the_pair_s_line(self):
         from keel.system import dbpostgres
         text = dbpostgres.pair_dropin_text()
