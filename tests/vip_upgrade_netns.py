@@ -113,13 +113,60 @@ def valid_lft_of(pid: int) -> int | None:
     return None
 
 
+# C's route of the VIP, sampled with the holders: whose key it names
+ROUTES: list[dict] = []
+
+
+def routes(c_pid: int, stop) -> None:
+    while not stop.is_set():
+        ROUTES.append({"t": time.time(), "to": routed_to(c_pid)})
+        stop.wait(0.2)
+
+
+def evidence(log: str, samples_: list[dict], start: float, end: float,
+             holder_key: str, pids: list[int]) -> dict:
+    """What tells the causes of a gap apart (CI 2026-11-07: 2.9 s with
+    the address on the holder all along): the pings sent and left
+    unanswered, the longest silence of the pinger itself, the longest
+    interval of the holder sampler, and C's route of the VIP"""
+    import re
+    said, unanswered = [], 0
+    with open(log) as fob:
+        for line in fob:
+            hit = re.match(r"\[(\d+\.\d+)\]", line)
+            if hit and start <= float(hit.group(1)) <= end:
+                said.append(float(hit.group(1)))
+                unanswered += "no answer yet" in line
+    edges = [start] + said + [end]
+    sampled = [one["t"] for one in samples_ if start <= one["t"] <= end]
+    sample_edges = [start] + sampled + [end]
+    routed = [one["to"] for one in ROUTES if start <= one["t"] <= end]
+    return {"unanswered": unanswered,
+            "pinger_silence_s": round(max(b - a for a, b in
+                                          zip(edges, edges[1:])), 3),
+            "sampler_silence_s": round(max(b - a for a, b in
+                                           zip(sample_edges,
+                                               sample_edges[1:])), 3),
+            "route_elsewhere": sum(one != holder_key for one in routed),
+            "route_samples": len(routed),
+            "load": os.getloadavg()[0]}
+
+
+def handshakes_of(pid: int) -> str:
+    done = subprocess.run(["nsenter", "-t", str(pid), "-n", "wg", "show",
+                           "wg0", "latest-handshakes"], capture_output=True,
+                          text=True, check=False)
+    return done.stdout.strip()
+
+
 def restarted(how: str, index: int, pids: list[int], samples_: list[dict],
-              log: str) -> dict:
+              log: str, holder_key: str = "") -> dict:
     """keel-vip.service on node `index` restarted as a package upgrade
     does (`try-restart`), or its helper killed (`kill`)"""
     before = epoch()
     unit = helper_unit(index)
     pid = main_pid(unit)
+    shakes = {"A": handshakes_of(pids[0]), "C": handshakes_of(pids[2])}
     at = time.time()
     if how == "kill":
         sh("systemctl", "kill", "--signal=KILL", "--kill-whom=main", unit)
@@ -134,6 +181,11 @@ def restarted(how: str, index: int, pids: list[int], samples_: list[dict],
             "helper_back_s": back,
             "valid_lft_after_restart": vlft,
             "gap_s": gap(answers(log), at - 1, time.time()),
+            "evidence": evidence(log, samples_, at - 1, time.time(),
+                                 holder_key, pids),
+            "handshakes_before": shakes,
+            "handshakes_after": {"A": handshakes_of(pids[0]),
+                                 "C": handshakes_of(pids[2])},
             "epoch_before": before.get("epoch"),
             "epoch_after": after.get("epoch"),
             "holder_after": after.get("holder"),
@@ -234,16 +286,19 @@ def scenario(report: dict, pids: list[int], pairs, roots: list[str],
     report["a_routed_s"] = wait_until(lambda: routed_to(c_pid) == key["A"],
                                       60)
     pinger(c_pid, log)
+    import threading
+    threading.Thread(target=routes, args=(c_pid, threading.Event()),
+                     daemon=True).start()
     time.sleep(10)
     report["a_answers"] = len(answers(log))
     report["a_holder"] = held_by(pids)
 
     # (a) keel-vip.service restarted as the packages do
-    report["restarts"] = [restarted("try-restart", 0, pids, samples_, log)
-                          for _ in range(3)]
+    report["restarts"] = [restarted("try-restart", 0, pids, samples_, log,
+                                    key["A"]) for _ in range(3)]
     report["replica_restart"] = restarted("try-restart", 1, pids, samples_,
-                                          log)
-    report["crash"] = restarted("kill", 0, pids, samples_, log)
+                                          log, key["A"])
+    report["crash"] = restarted("kill", 0, pids, samples_, log, key["A"])
 
     # (b) etcd restarted as etcd-server's postinst does, one at a time
     etcds = Etcds(pids, roots)

@@ -201,9 +201,14 @@ def inviter() -> None:
     members["D"] = d_process
     if not d.get("address"):
         # keel#251: say why, not an AttributeError on None
+        # and what the invite's listener said: which side ended the
+        # connection (an EOF in the handshake, CI 2026-11-07)
+        with open(mesh_netns.LISTENER_LOG) as fob:
+            heard = fob.read()[-3000:]
         raise RuntimeError(f"D's join gave no address: result {d!r},"
                            f" inviter exit {codes!r},"
-                           f" journal {journal[-20:]!r}")
+                           f" journal {journal[-20:]!r},"
+                           f" listener {heard!r}")
     d_address = d["address"].split("/")[0]
     report["d_roots"] = roots_of(d["root"])
 

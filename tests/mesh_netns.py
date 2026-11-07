@@ -69,6 +69,7 @@ from keel.mesh import inviting, joining, memberd, sync
 from keel.mesh.node import Node
 from keel.mesh.token import parse
 from keel.network import marker, switch, wireguard
+from netns_wait import entered
 
 PREFIX = "fd00:6b65:e2e"
 OVERLAY_A = f"{PREFIX}::1"
@@ -346,6 +347,7 @@ def link(name: str) -> int:
                              stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL)
     CHILDREN.append(child)
+    entered(child.pid)
     net = LINKS[name]
     sh("ip", "link", "add", f"to{name}", "type", "veth", "peer", "name",
        "uplink")

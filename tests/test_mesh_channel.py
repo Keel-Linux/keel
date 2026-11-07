@@ -123,7 +123,10 @@ class TestPost(Served):
         with self.assertRaises(Forged) as caught:
             self.post(pin=other)
         self.assertIn("not the one the token pins", str(caught.exception))
-        self.assertEqual(self.logged, [])
+        # no request reached the listener; it may say only that the
+        # connection ended (keel 0.23.93)
+        self.assertEqual([one for one in self.logged
+                          if "connection from" not in one], [])
 
     def test_a_refusal_says_why(self):
         with self.assertRaises(Refused) as caught:

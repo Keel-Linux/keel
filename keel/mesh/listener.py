@@ -14,7 +14,12 @@ listener can therefore forge nothing the root side accepts.
 Against someone scanning or holding the port:
 
 - a request's whole reading, TLS handshake included, has a deadline
-  (REQUEST_DEADLINE), and every read a timeout;
+  (REQUEST_DEADLINE), and every read of the request a timeout
+  (READ_TIMEOUT). The handshake has only the deadline: on the design
+  link (250 ms, 2 % loss) a segment of it lost twice waits for TCP's
+  retransmissions, 1 s and then 2 s more, and READ_TIMEOUT cut such
+  joins (the mesh jobs of CI, 2026-11-07: "the handshake operation
+  timed out" after 5.00 s, and the joiner saw an end of file);
 - at most SLOTS connections are read at once, and OVERLAY_SLOTS more
   are kept for connections to this node's overlay address, which only
   the mesh's peers reach, so a join's confirmation is never starved;
@@ -36,6 +41,7 @@ Against someone scanning or holding the port:
 import ipaddress
 import socket
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -326,8 +332,10 @@ def serve_one(listener: Listener, context, raw: socket.socket, source: str,
     held = [raw]
     read = threading.Timer(REQUEST_DEADLINE, shut, (held,))
     read.start()
+    began = time.monotonic()
     try:
-        raw.settimeout(READ_TIMEOUT)
+        # the handshake has the request's deadline only (see above)
+        raw.settimeout(REQUEST_DEADLINE)
         # keel#245: wrap_socket closes the descriptor when the handshake
         # fails, before release runs; split the handshake so that the
         # close below comes after release.  Side effect: shut() now
@@ -337,10 +345,16 @@ def serve_one(listener: Listener, context, raw: socket.socket, source: str,
                                   do_handshake_on_connect=False)
         held.append(tls)
         tls.do_handshake()
+        tls.settimeout(READ_TIMEOUT)
         Handler(tls, (source, 0),
                 Connection(listener, local, read, release))
-    except (OSError, ValueError):
-        pass
+    except (OSError, ValueError) as e:
+        # said, so that a client that saw the close can be told why: the
+        # mesh job's join failed on an EOF in the handshake, and nothing
+        # said which side ended it
+        listener.log(f"{listener.name}: the connection from [{source}]"
+                     f" ended after {time.monotonic() - began:.2f} s:"
+                     f" {e or type(e).__name__}")
     finally:
         read.cancel()
         # free first: a client that sees the close may ask again at once,
@@ -370,8 +384,13 @@ def run(server: socket.socket, listener: Listener, context,
                 else slots
             with guard:
                 held = active.get(source, 0)
-            if held >= PER_SOURCE or listener.blocked(source) or \
-                    not slot.acquire(blocking=False):
+            why = "it has a connection open already" if held >= PER_SOURCE \
+                else "it was refused too often" if listener.blocked(source) \
+                else None if slot.acquire(blocking=False) \
+                else "every slot is busy"
+            if why:
+                listener.log(f"{listener.name}: a connection from [{source}]"
+                             f" closed unread: {why}")
                 raw.close()
                 continue
             with guard:

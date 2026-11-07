@@ -285,6 +285,64 @@ class TestAFailedConnection(unittest.TestCase):
         self.assertEqual(order, ["release", "close"])
 
 
+    def test_the_handshake_has_the_deadline_and_the_request_its_reads(self):
+        """On the design link a handshake segment lost twice waits for
+        TCP's retransmissions; READ_TIMEOUT cut such joins after 5 s
+        (the mesh jobs of CI). The handshake has REQUEST_DEADLINE, the
+        reads of the request READ_TIMEOUT"""
+        timeouts = []
+
+        class Tls:
+            def do_handshake(self):
+                timeouts.append("handshake")
+
+            def settimeout(self, seconds):
+                timeouts.append(seconds)
+
+            def close(self):
+                pass
+
+        class Raw:
+            def settimeout(self, seconds):
+                timeouts.append(seconds)
+
+        class Context:
+            def wrap_socket(self, raw, **kwargs):
+                return Tls()
+        with mock.patch.object(listener, "Handler"):
+            listener.serve_one(mock.Mock(), Context(), Raw(), "::1", "::1",
+                               lambda: None)
+        self.assertEqual(timeouts, [listener.REQUEST_DEADLINE, "handshake",
+                                    listener.READ_TIMEOUT])
+
+    def test_a_failed_handshake_is_said_with_its_source(self):
+        """The mesh job's join failed on an EOF in the handshake, and
+        nothing said which side ended it: the listener says it"""
+        said = []
+
+        class Tls:
+            def do_handshake(self):
+                raise OSError("unexpected EOF")
+
+            def close(self):
+                pass
+
+        class Raw:
+            def settimeout(self, seconds):
+                pass
+
+        class Context:
+            def wrap_socket(self, raw, **kwargs):
+                return Tls()
+        front = mock.Mock(log=said.append)
+        front.name = "invite x"
+        listener.serve_one(front, Context(), Raw(), "2001:db8::2", "::1",
+                           lambda: None)
+        self.assertEqual(len(said), 1, said)
+        self.assertIn("invite x: the connection from [2001:db8::2] ended",
+                      said[0])
+        self.assertIn("unexpected EOF", said[0])
+
     def test_the_members_channel_frees_its_slot_first_too(self):
         from keel.mesh import memberlink
         order = []
