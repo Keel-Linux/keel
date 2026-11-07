@@ -46,6 +46,12 @@ def secret_forms(token: str) -> list[str]:
 POOR = "250ms 25ms 2%"
 
 
+
+
+def _text(found) -> str:
+    if isinstance(found, bytes):
+        return found.decode(errors="replace")
+    return found or ""
 class TestThreeNamespaces(unittest.TestCase):
     netem = ""
     reports: dict = {}
@@ -72,11 +78,27 @@ class TestThreeNamespaces(unittest.TestCase):
             if os.environ.get("CI"):
                 self.fail("no way to run wg-quick as root in a namespace")
             self.skipTest("neither root, user namespaces nor sudo -n")
-        done = subprocess.run(
-            prefix + ["env", f"PATH={tools}:{os.environ.get('PATH', '')}",
-                      f"PYTHONPATH={REPO}", f"MESH_NETEM={self.netem}",
-                      sys.executable, DRIVER],
-            capture_output=True, text=True, check=False, timeout=600)
+        try:
+            done = subprocess.run(
+                prefix + ["env", f"PATH={tools}:{os.environ.get('PATH', '')}",
+                          f"PYTHONPATH={REPO}", f"MESH_NETEM={self.netem}",
+                          sys.executable, DRIVER],
+                capture_output=True, text=True, check=False, timeout=600)
+        except subprocess.TimeoutExpired as e:
+            # what the driver said so far, and the listeners' log: a run
+            # that hung said nothing (runs 642, 728 and 836 of CI)
+            import glob
+            import tempfile
+            heard = ""
+            logs = sorted(glob.glob(os.path.join(
+                tempfile.gettempdir(), "keel-mesh-listener-*",
+                "listener.log")), key=os.path.getmtime)
+            if logs:
+                with open(logs[-1], errors="replace") as fob:
+                    heard = fob.read()[-3000:]
+            self.fail(f"{DRIVER} did not end within 600 s:\n"
+                      f"{_text(e.stdout)[-3000:]}\n{_text(e.stderr)[-6000:]}"
+                      f"\nlisteners: {heard}")
         for line in done.stdout.splitlines():
             if line.startswith("RESULT "):
                 return json.loads(line[len("RESULT "):])
