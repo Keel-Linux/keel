@@ -164,3 +164,34 @@ class TestSecrets(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestASecretFileThatCannotBeRead(unittest.TestCase):
+    """A secret file that exists with a strict mode but cannot be read or
+    decoded is said as a spec.SpecError, never a traceback"""
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp()
+        self.path = os.path.join(self.directory, "token")
+
+    def write(self, data: bytes, mode: int) -> None:
+        with open(self.path, "wb") as fob:
+            fob.write(data)
+        os.chmod(self.path, mode)
+        self.addCleanup(os.chmod, self.path, 0o600)
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads a file of mode 0000")
+    def test_a_file_this_user_cannot_read(self):
+        from keel.spec.secretstore import read_secret_file
+        self.write(b"secret\n", 0o000)
+        with self.assertRaises(spec.SpecError) as caught:
+            read_secret_file(self.path)
+        self.assertIn(self.path, str(caught.exception))
+        self.assertIn("cannot be read", str(caught.exception))
+
+    def test_a_file_that_is_not_text(self):
+        from keel.spec.secretstore import read_secret_file
+        self.write(b"\xff\xfe\n", 0o600)
+        with self.assertRaises(spec.SpecError) as caught:
+            read_secret_file(self.path)
+        self.assertIn("not UTF-8 text", str(caught.exception))

@@ -95,6 +95,43 @@ class TestFollowRetries(unittest.TestCase):
         self.assertGreater(int(unit.get("StartLimitBurst", "0")), 1)
 
 
+class TestTheSecretsDirectory(unittest.TestCase):
+    """/etc/keel/secrets did not exist after the first boot, so an
+    operator who gave the monitor a token file (decision 0063) made it by
+    hand first. The postinst makes it, mode 0700 (root: dpkg runs it as
+    root), and leaves one that exists as it is"""
+
+    POSTINST = join(dirname(CONTROL), "keel.postinst")
+
+    def run_postinst(self, root: str):
+        import subprocess
+        return subprocess.run(
+            ["sh", self.POSTINST, "configure"], capture_output=True,
+            text=True, check=False,
+            env={"PATH": "/usr/bin:/bin", "DPKG_ROOT": root})
+
+    def test_the_postinst_makes_it_root_only(self):
+        import os
+        import tempfile
+        root = tempfile.mkdtemp()
+        done = self.run_postinst(root)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        secrets = join(root, "etc/keel/secrets")
+        self.assertTrue(os.path.isdir(secrets))
+        self.assertEqual(os.stat(secrets).st_mode & 0o777, 0o700)
+
+    def test_a_directory_that_exists_is_left_as_it_is(self):
+        import os
+        import tempfile
+        root = tempfile.mkdtemp()
+        secrets = join(root, "etc/keel/secrets")
+        os.makedirs(secrets)
+        os.chmod(secrets, 0o750)
+        done = self.run_postinst(root)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(os.stat(secrets).st_mode & 0o777, 0o750)
+
+
 class TestFastStop(unittest.TestCase):
     """keel#219: a stop of postgresql@.service that arrives while its start
     still runs does not run ExecStop, and systemd sends SIGTERM to the
