@@ -1,3 +1,20 @@
+keel (0.23.96) unstable; urgency=medium
+
+  * keel database dump waits for a replica's server to replicate. Right
+    after a failback, the claim of a node says replica some seconds before
+    its server replicates from the new primary. The hourly dump fell in
+    that window on both nodes of a pair: it failed with "the server here
+    does not replicate" and left keel-database-dump.service failed until
+    its next run (release round A, keel-laravel cloud_simple,
+    2026-11-09). The dump now asks again every 10 s for up to 5 min. When
+    the server replicates, the dump runs as before. When the claim stops
+    saying replica, the dump has nothing to do. When the server still does
+    not replicate after 5 min, the run fails as before, with the same
+    alert, so a replica that does not come back still has a failed unit
+    and an alert.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Mon, 09 Nov 2026 00:00:00 +0000
+
 keel (0.23.95) unstable; urgency=medium
 
   * Monit no longer watches a process whose unit cannot run on the
