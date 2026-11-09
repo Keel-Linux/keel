@@ -10,7 +10,7 @@ clients of it.
 # an image's tree read offline): debian/changelog's and pyproject.toml's,
 # which tests/test_version.py keeps in step. Installed, the metadata
 # dpkg put beside the package answers (keel#98).
-FALLBACK_VERSION = "0.23.95"
+FALLBACK_VERSION = "0.23.96"
 
 
 def version() -> str:

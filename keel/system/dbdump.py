@@ -289,9 +289,48 @@ def _replicating(root: str, engine: str) -> bool:
     return False
 
 
+# a replica whose server does not replicate yet is asked again for this
+# long, every REPLICATION_POLL s, before the run fails: right after a
+# failback the claim says replica some seconds before the server follows
+# the new primary (release A, laravel cloud_simple, 2026-11-09: the hourly
+# run fell in that window on both nodes and left the unit failed). A fault
+# that lasts still fails the run, with its alert
+REPLICATION_WAIT = 300.0
+REPLICATION_POLL = 10.0
+# what the wait sleeps and reads the time with; the tests replace them
+_sleep = time.sleep
+_clock = time.monotonic
+
+
+class NoLongerReplica(Exception):
+    """The claim stopped saying replica while the run waited"""
+
+
+def _wait_for_replication(root: str, engine: str,
+                          still_replica: Callable[[], bool],
+                          out: Callable[[str], None]) -> bool:
+    """Whether the server here replicates, asked again every
+    REPLICATION_POLL s for up to REPLICATION_WAIT s; raises
+    NoLongerReplica when the claim stops saying replica meanwhile"""
+    if _replicating(root, engine):
+        return True
+    out(f"database dump: the claim says replica, and the server does not"
+        f" replicate yet; the dump waits for the server to replicate, up to"
+        f" {REPLICATION_WAIT:g} s")
+    end = _clock() + REPLICATION_WAIT
+    while _clock() < end:
+        _sleep(min(REPLICATION_POLL, max(0.0, end - _clock())))
+        if not still_replica():
+            raise NoLongerReplica()
+        if _replicating(root, engine):
+            return True
+    return False
+
+
 def _dump_once(root: str, engine: str, chosen: Settings, due_only: bool,
                now: float, statvfs: Callable, out: Callable[[str], None],
-               err: Callable[[str], None]) -> None:
+               err: Callable[[str], None],
+               still_replica: Callable[[], bool] = lambda: True) -> None:
     directory = os.path.join(root, BACKUPS[engine])
     newest = _newest(directory)
     if due_only and newest is not None and \
@@ -301,7 +340,7 @@ def _dump_once(root: str, engine: str, chosen: Settings, due_only: bool,
     if dbfollow.diverged(root) is not None:
         raise DumpFailed("this node diverged, so its data is not the pair's;"
                          " there is no dump until it is reseeded")
-    if not _replicating(root, engine):
+    if not _wait_for_replication(root, engine, still_replica, out):
         raise DumpFailed("the server here does not replicate, so there is"
                          " no dump of it")
     _prepare(directory)
@@ -346,24 +385,37 @@ def run(root: str, spec: str, out: Callable[[str], None],
             if not held:
                 out("database dump: another dump already runs")
                 return exits.OK
-            return _locked_run(root, engine, chosen, pair, due_only, now,
-                               statvfs, out, err)
+            return _locked_run(
+                root, engine, chosen, pair, due_only, now, statvfs, out, err,
+                lambda: _still_replica(root, doc))
     except OSError as e:
         err(f"database dump: {e.strerror or e}")
         return exits.APPLY_FAILED
 
 
+def _still_replica(root: str, doc: dict) -> bool:
+    found = dbpair.observe_pair(root, doc)
+    return found is not None and found.role == dbpair.REPLICA
+
+
 def _locked_run(root: str, engine: str, chosen: Settings,
                 pair: dbpair.PairState, due_only: bool, now: float,
                 statvfs: Callable, out: Callable[[str], None],
-                err: Callable[[str], None]) -> int:
+                err: Callable[[str], None],
+                still_replica: Callable[[], bool] = lambda: True) -> int:
     if pair.role != dbpair.REPLICA:
         out("database dump: a dump runs only while this node is the"
             " replica; nothing to do")
         _record(root, err, problem="", not_replica_at=now)
         return exits.OK
     try:
-        _dump_once(root, engine, chosen, due_only, now, statvfs, out, err)
+        _dump_once(root, engine, chosen, due_only, now, statvfs, out, err,
+                   still_replica)
+    except NoLongerReplica:
+        out("database dump: this node is no longer the replica; nothing to"
+            " do")
+        _record(root, err, problem="", not_replica_at=now)
+        return exits.OK
     except DumpFailed as e:
         err(f"database dump: {e}")
         _record(root, err, problem=str(e))
