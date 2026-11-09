@@ -1,3 +1,21 @@
+keel (0.23.94) unstable; urgency=medium
+
+  * A restart of keel-vip.service (an upgrade's try-restart, or a crash
+    that Restart= starts again) no longer tries to renew the VIP's lease
+    as the unit stops. The unit's RestrictAddressFamilies=AF_UNIX
+    AF_NETLINK prevents it from reaching etcd, so this renewal never got
+    an answer: etcdctl tried to connect until it was stopped after
+    2.5 s. The helper's end and ExecStopPost each tried it, so a restart
+    lost 5 s of the address's lifetime, and a crash lost 2.5 s. On a link
+    of 250 ms with 2 % loss, the next controller then sometimes renewed
+    after the kernel removed the address, and the VIP stopped answering
+    until that renewal (vip-upgrade / trixie in CI, 12 drops in 160
+    restarts). The address keeps the fresh lifetime the controller gave
+    it before it stopped (keel#244), and the kernel ends it by the release
+    time of that renewal, as before.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Mon, 09 Nov 2026 00:00:00 +0000
+
 keel (0.23.93) unstable; urgency=medium
 
   * The listener of an invite says why it ended a connection: a TLS
