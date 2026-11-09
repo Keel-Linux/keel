@@ -1,3 +1,19 @@
+keel (0.23.95) unstable; urgency=medium
+
+  * Monit no longer watches a process whose unit cannot run on the
+    machine: a unit with a ConditionPathExists= that does not hold, which
+    systemd skips at each start. keel-vip.service starts only once etcd's
+    cluster.json exists, so in cloud_simple, where etcd forms no cluster,
+    it is never active. Watched, it failed its check at each cycle
+    ("status failed (3)"), monit tried the restarts its manifest allows,
+    and then stopped watching it: two critical alerts on each node of a
+    cloud_simple pair (release round A, keel-lnpp, 2026-11-09). keel spec
+    apply says which process it does not watch and why, and it watches the
+    process again at the first apply after the condition holds. keel diff
+    compares the file with the same rule.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Mon, 09 Nov 2026 00:00:00 +0000
+
 keel (0.23.94) unstable; urgency=medium
 
   * A restart of keel-vip.service (an upgrade's try-restart, or a crash
