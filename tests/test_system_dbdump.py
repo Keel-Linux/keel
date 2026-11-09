@@ -183,13 +183,60 @@ class TestRun(Base):
         self.run_dump(due_only=True)
         self.assertEqual(len(self.names()), 2)
 
+    def waiting(self):
+        """A clock that the waits of the run move on, and what it slept"""
+        slept = []
+        clock = [0.0]
+
+        def sleep(seconds):
+            slept.append(seconds)
+            clock[0] += seconds
+        return slept, mock.patch.multiple(
+            dbdump, _sleep=sleep, _clock=lambda: clock[0])
+
     def test_a_server_that_does_not_replicate_is_a_problem_and_no_dump(self):
         # an empty server that was not seeded would push the good dumps
-        # out of the retention
-        with mock.patch.object(dbdump, "_replicating", return_value=False):
+        # out of the retention; it is waited for first, up to
+        # REPLICATION_WAIT, and a lasting fault fails the run
+        slept, patched = self.waiting()
+        with mock.patch.object(dbdump, "_replicating", return_value=False), \
+                patched:
             self.assertEqual(self.run_dump(), exits.APPLY_FAILED)
         self.assertFalse(os.path.exists(self.directory))
         self.assertIn("does not replicate", self.state()["problem"])
+        self.assertGreaterEqual(sum(slept), dbdump.REPLICATION_WAIT)
+        self.assertTrue(all(one <= dbdump.REPLICATION_POLL for one in slept))
+
+    def test_a_replica_that_replicates_after_a_wait_is_dumped(self):
+        """The failback window (release A, laravel cloud_simple,
+        2026-11-09): the claim says replica, and the server replicates
+        some seconds later. The hourly run fell in that window, failed,
+        and left keel-database-dump.service failed on both nodes"""
+        slept, patched = self.waiting()
+        with mock.patch.object(dbdump, "_replicating",
+                               side_effect=[False, False, True]), patched:
+            self.assertEqual(self.run_dump(), exits.OK)
+        self.assertEqual(len(self.names()), 1)
+        self.assertEqual(self.state()["problem"], "")
+        self.assertEqual(slept, [dbdump.REPLICATION_POLL] * 2)
+        self.assertTrue(any("waits for the server to replicate" in one
+                            for one in self.lines), self.lines)
+
+    def test_a_node_whose_claim_turns_primary_while_it_waits_dumps_nothing(
+            self):
+        slept, patched = self.waiting()
+        with mock.patch.object(dbdump, "_replicating", return_value=False), \
+                mock.patch.object(dbdump.dbpair, "observe_pair",
+                                  side_effect=[REPLICA, REPLICA, PRIMARY]), \
+                mock.patch.object(dbdump, "_document", return_value=doc()), \
+                patched:
+            found = dbdump.run(self.root, "spec.yaml", self.lines.append,
+                               self.lines.append, now=NOW,
+                               statvfs=wide_open)
+        self.assertEqual(found, exits.OK)
+        self.assertFalse(os.path.exists(self.directory))
+        self.assertEqual(self.state()["problem"], "")
+        self.assertEqual(self.state()["not_replica_at"], NOW)
 
     def test_a_diverged_node_is_a_problem_and_no_dump(self):
         with mock.patch.object(dbdump.dbfollow, "diverged",
