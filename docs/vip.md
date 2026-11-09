@@ -381,15 +381,14 @@ carries, **except while the unit restarts**: a restart job of the unit
 (an upgrade's `try-restart`), or a helper that died, which Restart=always
 starts again 2 s later (`$SERVICE_RESULT` other than `success`). Then an
 address with a lifetime stays, and the kernel removes it at the release
-time unless the next controller renews the lease. Before it lets the
-unit go, `--stopped` renews the lease once, as the controller does (a
-keep-alive, then a linearizable read), and gives the address the
-lifetime that renewal leaves: the next controller then has the whole
-release time to start and renew. Without it, on a link of 250 ms with
-2% loss, the next controller's start and first renewal took longer than
-what the old controller's last renewal had left, and the kernel removed
-the address for a moment. With no answer from etcd the address stays as
-it is; a lease gone drops it. A `systemctl stop`, the
+time unless the next controller renews the lease. On a restart job,
+the helper first lets the controller carry the VIP one more time, so
+the address has the lifetime of a fresh renewal (keel#244); after a
+crash, it has the lifetime of the last renewal. `--stopped` asks etcd
+nothing: the unit's `RestrictAddressFamilies=AF_UNIX AF_NETLINK`
+prevents it from reaching etcd, and a renewal tried there used 2.5 s
+and got no answer, time the next controller needs to start and renew
+(keel 0.23.94). A `systemctl stop`, the
 overlay disabled by `keel spec apply`, or a shutdown drops it at once.
 The unit has no start limit, so it is never left stopped for good.
 
