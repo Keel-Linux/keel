@@ -246,7 +246,7 @@ def plan_monit(doc: dict, states: dict, state: ApplianceState, live: bool,
     wg = ((doc.get("network") or {}).get("overlay") or {}).get(
         "wireguard") or {}
     rendered = render(resolved, states, wg.get("address"), NOTIFY,
-                      state.cycle.seconds)
+                      state.cycle.seconds, state.waiting)
     probes = sum(1 for name in rendered.services
                  if name.startswith("keel-check-"))
     summary = (f"{len(rendered.services) - probes} unit(s) and {probes}"

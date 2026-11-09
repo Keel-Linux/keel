@@ -93,6 +93,49 @@ def ask(run: Run, verb: str, unit: str,
         else UNKNOWN
 
 
+# where systemd finds a unit's file, the first one found the one it loads
+# (systemd.unit(5), "Unit File Load Path"); drop-ins are not read
+LOAD_PATH = ("etc/systemd/system", "run/systemd/system",
+             "usr/lib/systemd/system", "lib/systemd/system")
+CONDITION = "ConditionPathExists"
+
+
+def unmet(tree: Tree, unit: str) -> str | None:
+    """Why UNIT cannot run on this tree, or None: a ConditionPathExists=
+    of its file that does not hold, so systemd skips every start of it
+    (keel-vip.service without etcd's cluster.json). A triggering
+    condition (`|`) is not judged: one of a set is enough"""
+    for where in LOAD_PATH:
+        found = tree.read(f"{where}/{unit}")
+        if found.readable:
+            break
+    else:
+        return None
+    section = ""
+    for line in found.text.splitlines():
+        line = line.strip()
+        if line.startswith("["):
+            section = line
+            continue
+        key, _, value = line.partition("=")
+        if section != "[Unit]" or key.strip() != CONDITION:
+            continue
+        value = value.strip()
+        if not value or value.startswith("|"):
+            continue
+        negated = value.startswith("!")
+        path = value.lstrip("!")
+        if tree.exists(path.lstrip("/")) == negated:
+            state = "does not exist" if negated else "exists"
+            return f"{unit} starts only when {path} {state} ({CONDITION})"
+    return None
+
+
+def waiting(tree: Tree, units: Iterable[str]) -> dict[str, str]:
+    """Each of UNITS that cannot run on this tree, and why (unmet)"""
+    return {unit: why for unit in units if (why := unmet(tree, unit))}
+
+
 def overlay_state(units: list[UnitState]) -> tuple[str | None, str]:
     """`enabled`, `disabled`, or None and what each unit says
 

@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from keel.inspect.constants import ROOT_DEFAULT
 from keel.inspect.monitor import Cycle, monit_cycle
 from keel.inspect.tree import File, Tree
-from keel.inspect.units import UnitState, read_units
+from keel.inspect.units import UnitState, read_units, waiting
 from keel.manifest import monit
 from keel.manifest.facts import gather
 from keel.manifest.resolve import Resolved, overlay_units
@@ -63,6 +63,9 @@ class ApplianceState:
     # the VIP overlay waits for etcd's cluster: its unit's start
     # condition is cluster.json (keel#106)
     vip_waits: bool = False
+    # the processes' units that cannot run here, and why: monit does not
+    # watch them (keel.manifest.monit, keel.inspect.units.waiting)
+    waiting: dict[str, str] = field(default_factory=dict)
 
 
 def observe_appliance(root: str, doc: dict, start: bool = False,
@@ -121,4 +124,13 @@ def observe_appliance(root: str, doc: dict, start: bool = False,
         anubis_key=anubis_key,
         filesync=filesync_state,
         vip_waits=vip_waits,
+        waiting=process_waits(tree, facts.resolved),
     )
+
+
+def process_waits(tree: Tree, resolved: Resolved | None) -> dict[str, str]:
+    """The units of the chain's processes that cannot run on this tree"""
+    if resolved is None:
+        return {}
+    return waiting(tree, [owned.item["unit"]
+                          for owned in resolved.processes])

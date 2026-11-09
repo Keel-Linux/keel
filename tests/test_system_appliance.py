@@ -483,6 +483,36 @@ class TestObserve(ManifestCase):
         self.assertTrue(found.monit_link_present)
         self.assertFalse(found.monit_file.readable)
 
+    def test_a_unit_whose_start_condition_fails_is_not_watched(self):
+        """keel-vip.service starts only once etcd's cluster.json exists:
+        in cloud_simple, watched by monit, it failed its check at each
+        cycle and reached its restart limit (release A, lnpp
+        cloud_simple, 2026-11-09). The process is watched again once
+        the condition holds. etcd.service stands in for it here"""
+        unit = join(self.root, "usr/lib/systemd/system/etcd.service")
+        os.makedirs(os.path.dirname(unit), exist_ok=True)
+        with open(unit, "w") as fob:
+            fob.write("[Unit]\nConditionPathExists="
+                      "/var/lib/keel/etcd/cluster.json\n")
+        doc = {"version": 1, "appliance": {"name": "core"},
+               "overlays": {"installer": "enabled",
+                            "wireguard": "enabled", "etcd": "enabled",
+                            "crowdsec": "disabled"}}
+        found = observe_appliance(self.root, doc)
+        self.assertEqual(list(found.waiting), ["etcd.service"])
+        steps = plan_appliance(doc, found, False, frozenset())
+        written = [a for step in steps if step.field == "derived.monit"
+                   for a in step.actions if isinstance(a, WriteFile)]
+        self.assertNotIn("keel-unit-etcd", written[0].content)
+        os.makedirs(join(self.root, "var/lib/keel/etcd"))
+        open(join(self.root, "var/lib/keel/etcd/cluster.json"), "w").close()
+        found = observe_appliance(self.root, doc)
+        self.assertEqual(found.waiting, {})
+        steps = plan_appliance(doc, found, False, frozenset())
+        written = [a for step in steps if step.field == "derived.monit"
+                   for a in step.actions if isinstance(a, WriteFile)]
+        self.assertIn("keel-unit-etcd", written[0].content)
+
     def test_a_capi_file_of_comments_only_is_not_a_registration(self):
         """keel#61: the Core build seeds the file with a comment so the
         package's postinst does not register in the chroot. Leaked into

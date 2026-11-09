@@ -56,8 +56,10 @@ class RenderCase(ManifestCase):
         return found
 
     def render(self, states: dict, name: str = "web",
-               mesh: str | None = None, cycle: int = 30):
-        return render(self.resolved(name), states, mesh, NOTIFY, cycle)
+               mesh: str | None = None, cycle: int = 30,
+               waiting: dict | None = None):
+        return render(self.resolved(name), states, mesh, NOTIFY, cycle,
+                      waiting)
 
     def assertMonitAccepts(self, text: str) -> None:
         if not monit_binary():
@@ -232,6 +234,29 @@ class TestApplication(RenderCase):
         self.assertIn("blog-nginx not watched: its process nginx belongs"
                       " to the overlay nginx, which is disabled",
                       found.notes)
+
+    def test_a_process_whose_unit_cannot_run_is_not_watched(self):
+        """keel-vip.service starts only once etcd's cluster.json exists,
+        so in cloud_simple it is never active: watched, it failed its
+        check at every cycle and reached its restart limit (release A,
+        lnpp cloud_simple, 2026-11-09). A process whose unit's start
+        condition does not hold is left out, and so is each check on it"""
+        why = ("nginx.service starts only when /etc/x exists"
+               " (ConditionPathExists)")
+        found = self.render(self.states, "blog",
+                            waiting={"nginx.service": why})
+        self.assertNotIn("keel-unit-nginx", found.services)
+        self.assertNotIn("keel-unit-nginx", found.text)
+        self.assertNotIn("keel-check-blog-nginx", found.services)
+        self.assertIn(f"nginx not watched: {why}", found.notes)
+        self.assertIn("blog-nginx not watched: its process nginx is not"
+                      f" watched: {why}", found.notes)
+        self.assertIn("keel-unit-blog", found.services)
+        self.assertMonitAccepts(found.text)
+
+    def test_a_process_whose_unit_can_run_is_watched(self):
+        found = self.render(self.states, "blog", waiting={})
+        self.assertIn("keel-unit-nginx", found.services)
 
     def test_a_disabled_embedded_overlay_is_not_watched(self):
         found = self.render({**WEB_OFF, "mariadb": "disabled"}, "blog")
