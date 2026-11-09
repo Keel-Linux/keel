@@ -176,17 +176,17 @@ class TestStopped(WithEtcd):
         self.assertFalse(self.carried(0))
 
 
-class TestHandOver(WithEtcd):
-    """A restart renews the lease once, as the unit stops, and gives the
-    address a full lifetime from that renewal, so the next controller
-    has the release time to start and renew. On a link of 250 ms with
-    2% loss, the next controller's start and first renewal took longer
-    than what the last renewal of the old one had left, and the kernel
-    removed the address for a moment (vip-upgrade / trixie)"""
-
-    def stopped(self, restarting=True):
-        return vipetcd.stopped(self.all[0], restarting=restarting,
-                               client=lambda: self.kv, clock=self.monotonic)
+class TestTheStopAsksNoEtcd(WithEtcd):
+    """keel-vip.service, the root half, has RestrictAddressFamilies=
+    AF_UNIX AF_NETLINK: it cannot reach etcd. A renewal tried as the
+    unit stops never answers, and etcdctl waits for its dial until it is
+    killed (2.5 s). The helper's own end and ExecStopPost each tried one,
+    so each restart lost 5 s of the address's lifetime, and on the poor
+    link the next controller's first renewal then came after the kernel
+    removed the address (vip-upgrade / trixie, CI 2026-11-04 to 11-07).
+    The stop asks etcd nothing: the drain gives the address its fresh
+    lifetime (keel#244), and the kernel ends it by the release deadline
+    of that renewal"""
 
     def slow(self) -> int:
         """The holder, its last renewal 5 s old, 4 s left on wg0"""
@@ -196,53 +196,25 @@ class TestHandOver(WithEtcd):
         self.nets[0].lifetimes[HOST] = 4
         return len(self.kv.calls)
 
-    def test_a_restart_renews_once_and_gives_a_full_lifetime(self):
+    def test_a_restart_asks_etcd_nothing(self):
         before = self.slow()
-        self.assertEqual(self.stopped(), ([], [VIP]))
-        self.assertEqual(self.kv.calls[before:], ["keepalive", "prefix"])
-        self.assertEqual(self.nets[0].lifetimes[HOST],
-                         vipnet.lifetime(0.0))
+        with mock.patch.object(vipetcd, "local",
+                               side_effect=AssertionError("etcd asked")):
+            self.assertEqual(vipetcd.stopped(self.all[0], restarting=True),
+                             ([], [VIP]))
+        self.assertEqual(self.kv.calls[before:], [])
+
+    def test_a_restart_leaves_the_lifetime_to_the_kernel(self):
+        self.slow()
+        self.assertEqual(vipetcd.stopped(self.all[0], restarting=True),
+                         ([], [VIP]))
+        self.assertEqual(self.nets[0].lifetimes[HOST], 4)
         self.assertTrue(self.carried(0))
 
-    def test_no_answer_leaves_the_lifetime_to_the_kernel(self):
-        self.slow()
-        self.kv.refuse = "all"
-        self.assertEqual(self.stopped(), ([], [VIP]))
-        self.assertEqual(self.nets[0].lifetimes[HOST], 4)
-
-    def test_a_lease_gone_drops_it(self):
-        self.slow()
-        self.kv.expire(self.lease())
-        self.assertEqual(self.stopped(), ([VIP], []))
-        self.assertFalse(self.carried(0))
-
-    def test_an_address_not_carried_again_is_said(self):
-        self.slow()
-        with mock.patch.object(vipnode, "carry_held", return_value=False):
-            self.assertEqual(self.stopped(), ([], [VIP]))
-        self.assertIn("renewed as the unit restarts, but not carried",
-                      self.text(0))
-
-    def test_a_vip_on_no_lease_is_left_to_the_kernel(self):
-        self.slow()
-        held = vipnode.current(self.all[0], VIP)
-        from dataclasses import replace
-        self.assertTrue(vipetcd.handed_over(
-            self.all[0], replace(held, lease=None), lambda: self.kv,
-            self.monotonic))
-
-    def test_the_default_client_is_this_member_s_etcd(self):
-        self.slow()
-        with mock.patch.object(vipetcd, "local",
-                               return_value=self.kv) as local:
-            self.assertEqual(vipetcd.stopped(self.all[0], restarting=True,
-                                             clock=self.monotonic),
-                             ([], [VIP]))
-        local.assert_called_once_with(self.all[0])
-
-    def test_a_stop_renews_nothing(self):
+    def test_a_stop_asks_etcd_nothing(self):
         before = self.slow()
-        self.assertEqual(self.stopped(restarting=False), ([VIP], []))
+        self.assertEqual(vipetcd.stopped(self.all[0], restarting=False),
+                         ([VIP], []))
         self.assertEqual(self.kv.calls[before:], [])
 
 

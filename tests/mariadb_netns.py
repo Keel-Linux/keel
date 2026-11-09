@@ -817,26 +817,30 @@ class Writer:
                      f"INSERT INTO t (v, at) VALUES ('{self.name}-{n}',"
                      f" {started:.3f})"], capture_output=True, text=True,
                     check=False, timeout=30)
-                ok, err = one.returncode == 0, one.stderr.strip()[:12]
+                said = one.stderr.strip()
+                ok, err = one.returncode == 0, said[:12]
             except subprocess.TimeoutExpired:
                 # a hung attempt must not end the writer: the writes that
                 # come back after the promote are the measured thing
                 # (keel#94); on the lossy link one connection can outlive
                 # the 30 s cap, to the dead primary or a promoting one
                 ok, err = False, "hung past 30s"
+                said = err
             self.done.append({"n": n, "t": round(started, 3),
                               "end": round(time.time(), 3),
-                              "ok": ok, "err": err})
+                              "ok": ok, "err": err, "said": said[-100:]})
             self.halt.wait(0.1)
 
 
 class NewPrimary:
-    """When the node that is promoted carries the VIP, and when its
-    server turns writable, sampled every 0.2 s from the driver"""
+    """When the node that is promoted carries the VIP, when its server
+    turns writable, and when C's table routes the VIP to another peer,
+    sampled every 0.2 s from the driver"""
 
-    def __init__(self, pid: int, root: str):
-        self.pid, self.root = pid, root
-        self.carried_at = self.writable_at = None
+    def __init__(self, pid: int, root: str, c_pid: int | None = None):
+        self.pid, self.root, self.c_pid = pid, root, c_pid
+        self.carried_at = self.writable_at = self.rerouted_at = None
+        self.route_before = None
         self.halt = threading.Event()
         self.thread = threading.Thread(target=self.run, daemon=True)
 
@@ -849,10 +853,16 @@ class NewPrimary:
 
     def run(self) -> None:
         import vip_netns
+        if self.c_pid is not None:
+            self.route_before = vip_netns.routed_to(self.c_pid)
         while not self.halt.is_set():
             now = time.time()
             if self.carried_at is None and vip_netns.holds(self.pid):
                 self.carried_at = now
+            if self.c_pid is not None and self.rerouted_at is None and \
+                    vip_netns.routed_to(self.c_pid) not in (
+                        None, self.route_before):
+                self.rerouted_at = now
             if self.writable_at is None and read_only_of(self.root) == "0":
                 self.writable_at = now
             self.halt.wait(0.2)
@@ -883,8 +893,18 @@ def downtime(writer: Writer, watched: NewPrimary, killed_at: float,
             "writable_after_carried_s": None if watched.carried_at is None
             or watched.writable_at is None
             else round(watched.writable_at - watched.carried_at, 2),
+            "c_rerouted_s": since(watched.rerouted_at),
+            # the wall time of the kill, to place the follow's log lines
+            "killed_at": round(killed_at, 3),
             "errors_after_kill": errors, "writes": len(writer.done),
-            "acked": len(ok)}
+            "acked": len(ok),
+            # each write after the kill: its start, how long it took, and
+            # its error, so the gap after the VIP landed can be split
+            # into the server's part and the client's (CI 2026-11-09)
+            "attempts": [[since(one["t"]), round(one["end"] - one["t"], 2),
+                          one.get("said") or one["err"] or "ok"]
+                         for one in writer.done
+                         if one["t"] > killed_at - 2.5]}
 
 
 def acked_missing(writer: Writer, agent_send,
@@ -1123,7 +1143,7 @@ def crashed(report: dict, pids: list[int], roots: list[str]) -> None:
                                 "Rpl_semi_sync_master_status") == "ON",
         120, 1)
     writer = Writer(pids[2])
-    watched = NewPrimary(pids[1], roots[1])
+    watched = NewPrimary(pids[1], roots[1], pids[2])
     writer.start()
     watched.start()
     # writes acknowledged before the kill, so the downtime has a start:

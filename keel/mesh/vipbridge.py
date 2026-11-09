@@ -339,9 +339,8 @@ def serve(here: Here, stop: threading.Event,
     controller carry the VIP one more time before it stops: the controller's next
     renewal gives the address a fresh lifetime, which the kernel keeps
     across the restart. The root half's RestrictAddressFamilies=AF_UNIX
-    AF_NETLINK prevents `handed_over` from reaching etcd itself, so the
-    controller, which has AF_INET/AF_INET6, must be the one to renew
-    (keel#244)."""
+    AF_NETLINK prevents it from reaching etcd itself, so the controller,
+    which has AF_INET/AF_INET6, must be the one to renew (keel#244)."""
     try:
         texts = credentials(here.root)
     except OSError as e:
@@ -370,10 +369,10 @@ def serve(here: Here, stop: threading.Event,
                     send(conn, answered(ops, data))
                 # on a restart, let the controller carry one more
                 # time: its renewal refreshes the address's lifetime,
-                # which handed_over cannot do from the restricted
-                # service (keel#244). A stop does not wait, and a
-                # replica does not either: the address of a stop is
-                # dropped at once, as a failover expects
+                # which this restricted service cannot do (keel#244). A
+                # stop does not wait, and a replica does not either: the
+                # address of a stop is dropped at once, as a failover
+                # expects
                 if stop.is_set() and _restarting(here) and \
                         _holds_bounded(ops):
                     _drain_carry(conn, ops, here.err)
