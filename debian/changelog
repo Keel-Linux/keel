@@ -13,6 +13,18 @@ keel (0.23.94) unstable; urgency=medium
     restarts). The address keeps the fresh lifetime the controller gave
     it before it stopped (keel#244), and the kernel ends it by the release
     time of that renewal, as before.
+  * When a MariaDB replica takes the VIP, keel database follow starts to
+    read the old primary's position record in etcd (keel#271) before it
+    observes the server, not after. The read is a round trip to etcd's
+    leader (0.4 to 1.6 s on a link of 250 ms) and the observation takes
+    about 0.5 s; both were between the VIP landing on the node and its
+    first write. On a link of 250 ms with 2 % loss, the writes came back
+    5.09 s after the VIP landed, over the 5 s that keel#148 permits
+    (mariadb / trixie in CI). The record is final by then: the old
+    primary turned read only at its doubt (keel#195), before its lease
+    expired and the replica could claim. Only a node whose newest claim
+    is its own and whose last follow did not record it the primary
+    starts this read.
 
  -- KeelLinux maintainers <admin@keellinux.org>  Mon, 09 Nov 2026 00:00:00 +0000
 
