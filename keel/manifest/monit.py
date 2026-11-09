@@ -70,20 +70,35 @@ def watched(owned: Owned, states: dict) -> bool:
 
 
 def render(resolved: Resolved, states: dict, mesh: str | None,
-           notify: tuple[str, ...], cycle: int) -> Rendered:
+           notify: tuple[str, ...], cycle: int,
+           waiting: dict[str, str] | None = None) -> Rendered:
     """The file, what it watches, and what it could not watch and why
 
     `states` are the spec's overlays; `mesh` the overlay address of
     network.overlay.wireguard, with or without its prefix; `notify` the
     argv prefix of keel notify; `cycle` monit's, in seconds, which the
-    reminders count in.
+    reminders count in; `waiting` the units that cannot run on this
+    machine, and why (keel.inspect.units.waiting). A process of such a
+    unit is not watched: systemd skips each start of it, so it would
+    fail its check at every cycle and reach its restart limit
+    (keel-vip.service in cloud_simple, where etcd forms no cluster).
     """
     writer = _Writer(notify, reminder(cycle))
-    processes = {owned.item["name"]: owned.item
-                 for owned in resolved.processes if watched(owned, states)}
+    waiting = waiting or {}
+    blocks, services, notes = [HEADER + "\n"], [], []
+    processes = {}
+    skipped = {}
+    for owned in resolved.processes:
+        if not watched(owned, states):
+            continue
+        why = waiting.get(owned.item["unit"])
+        if why:
+            skipped[owned.item["name"]] = why
+            notes.append(f"{owned.item['name']} not watched: {why}")
+            continue
+        processes[owned.item["name"]] = owned.item
     owners = {owned.item["name"]: owned.overlay
               for owned in resolved.processes}
-    blocks, services, notes = [HEADER + "\n"], [], []
     for process in processes.values():
         blocks.append(writer.process(process))
         services.append(unit_service(process["name"]))
@@ -93,6 +108,10 @@ def render(resolved: Resolved, states: dict, mesh: str | None,
             continue
         check = owned.item
         process = check.get("process")
+        if process in skipped:
+            notes.append(f"{check['name']} not watched: its process"
+                         f" {process} is not watched: {skipped[process]}")
+            continue
         if process is not None and process not in processes:
             # a check of the appliance's own on an overlay's process:
             # depending on a service the file does not hold would make

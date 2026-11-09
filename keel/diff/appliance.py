@@ -25,7 +25,7 @@ from keel.diff.report import (
 )
 from keel.inspect.monitor import monit_cycle
 from keel.inspect.tree import Tree
-from keel.inspect.units import overlay_state, read_units
+from keel.inspect.units import overlay_state, read_units, waiting
 from keel.manifest import firewall as fw
 from keel.manifest import monit
 from keel.manifest.facts import gather
@@ -218,7 +218,9 @@ def monit_fields(declared: dict, resolved, states: dict,
     wg = ((declared.get("network") or {}).get("overlay") or {}).get(
         "wireguard") or {}
     rendered = monit.render(resolved, states, wg.get("address"), NOTIFY,
-                            monit_cycle(tree).seconds)
+                            monit_cycle(tree).seconds,
+                            waiting(tree, [owned.item["unit"] for owned
+                                           in resolved.processes]))
     file = tree.read(monit.PATH)
     if file.text == rendered.text:
         fields = [FieldDiff("derived.monit", SAME, RENDERED, RENDERED)]

@@ -14,7 +14,8 @@ from os.path import join
 from helpers import spec  # noqa: F401
 
 from keel.inspect.tree import Tree
-from keel.inspect.units import UnitState, overlay_state, read_units
+from keel.inspect.units import (UnitState, overlay_state, read_units,
+                                unmet, waiting)
 
 
 def answers(table: dict):
@@ -134,6 +135,71 @@ class TestOverlayState(unittest.TestCase):
             overlay_state([UnitState("crowdsec.service", "enabled",
                                      "failed")]),
             (None, "crowdsec.service enabled and failed"))
+
+
+
+class TestTheStartCondition(unittest.TestCase):
+    """A unit whose ConditionPathExists= does not hold is skipped by
+    systemd: it never runs there, whatever starts it (keel-vip.service
+    without etcd's cluster.json, in cloud_simple)"""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, self.root)
+        self.unit("usr/lib/systemd/system", "keel-vip.service",
+                  "[Unit]\nDescription=x\n"
+                  "ConditionPathExists=/var/lib/keel/etcd/cluster.json\n"
+                  "[Service]\nExecStart=/bin/true\n")
+
+    def unit(self, where: str, name: str, text: str) -> None:
+        os.makedirs(join(self.root, where), exist_ok=True)
+        with open(join(self.root, where, name), "w") as fob:
+            fob.write(text)
+
+    def touch(self, relative: str) -> None:
+        os.makedirs(join(self.root, os.path.dirname(relative)),
+                    exist_ok=True)
+        open(join(self.root, relative), "w").close()
+
+    def test_a_path_that_is_not_there_is_not_met(self):
+        self.assertEqual(
+            unmet(Tree(self.root), "keel-vip.service"),
+            "keel-vip.service starts only when"
+            " /var/lib/keel/etcd/cluster.json exists (ConditionPathExists)")
+
+    def test_a_path_that_is_there_is_met(self):
+        self.touch("var/lib/keel/etcd/cluster.json")
+        self.assertIsNone(unmet(Tree(self.root), "keel-vip.service"))
+
+    def test_a_negated_path(self):
+        self.unit("usr/lib/systemd/system", "a.service",
+                  "[Unit]\nConditionPathExists=!/etc/a.off\n")
+        self.assertIsNone(unmet(Tree(self.root), "a.service"))
+        self.touch("etc/a.off")
+        self.assertEqual(unmet(Tree(self.root), "a.service"),
+                         "a.service starts only when /etc/a.off does not"
+                         " exist (ConditionPathExists)")
+
+    def test_a_triggering_condition_is_not_judged(self):
+        self.unit("usr/lib/systemd/system", "b.service",
+                  "[Unit]\nConditionPathExists=|/etc/b1\n"
+                  "ConditionPathExists=|/etc/b2\n")
+        self.assertIsNone(unmet(Tree(self.root), "b.service"))
+
+    def test_the_unit_in_etc_replaces_the_package_s(self):
+        self.unit("etc/systemd/system", "keel-vip.service",
+                  "[Unit]\nDescription=local\n")
+        self.assertIsNone(unmet(Tree(self.root), "keel-vip.service"))
+
+    def test_a_unit_with_no_file_or_no_condition(self):
+        self.unit("usr/lib/systemd/system", "c.service", "[Unit]\n")
+        self.assertIsNone(unmet(Tree(self.root), "c.service"))
+        self.assertIsNone(unmet(Tree(self.root), "none.service"))
+
+    def test_waiting_names_each_unit_that_cannot_run(self):
+        self.unit("usr/lib/systemd/system", "c.service", "[Unit]\n")
+        found = waiting(Tree(self.root), ("keel-vip.service", "c.service"))
+        self.assertEqual(list(found), ["keel-vip.service"])
 
 
 if __name__ == "__main__":
