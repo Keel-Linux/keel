@@ -373,6 +373,67 @@ class TestThePrimary(FollowTestCase):
         self.assertIn("drained and promoted", " ".join(found.lines))
         self.assertEqual(overlapped, [True])
 
+    def test_the_record_is_read_while_the_server_is_observed(self):
+        """The read of the record in etcd starts before the server is
+        observed, not after: on the 250 ms link it took 0.4 to 1.6 s,
+        and the observation 0.5 s, both between the VIP landing on this
+        node and its first write (test_mariadb_netns, the unplanned
+        write downtime: 5.09 s against the budget of 5 s, keel#148). The
+        record is final by then: the old primary turned read only at its
+        doubt, before its lease expired and this node could claim"""
+        import threading
+        self.pair_nodes()
+        server = Server(replicating_from=address(1), read_only="ON",
+                        binlog_state="0-1-10", slave_pos="0-1-10")
+        record = dbposition.Record("0-1-10", False, "other")
+        reading_started = threading.Event()
+        before_observe = []
+        observe = dbfollow.observe_database
+
+        def observing(*args, **kwargs):
+            before_observe.append(reading_started.wait(2))
+            return observe(*args, **kwargs)
+
+        def reading(here, vip):
+            reading_started.set()
+            return record
+        with mock.patch.object(dbposition, "with_etcd", return_value=True), \
+                mock.patch.object(dbposition, "read_record",
+                                  side_effect=reading) as read, \
+                mock.patch.object(dbfollow, "observe_database",
+                                  side_effect=observing):
+            found = self.follow(0, server)
+        self.assertIsNone(found.problem, found.lines)
+        self.assertIn("drained and promoted", " ".join(found.lines))
+        self.assertEqual(before_observe, [True])
+        self.assertEqual(read.call_count, 1)
+
+    def test_a_replica_reads_no_record(self):
+        """The record is read ahead only for a node whose newest claim
+        is its own: a replica's follow asks etcd nothing for it"""
+        self.pair_nodes()
+        server = Server(replicating_from=address(0), read_only="ON")
+        with mock.patch.object(dbposition, "with_etcd", return_value=True), \
+                mock.patch.object(dbposition, "read_record") as read:
+            self.follow(1, server)
+        read.assert_not_called()
+
+    def test_the_primary_already_reads_no_record_ahead(self):
+        """A holder whose last follow recorded it the primary is not
+        promoted again: its follow does not start the read"""
+        self.pair_nodes()
+        root = self.all[0].root
+        path = os.path.join(root, dbpair.ROLE_FILE)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fob:
+            fob.write(dbpair.role_text("primary", VIP))
+        server = Server(read_only="OFF")
+        with mock.patch.object(dbposition, "with_etcd", return_value=True), \
+                mock.patch.object(dbposition, "read_record") as read:
+            found = self.follow(0, server)
+        self.assertIsNone(found.problem, found.lines)
+        read.assert_not_called()
+
     def test_the_operator_s_act_takes_the_lagging_replica_to_writes(self):
         self.pair_nodes()
         server = Server(replicating_from=address(1), read_only="ON",

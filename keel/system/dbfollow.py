@@ -64,6 +64,7 @@ import os
 import subprocess
 import sys
 import syslog
+import threading
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -266,6 +267,7 @@ def _follow_proof(root: str, spec: str, confirmed: bool, found: Followed,
     flip.doc = doc
     _learn(root, spec, doc, found, output)
     proof = _early_proof(root, doc, output, wait, sleep)
+    ahead = _record_ahead(root, spec, doc)
     state = observe_database(root, doc, start=proof is not False,
                              spec=spec)
     if state is None:
@@ -341,7 +343,8 @@ def _follow_proof(root: str, spec: str, confirmed: bool, found: Followed,
     elif role == PRIMARY:
         if not _primary(root, state, found, runner, sleep,
                         lambda: _proven(root, doc, output, 0, sleep),
-                        lambda: _lags(root, spec, state, found, runner)):
+                        lambda: _lags(root, spec, state, found, runner,
+                                      ahead)):
             _unproven(root, state, found, runner)
             return
     elif role == REPLICA:
@@ -568,28 +571,88 @@ def _primary(root: str, state: DatabaseState, found: Followed,
     return True
 
 
+class RecordAhead:
+    """The read of the VIP's position record in etcd, started in a
+    thread of its own; `result` waits for it"""
+
+    def __init__(self, vip: str, read: Callable[[], object]):
+        self.vip = vip
+        self._read = read
+        self._value = None
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        try:
+            self._value = self._read()
+        except Exception:  # noqa: BLE001 - read_record raises nothing
+            # of its own: an error here is etcd's, and counts as unread
+            self._value = dbposition.UNREADABLE
+
+    def result(self):
+        self._thread.join()
+        return self._value
+
+
+def _record_ahead(root: str, spec: str, doc: dict) -> RecordAhead | None:
+    """keel#271's read of the record, started before the server is
+    observed, for a MariaDB node whose newest claim is its own and which
+    moves the VIP through etcd; None for every other node. The read is a
+    round trip to etcd's leader over the overlay (0.4 to 1.6 s on the
+    250 ms link) and the observation takes 0.5 s; both were on the path
+    from the VIP landing on this node to its first write (the unplanned
+    write downtime of test_mariadb_netns, keel#148). The record is final
+    by then: the old primary turned read only at its doubt (keel#195),
+    before its lease expired and this node could claim"""
+    server = declared_server(doc)
+    if str(server.get("engine") or "") != "mariadb":
+        return None
+    pair = dbpair.observe_pair(root, doc)
+    if pair is None or pair.role != PRIMARY or \
+            _recorded_role(root) == PRIMARY:
+        # a replica, or a holder that is the primary already: no promote
+        return None
+    here = _here(root, spec)
+    if not dbposition.with_etcd(here):
+        return None
+    vip = pair.vip
+    return RecordAhead(vip, lambda: dbposition.read_record(here, vip))
+
+
+def _recorded_role(root: str) -> str | None:
+    """The role the last follow recorded (dbpair.ROLE_FILE), or None"""
+    try:
+        with open(os.path.join(root, dbpair.ROLE_FILE)) as fob:
+            for line in fob:
+                key, _, value = line.strip().partition("=")
+                if key == "role":
+                    return value
+    except OSError:
+        pass
+    return None
+
+
 def _lags(root: str, spec: str, state: DatabaseState, found: Followed,
-          runner) -> bool:
+          runner, ahead: RecordAhead | None = None) -> bool:
     """Whether this replica, which holds the VIP, lacks what the old
     primary logged (keel#271). It then stays a read-only replica, and
     each follow gives the same answer until it caught up or the operator
     accepted the loss. Without etcd there is no automatic failover: the
     VIP moved by the operator's own promote, and there is no record"""
-    here = _here(root, spec)
-    if not dbposition.with_etcd(here):
-        return False
-    fields = field_lines(state.status)
     vip = state.pair.vip
-    # the record in etcd (a round trip to the leader over the overlay)
-    # read while this server is asked its position: the check is on the
-    # path of every promote (test_mariadb_netns, 0.5 to 1.9 s apart)
-    from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        record = pool.submit(dbposition.read_record, here, vip)
-        own = _ask(runner, APPLIED_QUESTION) or ""
-        own = ",".join(part for part in own.strip().split("\t") + [
-            fields.get("Gtid_IO_Pos", "")] if part)
-        recorded = record.result()
+    if ahead is None or ahead.vip != vip:
+        here = _here(root, spec)
+        if not dbposition.with_etcd(here):
+            return False
+        ahead = RecordAhead(vip, lambda: dbposition.read_record(here, vip))
+    fields = field_lines(state.status)
+    # the record in etcd (a round trip to the leader over the overlay),
+    # read since before the server was observed, while this server is
+    # asked its position: the check is on the path of every promote
+    own = _ask(runner, APPLIED_QUESTION) or ""
+    own = ",".join(part for part in own.strip().split("\t") + [
+        fields.get("Gtid_IO_Pos", "")] if part)
+    recorded = ahead.result()
 
     def old_primary() -> str | None:
         host = fields.get("Master_Host") or state.pair.peer_address
