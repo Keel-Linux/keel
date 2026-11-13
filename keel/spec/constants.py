@@ -54,6 +54,10 @@ IPV6_METHODS = ("static", "dhcp", "auto", "manual", "none")
 # endpoints it uses. A machine can have both, or either alone.
 DATABASE_SUBJECTS = ("server", "client")
 DATABASE_ENGINES = ("mariadb", "postgresql", "redis")
+# The engines keel configures as a primary and a replica of a pair
+# (decisions 0049, 0054). keel validates the roles of Redis too and
+# converges none of them.
+PAIR_ENGINES = ("mariadb", "postgresql")
 # database.server.dump (docs/replication.md): the engines with a dump, the
 # defaults a pair has with no such section, and each number's range
 DUMP_ENGINES = ("mariadb", "postgresql")
