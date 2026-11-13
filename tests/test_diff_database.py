@@ -686,3 +686,9 @@ class TestBesideRedis(unittest.TestCase):
     def test_a_declared_standalone_is_the_same(self):
         found = verdicts(declaring(role="standalone"), self.observe_both())
         self.assertEqual(found[ROLE_FIELD], SAME)
+
+    def test_the_line_that_names_redis_is_not_a_field_of_diff(self):
+        found = verdicts(declaring(role="standalone"), self.observe_both())
+        self.assertNotIn("database.server.others", found)
+        self.assertEqual(found, verdicts(declaring(role="standalone"),
+                                         observe(MARIADB_STANDALONE)))
