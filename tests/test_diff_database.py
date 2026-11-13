@@ -22,6 +22,7 @@ from keel.inspect.tree import File  # noqa: E402
 from test_inspect_database import (  # noqa: E402
     MARIADB_REPLICA_STATUS,
     MARIADB_STANDALONE,
+    REDIS_MASTER,
     SOCKETS,
 )
 
@@ -653,3 +654,35 @@ class TestDumpIsNotCompared(unittest.TestCase):
         self.assertEqual(found["database.server.dump.keep"], NOT_COMPARED)
         self.assertEqual(found["database.server.dump.every_hours"],
                          NOT_COMPARED)
+
+
+class TestBesideRedis(unittest.TestCase):
+    """A MariaDB server with redis-server beside it (Nextcloud, Loops) is
+    compared: before, every field of database.server was unknown there"""
+
+    def observe_both(self) -> Inspection:
+        servers = tuple(
+            Installed(engine, f"/usr/sbin/{engine.name}d",
+                      answers(engine, answered), File("ss -lntH", SOCKETS))
+            for engine, answered in (
+                (next(e for e in ENGINES if e.name == "mariadb"),
+                 MARIADB_STANDALONE),
+                (next(e for e in ENGINES if e.name == "redis"),
+                 REDIS_MASTER),
+            )
+        )
+        section, findings = probe_database(servers, ())
+        return Inspection("/", "test", {"database": section},
+                          tuple(findings))
+
+    def test_the_declared_role_is_compared_and_can_drift(self):
+        found = verdicts(
+            declaring(role="replica",
+                      replication={"primary": {"host": "2001:db8:1::10"}}),
+            self.observe_both())
+        self.assertEqual(found[ROLE_FIELD], DRIFT)
+        self.assertEqual(found["database.server.engine"], SAME)
+
+    def test_a_declared_standalone_is_the_same(self):
+        found = verdicts(declaring(role="standalone"), self.observe_both())
+        self.assertEqual(found[ROLE_FIELD], SAME)

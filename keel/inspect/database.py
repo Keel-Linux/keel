@@ -19,6 +19,7 @@ from keel.inspect.dbengines import Engine
 from keel.inspect.dbreading import Reading, Value
 from keel.inspect.report import Finding, inferred, missing
 from keel.inspect.tree import File
+from keel.spec.constants import PAIR_ENGINES
 from keel.spec.origins import mariadb_problem
 
 SERVER = "database.server"
@@ -69,6 +70,14 @@ SEVERAL_ENGINES = (
     " has one database.server, so the role of each cannot be written down"
     " separately yet"
 )
+# A server that runs beside the one engine keel pairs (redis-server beside
+# MariaDB on Nextcloud, keel#304). It is not a field: the line names it, so
+# that it is not dropped silently, and keel diff ignores the path.
+OTHERS = f"{SERVER}.others"
+BESIDE = (
+    "{others} also runs on this machine; the description has one"
+    " database.server, and it describes {engine}, the engine keel pairs"
+)
 
 
 @dataclass(frozen=True)
@@ -116,7 +125,8 @@ def probe_server(
     """
     if not servers:
         return None, []
-    if len(servers) > 1:
+    installed = _described(servers)
+    if installed is None:
         names = ", ".join(one.engine.name for one in servers)
         return None, [
             missing(
@@ -124,8 +134,30 @@ def probe_server(
                 SEVERAL_ENGINES.format(count=len(servers), engines=names),
             )
         ]
+    section, findings = _server_section(installed)
+    others = [one for one in servers if one is not installed]
+    if others:
+        findings.append(missing(OTHERS, BESIDE.format(
+            others=", ".join(f"{one.engine.name} ({one.binary})"
+                             for one in others),
+            engine=installed.engine.name,
+        )))
+    return section, findings
 
-    installed = servers[0]
+
+def _described(servers: tuple[Installed, ...]) -> Installed | None:
+    """The server database.server describes: the only one, else the only
+    one of an engine keel pairs (keel#304); None when that is not one"""
+    if len(servers) == 1:
+        return servers[0]
+    paired = [one for one in servers if one.engine.name in PAIR_ENGINES]
+    return paired[0] if len(paired) == 1 else None
+
+
+def _server_section(
+    installed: Installed,
+) -> tuple[dict | None, list[Finding]]:
+    """The section of one server, from what it answered"""
     engine = installed.engine
     reading = installed.reading()
     if not reading.role.known:

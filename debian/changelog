@@ -1,3 +1,21 @@
+keel (0.23.97) unstable; urgency=medium
+
+  * keel inspect describes the database server when redis-server runs
+    beside MariaDB or PostgreSQL (keel#304). Before, two server binaries
+    made database.server "not inferred". keel-nextcloud, keel-loops and
+    keel-pixelfed install redis-server on the lnmp layer, so the role
+    screen of keel-init found no engine and made a pair of files only:
+    the VIP and the files moved on promote, but each node kept its own
+    database (Nextcloud cloud_simple, 2026-11-13). Now, when exactly one
+    server is of an engine that keel pairs, database.server describes
+    that server, and the line database.server.others names the other
+    servers. Redis alone is as before. MariaDB and PostgreSQL together
+    stay "not inferred". keel diff now compares database.server on such
+    a machine, where before each field was unknown. keel spec apply does
+    not use this inference and does not change.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Fri, 13 Nov 2026 00:00:00 +0000
+
 keel (0.23.96) unstable; urgency=medium
 
   * keel database dump waits for a replica's server to replicate. Right

@@ -463,15 +463,68 @@ class TestServerSection(unittest.TestCase):
         self.assertIn("redis server is installed", reason)
         self.assertIn("exited 1", reason)
 
-    def test_two_servers_on_one_machine_are_not_describable_yet(self):
+    def test_two_engines_keel_pairs_are_not_describable_yet(self):
         section, findings = probe_server((
             self.one("mariadb", MARIADB_STANDALONE),
-            self.one("redis", REDIS_MASTER),
+            self.one("postgresql", PG_STANDALONE),
         ))
         self.assertIsNone(section)
         reason = reason_of(findings, "database.server")
         self.assertIn("2 database servers", reason)
-        self.assertIn("mariadb, redis", reason)
+        self.assertIn("mariadb, postgresql", reason)
+
+    def test_two_engines_keel_pairs_and_redis_are_not_describable(self):
+        section, findings = probe_server((
+            self.one("mariadb", MARIADB_STANDALONE),
+            self.one("postgresql", PG_STANDALONE),
+            self.one("redis", REDIS_MASTER),
+        ))
+        self.assertIsNone(section)
+        reason = reason_of(findings, "database.server")
+        self.assertIn("3 database servers", reason)
+
+    def test_mariadb_beside_redis_is_described_as_mariadb(self):
+        """keel#304: Nextcloud on lnmp has redis-server too, and the
+        pair was a pair of files only, each node with its own database"""
+        section, findings = probe_server((
+            self.one("mariadb", MARIADB_STANDALONE),
+            self.one("redis", REDIS_MASTER),
+        ))
+        self.assertEqual(section["engine"], "mariadb")
+        self.assertEqual(section["role"], "standalone")
+        self.assertEqual(statuses(findings, "database.server"), [])
+        self.assertEqual(
+            statuses(findings, "database.server.engine"), [INFERRED]
+        )
+
+    def test_postgresql_beside_redis_is_described_as_postgresql(self):
+        section, _ = probe_server((
+            self.one("postgresql", PG_STANDALONE),
+            self.one("redis", REDIS_MASTER),
+        ))
+        self.assertEqual(section["engine"], "postgresql")
+
+    def test_the_server_keel_does_not_pair_is_named_not_dropped(self):
+        _, findings = probe_server((
+            self.one("redis", REDIS_MASTER),
+            self.one("mariadb", MARIADB_STANDALONE),
+        ))
+        self.assertEqual(
+            statuses(findings, "database.server.others"), [NOT_INFERRED]
+        )
+        reason = reason_of(findings, "database.server.others")
+        self.assertIn("redis (/usr/sbin/redisd)", reason)
+        self.assertIn("mariadb", reason)
+
+    def test_one_server_alone_names_no_other_server(self):
+        for name, answered in (("redis", REDIS_MASTER),
+                               ("mariadb", MARIADB_STANDALONE)):
+            with self.subTest(engine=name):
+                section, findings = probe_server((self.one(name, answered),))
+                self.assertEqual(section["engine"], name)
+                self.assertEqual(
+                    statuses(findings, "database.server.others"), []
+                )
 
 
 READ_ONLY_FIELD = "database.server.read_only"
@@ -900,6 +953,14 @@ class TestWhatInspectWritesValidates(unittest.TestCase):
 
     def test_a_standalone_validates(self):
         section, _ = probe_server((self.one("redis", REDIS_MASTER),))
+        self.assertEqual(self.validate({"server": section}), [])
+
+    def test_mariadb_described_beside_redis_validates(self):
+        section, _ = probe_server((
+            self.one("mariadb", MARIADB_STANDALONE),
+            self.one("redis", REDIS_MASTER),
+        ))
+        self.assertEqual(section["engine"], "mariadb")
         self.assertEqual(self.validate({"server": section}), [])
 
     def test_what_the_client_reader_writes_validates(self):

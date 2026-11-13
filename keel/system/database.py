@@ -35,6 +35,7 @@ and keel.system.effects acts.
 import os
 
 from keel.inspect import constants as paths
+from keel.spec.constants import PAIR_ENGINES
 from keel.spec.origins import canonical, is_name, mariadb_problem
 from keel.system import dbmariadb as mariadb
 from keel.system import dbpostgres
@@ -60,7 +61,7 @@ from keel.system.dbstate import (
 )
 
 FIELD = "database.server"
-CONVERGED = ("mariadb", "postgresql")
+CONVERGED = PAIR_ENGINES
 AUTHORIZATIONS = f"{FIELD}.replication.allowed_from"
 REPLICATION = f"{FIELD}.replication.primary"
 STANDALONE = "standalone"

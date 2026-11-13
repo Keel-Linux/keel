@@ -151,9 +151,16 @@ Two consequences worth stating, because they are visible in `keel diff`:
   is a Redis with `requirepass` set, because `redis-cli` is refused and
   `inspect` never reads a secret to get past it.
 
-Two servers on one machine report the section as not inferred as well, naming
-both: the description holds one `database.server`, so there is nowhere to write
-two roles down.
+The description holds one `database.server`, so there is nowhere to write
+two roles down. When two or more servers run on one machine, the section
+describes the one server of an engine that keel pairs (MariaDB or
+PostgreSQL, decisions 0049 and 0054). Nextcloud, Loops and Pixelfed run
+`redis-server` beside MariaDB, and the section describes MariaDB (keel#304).
+The line `database.server.others` names each other server, so that none is
+dropped silently. It is not a field, and `keel diff` does not compare it.
+When no server, or more than one server, is of an engine that keel pairs
+(MariaDB and PostgreSQL together, say), the section is not inferred, and
+the line names each server.
 
 `database.server.listen` comes from `ss -lntH`, filtered on the port the server
 itself reported, so it is the addresses the machine is really answering on and
