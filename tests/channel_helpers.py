@@ -32,6 +32,12 @@ SUBKEY_UID = "Keel Test Revoked Subkey <subkey@example.invalid>"
 # When the expired key was made and signed. Far enough back that its
 # thirty day life is long over, whatever day the suite runs on.
 PAST = "20240101T000000"
+# When the expired key signs: a day after PAST. gpg's faked clock runs on
+# from PAST, so a key made on a loaded runner is some seconds newer than
+# PAST, and a signature at PAST itself is refused with "Time conflict"
+# (gpg exit 2, keel#305 CI run 866). The key lives 30 days, so a day
+# later it still signs, and it is expired now.
+SIGNED_AT = "20240102T000000"
 
 KEY_TEMPLATE = """%no-protection
 Key-Type: eddsa
@@ -123,7 +129,7 @@ class Keys:
         self.export(self.keyring_subkey, self.subkey_primary)
         self.expired = self._generate_expired(EXPIRED_UID)
         self.expired_signature = self.clearsign(
-            channel_body(), self.expired, at=PAST
+            channel_body(), self.expired, at=SIGNED_AT
         )
         self.keyring_expired = join(self.home, "expired-keyring.gpg")
         self.export(self.keyring_expired, self.expired)
