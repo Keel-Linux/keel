@@ -1,0 +1,16 @@
+#!/bin/sh
+# keel's prerm: on removal, stop keel-firewall-watch.timer. Its units
+# are installed with --no-start, so debhelper writes no stop for them;
+# a timer left active after its service file is gone fails at its next
+# elapse, and the node is degraded until a reboot. An upgrade stops
+# nothing (--no-stop-on-upgrade, decision 0073). keel's table inet keel
+# stays loaded until a reboot, which keeps the node closed.
+set -e
+
+if [ "$1" = "remove" ] && [ -z "${DPKG_ROOT:-}" ] && [ -d /run/systemd/system ]; then
+    deb-systemd-invoke stop keel-firewall-watch.timer keel-firewall-watch.service >/dev/null || true
+fi
+
+#DEBHELPER#
+
+exit 0
