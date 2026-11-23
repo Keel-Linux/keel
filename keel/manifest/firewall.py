@@ -41,6 +41,12 @@ from dataclasses import dataclass
 
 from keel.manifest.resolve import Resolved
 from keel.network import wireguard as wg
+from keel.spec.validate_firewall import (  # noqa: F401  (callers' names)
+    ENFORCE,
+    OFF,
+    REPORT,
+    STATES,
+)
 
 # where apply writes the ruleset; keel-firewall.service loads it at boot
 PATH = "etc/keel/firewall/keel-manifest.nft"
@@ -51,10 +57,6 @@ HEADER = (
     "# (handbook decision 0041): the public and mesh ports of every\n"
     "# process whose overlay is enabled; a change made here is overwritten"
 )
-ENFORCE = "enforce"
-REPORT = "report"
-OFF = "off"
-STATES = (ENFORCE, REPORT, OFF)
 POLICY = {ENFORCE: "drop", REPORT: "accept"}
 POLICY_RE = re.compile(r"hook input priority filter; policy (drop|accept);")
 REPORT_COUNTER = "keel-report: enforce would drop these"

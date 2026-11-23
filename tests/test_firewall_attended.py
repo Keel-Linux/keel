@@ -55,5 +55,25 @@ class TestAttended(unittest.TestCase):
                 "attended"].default, False)
 
 
+class TestImports(unittest.TestCase):
+    """keel.manifest imports keel.spec while it loads: the firewall's
+    modules must import alone, in a fresh interpreter, whatever comes
+    first (the database guard's ExecStartPre imports keel.manifest
+    first, and a cycle failed the server's start)"""
+
+    def test_each_firewall_module_imports_alone(self):
+        import subprocess
+        import sys
+        for name in ("keel.manifest.monit", "keel.manifest.firewall",
+                     "keel.spec.validate_firewall", "keel.system.firewall",
+                     "keel.system.listeners", "keel.system.fwcheck",
+                     "keel.diff.appliance", "keel.manifest"):
+            with self.subTest(module=name):
+                done = subprocess.run([sys.executable, "-c",
+                                       f"import {name}"],
+                                      capture_output=True, text=True)
+                self.assertEqual(done.returncode, 0, done.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

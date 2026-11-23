@@ -22,9 +22,15 @@ keel.system.firewall).
 import ipaddress
 from typing import Any
 
-from keel.manifest.firewall import ENFORCE, OFF, STATES
 from keel.spec.fields import mapping_error
 
+# the states of the ruleset; keel.manifest.firewall renders the first two.
+# Kept here, with no import of keel.manifest: keel.manifest imports
+# keel.spec while it loads, and the other way round would be a cycle
+ENFORCE = "enforce"
+REPORT = "report"
+OFF = "off"
+STATES = (ENFORCE, REPORT, OFF)
 KEY = "firewall"
 KEYS = ("enabled", "state", "allow")
 ALLOW_KEYS = ("port", "protocol", "from")
