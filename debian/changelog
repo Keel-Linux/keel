@@ -34,9 +34,18 @@ keel (0.23.99) unstable; urgency=high
     enforce, and leaves report out.
   * Syncthing listens on the loopback, not on a random port of every
     address, when the node has no overlay address.
+  * After the real test of this change (handbook PR 206): rule B runs
+    with no firewall key in the spec, as on every published node (the
+    sockets and sshd -T were asked only when the key was there); a
+    drop-in for nftables.service loads keel's table again after each
+    start, reload and stop of that unit, and keel-firewall-watch.timer
+    (keel firewall check --restore, every 30 s) after a flush by hand,
+    whatever the monitor section says; keel firewall check verifies the
+    file's rules, nft -c and the loaded policy, not the digest comment
+    alone; the running init fence no longer keeps rule B in report.
   * The package depends on nftables and iproute2. An upgrade changes no
-    rule and starts or restarts no unit (decision 0073): the change
-    comes at the next apply.
+    rule and starts or restarts no unit of the firewall (decision 0073):
+    the change comes at the next apply, which also starts the timer.
 
  -- KeelLinux maintainers <admin@keellinux.org>  Mon, 23 Nov 2026 00:00:00 +0000
 

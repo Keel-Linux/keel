@@ -167,6 +167,22 @@ class TestClassify(unittest.TestCase):
                          opened=frozenset(), overlay=None)
         self.assertEqual(found.undeclared, ())
 
+    def test_the_running_init_fence_is_keel_s_while_it_is_enabled(self):
+        """the real test of PR 307: simplehttpd.py on 60080 and 60443 kept
+        rule B in report on an interactive first boot"""
+        fence = (Listener("tcp", "*", None, 60080, (5,), ("simplehttpd.py",),
+                          ("turnkey-init-fence.service",)),
+                 Listener("tcp", "*", None, 60443, (5,), ("simplehttpd.py",),
+                          ("turnkey-init-fence.service",)))
+        found = classify(fence, frozenset(), ssh=(22,), allow=frozenset(),
+                         opened=frozenset(), overlay=None,
+                         fence=(60080, 60443))
+        self.assertTrue(found.clean)
+        self.assertEqual(found.closed, ())
+        unknown = classify(fence, frozenset(), ssh=(22,), allow=frozenset(),
+                           opened=frozenset(), overlay=None)
+        self.assertEqual(len(unknown.undeclared), 2)
+
     def test_a_pending_invite_s_listener_is_keel_s(self):
         found = classify((Listener("tcp", "::", None, 40123, (7,),
                                    ("python3",),

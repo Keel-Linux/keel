@@ -16,6 +16,9 @@ What counts as known without a unit of the manifests:
 - the overlay's own UDP port, a socket of the kernel with no process;
 - the DHCP client (UDP 68, and 546 on IPv6), which the ruleset always
   lets in;
+- the init fence's ports (`fence`) while its unit is enabled: the
+  ruleset accepts them for redirected packets only, and the fence is the
+  first boot's own page (decision 0097, section 2, item 4);
 - the listener of a pending mesh invite (`keel-mesh-invite@ID.service`,
   decision 0048), whose port the set `mesh_invites` opens until it
   expires.
@@ -152,15 +155,18 @@ def belongs(unit: str, units: frozenset[str]) -> bool:
 def classify(listeners: tuple[Listener, ...], units: frozenset[str], *,
              ssh: tuple[int, ...], allow: frozenset[Port],
              opened: frozenset[Port],
-             overlay: tuple[str, int] | None) -> Classified:
+             overlay: tuple[str, int] | None,
+             fence: tuple[int, ...] = ()) -> Classified:
     """`opened` the ports the ruleset opens; `overlay` the WireGuard
-    interface and UDP port, None without an overlay"""
+    interface and UDP port, None without an overlay; `fence` the init
+    fence's ports while its unit is enabled"""
     undeclared, closed = [], []
     for item in listeners:
         if loopback(item) or (overlay and item.device == overlay[0]):
             continue
         port = (item.port, item.protocol)
-        if known(item, ssh, allow, overlay):
+        if known(item, ssh, allow, overlay) or (
+                item.protocol == "tcp" and item.port in fence):
             continue
         if not any(belongs(unit, units) for unit in item.units):
             undeclared.append(item)

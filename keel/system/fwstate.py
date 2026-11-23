@@ -74,6 +74,9 @@ class FirewallState:
     # an enabled fence has none
     fence: tuple[int, ...] = ()
     fence_note: str = ""
+    # whether keel-firewall-watch.timer runs; None when not asked
+    # (--root, or systemctl cannot answer)
+    watch: bool | None = None
 
 
 def ports_in(lines: list[str]) -> set[int]:
@@ -157,7 +160,23 @@ def observe_firewall(tree: Tree, live: bool) -> FirewallState:
         listeners_source=listened,
         fence=fence,
         fence_note=fence_note,
+        watch=watch_active() if live else None,
     )
+
+
+WATCH_TIMER = "keel-firewall-watch.timer"
+
+
+def watch_active() -> bool | None:
+    """Whether keel-firewall-watch.timer runs; None when systemctl
+    cannot be asked"""
+    try:
+        out = subprocess.run(["systemctl", "is-active", "--quiet",
+                              WATCH_TIMER], capture_output=True, text=True,
+                             check=False)
+    except OSError:
+        return None
+    return out.returncode == 0
 
 
 def fence_ports(tree: Tree) -> tuple[tuple[int, ...], str]:

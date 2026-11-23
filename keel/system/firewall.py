@@ -67,7 +67,7 @@ from keel.system.actions import (
     Step,
     WriteFile,
 )
-from keel.system.fwstate import FirewallState
+from keel.system.fwstate import WATCH_TIMER, FirewallState
 from keel.system.listeners import classify, declared_units, unopened
 
 FIELD = "derived.firewall"
@@ -155,9 +155,10 @@ def build(doc: dict, resolved: Resolved, state: FirewallState,
 
 def opened_ports(ruleset: Ruleset, doc: dict) -> frozenset:
     """What the ruleset opens to someone: public, the mesh on the
-    overlay, and the administrator's ports"""
+    overlay, the administrator's ports and the fence's redirected ones"""
     return frozenset(ruleset.public) | frozenset(ruleset.mesh) | {
-        (item.port, item.protocol) for item in allow_of(doc)}
+        (item.port, item.protocol) for item in allow_of(doc)} | {
+        (port, "tcp") for port in ruleset.fence}
 
 
 def choose(doc: dict, resolved: Resolved, state: FirewallState,
@@ -198,7 +199,8 @@ def sorting(doc: dict, resolved: Resolved, state: FirewallState):
         opened=opened_ports(enforcing, doc),
         overlay=None if overlay is None else (
             overlay.get("interface") or wireguard.DEFAULT_INTERFACE,
-            overlay.get("listen_port") or wireguard.DEFAULT_PORT))
+            overlay.get("listen_port") or wireguard.DEFAULT_PORT),
+        fence=state.fence)
 
 
 def told(doc: dict, resolved: Resolved, state: FirewallState,
@@ -279,6 +281,10 @@ def load(ruleset: Ruleset, state: FirewallState, live: bool,
     else:
         actions.append(Note(f"unchanged (/{PATH}, loaded as table inet"
                             " keel)"))
+    if live and state.watch is False:
+        actions.append(Run(("systemctl", "start", WATCH_TIMER), (
+            f"start {WATCH_TIMER}: it loads a lost table again within"
+            " about 35 s, whatever the spec says")))
     return actions
 
 

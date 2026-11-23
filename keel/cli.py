@@ -404,6 +404,13 @@ def add_firewall_parser(subparsers) -> None:
         " ruleset file says; what monit runs, to load it again when it is"
         " lost",
     )
+    check_parser.add_argument(
+        "--restore",
+        action="store_true",
+        help="load the file again (nft -f) when the table is lost or"
+        " another and the file is sound; silent when all is well; what"
+        " keel-firewall-watch.timer runs",
+    )
     add_root_option(check_parser, "read keel's ruleset file of")
     check_parser.set_defaults(handler="keel.commands.firewall_check")
 

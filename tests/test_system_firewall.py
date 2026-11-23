@@ -31,7 +31,7 @@ from keel.system.actions import (
 from keel.system.actions import Plan
 from keel.system.effects import Effects
 from keel.system.execute import execute
-from keel.system.firewall import plan_firewall, waiting_notice
+from keel.system.firewall import PROMOTED, plan_firewall, waiting_notice
 from keel.system.listeners import Listener
 from keel.system.fwstate import FirewallState, observe_firewall, ssh_ports
 
@@ -340,12 +340,61 @@ class TestTransition(FirewallCase):
         self.assertIn("ct status dnat tcp dport { 60080, 60443 } accept",
                       self.ruleset(found).content)
 
+    def test_a_running_fence_does_not_keep_report(self):
+        fence = tuple(Listener("tcp", "*", None, port, (5,),
+                               ("simplehttpd.py",),
+                               ("turnkey-init-fence.service",))
+                      for port in (60080, 60443))
+        found = self.implicit(listeners=(SSHD,) + fence,
+                              listeners_source="ss", fence=(60080, 60443))
+        self.assertEqual(found[0].describe(), PROMOTED)
+        reported = self.actions(doc(enabled=None, state="report"),
+                                self.state(listeners=(SSHD,) + fence,
+                                           listeners_source="ss",
+                                           fence=(60080, 60443)))
+        self.assertFalse([a for a in reported
+                          if "60080" in a.describe()
+                          and "would close" in a.describe()])
+
     def test_a_fence_whose_ports_cannot_be_read_is_said(self):
         found = self.actions(state=self.state(
             fence_note="the init fence is enabled, and /r/etc/default/"
             "turnkey-init-fence names no fence port: its page will not"
             " answer under enforce"))
         self.assertIn("names no fence port", found[0].describe())
+
+
+class TestWatch(FirewallCase):
+    """keel-firewall-watch.timer loads a lost table again whatever the
+    spec says (the real test of PR 307: no published spec enables the
+    monitor). The package does not start it (0073); the apply that
+    writes the firewall on the live system does."""
+
+    def test_an_apply_starts_the_timer_that_is_not_running(self):
+        ruleset = self.rendered()
+        found = self.actions(state=self.state(
+            file=File("/r/x", ruleset.text), loaded=ruleset.digest,
+            watch=False))
+        self.assertEqual(found[-1].argv, ("systemctl", "start",
+                                          "keel-firewall-watch.timer"))
+        self.assertIn("within about 35 s", found[-1].describe())
+
+    def test_a_running_timer_or_a_root_is_left_alone(self):
+        for state, live in ((self.state(watch=True), True),
+                            (self.state(watch=None), True),
+                            (self.state(watch=False), False)):
+            found = self.actions(state=state, live=live,
+                                 available=LIVE if live else frozenset())
+            self.assertFalse([a for a in found
+                              if "keel-firewall-watch" in a.describe()])
+
+    def test_the_timer_is_asked_on_the_live_system_only(self):
+        def run(argv, **kwargs):
+            code = 0 if argv[:2] == ["systemctl", "is-active"] else 1
+            return subprocess.CompletedProcess(argv, code, "", "")
+        with mock.patch("keel.system.fwstate.subprocess.run", run):
+            self.assertTrue(observe_firewall(Tree(self.root), True).watch)
+        self.assertIsNone(observe_firewall(Tree(self.root), False).watch)
 
 
 class TestFailedLoad(FirewallCase):

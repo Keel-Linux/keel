@@ -11,9 +11,10 @@
 # systemd skips the unit.
 #
 # A file nft refuses fails the unit: the node comes up without keel's
-# table, and is degraded, which is visible; Monit's check keel-firewall
-# restarts this unit when the table is lost or differs (keel firewall
-# check). The package never starts or restarts it on an upgrade
+# table, and is degraded, which is visible. A table lost later comes
+# back by keel's drop-in for nftables.service and by
+# keel-firewall-watch.timer (keel firewall check --restore), whatever
+# the spec says. The package never starts or restarts it on an upgrade
 # (debian/rules, --no-start; decision 0073): the next apply loads it.
 #
 # After nftables.service, whose /etc/nftables.conf flushes the whole

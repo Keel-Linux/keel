@@ -109,6 +109,8 @@ class Ruleset:
     digest: str
     state: str = ENFORCE
     ssh: tuple[int, ...] = ()
+    # the init fence's ports, accepted for redirected packets only
+    fence: tuple[int, ...] = ()
 
 
 def render(resolved: Resolved, states: dict, wireguard: dict | None,
@@ -178,7 +180,8 @@ def render(resolved: Resolved, states: dict, wireguard: dict | None,
         "}\n"
     )
     return Ruleset(text, tuple(sorted(public)), tuple(opened_mesh),
-                   tuple(notes), digest, state, tuple(sorted(set(ssh))))
+                   tuple(notes), digest, state, tuple(sorted(set(ssh))),
+                   tuple(sorted(set(fence))))
 
 
 def exposed(resolved: Resolved, states: dict
@@ -253,6 +256,30 @@ def _rules(prefix: str, ports: list[Port]) -> list[str]:
         match = _one_or_set(numbers)
         rules.append(f"{prefix}{protocol} dport {match} accept")
     return rules
+
+
+CHAIN_HEAD = "\tchain input {\n"
+TYPE_RE = re.compile(r"\t\ttype filter hook input priority filter;"
+                     r" policy (drop|accept);\n")
+TAIL = "\t}\n}\n"
+
+
+def digest_of(text: str) -> str | None:
+    """The digest of the rules a file of keel's really holds, computed
+    as render() computes it, to compare with the one in its comment; a
+    file of keel 0.23.97 (no state line) has the digest of its sets and
+    rules alone. None for a file of another shape."""
+    found = COMMENT_RE.search(text or "")
+    if found is None or CHAIN_HEAD not in text:
+        return None
+    sets = text[text.index("\n", found.end()) + 1:text.index(CHAIN_HEAD)]
+    head = TYPE_RE.search(text, text.index(CHAIN_HEAD))
+    if head is None or not text.endswith(TAIL):
+        return None
+    body = text[head.end():-len(TAIL)]
+    policy = head.group(1) if "\n# state: " in text else ""
+    return hashlib.sha256((sets + policy + body).encode()).hexdigest()[
+        :DIGEST_LENGTH]
 
 
 def loaded_digest(listing: str) -> str | None:

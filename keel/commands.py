@@ -378,11 +378,25 @@ def network_mtu(args) -> int:
 
 def firewall_check(args) -> int:
     """Whether the kernel holds the table keel's file says (decision
-    0097); Monit runs it and restarts keel-firewall.service on drift"""
+    0097); with --restore, load a lost table again from a sound file,
+    and say nothing when all is well (keel-firewall-watch.timer)"""
     from keel.system import fwcheck
-    code, message = fwcheck.check(getattr(args, "root", ROOT_DEFAULT))
-    (print if code == exits.OK else error)(message)
-    return code
+    root = getattr(args, "root", ROOT_DEFAULT)
+    found = fwcheck.check(root)
+    if not getattr(args, "restore", False):
+        (print if found.code == exits.OK else error)(found.message)
+        return found.code
+    if found.code == exits.OK:
+        return exits.OK
+    if not found.restorable:
+        error(found.message)
+        return found.code
+    problem = fwcheck.restore(root)
+    if problem is not None:
+        error(f"{found.message}; nft -f failed: {problem}")
+        return exits.APPLY_FAILED
+    warn(f"{found.message}: loaded again")
+    return exits.OK
 
 
 def network_wireguard_key(args) -> int:

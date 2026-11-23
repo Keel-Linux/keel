@@ -1311,12 +1311,34 @@ holds is the one the file says.
 `keel-firewall.service`, shipped enabled, loads the file at every boot
 before the network comes up, and only while the file exists. A file nft
 refuses at boot fails the unit, and the node is degraded and open: the
-failure is visible. Monit's check `keel-firewall` (in keel's Monit file
-wherever the state is not off) runs `keel firewall check`, which
-compares the digest of the loaded table with the file's; a table absent
-or another for 2 cycles restarts `keel-firewall.service`, which loads
-the file again, so a `systemctl restart nftables.service` by hand leaves
-the node open for a few cycles only. `firewall.state: off` removes
+failure is visible.
+
+**A lost table comes back, whatever the spec says.** The real test of
+pull request 307 found Monit's check useless on a published node: no
+published spec has a `monitor` section, and after `systemctl restart
+nftables.service` the node stayed open until an apply. So:
+
+- a drop-in for `nftables.service`
+  (`/usr/lib/systemd/system/nftables.service.d/keel-firewall.conf`)
+  loads keel's file right after each start, reload and stop of that
+  unit, whose `/etc/nftables.conf` and `ExecStop` flush the whole
+  ruleset: the node is open between the two nft runs, milliseconds;
+- `keel-firewall-watch.timer` runs `keel firewall check --restore`
+  every 30 s (5 s of accuracy) for a flush by hand (`nft flush
+  ruleset`, `nft delete table inet keel`), which leaves no trace a unit
+  could wait on: open for at most about 35 s. The package does not
+  start the timer (decision 0073); the apply that writes the firewall on
+  the live system starts it, and so does the boot;
+- `keel firewall check` trusts no comment: the rules in the file must
+  be the ones its digest names, `nft -c` must accept the file, and the
+  loaded table must carry that digest and the file's policy. `--restore`
+  loads a sound file again with `nft -f` and says so; a broken file is
+  never loaded, the timer's unit fails, and the node is degraded;
+- where the spec enables the monitor, Monit's check `keel-firewall`
+  runs the same check and restarts `keel-firewall.service`.
+
+CrowdSec's tables are CrowdSec's: keel does not put them back after a
+flush (decision 0097, section 1, item 4). `firewall.state: off` removes
 keel's file and deletes the `inet keel` table.
 
 An upgrade of the package changes no rule: the postinst applies
