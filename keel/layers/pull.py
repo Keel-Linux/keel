@@ -210,6 +210,28 @@ class Places:
         manifest = self.manifest_name(name)
         return manifest[: -len(MANIFEST_SUFFIX)] + PACKAGES_SUFFIX
 
+    def digest_manifest_name(self, name: str, sha256: str) -> str | None:
+        """Where the flat layout keeps the manifest of one version of a layer
+
+        The mirror publishes every layer also under the names that carry its
+        sha256, the cache layout (apt#112), so a parent stays reachable when
+        the plain name moved to a rebuilt version. None for a release
+        revision, whose directory already holds the whole chain.
+        """
+        if self.release is not None:
+            return None
+        return manifests.cache_stem(name, sha256) + MANIFEST_SUFFIX
+
+    def packages_names(self, layer: Manifest) -> tuple[str, ...]:
+        """Every name the package list may have beside the manifest, best first"""
+        plain = self.packages_name(layer.name)
+        if self.release is not None:
+            return (plain,)
+        return (
+            manifests.cache_stem(layer.name, layer.sha256) + PACKAGES_SUFFIX,
+            plain,
+        )
+
     def tarball_names(self, layer: Manifest) -> tuple[str, ...]:
         """Every name the source may keep the tarball under, best first"""
         names = (
@@ -282,6 +304,37 @@ def load_top(
         raise LayerError(exits.MANIFEST_INVALID, str(e)) from e
 
 
+def load_parent(
+    source: Source, child: Manifest, places: Places = Places()
+) -> Manifest:
+    """The parent manifest of `child`, the version the child was built on
+
+    The plain name first. When it holds another version, or is not there,
+    the flat layout is asked for the name that carries the parent's
+    sha256. The version found is never substituted: the caller still
+    compares its sha256 with the one the child recorded.
+    """
+    try:
+        parent = load_source_manifest(source, child.parent, places)
+    except LayerError as e:
+        if e.code != exits.LAYER_UNAVAILABLE:
+            raise
+        parent, problem = None, e
+    if parent is not None and parent.sha256 == child.parent_sha256:
+        return parent
+    other = places.digest_manifest_name(child.parent, child.parent_sha256)
+    if other is not None:
+        try:
+            text = source.read_text(other)
+        except OSError:
+            text = None
+        if text is not None:
+            return check_manifest(source.path(other), text, child.parent)
+    if parent is None:
+        raise problem
+    return parent
+
+
 def resolve_chain(
     top: Manifest, source: Source, places: Places = Places()
 ) -> list[Manifest]:
@@ -295,7 +348,7 @@ def resolve_chain(
     seen = {top.name}
     current = top
     while current.kind != KIND_ROOTFS:
-        parent = load_source_manifest(source, current.parent, places)
+        parent = load_parent(source, current, places)
         if parent.sha256 != current.parent_sha256:
             raise LayerError(
                 exits.LAYER_MISMATCH,
@@ -418,18 +471,20 @@ def fetch_packages_list(
     declared = layer.fields.get("packages_sha256")
     if declared is None:
         return False
-    try:
-        with source.open(places.packages_name(layer.name)) as fob:
-            data = fob.read(PACKAGES_LIST_MAX + 1)
-    except OSError:
-        return False
-    if len(data) > PACKAGES_LIST_MAX:
-        return False
-    if hashlib.sha256(data).hexdigest() != declared:
-        return False
-    with open(target, "wb") as out:
-        out.write(data)
-    return True
+    for name in places.packages_names(layer):
+        try:
+            with source.open(name) as fob:
+                data = fob.read(PACKAGES_LIST_MAX + 1)
+        except OSError:
+            continue
+        if len(data) > PACKAGES_LIST_MAX:
+            continue
+        if hashlib.sha256(data).hexdigest() != declared:
+            continue
+        with open(target, "wb") as out:
+            out.write(data)
+        return True
+    return False
 
 
 def remove_quietly(path: str) -> None:

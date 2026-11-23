@@ -392,3 +392,54 @@ class TestSource(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestParentBySha256(PullTestCase):
+    """apt#112: the plain name of a parent moved to a rebuilt version"""
+
+    def move_core(self):
+        """Keep the old core under its sha256 name, put another at the plain name"""
+        old = self.fields["core"]["sha256"]
+        for suffix in (".manifest", ".tar.zst"):
+            os.rename(join(self.source, "core" + suffix),
+                      join(self.source, f"core-{old}{suffix}"))
+        self.rewrite_other_core()
+        return old
+
+    def rewrite_other_core(self):
+        data = b"another core"
+        write(join(self.source, "core.tar.zst"), data)
+        write_manifest(self.source,
+                       dict(self.fields["core"], sha256=sha256(data),
+                            size=str(len(data))))
+
+    def test_the_parent_is_found_under_its_sha256_name(self):
+        old = self.move_core()
+        report = self.pull()
+        self.assertEqual([r.name for r in report.results], ["core", "lamp"])
+        self.assertEqual(report.results[0].sha256, old)
+        self.assertTrue(exists(self.cached("core")))
+
+    def test_no_sha256_name_is_still_a_mismatch(self):
+        self.rewrite_other_core()
+        error = self.failing()
+        self.assertEqual(error.code, exits.LAYER_MISMATCH)
+        self.assertIn("lamp: parent_sha256", str(error))
+
+    def test_a_missing_plain_parent_is_found_under_its_sha256_name(self):
+        old = self.fields["core"]["sha256"]
+        os.rename(join(self.source, "core.manifest"),
+                  join(self.source, f"core-{old}.manifest"))
+        report = self.pull()
+        self.assertEqual(report.results[0].sha256, old)
+
+    def test_a_sha256_name_holding_another_layer_is_invalid(self):
+        old = self.move_core()
+        write_manifest(self.source, dict(self.fields["lamp"]),
+                       name=f"core-{old}")
+        error = self.failing()
+        self.assertEqual(error.code, exits.MANIFEST_INVALID)
+
+    def test_a_release_revision_does_not_look_for_sha256_names(self):
+        self.assertIsNone(
+            pulling.Places("2026-10-26", 1).digest_manifest_name("core", OTHER))
