@@ -77,6 +77,9 @@ class FirewallState:
     # whether keel-firewall-watch.timer runs; None when not asked
     # (--root, or systemctl cannot answer)
     watch: bool | None = None
+    # `systemctl is-enabled` of the timer: masked or disabled is the
+    # administrator's, and left alone
+    watch_enabled: str | None = None
     # said when a running sshd listens on a port its configuration does
     # not name (both are opened)
     ssh_note: str = ""
@@ -165,6 +168,7 @@ def observe_firewall(tree: Tree, live: bool) -> FirewallState:
         fence=fence,
         fence_note=fence_note,
         watch=watch_active() if live else None,
+        watch_enabled=watch_enabled() if live else None,
         ssh_note=ssh_note,
     )
 
@@ -187,6 +191,17 @@ def with_running(configured: tuple[int, ...], source: str,
 
 
 WATCH_TIMER = "keel-firewall-watch.timer"
+
+
+def watch_enabled() -> str | None:
+    """`systemctl is-enabled` of the timer (enabled, disabled, masked,
+    ...); None when systemctl cannot be asked"""
+    try:
+        out = subprocess.run(["systemctl", "is-enabled", WATCH_TIMER],
+                             capture_output=True, text=True, check=False)
+    except OSError:
+        return None
+    return out.stdout.strip() or None
 
 
 def watch_active() -> bool | None:

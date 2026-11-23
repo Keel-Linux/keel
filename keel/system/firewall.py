@@ -326,10 +326,26 @@ def load(ruleset: Ruleset, state: FirewallState, live: bool,
         actions.append(Note(f"unchanged (/{PATH}, loaded as table inet"
                             " keel)"))
     if live and state.watch is False:
-        actions.append(Run(("systemctl", "start", WATCH_TIMER), (
-            f"start {WATCH_TIMER}: it loads a lost table again within"
-            " about 35 s, whatever the spec says")))
+        actions.append(watch_start(state))
     return actions
+
+
+LEFT_ALONE = ("masked", "disabled")
+WITHOUT_WATCH = ("a lost table comes back only by the drop-in of"
+                 " nftables.service, a reboot or the next apply")
+
+
+def watch_start(state: FirewallState) -> Action:
+    """Start the watch timer; one the administrator masked or disabled
+    is left alone and said. Its start never fails the apply, also under
+    enforce: the table is loaded either way, and the timer only brings a
+    lost one back"""
+    if state.watch_enabled in LEFT_ALONE:
+        return Note(f"{WATCH_TIMER} is {state.watch_enabled}: left alone;"
+                    f" {WITHOUT_WATCH}")
+    return Attempt(("systemctl", "start", WATCH_TIMER), (
+        f"start {WATCH_TIMER}: it loads a lost table again within about"
+        " 35 s, whatever the spec says"), f"not started: {WITHOUT_WATCH}")
 
 
 def guard(state: FirewallState, live: bool,

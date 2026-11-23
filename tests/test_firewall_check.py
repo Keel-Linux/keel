@@ -12,6 +12,7 @@ node open for a few cycles only.
 
 import os
 import shlex
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -339,8 +340,57 @@ class TestTableLoss(unittest.TestCase):
                      "LogLevelMax=notice", "SyslogLevel=warning"):
             self.assertIn(line, service)
 
-    def test_an_upgrade_starts_neither_the_timer_nor_anything(self):
-        """decision 0073: the next apply starts the timer"""
-        with open(os.path.join(REPO, "debian", "rules")) as fob:
-            self.assertIn("dh_installsystemd --name=keel-firewall-watch"
-                          " --no-start\n", fob.read())
+
+
+class TestMaintainerScripts(unittest.TestCase):
+    """The second review: the generated preinst stopped
+    keel-firewall-watch.timer on every upgrade, and --no-start never
+    started it again. The scripts dh_installsystemd generates from
+    debian/rules are read here, not the rules file: an upgrade must
+    neither stop, start nor restart keel's firewall units (0073)."""
+
+    @classmethod
+    def setUpClass(cls):
+        if shutil.which("dh_installsystemd") is None:
+            if os.environ.get("CI"):
+                raise AssertionError("dh_installsystemd (debhelper) is"
+                                     " missing in CI")
+            raise unittest.SkipTest("debhelper is not installed")
+        cls.tmp = tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR"))
+        shutil.copytree(os.path.join(REPO, "debian"),
+                        os.path.join(cls.tmp.name, "debian"))
+        done = subprocess.run(["make", "-s", "-f", "debian/rules",
+                               "override_dh_installsystemd"],
+                              cwd=cls.tmp.name, capture_output=True,
+                              text=True)
+        assert done.returncode == 0, done.stderr
+        generated = os.path.join(cls.tmp.name, "debian", ".debhelper",
+                                 "generated", "keel")
+        cls.scripts = {}
+        for name in ("preinst", "postinst", "prerm"):
+            path = os.path.join(generated, f"{name}.service")
+            with open(path) as fob:
+                cls.scripts[name] = fob.read()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def sections(self, script: str) -> list[str]:
+        return self.scripts[script].split("# End automatically added")
+
+    def test_an_upgrade_stops_no_firewall_unit(self):
+        for section in self.sections("preinst"):
+            if "keel-firewall" in section:
+                self.assertNotIn("stop", section)
+
+    def test_an_upgrade_starts_or_restarts_no_firewall_unit(self):
+        for section in self.sections("postinst"):
+            if "keel-firewall" in section:
+                for verb in ("deb-systemd-invoke", "start", "restart"):
+                    self.assertNotIn(verb, section)
+
+    def test_the_units_are_enabled_for_the_next_boot(self):
+        for unit in ("keel-firewall.service", "keel-firewall-watch.timer"):
+            self.assertIn(f"deb-systemd-helper enable '{unit}'",
+                          self.scripts["postinst"])

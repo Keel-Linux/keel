@@ -22,6 +22,7 @@ from keel.inspect.tree import File, Tree
 from keel.manifest.facts import gather
 from keel.manifest.firewall import HEADER, PATH, render
 from keel.system.actions import (
+    Attempt,
     InstallRuleset,
     Note,
     Refuse,
@@ -444,9 +445,22 @@ class TestWatch(FirewallCase):
         found = self.actions(state=self.state(
             file=File("/r/x", ruleset.text), loaded=ruleset.digest,
             watch=False))
+        self.assertIsInstance(found[-1], Attempt)
         self.assertEqual(found[-1].argv, ("systemctl", "start",
                                           "keel-firewall-watch.timer"))
         self.assertIn("within about 35 s", found[-1].describe())
+        self.assertIn("a lost table comes back only by the drop-in of"
+                      " nftables.service", found[-1].otherwise)
+
+    def test_a_masked_or_disabled_timer_is_left_alone_and_said(self):
+        """the second review: a plain systemctl start of a masked timer
+        failed every apply"""
+        for enabled in ("masked", "disabled"):
+            found = self.actions(state=self.state(watch=False,
+                                                  watch_enabled=enabled))
+            self.assertFalse([a for a in found if isinstance(a, Attempt)])
+            self.assertIn(f"keel-firewall-watch.timer is {enabled}: left"
+                          " alone", found[-1].describe())
 
     def test_a_running_timer_or_a_root_is_left_alone(self):
         for state, live in ((self.state(watch=True), True),
@@ -459,10 +473,15 @@ class TestWatch(FirewallCase):
 
     def test_the_timer_is_asked_on_the_live_system_only(self):
         def run(argv, **kwargs):
-            code = 0 if argv[:2] == ["systemctl", "is-active"] else 1
-            return subprocess.CompletedProcess(argv, code, "", "")
+            if argv[:2] == ["systemctl", "is-active"]:
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            if argv[:2] == ["systemctl", "is-enabled"]:
+                return subprocess.CompletedProcess(argv, 1, "masked\n", "")
+            return subprocess.CompletedProcess(argv, 1, "", "")
         with mock.patch("keel.system.fwstate.subprocess.run", run):
-            self.assertTrue(observe_firewall(Tree(self.root), True).watch)
+            found = observe_firewall(Tree(self.root), True)
+        self.assertTrue(found.watch)
+        self.assertEqual(found.watch_enabled, "masked")
         self.assertIsNone(observe_firewall(Tree(self.root), False).watch)
 
 
@@ -580,9 +599,8 @@ class TestBootUnit(FirewallCase):
         ruleset; the next apply a person runs does"""
         debian = join(os.path.dirname(os.path.dirname(os.path.abspath(
             __file__))), "debian")
-        with open(join(debian, "rules")) as fob:
-            self.assertIn("dh_installsystemd --name=keel-firewall"
-                          " --no-start\n", fob.read())
+        # the units' scripts: tests/test_firewall_check.py,
+        # TestMaintainerScripts, reads what dh_installsystemd generates
         with open(join(debian, "keel.postinst")) as fob:
             # the commands, not the comments or a message it echoes
             run = [line.split("||")[0] for line in fob.read().splitlines()
