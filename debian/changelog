@@ -73,6 +73,10 @@ keel (0.23.99) unstable; urgency=high
     the watch stays failed while a problem lasts, and a table lost
     beside a broken file is said at once; the prerm stops the watch
     timer on removal.
+  * After the third real test: a repaired (empty or cut) ruleset keeps
+    the state the node was in, from /var/lib/keel/firewall/state, which
+    a broken file cannot lose; a busy inviter answers 409 and keeps the
+    invite, so the same join line works again.
   * The package depends on nftables and iproute2. An upgrade changes no
     rule and starts or restarts no unit of the firewall (decision 0073):
     the change comes at the next apply, which also starts the timer.
