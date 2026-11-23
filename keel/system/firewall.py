@@ -279,6 +279,7 @@ def on(doc: dict, resolved: Resolved, state: FirewallState, live: bool,
     ruleset = build(doc, resolved, state, target)
     said += told(doc, resolved, state, ruleset)
     said += ssh_said(resolved, doc, state)
+    said += [state.ssh_note] if state.ssh_note else []
     said += [state.fence_note] if state.fence_note else []
     actions: list[Action] = [Note(note) for note in
                              said + list(ruleset.notes)]

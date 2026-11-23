@@ -187,8 +187,7 @@ def classify(listeners: tuple[Listener, ...], units: frozenset[str], *,
         if loopback(item) or (overlay and item.device == overlay[0]):
             continue
         port = (item.port, item.protocol)
-        if known(item, ssh, allow, overlay) or (
-                item.protocol == "tcp" and item.port in fence):
+        if known(item, ssh, allow, overlay) or fenced(item, fence):
             continue
         if port in mesh and not on_overlay(item, overlay_addresses):
             undeclared.append(item)
@@ -200,6 +199,34 @@ def classify(listeners: tuple[Listener, ...], units: frozenset[str], *,
     return Classified(tuple(undeclared), tuple(closed), tuple(reasons))
 
 
+FENCE_UNIT = "turnkey-init-fence.service"
+SSH_UNITS = ("ssh.service", "ssh.socket")
+SSHD_NAMES = ("sshd",)
+
+
+def fenced(item: Listener, fence: tuple[int, ...]) -> bool:
+    """A socket of the init fence's own unit on one of its ports"""
+    return (item.protocol == "tcp" and item.port in fence
+            and bool(item.units)
+            and all(unit == FENCE_UNIT for unit in item.units))
+
+
+def sshd_ports(listeners: tuple[Listener, ...] | None) -> tuple[int, ...]:
+    """The TCP ports a running sshd listens on now, on an address that is
+    not a loopback: its units (ssh.service, ssh.socket, sshd@...), or a
+    process named sshd. What `sshd -T` cannot see: SSHD_OPTS="-p N" of
+    /etc/default/ssh, or a Port edited and sshd not restarted"""
+    found = set()
+    for item in listeners or ():
+        if item.protocol != "tcp" or loopback(item):
+            continue
+        if any(unit in SSH_UNITS or unit.startswith("sshd@")
+               for unit in item.units) or any(
+                name in SSHD_NAMES for name in item.names):
+            found.add(item.port)
+    return tuple(sorted(found))
+
+
 def wireguard_default() -> str:
     from keel.network import wireguard
     return wireguard.DEFAULT_INTERFACE
@@ -209,9 +236,12 @@ def on_overlay(item: Listener, addresses: frozenset[str]) -> bool:
     """Bound to an overlay address or the VIP, which only wg0 reaches
     under enforce"""
     try:
-        return str(ipaddress.ip_address(item.address)) in addresses
+        address = ipaddress.ip_address(item.address)
     except ValueError:
         return False
+    mapped = getattr(address, "ipv4_mapped", None)
+    return str(address) in addresses or (
+        mapped is not None and str(mapped) in addresses)
 
 
 def known(item: Listener, ssh: tuple[int, ...], allow: frozenset[Port],

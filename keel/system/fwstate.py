@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from keel.inspect.tree import File, Tree
 from keel.manifest.firewall import PATH, TABLE, loaded_digest
 from keel.network import marker
-from keel.system.listeners import Listener, observe_listeners
+from keel.system.listeners import Listener, observe_listeners, sshd_ports
 
 SSHD_CONFIG = "etc/ssh/sshd_config"
 SSHD_DROP_INS = "etc/ssh/sshd_config.d/*.conf"
@@ -77,6 +77,9 @@ class FirewallState:
     # whether keel-firewall-watch.timer runs; None when not asked
     # (--root, or systemctl cannot answer)
     watch: bool | None = None
+    # said when a running sshd listens on a port its configuration does
+    # not name (both are opened)
+    ssh_note: str = ""
 
 
 def ports_in(lines: list[str]) -> set[int]:
@@ -148,6 +151,7 @@ def ask(run, argv: tuple[str, ...]) -> str | None:
 def observe_firewall(tree: Tree, live: bool) -> FirewallState:
     ports, source = ssh_ports(tree, live)
     listeners, listened = observe_listeners(tree, live)
+    ports, ssh_note = with_running(ports, source, sshd_ports(listeners))
     fence, fence_note = fence_ports(tree)
     return FirewallState(
         file=tree.read(PATH),
@@ -161,7 +165,25 @@ def observe_firewall(tree: Tree, live: bool) -> FirewallState:
         fence=fence,
         fence_note=fence_note,
         watch=watch_active() if live else None,
+        ssh_note=ssh_note,
     )
+
+
+def with_running(configured: tuple[int, ...], source: str,
+                 running: tuple[int, ...]) -> tuple[tuple[int, ...], str]:
+    """The union of the ports sshd is configured for and the ports a
+    running sshd listens on now, and what the plan says when they
+    differ. Configured ports that cannot be determined stay unknown, and
+    the plan refuses as before."""
+    if not configured:
+        return configured, ""
+    extra = [port for port in running if port not in configured]
+    if not extra:
+        return configured, ""
+    named = ", ".join(str(port) for port in extra)
+    return (tuple(sorted(set(configured) | set(extra))),
+            f"sshd listens now on tcp {named}, which its configuration"
+            f" ({source}) does not name: both stay open")
 
 
 WATCH_TIMER = "keel-firewall-watch.timer"

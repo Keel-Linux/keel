@@ -216,6 +216,43 @@ class TestClassify(unittest.TestCase):
                          overlay_addresses=frozenset({"fd00:1::1"}))
         self.assertEqual(found, (wide,))
 
+    def test_another_process_on_a_fence_port_is_still_named(self):
+        """the second review: the exemption is the fence unit's own
+        sockets, not the port numbers"""
+        other = Listener("tcp", "*", None, 60080, (6,), ("nc",),
+                         ("session-2.scope",))
+        found = classify((other,), frozenset(), ssh=(22,),
+                         allow=frozenset(), opened=frozenset(),
+                         overlay=None, fence=(60080, 60443))
+        self.assertEqual(found.undeclared, (other,))
+
+    def test_an_ipv4_mapped_overlay_address_is_on_the_overlay(self):
+        mapped = Listener("tcp", "::ffff:10.9.0.1", None, 3306, (9,),
+                          ("mariadbd",), ("mariadb.service",))
+        found = classify((mapped,), frozenset({"mariadb.service"}),
+                         ssh=(22,), allow=frozenset(),
+                         opened=frozenset({(3306, "tcp")}),
+                         overlay=("wg0", 51820),
+                         mesh=frozenset({(3306, "tcp")}),
+                         overlay_addresses=frozenset({"10.9.0.1"}))
+        self.assertTrue(found.clean)
+
+    def test_the_ports_a_running_sshd_listens_on(self):
+        from keel.system.listeners import sshd_ports
+        found = sshd_ports((
+            Listener("tcp", "0.0.0.0", None, 2200, (1,), ("sshd",),
+                     ("ssh.service",)),
+            Listener("tcp", "::", None, 2201, (1,), ("systemd",),
+                     ("ssh.socket",)),
+            Listener("tcp", "::", None, 2202, (1,), ("sshd",),
+                     ("sshd@1-10.0.0.2:22-10.0.0.9:5000.service",)),
+            Listener("tcp", "127.0.0.1", None, 2203, (1,), ("sshd",),
+                     ("ssh.service",)),
+            Listener("tcp", "::", None, 80, (2,), ("nginx",),
+                     ("nginx.service",))))
+        self.assertEqual(found, (2200, 2201, 2202))
+        self.assertEqual(sshd_ports(None), ())
+
     def test_a_pending_invite_s_listener_is_keel_s(self):
         found = classify((Listener("tcp", "::", None, 40123, (7,),
                                    ("python3",),

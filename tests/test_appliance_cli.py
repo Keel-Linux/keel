@@ -468,6 +468,18 @@ class TestLiveEntry(ApplianceCliCase):
                       " sockets belong to no unit of the manifests: tcp"
                       " [::]:9999", out)
 
+    def test_the_port_a_running_sshd_holds_stays_open(self):
+        """the second review: SSHD_OPTS="-p 2200" in /etc/default/ssh,
+        or a Port edited and sshd not restarted: sshd -T says 22, the
+        daemon listens on 2200. Both stay open, and the plan says so"""
+        self.ss = SS_CORE.replace("0.0.0.0:22 ", "0.0.0.0:2200 ")
+        out = self.apply_live("simple")
+        self.assertIn("would write /etc/keel/firewall/keel-manifest.nft"
+                      " (enforce): public tcp 22, 2200, 12320, 12321", out)
+        self.assertIn("derived.firewall: sshd listens now on tcp 2200,"
+                      " which its configuration (sshd -T) does not name:"
+                      " both stay open", out)
+
     def test_each_spelling_from_the_command(self):
         """the table of docs/spec.md: what each value means"""
         cases = (("", "enforce"),
