@@ -254,8 +254,11 @@ class Admitter:
         with sync.sync_lock(self.root, sync.BUSY_WAIT, "an invite admission",
                             reentrant=True) as held:
             if not held:
+                # 409, as for a network change that waits: the listener
+                # passes it on and keeps the invite, where a 503 says the
+                # root side is gone and ends it (the third real test)
                 self.log(f"{self.name}: {sync.BUSY}; the invite stays")
-                return refusal(503, sync.BUSY)
+                return refusal(409, sync.BUSY)
             try:
                 invites.consume(self.root, self.invite.invite_id,
                                 self.clock())
