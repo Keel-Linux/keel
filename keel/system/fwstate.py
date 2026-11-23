@@ -49,6 +49,11 @@ LISTEN_RE = re.compile(
     r"(?:\s+rdomain\s+\S+)?\s*$", re.IGNORECASE)
 INCLUDE_RE = re.compile(r"^\s*include[\s=]+(.+?)\s*$", re.IGNORECASE)
 STREAM_RE = re.compile(r"(\S+) \(Stream\)")
+# the state keel last wrote, enforce or report, beside the ruleset file
+# and apart from it: an empty or cut file loses its policy line, and the
+# state the node was in must survive it (the third real test of 0097)
+RECORD = "var/lib/keel/firewall/state"
+RECORDED = ("enforce", "report")
 FENCE_UNIT = ("etc/systemd/system/multi-user.target.wants/"
               "turnkey-init-fence.service")
 FENCE_DEFAULTS = "etc/default/turnkey-init-fence"
@@ -83,6 +88,8 @@ class FirewallState:
     # said when a running sshd listens on a port its configuration does
     # not name (both are opened)
     ssh_note: str = ""
+    # the state keel last wrote (RECORD); None when there is none
+    recorded: str | None = None
 
 
 def ports_in(lines: list[str]) -> set[int]:
@@ -171,7 +178,14 @@ def observe_firewall(tree: Tree, live: bool) -> FirewallState:
         watch=watch_active() if live else None,
         watch_enabled=watch_enabled() if live else None,
         ssh_note=ssh_note,
+        recorded=recorded_state(tree),
     )
+
+
+def recorded_state(tree: Tree) -> str | None:
+    found = tree.read(RECORD)
+    value = (found.text or "").strip() if found.readable else ""
+    return value if value in RECORDED else None
 
 
 SSHD_MAIN = ("systemctl", "show", "--value", "-p", "MainPID", "ssh.service")

@@ -44,6 +44,7 @@ from keel.system.firewall import (
 from keel.system.fwstate import (
     bridges_of,
     fence_ports,
+    recorded_state,
     ssh_ports,
     table_digest,
 )
@@ -217,7 +218,8 @@ def firewall_fields(declared: dict, resolved, states: dict,
                           None, KEEL_RULESET if keel_s else None),
                 FieldDiff("derived.firewall.state", NOT_COMPARED,
                           reason=OFF_WARNING)] + warnings
-    expected = expected_state(said, fw.file_state(file.text))
+    expected = expected_state(said, fw.file_state(file.text)
+                              or recorded_state(tree))
     wanted = f"{RULESET}, {expected}"
     live = tree.root == LIVE_ROOT
     ssh, source = ssh_ports(tree, live)

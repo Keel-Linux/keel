@@ -1281,7 +1281,9 @@ there and what to do: declare each in `firewall.allow`, stop it, or set
 `firewall.state: enforce`. A port of a declared process that the
 manifests do not list (UDP 12321 of Webmin's `miniserv.pl`) does not
 keep it there: enforce closes it, and the plan names it. Once keel's
-file is in enforce, it is the record: an apply with no word keeps it,
+file is in enforce, it is the record (and `/var/lib/keel/firewall/state`
+beside it, which an empty or cut file cannot lose, so a repair keeps
+enforce: rule B is for the first move only): an apply with no word keeps it,
 and only `firewall.state: report` or `off` goes back. The ntfy notice of
 decision 0085 for a node that waits is not built; when it is, it sends
 the plan's line (`keel.system.firewall.waiting_notice`).

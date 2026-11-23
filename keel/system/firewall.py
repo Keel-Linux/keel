@@ -71,7 +71,7 @@ from keel.system.actions import (
     WriteFile,
 )
 from keel.system.dbmariadb import overlay_addresses
-from keel.system.fwstate import WATCH_TIMER, FirewallState
+from keel.system.fwstate import RECORD, WATCH_TIMER, FirewallState
 from keel.system.listeners import classify, declared_units, unopened
 
 FIELD = "derived.firewall"
@@ -132,6 +132,9 @@ def off(state: FirewallState, live: bool,
     if written_by_keel(state):
         actions.append(RemoveFile(PATH, f"remove /{PATH}, which keel wrote:"
                                   " the firewall is off in the spec"))
+    if state.recorded is not None:
+        actions.append(RemoveFile(RECORD, f"remove /{RECORD}: the firewall"
+                                  " is off in the spec"))
     if live and state.loaded is not None and "nft" in available:
         actions.append(Run(("nft", "delete", "table", *TABLE_ARGS),
                            "remove keel's table: the firewall is off in"
@@ -172,8 +175,11 @@ def opened_ports(ruleset: Ruleset, doc: dict) -> frozenset:
 
 def choose(doc: dict, resolved: Resolved, state: FirewallState,
            declared: str | None, attended: bool) -> tuple[str, list[str]]:
-    """The state to write, and what the plan says about it"""
-    current = file_state(state.file.text)
+    """The state to write, and what the plan says about it. The state the
+    node is in is its file's, or, when an empty or cut file has lost its
+    policy, keel's record of what it last wrote: a repair keeps enforce,
+    and rule B is only for the first move"""
+    current = file_state(state.file.text) or state.recorded
     if declared == ENFORCE:
         if attended or current == ENFORCE:
             return ENFORCE, []
@@ -328,6 +334,10 @@ def load(ruleset: Ruleset, state: FirewallState, live: bool,
     else:
         actions.append(Note(f"unchanged (/{PATH}, loaded as table inet"
                             " keel)"))
+    if state.recorded != ruleset.state:
+        actions.append(WriteFile(RECORD, f"{ruleset.state}\n", 0o644, None,
+                                 f"record /{RECORD}: {ruleset.state}, the"
+                                 " state a broken file cannot lose"))
     if live and state.watch is False:
         actions.append(watch_start(state))
     return actions

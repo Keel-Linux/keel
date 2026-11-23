@@ -34,7 +34,12 @@ from keel.system.effects import Effects
 from keel.system.execute import execute
 from keel.system.firewall import PROMOTED, plan_firewall, waiting_notice
 from keel.system.listeners import Listener
-from keel.system.fwstate import FirewallState, observe_firewall, ssh_ports
+from keel.system.fwstate import (
+    RECORD,
+    FirewallState,
+    observe_firewall,
+    ssh_ports,
+)
 
 LIVE = frozenset(("nft", "systemctl"))
 STATES = {"installer": "enabled", "wireguard": "enabled",
@@ -79,6 +84,7 @@ class FirewallCase(ManifestCase):
         self.resolved = gather(self.root, "core").resolved
 
     def state(self, **fields) -> FirewallState:
+        # recorded: what keel last wrote (none on a node in the field)
         base = FirewallState(file=ABSENT, loaded=None, ssh_ports=(22,),
                              ssh_source="/r/etc/ssh/sshd_config",
                              pending=False, bridges=())
@@ -98,7 +104,7 @@ class FirewallCase(ManifestCase):
 class TestEnabled(FirewallCase):
     def test_checked_as_a_copy_put_in_place_then_loaded(self):
         """a file nft refuses never reaches the path the boot unit loads"""
-        found = self.actions()
+        found = self.actions(state=self.state(recorded="enforce"))
         self.assertIsInstance(found[0], InstallRuleset)
         self.assertEqual(found[0].path, PATH)
         self.assertEqual(found[0].content, self.rendered().text)
@@ -130,14 +136,14 @@ class TestEnabled(FirewallCase):
     def test_the_same_file_loaded_is_unchanged(self):
         ruleset = self.rendered()
         found = self.actions(state=self.state(
-            file=File("/r/x", ruleset.text), loaded=ruleset.digest))
+            file=File("/r/x", ruleset.text), loaded=ruleset.digest, recorded="enforce"))
         self.assertEqual([a.describe() for a in found], [
             f"unchanged (/{PATH}, loaded as table inet keel)"])
 
     def test_a_table_that_is_not_the_file_s_is_loaded_again(self):
         ruleset = self.rendered()
         found = self.actions(state=self.state(
-            file=File("/r/x", ruleset.text), loaded=None))
+            file=File("/r/x", ruleset.text), loaded=None, recorded="enforce"))
         self.assertEqual([a.argv for a in found],
                          [("nft", "-c", "-f", f"/{PATH}"),
                           ("nft", "-f", f"/{PATH}")])
@@ -190,7 +196,7 @@ class TestEnabled(FirewallCase):
 class TestOff(FirewallCase):
     def test_off_removes_keel_s_file_and_table_and_warns(self):
         found = self.actions(doc(enabled=None, state="off"), self.state(
-            file=File("/r/x", HEADER + "\n"), loaded="abc"))
+            file=File("/r/x", HEADER + "\n"), loaded="abc", recorded=None))
         self.assertEqual(found[0].describe(), (
             "off in the spec: no inbound rule of keel's protects this"
             " node; `firewall.state: enforce` closes it"))
@@ -202,13 +208,15 @@ class TestOff(FirewallCase):
     def test_off_with_nothing_of_keel_s_is_unchanged(self):
         found = self.actions(doc(enabled=None, state="off", mode="simple"),
                              self.state(file=File("/r/x",
-                                                  "table inet mine {}\n")))
+                                                  "table inet mine {}\n"),
+                                        recorded=None))
         self.assertEqual([a.describe() for a in found][1:],
                          ["unchanged (off)"])
 
     def test_off_under_a_root_removes_the_file_only(self):
         found = self.actions(doc(enabled=None, state="off"), self.state(
-            file=File("/r/x", HEADER + "\n"), loaded=None), live=False,
+            file=File("/r/x", HEADER + "\n"), loaded=None, recorded=None),
+            live=False,
             available=frozenset())
         self.assertEqual([type(a) for a in found], [Note, RemoveFile])
 
@@ -299,7 +307,7 @@ class TestTransition(FirewallCase):
         enforcing = render(self.resolved, STATES, WG)
         for spec in (doc(enabled=None), doc(enabled=None, state="enforce")):
             found = self.actions(spec, self.state(
-                file=File("/r/x", enforcing.text), loaded=enforcing.digest),
+                file=File("/r/x", enforcing.text), loaded=enforcing.digest, recorded="enforce"),
                 attended=False)
             self.assertEqual(found[-1].describe(), (
                 f"unchanged (/{PATH}, loaded as table inet keel)"))
@@ -311,7 +319,7 @@ class TestTransition(FirewallCase):
         found = self.implicit(file=File("/r/x", enforcing.text),
                               loaded=enforcing.digest,
                               listeners=(SSHD, STRANGER),
-                              listeners_source="ss")
+                              listeners_source="ss", recorded="enforce")
         self.assertIn("tcp [::]:9999 of session-3.scope (nc): listens, not"
                       " declared, closed by the firewall",
                       [a.describe() for a in found])
@@ -464,6 +472,46 @@ class TestCutFile(FirewallCase):
                 self.assertTrue([a for a in found
                                  if isinstance(a, InstallRuleset)], found)
 
+    def test_a_cut_file_of_an_enforcing_node_is_written_in_enforce(self):
+        """the third real test: an empty file, a node in enforce and an
+        undeclared listener running; the repair wrote report. The state
+        the node was in comes from keel's record, which a broken file
+        does not touch; rule B is for the first move only"""
+        for text in ("", HEADER[:20]):
+            with self.subTest(text=text):
+                found = self.actions(doc(enabled=None), self.state(
+                    file=File("/r/x", text), recorded="enforce",
+                    listeners=(SSHD, STRANGER), listeners_source="ss"))
+                ruleset = next(a for a in found
+                               if isinstance(a, InstallRuleset))
+                self.assertIn("policy drop", ruleset.content)
+                self.assertIn("tcp [::]:9999 of session-3.scope (nc):"
+                              " listens, not declared, closed by the"
+                              " firewall", [a.describe() for a in found])
+
+    def test_the_record_follows_what_is_written(self):
+        found = self.actions(state=self.state(recorded=None))
+        records = [a for a in found if isinstance(a, WriteFile)
+                   and a.path == RECORD]
+        self.assertEqual([a.content for a in records], ["enforce\n"])
+        ruleset = self.rendered()
+        same = self.actions(state=self.state(
+            file=File("/r/x", ruleset.text), loaded=ruleset.digest,
+            recorded="enforce"))
+        self.assertFalse([a for a in same if isinstance(a, WriteFile)])
+
+    def test_the_spec_s_report_wins_over_the_record(self):
+        found = self.actions(doc(enabled=None, state="report"), self.state(
+            file=File("/r/x", ""), recorded="enforce"))
+        ruleset = next(a for a in found if isinstance(a, InstallRuleset))
+        self.assertIn("policy accept", ruleset.content)
+
+    def test_off_removes_the_record(self):
+        found = self.actions(doc(enabled=None, state="off"), self.state(
+            file=File("/r/x", HEADER + "\n"), recorded="enforce"))
+        self.assertIn(RECORD, [a.path for a in found
+                               if isinstance(a, RemoveFile)])
+
     def test_a_foreign_file_is_still_not_replaced(self):
         found = self.actions(doc(enabled=None), self.state(
             file=File("/r/x", "table inet mine {}\n")))
@@ -526,7 +574,7 @@ class TestFailedLoad(FirewallCase):
     kernel holds as it was, and nothing after it runs"""
 
     def run_plan(self, nft):
-        steps = plan_firewall(doc(), self.resolved, self.state(), True,
+        steps = plan_firewall(doc(), self.resolved, self.state(recorded="enforce"), True,
                               LIVE, True)
         with mock.patch("keel.system.fwinstall.subprocess.run", nft), \
                 mock.patch("keel.system.effects.subprocess.run", nft):
@@ -802,6 +850,14 @@ class TestObserve(FirewallCase):
                 self.assertIsNone(observe_firewall(Tree(self.root),
                                                    True).loaded)
         self.assertIsNone(observe_firewall(Tree(self.root), False).loaded)
+
+    def test_the_record_of_the_state(self):
+        self.assertIsNone(observe_firewall(Tree(self.root), False).recorded)
+        self.write(RECORD, "enforce\n")
+        self.assertEqual(observe_firewall(Tree(self.root), False).recorded,
+                         "enforce")
+        self.write(RECORD, "garbage\n")
+        self.assertIsNone(observe_firewall(Tree(self.root), False).recorded)
 
     def test_a_pending_network_change(self):
         self.write("var/lib/keel/network/pending.json", "{}\n")
