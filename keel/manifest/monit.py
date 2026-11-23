@@ -17,6 +17,9 @@ overlay on or off adds or removes exactly its checks.
 - Every failure, every recovery and a restart limit reached run keel
   notify, as the checks of decision 0021 do, so the operator hears of it
   on the channels of the spec's monitor section.
+- Where keel writes the firewall (decision 0097, every state but off),
+  `keel-firewall` runs `keel firewall check`: a table that is absent or
+  is not the file's restarts keel-firewall.service, which loads it.
 
 Names are `keel-unit-<process>` and `keel-check-<check>`: a process and a
 check may share a name (Core's sshd), and Monit refuses two services of
@@ -44,6 +47,10 @@ INDENT = "    "
 HOLD = "for 2 cycles"
 LOOPBACK = "::1"
 ENABLED = "enabled"
+FIREWALL_SERVICE = "keel-firewall"
+FIREWALL_UNIT = "keel-firewall.service"
+FIREWALL_CHECK = ("/usr/bin/python3", "-B", "-m", "keel", "firewall",
+                  "check")
 # a character Monit's quoted program string cannot carry inside one
 # argument: it splits the string at spaces and has no escape
 UNQUOTABLE = (" ", "\t", "\n", '"', "'")
@@ -71,7 +78,8 @@ def watched(owned: Owned, states: dict) -> bool:
 
 def render(resolved: Resolved, states: dict, mesh: str | None,
            notify: tuple[str, ...], cycle: int,
-           waiting: dict[str, str] | None = None) -> Rendered:
+           waiting: dict[str, str] | None = None,
+           firewall: bool = False) -> Rendered:
     """The file, what it watches, and what it could not watch and why
 
     `states` are the spec's overlays; `mesh` the overlay address of
@@ -82,6 +90,7 @@ def render(resolved: Resolved, states: dict, mesh: str | None,
     unit is not watched: systemd skips each start of it, so it would
     fail its check at every cycle and reach its restart limit
     (keel-vip.service in cloud_simple, where etcd forms no cluster).
+    `firewall` adds the check of keel's table (decision 0097).
     """
     writer = _Writer(notify, reminder(cycle))
     waiting = waiting or {}
@@ -126,6 +135,9 @@ def render(resolved: Resolved, states: dict, mesh: str | None,
             continue
         blocks.append(block)
         services.append(check_service(check["name"]))
+    if firewall:
+        blocks.append(writer.firewall())
+        services.append(FIREWALL_SERVICE)
     return Rendered("\n".join(blocks), tuple(services), tuple(notes))
 
 
@@ -206,6 +218,14 @@ class _Writer:
         else:
             lines = self.restarted("status != 0", name, unit, restart, [])
         return _block(head, lines)
+
+    def firewall(self) -> str:
+        """keel's table, loaded again by its unit when it is lost"""
+        head = (f"check program {FIREWALL_SERVICE} with path"
+                f' "{" ".join(FIREWALL_CHECK)}"')
+        return _block(head, self.restarted(
+            "status != 0", FIREWALL_SERVICE, FIREWALL_UNIT, DEFAULT_RESTART,
+            []))
 
     def check(self, check: dict, processes: dict, resolved: Resolved,
               mesh: str | None) -> tuple[str | None, str]:

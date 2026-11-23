@@ -45,6 +45,11 @@ class ApplianceCliCase(ManifestCase):
         super().setUp()
         # Core alone, as a keel-core machine has it
         os.remove(self.path("appliances", "web"))
+        # sshd's configuration, which every machine has: the firewall
+        # (decision 0097, every mode) reads the ports it must keep open
+        os.makedirs(join(self.root, "etc/ssh"), exist_ok=True)
+        with open(join(self.root, "etc/ssh/sshd_config"), "w") as fob:
+            fob.write("Port 22\n")
         self.spec = join(self.tmpdir, "instance.yaml")
         self.systemctl = []
 
@@ -87,7 +92,7 @@ class TestConverge(ApplianceCliCase):
         self.assertIn("overlays.crowdsec: unchanged (disabled:"
                       " crowdsec.service, crowdsec-firewall-bouncer.service)",
                       out)
-        self.assertIn(f"derived.monit: write /{MANIFEST_MONIT}: 4 unit(s)"
+        self.assertIn(f"derived.monit: write /{MANIFEST_MONIT}: 5 unit(s)"
                       " and 3 probe(s) of core (mode 0600): done", out)
         off = self.monit_file()
         self.assertEqual(self.diff()[0], 0, self.diff()[1])
@@ -215,13 +220,13 @@ class TestConverge(ApplianceCliCase):
 
 
 class TestFirewall(ApplianceCliCase):
-    """Optional, cloud advanced only: written under --root, compared by
-    diff, and removed again when the spec turns it off"""
+    """Every mode (decision 0097): written under --root, compared by
+    diff, read back by inspect, and removed when the spec says off"""
 
     def setUp(self):
         super().setUp()
         # the ports sshd listens on are read, never guessed
-        os.makedirs(join(self.root, "etc/ssh"))
+        os.makedirs(join(self.root, "etc/ssh"), exist_ok=True)
         with open(join(self.root, "etc/ssh/sshd_config"), "w") as fob:
             fob.write("Port 22\n")
         # a host bridge, whose guests keep their DHCP and DNS
@@ -229,29 +234,33 @@ class TestFirewall(ApplianceCliCase):
 
     def test_without_sshd_s_config_nothing_is_written(self):
         os.remove(join(self.root, "etc/ssh/sshd_config"))
-        self.write(self.firewall(True))
+        self.write(self.firewall("enforce"))
         code, out, _ = self.apply()
         self.assertEqual(code, 16)
         self.assertIn("the ports sshd listens on cannot be determined", out)
         self.assertFalse(os.path.exists(join(self.root, FIREWALL)))
 
-    def firewall(self, enabled: bool, mode: str = "cloud_advanced") -> str:
-        return (spec_text().replace("mode: simple", f"mode: {mode}")
-                + f"firewall: {{enabled: {str(enabled).lower()}}}\n")
+    def firewall(self, state: str | None, mode: str = "simple",
+                 extra: str = "") -> str:
+        text = spec_text().replace("mode: simple", f"mode: {mode}")
+        if state is not None:
+            text += f"firewall: {{state: {state}{extra}}}\n"
+        return text
 
-    def test_on_then_off(self):
-        self.write(self.firewall(True))
+    def test_enforce_then_off_in_the_simple_mode(self):
+        self.write(self.firewall("enforce"))
         code, out, err = self.apply()
         self.assertEqual(code, 0, out + err)
-        self.assertIn(f"derived.firewall: write /{FIREWALL}: public tcp 22,"
-                      " 12320, 12321, DHCP and DNS for the guests of lxcbr0"
-                      " (mode 0600): done", out)
+        self.assertIn(f"derived.firewall: write /{FIREWALL} (enforce): public"
+                      " tcp 22, 12320, 12321, DHCP and DNS for the guests of"
+                      " lxcbr0 (mode 0600): done", out)
         self.assertIn("derived.firewall: not loaded: not the live system",
                       out)
+        self.assertIn("check program keel-firewall", self.monit_file())
         code, out, _ = self.diff()
         self.assertEqual(code, 0, out)
         self.assertIn("derived.firewall: same (the ruleset apply renders"
-                      " from the manifests)", out)
+                      " from the manifests, enforce)", out)
         self.assertIn("derived.firewall.loaded: not compared", out)
         self.assertIn("0 change(s)", self.apply()[1])
 
@@ -261,63 +270,128 @@ class TestFirewall(ApplianceCliCase):
         self.assertEqual(code, DRIFT)
         self.assertIn("derived.firewall: drift", out)
 
-        self.write(self.firewall(False))
+        self.write(self.firewall("off"))
         code, out, _ = self.apply()
         self.assertIn(f"derived.firewall: remove /{FIREWALL}, which keel"
                       " wrote: the firewall is off in the spec: done", out)
         self.assertFalse(os.path.exists(join(self.root, FIREWALL)))
+        self.assertNotIn("keel-firewall", self.monit_file())
         code, out, _ = self.diff()
         self.assertEqual(code, 0, out)
         self.assertIn("derived.firewall: same (nothing)", out)
+        self.assertIn("derived.firewall.state: not compared (warning: off"
+                      " in the spec, no inbound rule of keel's protects this"
+                      " node)", out)
+
+    def test_a_spec_that_says_nothing_writes_report_under_a_root(self):
+        """an image build declares enforce; with nothing said, keel
+        cannot see a socket under --root, so it writes report"""
+        self.write(self.firewall(None, "cloud_simple"))
+        code, out, err = self.apply()
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("derived.firewall: report: the sockets cannot be"
+                      " listed (not the live system: no socket is seen)", out)
+        self.assertIn(f"write /{FIREWALL} (report)", out)
+        code, out, _ = self.diff()
+        self.assertEqual(code, 0, out)
+        self.assertIn("derived.firewall: same (the ruleset apply renders"
+                      " from the manifests, report)", out)
+
+    def test_a_node_in_the_field_before_its_apply_is_drift(self):
+        self.write(self.firewall(None))
+        code, out, _ = self.diff()
+        self.assertEqual(code, DRIFT)
+        self.assertIn("derived.firewall: drift (declared the ruleset apply"
+                      " renders from the manifests, report, observed"
+                      " nothing)", out)
+
+    def test_diff_without_sshd_s_ports_is_unknown(self):
+        os.remove(join(self.root, "etc/ssh/sshd_config"))
+        self.write(self.firewall("enforce"))
+        code, out, _ = self.diff()
+        self.assertIn("derived.firewall: unknown (declared the ruleset apply"
+                      " renders from the manifests, enforce; not inferred:"
+                      " the ports sshd listens on cannot be determined", out)
 
     def test_on_the_live_system_the_kernel_s_table_is_compared(self):
-        self.write(self.firewall(True))
+        self.write(self.firewall("enforce"))
         self.apply()
         with open(join(self.root, FIREWALL)) as fob:
             digest = loaded_digest(fob.read())
-        declared = yaml.safe_load(self.firewall(True))
+        declared = yaml.safe_load(self.firewall("enforce"))
         for held, status in ((digest, "same"), ("0000", "drift"),
                              (None, "drift")):
-            with mock.patch("keel.diff.appliance.LIVE_ROOT", self.root), \
-                    mock.patch("keel.diff.appliance.table_digest",
-                               return_value=held), \
-                    mock.patch("keel.inspect.units.subprocess.run",
-                               side_effect=OSError(2, "none")):
-                found = {field.field: field for field in
-                         appliance_fields(declared, self.root)}
+            found = self.live_fields(declared, held, "")
             self.assertEqual(found["derived.firewall.loaded"].status, status)
 
-    def test_inspect_keeps_the_opt_in(self):
-        """a re-emitted spec (0027) keeps firewall.enabled"""
-        self.write(self.firewall(True))
+    def live_fields(self, declared, held, ss: str) -> dict:
+        def run(argv, **kwargs):
+            """ss and sshd -T answer; systemctl and the rest are absent"""
+            if argv[0] == "ss":
+                return subprocess.CompletedProcess(argv, 0, ss, "")
+            if argv[0] == "sshd":
+                return subprocess.CompletedProcess(argv, 0, "port 22\n", "")
+            raise OSError(2, "none")
+        # one patch: these modules share the one subprocess module
+        with mock.patch("keel.diff.appliance.LIVE_ROOT", self.root), \
+                mock.patch("keel.diff.appliance.table_digest",
+                           return_value=held), \
+                mock.patch("keel.system.listeners.subprocess.run", run):
+            return {field.field: field for field in
+                    appliance_fields(declared, self.root)}
+
+    def test_diff_lists_what_enforce_would_close(self):
+        """report: each socket on an address that is not a loopback and
+        that the ruleset does not open"""
+        self.write(self.firewall("report"))
         self.apply()
-        code, out, err = self.cli("inspect")
-        self.assertEqual(yaml.safe_load(out)["firewall"], {"enabled": True})
-        self.assertIn(f"firewall.enabled: true (from {self.root}/"
-                      f"{FIREWALL}, keel's ruleset)", err)
-        self.write(self.firewall(False))
+        found = self.live_fields(yaml.safe_load(self.firewall("report")),
+                                 None,
+                                 "tcp LISTEN 0 1 0.0.0.0:22 0.0.0.0:*\n"
+                                 "tcp LISTEN 0 1 [::]:9999 [::]:*\n"
+                                 "tcp LISTEN 0 1 127.0.0.1:25 0.0.0.0:*\n")
+        line = found["derived.firewall.listeners"].line()
+        self.assertEqual(line, (
+            "derived.firewall.listeners: not compared (report: enforce would"
+            " close tcp [::]:9999 of no process ss could read)"))
+
+    def test_diff_names_the_warnings_of_decision_0097(self):
+        os.makedirs(join(self.root, "etc/iptables"))
+        with open(join(self.root, "etc/iptables/rules.v4"), "w") as fob:
+            fob.write("*filter\n")
+        self.write(self.firewall("enforce", extra=", allow: [{port: 3306,"
+                                 " protocol: tcp}, {port: 8080, protocol:"
+                                 " tcp}]"))
+        code, out, _ = self.diff()
+        self.assertIn("derived.firewall.legacy: not compared (warning:"
+                      " /etc/iptables/rules.v4 is there: do not install"
+                      " iptables-persistent, its rules have no WireGuard"
+                      " port)", out)
+        self.assertIn("firewall.allow: not compared (warning: 3306/tcp opens"
+                      " a database port to every address: give it `from`)",
+                      out)
+
+    def test_inspect_keeps_enforce_and_leaves_report_to_rule_b(self):
+        """a re-emitted spec (0027) keeps enforce; report is left out, so
+        a re-emitted spec never pins a node in report"""
+        self.write(self.firewall("enforce"))
         self.apply()
         code, out, err = self.cli("inspect")
         self.assertEqual(yaml.safe_load(out)["firewall"],
-                         {"enabled": False})
-
-    def test_refused_outside_cloud_advanced(self):
-        self.write(self.firewall(True, "simple"))
-        code, _, err = self.apply()
-        self.assertEqual(code, 3)
-        self.assertIn("firewall.enabled: the firewall derived from the"
-                      " manifests is for cloud advanced installations only",
-                      err)
-        self.assertFalse(os.path.exists(join(self.root, FIREWALL)))
-
-    def test_off_with_keel_s_file_left_behind_is_drift(self):
-        self.write(self.firewall(True))
+                         {"state": "enforce"})
+        self.assertIn(f"firewall.state: enforce (from {self.root}/"
+                      f"{FIREWALL}, keel's ruleset)", err)
+        self.write(self.firewall("report"))
         self.apply()
-        self.write(self.firewall(False))
-        code, out, _ = self.diff()
-        self.assertEqual(code, DRIFT)
-        self.assertIn("derived.firewall: drift (declared nothing, observed"
-                      " keel's ruleset)", out)
+        code, out, err = self.cli("inspect")
+        self.assertNotIn("firewall", yaml.safe_load(out))
+        self.assertIn("firewall.state: not inferred", err)
+
+    def test_enforce_is_valid_in_every_mode(self):
+        for mode in ("simple", "cloud_simple", "cloud_advanced"):
+            self.write(self.firewall("enforce", mode))
+            _, _, err = self.apply()
+            self.assertNotIn("firewall", err)
 
 
 class TestInspect(ApplianceCliCase):

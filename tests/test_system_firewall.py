@@ -26,11 +26,13 @@ from keel.system.actions import (
     Note,
     Refuse,
     RemoveFile,
-    Run,
     WriteFile,
 )
+from keel.system.actions import Plan
 from keel.system.effects import Effects
-from keel.system.firewall import plan_firewall
+from keel.system.execute import execute
+from keel.system.firewall import plan_firewall, waiting_notice
+from keel.system.listeners import Listener
 from keel.system.fwstate import FirewallState, observe_firewall, ssh_ports
 
 LIVE = frozenset(("nft", "systemctl"))
@@ -40,11 +42,16 @@ WG = {"address": "fd00:1::1/64", "private_key": {"file": "/etc/k"}}
 ABSENT = File("/r/" + PATH, problem="not present")
 
 
-def doc(enabled=True, wireguard=WG, mode="cloud_advanced") -> dict:
+def doc(enabled=True, wireguard=WG, mode="cloud_advanced",
+        state=None, allow=None) -> dict:
     found = {"version": 1, "appliance": {"name": "core"},
              "installation": {"mode": mode}, "overlays": STATES}
     if enabled is not None:
         found["firewall"] = {"enabled": enabled}
+    if state is not None:
+        found["firewall"] = {"state": state}
+    if allow is not None:
+        found.setdefault("firewall", {})["allow"] = allow
     if wireguard is not None:
         found["network"] = {"overlay": {"wireguard": wireguard}}
     return found
@@ -79,10 +86,11 @@ class FirewallCase(ManifestCase):
     def rendered(self):
         return render(self.resolved, STATES, WG)
 
-    def actions(self, spec=None, state=None, live=True, available=LIVE):
+    def actions(self, spec=None, state=None, live=True, available=LIVE,
+                attended=True):
         steps = plan_firewall(spec if spec is not None else doc(),
                               self.resolved, state or self.state(), live,
-                              available)
+                              available, attended)
         return [action for step in steps for action in step.actions]
 
 
@@ -94,7 +102,8 @@ class TestEnabled(FirewallCase):
         self.assertEqual(found[0].path, PATH)
         self.assertEqual(found[0].content, self.rendered().text)
         self.assertEqual(found[0].describe(), (
-            f"write /{PATH}: public tcp 22, 12320, 12321 and udp 51820,"
+            f"write /{PATH} (enforce): public tcp 22, 12320, 12321 and udp"
+            " 51820,"
             " mesh tcp 2379, 2380 on wg0; checked by nft -c as a copy"
             " first, so a file nft refuses is never put in place (mode"
             " 0600)"))
@@ -140,15 +149,18 @@ class TestEnabled(FirewallCase):
             "not loaded: not the live system; keel-firewall.service loads"
             " it at boot"))
 
-    def test_no_ssh_port_opened_is_refused_before_anything(self):
+    def test_every_port_sshd_listens_on_is_opened_not_refused(self):
+        """decision 0097, section 3: sshd on a second port set by hand
+        is added to the ruleset and named, never a refusal"""
         found = self.actions(state=self.state(
-            ssh_ports=(22, 2222), ssh_source="/r/etc/ssh/sshd_config"))
-        self.assertEqual(len(found), 1)
-        self.assertIsInstance(found[0], Refuse)
+            ssh_ports=(22, 2222), ssh_source="sshd -T"))
+        self.assertIsInstance(found[0], Note)
         self.assertEqual(found[0].describe(), (
-            "the ruleset would close SSH: sshd listens on 2222/tcp"
-            " (/r/etc/ssh/sshd_config), and no enabled process of the"
-            " manifests opens it; nothing is written or loaded"))
+            "SSH stays open: tcp 22, 2222, the ports sshd listens on"
+            " (sshd -T)"))
+        self.assertIsInstance(found[1], InstallRuleset)
+        self.assertIn("tcp dport { 22, 2222, 12320, 12321 } accept",
+                      found[1].content)
 
     def test_nothing_moves_while_a_network_change_waits(self):
         found = self.actions(state=self.state(pending=True))
@@ -175,37 +187,199 @@ class TestEnabled(FirewallCase):
 
 
 class TestOff(FirewallCase):
-    def test_not_declared_is_no_step(self):
-        self.assertEqual(self.actions(doc(enabled=None)), [])
-
-    def test_not_declared_says_that_keel_s_table_is_left(self):
-        found = self.actions(doc(enabled=None), self.state(
-            file=File("/r/x", HEADER + "\n")))
-        self.assertEqual([a.describe() for a in found], [
-            "not declared: the firewall keel set up earlier is left as it"
-            " is; `firewall.enabled: false` removes it"])
-
-    def test_off_removes_keel_s_file_and_table(self):
-        found = self.actions(doc(enabled=False), self.state(
+    def test_off_removes_keel_s_file_and_table_and_warns(self):
+        found = self.actions(doc(enabled=None, state="off"), self.state(
             file=File("/r/x", HEADER + "\n"), loaded="abc"))
-        self.assertIsInstance(found[0], RemoveFile)
-        self.assertEqual(found[0].path, PATH)
-        self.assertEqual(found[1].argv, ("nft", "delete", "table", "inet",
+        self.assertEqual(found[0].describe(), (
+            "off in the spec: no inbound rule of keel's protects this"
+            " node; `firewall.state: enforce` closes it"))
+        self.assertIsInstance(found[1], RemoveFile)
+        self.assertEqual(found[1].path, PATH)
+        self.assertEqual(found[2].argv, ("nft", "delete", "table", "inet",
                                          "keel"))
 
     def test_off_with_nothing_of_keel_s_is_unchanged(self):
-        found = self.actions(doc(enabled=False, mode="simple"), self.state(
-            file=File("/r/x", "table inet mine {}\n")))
-        self.assertEqual([a.describe() for a in found], ["unchanged (off)"])
+        found = self.actions(doc(enabled=None, state="off", mode="simple"),
+                             self.state(file=File("/r/x",
+                                                  "table inet mine {}\n")))
+        self.assertEqual([a.describe() for a in found][1:],
+                         ["unchanged (off)"])
 
     def test_off_under_a_root_removes_the_file_only(self):
-        found = self.actions(doc(enabled=False), self.state(
+        found = self.actions(doc(enabled=None, state="off"), self.state(
             file=File("/r/x", HEADER + "\n"), loaded=None), live=False,
             available=frozenset())
-        self.assertEqual([type(a) for a in found], [RemoveFile])
+        self.assertEqual([type(a) for a in found], [Note, RemoveFile])
+
+    def test_enabled_false_is_no_longer_off(self):
+        """decision 0097: `false` records no choice (inspect wrote it
+        where it found no file), so it reads as report"""
+        found = self.actions(doc(enabled=False), self.state(
+            listeners=(), listeners_source="ss"))
+        self.assertNotIn(RemoveFile, [type(a) for a in found])
+        self.assertIn("policy drop", found[1].content)
 
     def test_no_appliance_state_is_no_step(self):
         self.assertEqual(plan_firewall(doc(), None, None, True, LIVE), [])
+
+
+SSHD = Listener("tcp", "0.0.0.0", None, 22, (1,), ("sshd",),
+                ("ssh.service",))
+WEBMIN_UDP = Listener("udp", "0.0.0.0", None, 12321, (2,), ("miniserv.pl",),
+                      ("webmin.service",))
+STRANGER = Listener("tcp", "::", None, 9999, (3,), ("nc",),
+                    ("session-3.scope",))
+
+
+class TestTransition(FirewallCase):
+    """Decision 0097, section 5, the maintainer's answer B: with no
+    `firewall.state` in the spec, a node in report goes to enforce by
+    itself only in an apply a person runs, and only when each socket on
+    an address that is not a loopback belongs to a unit of the
+    manifests; keel mesh never begins enforcement"""
+
+    def implicit(self, **fields):
+        return self.actions(doc(enabled=None), self.state(**fields))
+
+    def ruleset(self, found):
+        return next(a for a in found if isinstance(a, InstallRuleset))
+
+    def test_every_socket_declared_goes_to_enforce(self):
+        found = self.implicit(listeners=(SSHD, WEBMIN_UDP),
+                              listeners_source="ss")
+        self.assertEqual(found[0].describe(), (
+            "enforce: each socket on an address that is not a loopback"
+            " belongs to a unit of the manifests (decision 0097, B)"))
+        self.assertEqual(found[1].describe(), (
+            "closes udp 0.0.0.0:12321 of webmin.service (miniserv.pl): the"
+            " manifests declare its process, not this port"))
+        self.assertIn("policy drop", self.ruleset(found).content)
+
+    def test_an_undeclared_socket_keeps_report_and_tells(self):
+        found = self.implicit(listeners=(SSHD, STRANGER),
+                              listeners_source="ss")
+        self.assertEqual(found[0].describe(), waiting_notice(
+            ["tcp [::]:9999 of session-3.scope (nc)"]))
+        self.assertEqual(found[0].describe(), (
+            "report: enforce waits, because these sockets belong to no"
+            " unit of the manifests: tcp [::]:9999 of session-3.scope (nc)."
+            " Declare each in firewall.allow, or stop it, or set"
+            " firewall.state: enforce; then run keel spec apply --system"))
+        ruleset = self.ruleset(found)
+        self.assertIn("policy accept", ruleset.content)
+        self.assertIn("(report)", ruleset.describe())
+
+    def test_sockets_that_cannot_be_listed_keep_report(self):
+        found = self.implicit(listeners=None,
+                              listeners_source="ss cannot run: x")
+        self.assertEqual(found[0].describe(), (
+            "report: the sockets cannot be listed (ss cannot run: x), so"
+            " enforce waits; `firewall.state: enforce` enforces anyway"))
+        self.assertIn("policy accept", self.ruleset(found).content)
+
+    def test_keel_mesh_never_begins_enforcement(self):
+        found = self.actions(doc(enabled=None), self.state(
+            listeners=(SSHD,), listeners_source="ss"), attended=False)
+        self.assertEqual(found[0].describe(), (
+            "report: only an apply a person runs (keel spec apply"
+            " --system) moves this node to enforce"))
+        self.assertIn("policy accept", self.ruleset(found).content)
+
+    def test_keel_mesh_waits_even_where_the_spec_says_enforce(self):
+        found = self.actions(doc(enabled=None, state="enforce"),
+                             self.state(), attended=False)
+        self.assertEqual(found[0].describe(), (
+            "report until an apply a person runs: the spec says enforce,"
+            " and keel mesh never begins enforcement (decision 0097)"))
+        self.assertIn("policy accept", self.ruleset(found).content)
+
+    def test_enforce_once_begun_stays_through_keel_mesh(self):
+        """the file keel wrote is the record: mesh sync never demotes"""
+        enforcing = render(self.resolved, STATES, WG)
+        for spec in (doc(enabled=None), doc(enabled=None, state="enforce")):
+            found = self.actions(spec, self.state(
+                file=File("/r/x", enforcing.text), loaded=enforcing.digest),
+                attended=False)
+            self.assertEqual(found[-1].describe(), (
+                f"unchanged (/{PATH}, loaded as table inet keel)"))
+
+    def test_an_enforcing_node_stays_enforce_without_a_word(self):
+        enforcing = render(self.resolved, STATES, WG)
+        found = self.implicit(file=File("/r/x", enforcing.text),
+                              loaded=enforcing.digest,
+                              listeners=(SSHD, STRANGER),
+                              listeners_source="ss")
+        self.assertEqual(found[0].describe(), (
+            "enforce, as keel's file already says; `firewall.state:"
+            " report` goes back"))
+
+    def test_report_declared_stays_report(self):
+        found = self.actions(doc(enabled=None, state="report"), self.state(
+            listeners=(SSHD,), listeners_source="ss"))
+        self.assertIn("policy accept", self.ruleset(found).content)
+
+    def test_report_on_a_node_in_the_field_names_what_enforce_closes(self):
+        """keel diff lists them too; the plan says them where it waits"""
+        found = self.actions(doc(enabled=None, state="report"), self.state(
+            listeners=(SSHD, STRANGER), listeners_source="ss"))
+        self.assertIn("enforce would close tcp [::]:9999 of"
+                      " session-3.scope (nc)",
+                      [a.describe() for a in found])
+
+    def test_allow_declares_a_socket_and_opens_its_port(self):
+        found = self.actions(doc(enabled=None, allow=[
+            {"port": 9999, "protocol": "tcp", "from": ["2001:db8::/32"]}]),
+            self.state(listeners=(SSHD, STRANGER), listeners_source="ss"))
+        ruleset = self.ruleset(found)
+        self.assertIn("policy drop", ruleset.content)
+        self.assertIn("ip6 saddr 2001:db8::/32 tcp dport 9999 accept",
+                      ruleset.content)
+
+    def test_the_fence_ports_follow_the_state(self):
+        found = self.actions(state=self.state(fence=(60080, 60443)))
+        self.assertIn("ct status dnat tcp dport { 60080, 60443 } accept",
+                      self.ruleset(found).content)
+
+    def test_a_fence_whose_ports_cannot_be_read_is_said(self):
+        found = self.actions(state=self.state(
+            fence_note="the init fence is enabled, and /r/etc/default/"
+            "turnkey-init-fence names no fence port: its page will not"
+            " answer under enforce"))
+        self.assertIn("names no fence port", found[0].describe())
+
+
+class TestFailedLoad(FirewallCase):
+    """A ruleset nft refuses, or a load that fails, leaves the table the
+    kernel holds as it was, and nothing after it runs"""
+
+    def run_plan(self, nft):
+        steps = plan_firewall(doc(), self.resolved, self.state(), True,
+                              LIVE, True)
+        with mock.patch("keel.system.fwinstall.subprocess.run", nft), \
+                mock.patch("keel.system.effects.subprocess.run", nft):
+            return execute(Plan(tuple(steps)), Effects(self.root))
+
+    def test_a_refused_copy_never_reaches_the_load(self):
+        calls = []
+
+        def nft(argv, **kwargs):
+            calls.append(tuple(argv))
+            return subprocess.CompletedProcess(argv, 1, "", "Error: x")
+        outcome = self.run_plan(nft)
+        self.assertTrue(outcome.failed)
+        self.assertEqual([call[:3] for call in calls], [("nft", "-c", "-f")])
+        self.assertIn("skipped: load it in one transaction", "\n".join(
+            outcome.lines))
+        self.assertFalse(os.path.exists(join(self.root, PATH)))
+
+    def test_a_failed_load_fails_the_apply(self):
+        def nft(argv, **kwargs):
+            code = 0 if "-c" in argv else 1
+            return subprocess.CompletedProcess(argv, code, "",
+                                               "Operation not permitted")
+        outcome = self.run_plan(nft)
+        self.assertTrue(outcome.failed)
+        self.assertIn("failed", outcome.lines[-1])
 
 
 class TestInstall(FirewallCase):
@@ -267,6 +441,21 @@ class TestBootUnit(FirewallCase):
         self.assertIn(f"ExecStart=/usr/sbin/nft -f /{PATH}", lines)
         self.assertIn("After=local-fs.target nftables.service", lines)
         self.assertIn("Before=network-pre.target shutdown.target", lines)
+
+    def test_an_upgrade_starts_restarts_and_applies_nothing(self):
+        """decision 0073 and 0097, section 5: the package never loads a
+        ruleset; the next apply a person runs does"""
+        debian = join(os.path.dirname(os.path.dirname(os.path.abspath(
+            __file__))), "debian")
+        with open(join(debian, "rules")) as fob:
+            self.assertIn("dh_installsystemd --name=keel-firewall"
+                          " --no-start\n", fob.read())
+        with open(join(debian, "keel.postinst")) as fob:
+            # the commands, not the comments or a message it echoes
+            run = [line.split("||")[0] for line in fob.read().splitlines()
+                   if not line.lstrip().startswith("#")]
+        for word in ("spec apply", "nft", "keel-firewall"):
+            self.assertFalse([line for line in run if word in line], word)
 
 
 class TestObserve(FirewallCase):
@@ -429,3 +618,26 @@ class TestObserve(FirewallCase):
     def test_a_pending_network_change(self):
         self.write("var/lib/keel/network/pending.json", "{}\n")
         self.assertTrue(observe_firewall(Tree(self.root), False).pending)
+
+    def test_the_init_fence_s_ports_while_it_is_enabled(self):
+        link = "etc/systemd/system/multi-user.target.wants/" \
+            "turnkey-init-fence.service"
+        self.assertEqual(observe_firewall(Tree(self.root), False).fence, ())
+        os.makedirs(join(self.root, os.path.dirname(link)))
+        os.symlink("/usr/lib/systemd/system/turnkey-init-fence.service",
+                   join(self.root, link))
+        found = observe_firewall(Tree(self.root), False)
+        self.assertEqual(found.fence, ())
+        self.assertIn("names no fence port", found.fence_note)
+        self.write("etc/default/turnkey-init-fence",
+                   "HTTP_PORTS=(80)\nHTTP_FENCE_PORT=60080\n"
+                   "HTTPS_FENCE_PORT=60443\n")
+        found = observe_firewall(Tree(self.root), False)
+        self.assertEqual((found.fence, found.fence_note),
+                         ((60080, 60443), ""))
+
+    def test_the_listeners_under_a_root_are_unknown(self):
+        found = observe_firewall(Tree(self.root), False)
+        self.assertIsNone(found.listeners)
+        self.assertIn("not the live system", found.listeners_source)
+

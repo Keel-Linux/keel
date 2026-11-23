@@ -1,6 +1,14 @@
 # Copyright (c) 2026 KeelLinux maintainers
 """The firewall, derived from the manifests' exposure classes; pure
 
+Decision 0097: written in every mode (simple, cloud simple, cloud
+advanced and the etcd witness), in one of two states. `enforce` has the
+drop policy below. `report` has the same rules, a policy accept, no
+drop at all, and one counter as its last rule: what reaches it is what
+enforce would drop. The ports sshd listens on (`ssh`), the spec's
+`firewall.allow` and, while the init fence runs, its ports for
+redirected packets only (`ct status dnat`) are opened too.
+
 docs/manifest-v1.md, "What is derived, and how": every `listen` with
 `expose: public` of a process whose overlay is enabled (and every one of
 the appliance's own processes) is opened on every interface, every
@@ -27,6 +35,7 @@ the file says, without comparing nft's own listing line by line.
 """
 
 import hashlib
+import ipaddress
 import re
 from dataclasses import dataclass
 
@@ -42,6 +51,14 @@ HEADER = (
     "# (handbook decision 0041): the public and mesh ports of every\n"
     "# process whose overlay is enabled; a change made here is overwritten"
 )
+ENFORCE = "enforce"
+REPORT = "report"
+OFF = "off"
+STATES = (ENFORCE, REPORT, OFF)
+POLICY = {ENFORCE: "drop", REPORT: "accept"}
+POLICY_RE = re.compile(r"hook input priority filter; policy (drop|accept);")
+REPORT_COUNTER = "keel-report: enforce would drop these"
+INVALID = "ct state invalid drop"
 COMMENT = "keel-manifest"
 COMMENT_RE = re.compile(r'comment "keel-manifest ([0-9a-f]+)"')
 DIGEST_LENGTH = 16
@@ -72,31 +89,40 @@ Port = tuple[int, str]
 
 
 @dataclass(frozen=True)
+class Allow:
+    """One item of the spec's firewall.allow: open everywhere, or only
+    from `sources`, IPv4 and IPv6 prefixes"""
+
+    port: int
+    protocol: str
+    sources: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class Ruleset:
     text: str
     public: tuple[Port, ...]
     mesh: tuple[Port, ...]
     notes: tuple[str, ...]
     digest: str
+    state: str = ENFORCE
+    ssh: tuple[int, ...] = ()
 
 
 def render(resolved: Resolved, states: dict, wireguard: dict | None,
-           bridges: tuple[str, ...] = ()) -> Ruleset:
+           bridges: tuple[str, ...] = (), *, state: str = ENFORCE,
+           ssh: tuple[int, ...] = (), allow: tuple[Allow, ...] = (),
+           fence: tuple[int, ...] = ()) -> Ruleset:
     """`states` are the spec's overlays, `wireguard` its
     network.overlay.wireguard, None when it declares none, and `bridges`
     the machine's bridge interfaces, whose guests get their leases and
-    names from the host (BRIDGE_SERVICES)"""
-    public: set[Port] = set()
-    mesh: dict[str, set[Port]] = {}
-    for owned in resolved.processes:
-        if owned.overlay is not None and states.get(owned.overlay) != ENABLED:
-            continue
-        for listen in owned.item.get("listen") or []:
-            port = (listen["port"], listen["protocol"])
-            if listen["expose"] == "public":
-                public.add(port)
-            elif listen["expose"] == "mesh":
-                mesh.setdefault(owned.item["name"], set()).add(port)
+    names from the host (BRIDGE_SERVICES). `state` is enforce or report,
+    `ssh` the ports sshd listens on, `allow` the spec's firewall.allow,
+    `fence` the ports of the init fence while it runs"""
+    if state not in POLICY:
+        raise ValueError(f"a ruleset is enforce or report, not {state}")
+    declared, mesh = exposed(resolved, states)
+    public: set[Port] = declared | {(port, "tcp") for port in ssh}
     notes = []
     iface = None
     if wireguard is not None:
@@ -109,7 +135,13 @@ def render(resolved: Resolved, states: dict, wireguard: dict | None,
                          " no network.overlay.wireguard")
         mesh = {}
     opened_mesh = sorted({port for ports in mesh.values() for port in ports})
-    rules = list(ALWAYS) + _rules("", sorted(public))
+    always = [rule for rule in ALWAYS
+              if state == ENFORCE or rule != INVALID]
+    rules = always + _rules("", sorted(public))
+    rules += _allowed(allow)
+    if fence:
+        rules += _rules("ct status dnat ", [(port, "tcp")
+                                            for port in sorted(fence)])
     sets = ""
     if iface:
         rules += _rules(f'iifname "{iface}" ', opened_mesh)
@@ -121,25 +153,82 @@ def render(resolved: Resolved, states: dict, wireguard: dict | None,
     if bridges:
         rules += _rules(_iifname(sorted(set(bridges))) + " ",
                         list(BRIDGE_SERVICES))
+    if state == REPORT:
+        rules.append(f'counter comment "{REPORT_COUNTER}"')
     body = "".join(f"\t\t{rule}\n" for rule in rules)
-    digest = hashlib.sha256((sets + body).encode()).hexdigest()[
+    policy = POLICY[state]
+    digest = hashlib.sha256((sets + policy + body).encode()).hexdigest()[
         :DIGEST_LENGTH]
     family, name = TABLE
     text = (
         f"{HEADER}\n"
+        f"# state: {state}\n"
         f"table {family} {name}\n"
         f"delete table {family} {name}\n"
         f"table {family} {name} {{\n"
         f'\tcomment "{COMMENT} {digest}"\n'
         f"{sets}"
         "\tchain input {\n"
-        "\t\ttype filter hook input priority filter; policy drop;\n"
+        "\t\ttype filter hook input priority filter; policy"
+        f" {policy};\n"
         f"{body}"
         "\t}\n"
         "}\n"
     )
     return Ruleset(text, tuple(sorted(public)), tuple(opened_mesh),
-                   tuple(notes), digest)
+                   tuple(notes), digest, state, tuple(sorted(set(ssh))))
+
+
+def exposed(resolved: Resolved, states: dict
+            ) -> tuple[set[Port], dict[str, set[Port]]]:
+    """The public ports, and the mesh ports by process, of every process
+    whose overlay is enabled"""
+    public: set[Port] = set()
+    mesh: dict[str, set[Port]] = {}
+    for owned in resolved.processes:
+        if owned.overlay is not None and states.get(owned.overlay) != ENABLED:
+            continue
+        for listen in owned.item.get("listen") or []:
+            port = (listen["port"], listen["protocol"])
+            if listen["expose"] == "public":
+                public.add(port)
+            elif listen["expose"] == "mesh":
+                mesh.setdefault(owned.item["name"], set()).add(port)
+    return public, mesh
+
+
+def _allowed(allow: tuple[Allow, ...]) -> list[str]:
+    """The administrator's ports: everywhere, or one rule per family"""
+    rules = []
+    for item in allow:
+        match = f"{item.protocol} dport {item.port} accept"
+        if not item.sources:
+            rules.append(match)
+            continue
+        networks = [ipaddress.ip_network(source, strict=False)
+                    for source in item.sources]
+        for family, version in (("ip", 4), ("ip6", 6)):
+            found = sorted({str(net) for net in networks
+                            if net.version == version})
+            if found:
+                rules.append(f"{family} saddr {_one_or_set(found)} {match}")
+    return rules
+
+
+def _one_or_set(items: list[str]) -> str:
+    return items[0] if len(items) == 1 else "{ " + ", ".join(items) + " }"
+
+
+def file_state(text: str | None) -> str | None:
+    """enforce or report, by the policy of a file keel wrote; None for no
+    file or another's. A file of keel 0.23.97 and before has no state
+    line, and its drop policy reads as enforce."""
+    if not text or not text.startswith(HEADER):
+        return None
+    found = POLICY_RE.search(text)
+    if found is None:
+        return None
+    return ENFORCE if found.group(1) == "drop" else REPORT
 
 
 def _iifname(names: list[str]) -> str:
@@ -159,8 +248,7 @@ def _rules(prefix: str, ports: list[Port]) -> list[str]:
         numbers = [str(port) for port, proto in ports if proto == protocol]
         if not numbers:
             continue
-        match = (numbers[0] if len(numbers) == 1
-                 else "{ " + ", ".join(numbers) + " }")
+        match = _one_or_set(numbers)
         rules.append(f"{prefix}{protocol} dport {match} accept")
     return rules
 

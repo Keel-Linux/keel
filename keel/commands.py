@@ -205,7 +205,7 @@ def spec_apply(args) -> int:
         getattr(args, "network_window", DEFAULT_WINDOW),
         getattr(args, "skip_network", False),
         getattr(args, "skip_uplink", False),
-        spec_path=args.spec,
+        spec_path=args.spec, attended=True,
     )
     if code == exits.OK and not dry_run:
         from keel.system import bootrefusal
@@ -246,6 +246,7 @@ def apply_system(
     confirmed: bool = False, defer_certificate: bool = False,
     network_window: int = DEFAULT_WINDOW, skip_network: bool = False,
     skip_uplink: bool = False, spec_path: str | None = None,
+    attended: bool = False,
 ) -> int:
     """Observe, plan, then carry out or only print; one line per action
 
@@ -259,6 +260,11 @@ def apply_system(
 
     A run that is not a dry run may start the database server it
     converges before asking it anything (keel.system.dbready).
+
+    `attended` is keel spec apply, a person's command (the first boot
+    hook and confconsole run it for the person who installs or
+    configures the node); keel mesh applies with no person and leaves it
+    false, so it never begins the firewall's enforcement (decision 0097).
 
     An overlay the chain gained since the spec was last applied is
     converged to its manifest default; a run that did not fail then
@@ -275,7 +281,8 @@ def apply_system(
     doc, _ = with_defaults(doc, facts)
     state = system.observe(root, doc, start=not dry_run, spec=spec_path)
     plan = system.plan(doc, state, confirmed, defer_certificate,
-                       network_window, skip_network, skip_uplink, spec_path)
+                       network_window, skip_network, skip_uplink, spec_path,
+                       attended=attended)
     if not plan.steps:
         print(f"{label}: nothing declared that this phase converges")
         return exits.OK
@@ -367,6 +374,15 @@ def network_mtu(args) -> int:
         failed = failed or bad
         (error if bad else print)(line)
     return exits.APPLY_FAILED if failed else exits.OK
+
+
+def firewall_check(args) -> int:
+    """Whether the kernel holds the table keel's file says (decision
+    0097); Monit runs it and restarts keel-firewall.service on drift"""
+    from keel.system import fwcheck
+    code, message = fwcheck.check(getattr(args, "root", ROOT_DEFAULT))
+    (print if code == exits.OK else error)(message)
+    return code
 
 
 def network_wireguard_key(args) -> int:

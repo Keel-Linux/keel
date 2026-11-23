@@ -384,7 +384,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_assemble_options(assemble_parser)
     add_manifest_parser(subparsers)
+    add_firewall_parser(subparsers)
     return parser
+
+
+def add_firewall_parser(subparsers) -> None:
+    """keel firewall: keel's own nftables table (decision 0097)"""
+    firewall_parser = subparsers.add_parser(
+        "firewall",
+        help="keel's firewall table, which apply writes from the manifests"
+        " (decision 0097)",
+    )
+    firewall_actions = firewall_parser.add_subparsers(
+        dest="action", metavar="ACTION"
+    )
+    check_parser = firewall_actions.add_parser(
+        "check",
+        help="whether the table inet keel the kernel holds is the one keel's"
+        " ruleset file says; what monit runs, to load it again when it is"
+        " lost",
+    )
+    add_root_option(check_parser, "read keel's ruleset file of")
+    check_parser.set_defaults(handler="keel.commands.firewall_check")
 
 
 def add_manifest_parser(subparsers) -> None:

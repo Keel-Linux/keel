@@ -21,7 +21,7 @@ def plan(
     doc: dict, state: SystemState, confirmed: bool = False,
     defer_certificate: bool = False, network_window: int = DEFAULT_WINDOW,
     skip_network: bool = False, skip_uplink: bool = False,
-    spec: str | None = None,
+    spec: str | None = None, attended: bool = False,
 ) -> Plan:
     """Steps: instance, users, locale, security, tls, database, monitor,
     the appliance's overlays and Monit file (decision 0041), its firewall
@@ -32,7 +32,9 @@ def plan(
     so everything cheap and reversible is already done when it is
     reached. `confirmed` is the operator saying, in this invocation, that
     becoming a replica may destroy what this server holds; nothing else
-    in keel sets it.
+    in keel sets it. `attended` is a person running the apply, which
+    keel spec apply says and keel mesh never does: only then may the
+    firewall begin to enforce (decision 0097).
 
     The network after everything, because it is the one step that can
     cut off the session running apply (decision 0018): whatever else the
@@ -60,7 +62,7 @@ def plan(
     steps += plan_firewall(
         doc, appliance.resolved if appliance else None,
         appliance.firewall if appliance else None, state.live,
-        state.available)
+        state.available, attended)
     uplink = plan_network(doc.get("network") or {}, state.network,
                           state.live, state.available, network_window,
                           skip_network or skip_uplink,

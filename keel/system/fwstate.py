@@ -15,6 +15,10 @@ sshd reads them (`Port 22`, `Port=22`, `ListenAddress [::1]:22 rdomain
 x`); a file that sets no port is sshd's documented default, 22, but a
 file that cannot be read, or an Include of anything but the drop-in
 directory, leaves the ports unknown, and the plan refuses.
+
+Decision 0097 adds the sockets the node listens on with the unit of
+each (keel.system.listeners, live only), and the ports of the init
+fence while its unit is enabled, read from its defaults file.
 """
 
 import re
@@ -24,6 +28,7 @@ from dataclasses import dataclass
 from keel.inspect.tree import File, Tree
 from keel.manifest.firewall import PATH, TABLE, loaded_digest
 from keel.network import marker
+from keel.system.listeners import Listener, observe_listeners
 
 SSHD_CONFIG = "etc/ssh/sshd_config"
 SSHD_DROP_INS = "etc/ssh/sshd_config.d/*.conf"
@@ -44,6 +49,10 @@ LISTEN_RE = re.compile(
     r"(?:\s+rdomain\s+\S+)?\s*$", re.IGNORECASE)
 INCLUDE_RE = re.compile(r"^\s*include[\s=]+(.+?)\s*$", re.IGNORECASE)
 STREAM_RE = re.compile(r"(\S+) \(Stream\)")
+FENCE_UNIT = ("etc/systemd/system/multi-user.target.wants/"
+              "turnkey-init-fence.service")
+FENCE_DEFAULTS = "etc/default/turnkey-init-fence"
+FENCE_KEYS = ("HTTP_FENCE_PORT", "HTTPS_FENCE_PORT")
 
 
 @dataclass(frozen=True)
@@ -57,6 +66,14 @@ class FirewallState:
     ssh_source: str
     pending: bool
     bridges: tuple[str, ...] = ()
+    # the sockets with their units; None when they cannot be listed,
+    # and listeners_source then says why
+    listeners: tuple[Listener, ...] | None = None
+    listeners_source: str = ""
+    # the init fence's ports while it is enabled; fence_note says why
+    # an enabled fence has none
+    fence: tuple[int, ...] = ()
+    fence_note: str = ""
 
 
 def ports_in(lines: list[str]) -> set[int]:
@@ -127,6 +144,8 @@ def ask(run, argv: tuple[str, ...]) -> str | None:
 
 def observe_firewall(tree: Tree, live: bool) -> FirewallState:
     ports, source = ssh_ports(tree, live)
+    listeners, listened = observe_listeners(tree, live)
+    fence, fence_note = fence_ports(tree)
     return FirewallState(
         file=tree.read(PATH),
         loaded=table_digest() if live else None,
@@ -134,7 +153,26 @@ def observe_firewall(tree: Tree, live: bool) -> FirewallState:
         ssh_source=source,
         pending=tree.exists(marker.PENDING),
         bridges=bridges_of(tree),
+        listeners=listeners,
+        listeners_source=listened,
+        fence=fence,
+        fence_note=fence_note,
     )
+
+
+def fence_ports(tree: Tree) -> tuple[tuple[int, ...], str]:
+    """The ports turnkey-init-fence redirects to, while it is enabled"""
+    if not tree.exists(FENCE_UNIT):
+        return (), ""
+    defaults = tree.read(FENCE_DEFAULTS)
+    values = defaults.assignments() if defaults.readable else {}
+    ports = tuple(sorted(int(values[key]) for key in FENCE_KEYS
+                         if values.get(key, "").isdigit()))
+    if not ports:
+        return (), (f"the init fence is enabled, and {defaults.path} names"
+                    " no fence port: its page will not answer under"
+                    " enforce")
+    return ports, ""
 
 
 def bridges_of(tree: Tree) -> tuple[str, ...]:

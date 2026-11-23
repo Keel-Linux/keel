@@ -61,10 +61,11 @@ class Change:
 
 
 def live_apply(doc: dict, root: str, window: int) -> int:
-    """apply --system-only --skip-uplink"""
+    """apply --system-only --skip-uplink, with no person: it never
+    begins the firewall's enforcement (decision 0097)"""
     return apply_system(doc, root, False, "keel mesh",
                         defer_certificate=True, network_window=window,
-                        skip_uplink=True)
+                        skip_uplink=True, attended=False)
 
 
 @dataclass

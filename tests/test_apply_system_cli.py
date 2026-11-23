@@ -681,9 +681,10 @@ class TestDeferCertificate(ApplySystemTestCase):
         real = system.plan
 
         def spy(doc, state, confirmed=False, defer_certificate=False,
-                *network):
+                *network, **named):
             seen["defer"] = defer_certificate
-            return real(doc, state, confirmed, defer_certificate, *network)
+            return real(doc, state, confirmed, defer_certificate, *network,
+                        **named)
 
         with mock.patch.object(system, "plan", side_effect=spy), \
                 mock.patch.object(effects.subprocess, "run",

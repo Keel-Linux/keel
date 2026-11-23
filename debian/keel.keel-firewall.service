@@ -1,12 +1,20 @@
 # Load the firewall keel derived from the appliance manifests, at boot.
 #
-# keel spec apply --system writes /etc/keel/firewall/keel-manifest.nft
-# where the spec enables the firewall, which it may only in a cloud
-# advanced installation (handbook decision 0041), and loads it then; this
-# unit loads it again at every boot, before the network comes up, so the
-# table survives a reboot. The file replaces keel's own table `inet
-# keel` in one transaction and touches no other rule. Without the file,
-# nothing runs: every other installation keeps the firewall it has.
+# keel spec apply --system writes /etc/keel/firewall/keel-manifest.nft in
+# every installation mode (handbook decision 0097), enforce or report,
+# and loads it then; an image build writes it with --root and does not
+# load it. This unit loads it at every boot, before the network comes
+# up, so a new node is closed from its first packet and the table
+# survives a reboot. The file replaces keel's own table `inet keel` in
+# one transaction and touches no other rule. Without the file (a node
+# where no apply ran since the upgrade, or `firewall.state: off`),
+# systemd skips the unit.
+#
+# A file nft refuses fails the unit: the node comes up without keel's
+# table, and is degraded, which is visible; Monit's check keel-firewall
+# restarts this unit when the table is lost or differs (keel firewall
+# check). The package never starts or restarts it on an upgrade
+# (debian/rules, --no-start; decision 0073): the next apply loads it.
 #
 # After nftables.service, whose /etc/nftables.conf flushes the whole
 # ruleset where an administrator enabled it.

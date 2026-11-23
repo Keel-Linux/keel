@@ -33,7 +33,16 @@ from keel.manifest.resolve import overlay_units
 from keel.mesh import etcdstate
 from keel.spec import overlayrecord
 from keel.spec.validate_appliance import with_defaults
-from keel.system.fwstate import bridges_of, table_digest
+from keel.network import wireguard
+from keel.spec.validate_firewall import declared_state
+from keel.system.firewall import allow_of, opened_ports, overlay_of
+from keel.system.fwstate import (
+    bridges_of,
+    fence_ports,
+    ssh_ports,
+    table_digest,
+)
+from keel.system.listeners import observe_listeners, unopened
 from keel.system.monitor import NOTIFY
 
 RENEWED = "renewed by keel mesh etcd tend"
@@ -52,6 +61,12 @@ NO_MONITOR = ("no monitor section: the include is left as an earlier apply"
               " set it")
 RULESET = "the ruleset apply renders from the manifests"
 KEEL_RULESET = "keel's ruleset"
+OFF_WARNING = ("warning: off in the spec, no inbound rule of keel's"
+               " protects this node")
+LEGACY_RULES = ("etc/iptables/rules.v4", "etc/iptables/rules.v6")
+# MariaDB, PostgreSQL and Redis: a `firewall.allow` item with no `from`
+# opens them to the world (decision 0097, section 2)
+DATABASE_PORTS = frozenset({(3306, "tcp"), (5432, "tcp"), (6379, "tcp")})
 DEFAULT_NOTE = "not declared: the manifest's default"
 LEGACY_VIP = (
     "{vip} is outside the VIP range{range}. It was paired before the"
@@ -186,31 +201,93 @@ def etcd_fields(states: dict, tree: Tree,
 def firewall_fields(declared: dict, resolved, states: dict,
                     tree: Tree) -> list[FieldDiff]:
     """The ruleset file whole, and on the live system the kernel's table
-    by the digest in its comment; nothing when the spec has no firewall"""
-    firewall = declared.get("firewall")
-    if not isinstance(firewall, dict):
-        return []
+    by the digest in its comment and the sockets enforce closes or would
+    close; and the warnings of decision 0097"""
+    warnings = firewall_warnings(declared, tree)
     file = tree.read(fw.PATH)
-    keel_s = (file.text or "").startswith(fw.HEADER)
-    if firewall.get("enabled") is not True:
+    said = declared_state(declared)
+    if said == fw.OFF:
+        keel_s = (file.text or "").startswith(fw.HEADER)
         return [FieldDiff("derived.firewall", DRIFT if keel_s else SAME,
-                          None, KEEL_RULESET if keel_s else None)]
-    wg = ((declared.get("network") or {}).get("overlay") or {}).get(
-        "wireguard")
-    ruleset = fw.render(resolved, states, wg if isinstance(wg, dict)
-                        else None, bridges_of(tree))
+                          None, KEEL_RULESET if keel_s else None),
+                FieldDiff("derived.firewall.state", NOT_COMPARED,
+                          reason=OFF_WARNING)] + warnings
+    expected = expected_state(said, fw.file_state(file.text))
+    wanted = f"{RULESET}, {expected}"
+    live = tree.root == LIVE_ROOT
+    ssh, source = ssh_ports(tree, live)
+    if not ssh:
+        return [FieldDiff("derived.firewall", UNKNOWN, wanted, None,
+                          "the ports sshd listens on cannot be determined"
+                          f" ({source})")] + warnings
+    fence, _ = fence_ports(tree)
+    wg = overlay_of(declared)
+    ruleset = fw.render(resolved, states, wg, bridges_of(tree),
+                        state=expected, ssh=ssh, allow=allow_of(declared),
+                        fence=fence)
     if file.text == ruleset.text:
-        fields = [FieldDiff("derived.firewall", SAME, RULESET, RULESET)]
+        fields = [FieldDiff("derived.firewall", SAME, wanted, wanted)]
     else:
-        fields = [FieldDiff("derived.firewall", DRIFT, RULESET,
+        fields = [FieldDiff("derived.firewall", DRIFT, wanted,
                             DIFFERS if file.readable else None)]
     key = "derived.firewall.loaded"
-    if tree.root != LIVE_ROOT:
+    if not live:
         return fields + [FieldDiff(key, NOT_COMPARED, None, None,
-                                   NOT_LIVE)]
+                                   NOT_LIVE)] + warnings
     held = table_digest()
-    return fields + [FieldDiff(key, SAME if held == ruleset.digest
-                               else DRIFT, ruleset.digest, held)]
+    fields.append(FieldDiff(key, SAME if held == ruleset.digest
+                            else DRIFT, ruleset.digest, held))
+    return fields + [listener_field(declared, ruleset, tree)] + warnings
+
+
+def expected_state(said: str | None, current: str | None) -> str:
+    """What apply writes with no person: diff never promotes (rule B)"""
+    if said in (fw.ENFORCE, fw.REPORT):
+        return said
+    return fw.ENFORCE if current == fw.ENFORCE else fw.REPORT
+
+
+def listener_field(declared: dict, ruleset, tree: Tree) -> FieldDiff:
+    """The sockets on an address that is not a loopback whose port the
+    ruleset does not open"""
+    key = "derived.firewall.listeners"
+    found, why = observe_listeners(tree, True)
+    if found is None:
+        return FieldDiff(key, NOT_COMPARED, reason=why)
+    wg = overlay_of(declared)
+    device = (wg.get("interface") or wireguard.DEFAULT_INTERFACE
+              if wg else None)
+    closed = unopened(found, opened_ports(ruleset, declared), device)
+    verb = ("enforce would close" if ruleset.state == fw.REPORT
+            else "enforce closes")
+    named = "; ".join(item.describe() for item in closed) or "nothing"
+    return FieldDiff(key, NOT_COMPARED, reason=f"{ruleset.state}: {verb}"
+                     f" {named}")
+
+
+def firewall_warnings(declared: dict, tree: Tree) -> list[FieldDiff]:
+    """rules.v4 and rules.v6 of TurnKey, and a database port the spec's
+    allow opens to every address (decision 0097, sections 1 and 2)"""
+    fields = []
+    legacy = [f"/{path}" for path in LEGACY_RULES if tree.exists(path)]
+    if legacy:
+        there = " and ".join(legacy) + (" is" if len(legacy) == 1
+                                        else " are")
+        fields.append(FieldDiff(
+            "derived.firewall.legacy", NOT_COMPARED,
+            reason=f"warning: {there} there: do not install"
+            " iptables-persistent, its rules have no WireGuard port"))
+    open_databases = [f"{item.port}/{item.protocol}"
+                      for item in allow_of(declared)
+                      if not item.sources and
+                      (item.port, item.protocol) in DATABASE_PORTS]
+    if open_databases:
+        fields.append(FieldDiff(
+            "firewall.allow", NOT_COMPARED,
+            reason="warning: " + "; ".join(
+                f"{port} opens a database port to every address: give it"
+                " `from`" for port in open_databases)))
+    return fields
 
 
 def monit_fields(declared: dict, resolved, states: dict,
@@ -220,7 +297,8 @@ def monit_fields(declared: dict, resolved, states: dict,
     rendered = monit.render(resolved, states, wg.get("address"), NOTIFY,
                             monit_cycle(tree).seconds,
                             waiting(tree, [owned.item["unit"] for owned
-                                           in resolved.processes]))
+                                           in resolved.processes]),
+                            firewall=declared_state(declared) != fw.OFF)
     file = tree.read(monit.PATH)
     if file.text == rendered.text:
         fields = [FieldDiff("derived.monit", SAME, RENDERED, RENDERED)]

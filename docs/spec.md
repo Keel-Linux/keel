@@ -1002,24 +1002,36 @@ with systemd, and Monit's derived file with what apply renders
 
 ## firewall
 
-The firewall derived from the manifests (decision 0041): every `public`
-port of the appliance's processes and of its enabled overlays' processes
-opened on every interface, every `mesh` one on the WireGuard interface
-only, and the overlay's UDP port. Optional, and for cloud advanced
-installations only, as the maintainer scoped it on 2026-09-30: in the
-simple and cloud simple modes keel installs and changes no firewall
-rule.
+The firewall derived from the manifests (decisions 0041 and 0097): every
+`public` port of the appliance's processes and of its enabled overlays'
+processes opened on every interface, every `mesh` one on the WireGuard
+interface only, the overlay's UDP port, every port sshd listens on, and
+the ports of `firewall.allow`. Decision 0097 ends the scope of
+2026-09-30 (cloud advanced only): keel writes it in every mode, simple,
+cloud simple and cloud advanced, the etcd witness included, and the
+section is valid in each.
 
 ```yaml
-installation:
-  mode: cloud_advanced
 firewall:
-  enabled: true
+  state: enforce
+  allow:
+    - {port: 8080, protocol: tcp}
+    - {port: 5432, protocol: tcp, from: [192.0.2.0/24, "2001:db8::/32"]}
 ```
 
 | Field | State | Notes |
 | --- | --- | --- |
-| `firewall.enabled` | system | `true` or `false`; absent is off. `true` needs `appliance.name` and `installation.mode: cloud_advanced`, and is refused otherwise. `apply --system` writes `/etc/keel/firewall/keel-manifest.nft` and loads it when true, and removes keel's file and table when false ([docs/apply.md](apply.md)). A spec without the section leaves an earlier firewall as it is. `keel inspect` writes it from keel's ruleset file, so a re-emitted spec keeps the opt-in |
+| `firewall.state` | system | `enforce`, `report` or `off`. `enforce` loads `inet keel` with a drop policy on input. `report` loads the same rules with an accept policy and one counter as the last rule: it drops nothing, and counts what enforce would drop; `keel diff` lists each socket enforce would close. `off` removes keel's file and table, and the plan and `keel diff` warn. An unquoted `off` is YAML's false, and reads as `off`. Not declared, the state is `report`, and an apply a person runs moves the node to `enforce` by itself when each socket on an address that is not a loopback belongs to a unit of the manifests (rule B, [docs/apply.md](apply.md)); once keel's file is in enforce, it stays there until the spec says otherwise. `keel mesh` never begins enforcement, not even where the spec says `enforce`: it keeps report until a person applies. `keel inspect` writes `state: enforce` from keel's ruleset file, and leaves a report out, so a re-emitted spec never pins a node in report |
+| `firewall.enabled` | system | The spelling of keel 0.23.97 and before: `true` is `state: enforce`; `false` records no choice (inspect wrote it where it found no file), and reads as a section that says nothing. Refused together with `state` |
+| `firewall.allow` | system | A list of the administrator's ports: each `port` (1 to 65535), `protocol` (`tcp` or `udp`) and an optional `from`, a list of IPv4 and IPv6 prefixes (an address alone is its /32 or /128). Without `from`, the port opens on every interface; with it, only for those sources, one rule per family. A socket on such a port counts as declared for rule B. `keel diff` warns of each item that opens a database port (3306, 5432, 6379) with no `from` |
+
+`enforce`, `report` and `enabled: true` need `appliance.name`: the ports
+come from its manifests. `apply --system` writes
+`/etc/keel/firewall/keel-manifest.nft` and loads it; under `--root` it
+writes the file and `keel-firewall.service` loads it at boot. An image
+build that wants a node closed from its first packet declares
+`state: enforce`: under `--root` keel sees no socket, so a section that
+says nothing writes report there.
 
 ## Not in the spec yet
 

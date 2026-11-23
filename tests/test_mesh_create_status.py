@@ -292,7 +292,7 @@ class TestNode(unittest.TestCase):
             self.assertEqual(live_apply({"version": 1}, "/", 150), 0)
         applied.assert_called_once_with(
             {"version": 1}, "/", False, "keel mesh", defer_certificate=True,
-            network_window=150, skip_uplink=True)
+            network_window=150, skip_uplink=True, attended=False)
 
     def test_apply_s_lines_are_held_by_the_change_not_printed(self):
         def saying(doc, root, window):

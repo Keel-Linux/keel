@@ -366,7 +366,7 @@ class TestMonit(PlanCase):
         self.assertIsInstance(write, WriteFile)
         self.assertEqual((write.path, write.mode), (MANIFEST_MONIT, 0o600))
         self.assertEqual(write.describe(), (
-            f"write /{MANIFEST_MONIT}: 4 unit(s) and 3 probe(s) of core"
+            f"write /{MANIFEST_MONIT}: 5 unit(s) and 3 probe(s) of core"
             " (mode 0600)"))
         self.assertEqual(len(found), 1)
 
@@ -397,7 +397,7 @@ class TestMonit(PlanCase):
                            monit_link_present=True)
         found = self.monit(OFF, state, {"enabled": True})
         self.assertEqual([a.describe() for a in found], [
-            f"unchanged (/{MANIFEST_MONIT}, 4 unit(s) and 3 probe(s) of"
+            f"unchanged (/{MANIFEST_MONIT}, 5 unit(s) and 3 probe(s) of"
             " core, included)"])
 
     def test_a_monitor_turned_off_stops_including_it(self):
@@ -417,7 +417,7 @@ class TestMonit(PlanCase):
                            monit_link_present=True)
         found = self.monit(OFF, state)
         self.assertEqual([a.describe() for a in found], [
-            f"unchanged (/{MANIFEST_MONIT}, 4 unit(s) and 3 probe(s) of"
+            f"unchanged (/{MANIFEST_MONIT}, 5 unit(s) and 3 probe(s) of"
             " core, included)"])
 
     def test_a_changed_file_that_is_not_included_is_not_reloaded(self):

@@ -91,7 +91,8 @@ from keel.system import filesync_owner
 from keel.system import roles
 from keel.system.actions import Action, Note, Refuse, Run, WriteFile
 from keel.system.filesync_api import (  # noqa: F401  (the names callers use)
-    GUI_ADDRESS, GUI_PORT, PORT, RECEIVE, SEND, VERSIONING_KEEP)
+    GUI_ADDRESS, GUI_PORT, LOOPBACK_LISTEN, PORT, RECEIVE, SEND,
+    VERSIONING_KEEP)
 from keel.system.filesync_io import (  # noqa: F401
     APIKEY, DEVICE_FILE, DIR, HOME, PEER_FILE, PENDING, PUBLIC_MODE, RECORD,
     SECRET_MODE, STATE_FILE, folder_id)
@@ -280,7 +281,8 @@ def config_xml(device: str, peer_device: str | None, peer_address: str | None,
     _add(gui, "apikey", apikey)
     options = _add(top, "options")
     _add(options, "listenAddress",
-         f"tcp://[{address}]:{PORT}" if address else "tcp://:0")
+         f"tcp://[{address}]:{PORT}" if address
+         else f"tcp://{LOOPBACK_LISTEN}:{PORT}")
     for name, value in (("globalAnnounceEnabled", "false"),
                         ("localAnnounceEnabled", "false"),
                         ("relaysEnabled", "false"),

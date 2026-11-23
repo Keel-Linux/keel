@@ -18,7 +18,16 @@ from wgtools import namespace_prefix
 
 from keel.manifest.catalog import Catalog
 from keel.manifest.constants import APPLIANCE
-from keel.manifest.firewall import HEADER, loaded_digest, render
+from keel.manifest.firewall import (
+    ENFORCE,
+    HEADER,
+    REPORT,
+    REPORT_COUNTER,
+    Allow,
+    file_state,
+    loaded_digest,
+    render,
+)
 from keel.manifest.resolve import resolve
 
 CORE_OFF = {"installer": "enabled", "wireguard": "disabled",
@@ -169,6 +178,103 @@ class TestRender(FirewallCase):
                    f' {found.digest}"\n\tchain input {{\n')
         self.assertEqual(loaded_digest(listing), found.digest)
         self.assertIsNone(loaded_digest("table inet keel {\n}\n"))
+
+
+class TestEveryMode(FirewallCase):
+    """Decision 0097: one ruleset in every mode, in two states"""
+
+    def resolved(self):
+        catalog = Catalog(self.root)
+        resolved, _ = resolve(catalog, catalog.read(APPLIANCE, "core"))
+        return resolved
+
+    def test_each_mode_renders_a_drop_policy_nft_accepts(self):
+        simple = render(self.resolved(), CORE_OFF, None)
+        cloud_simple = render(self.resolved(), {**ADVANCED, "etcd":
+                                                "disabled"}, WG)
+        advanced = render(self.resolved(), ADVANCED, WG)
+        for found in (simple, cloud_simple, advanced):
+            self.assertEqual(found.state, ENFORCE)
+            self.assertIn("policy drop;", found.text)
+            self.assertIn("\t\tct state invalid drop\n", found.text)
+            self.assertNftAccepts(found.text)
+        self.assertNotIn("2379", cloud_simple.text)
+        self.assertIn('iifname "wg0" tcp dport 51821 accept',
+                      cloud_simple.text)
+
+    def test_report_drops_nothing_and_counts_what_enforce_would(self):
+        found = render(self.resolved(), ADVANCED, WG, state=REPORT)
+        self.assertEqual(found.state, REPORT)
+        self.assertIn("type filter hook input priority filter; policy"
+                      " accept;", found.text)
+        chain = found.text.split("chain input {\n")[1].split("\t}\n")[0]
+        self.assertFalse([line for line in chain.splitlines()
+                          if line.endswith(" drop")])
+        self.assertEqual(chain.splitlines()[-1],
+                         f'\t\tcounter comment "{REPORT_COUNTER}"')
+        self.assertTrue(found.text.startswith(HEADER + "\n# state: report"
+                                              "\n"))
+        self.assertNftAccepts(found.text)
+
+    def test_the_two_states_have_two_digests(self):
+        enforce = render(self.resolved(), CORE_OFF, None)
+        report = render(self.resolved(), CORE_OFF, None, state=REPORT)
+        self.assertNotEqual(enforce.digest, report.digest)
+
+    def test_the_state_of_a_file_is_read_from_its_policy(self):
+        enforce = render(self.resolved(), CORE_OFF, None)
+        report = render(self.resolved(), CORE_OFF, None, state=REPORT)
+        self.assertEqual(file_state(enforce.text), ENFORCE)
+        self.assertEqual(file_state(report.text), REPORT)
+        self.assertIsNone(file_state(None))
+        self.assertIsNone(file_state("table inet mine {}\n"))
+
+    def test_off_is_no_ruleset_and_a_header_alone_no_state(self):
+        with self.assertRaisesRegex(ValueError, "enforce or report"):
+            render(self.resolved(), CORE_OFF, None, state="off")
+        self.assertIsNone(file_state(HEADER + "\n"))
+
+    def test_a_file_of_keel_0_23_97_reads_as_enforce(self):
+        """cloud advanced nodes with `firewall.enabled: true` have the
+        old file: it has the same header and a drop policy"""
+        old = (HEADER + "\ntable inet keel\ndelete table inet keel\n"
+               "table inet keel {\n\tchain input {\n\t\ttype filter hook"
+               " input priority filter; policy drop;\n\t}\n}\n")
+        self.assertEqual(file_state(old), ENFORCE)
+
+    def test_every_port_sshd_listens_on_is_opened(self):
+        found = render(self.resolved(), CORE_OFF, None, ssh=(22, 2222))
+        self.assertIn((2222, "tcp"), found.public)
+        self.assertEqual(found.ssh, (22, 2222))
+        self.assertIn("\t\ttcp dport { 22, 2222, 12320, 12321 } accept\n",
+                      found.text)
+        self.assertNftAccepts(found.text)
+
+    def test_allow_opens_a_port_everywhere_or_from_its_prefixes(self):
+        allow = (Allow(8080, "tcp"),
+                 Allow(5432, "tcp", ("192.0.2.0/24", "2001:db8::/32",
+                                     "198.51.100.7/32")),
+                 Allow(9000, "udp", ("2001:db8:1::/48",)))
+        found = render(self.resolved(), CORE_OFF, None, allow=allow)
+        self.assertIn("\t\ttcp dport 8080 accept\n", found.text)
+        self.assertIn("\t\tip saddr { 192.0.2.0/24, 198.51.100.7/32 } tcp"
+                      " dport 5432 accept\n", found.text)
+        self.assertIn("\t\tip6 saddr 2001:db8::/32 tcp dport 5432 accept\n",
+                      found.text)
+        self.assertIn("\t\tip6 saddr 2001:db8:1::/48 udp dport 9000"
+                      " accept\n", found.text)
+        self.assertNotIn("ip saddr 2001", found.text)
+        self.assertNftAccepts(found.text)
+
+    def test_the_fence_ports_only_for_redirected_packets(self):
+        """turnkey-init-fence redirects 80 and 443 to its own ports: the
+        input hook sees the fence port, so only a DNAT packet passes"""
+        found = render(self.resolved(), CORE_OFF, None, fence=(60080, 60443))
+        self.assertIn("\t\tct status dnat tcp dport { 60080, 60443 }"
+                      " accept\n", found.text)
+        self.assertNotIn("60080", render(self.resolved(), CORE_OFF,
+                                         None).text)
+        self.assertNftAccepts(found.text)
 
 
 if __name__ == "__main__":

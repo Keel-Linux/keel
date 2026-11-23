@@ -22,6 +22,8 @@ Depends:
  zstd,
  gpgv,
  openssl,
+ nftables,
+ iproute2,
  ${python3:Depends},
  ${misc:Depends},
 Breaks:
@@ -29,7 +31,6 @@ Breaks:
  keel-overlay-etcd (<< 0.4.0~),
 Suggests:
  monit,
- nftables,
  wireguard-tools,
 Description: Declarative management of one appliance instance
  Keel describes one appliance instance in a single file and applies it
