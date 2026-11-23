@@ -1025,7 +1025,23 @@ firewall:
 | `firewall.enabled` | system | The spelling of keel 0.23.97 and before: `true` is `state: enforce`; `false` records no choice (inspect wrote it where it found no file), and reads as a section that says nothing. Refused together with `state` |
 | `firewall.allow` | system | A list of the administrator's ports: each `port` (1 to 65535), `protocol` (`tcp` or `udp`) and an optional `from`, a list of IPv4 and IPv6 prefixes (an address alone is its /32 or /128). Without `from`, the port opens on every interface; with it, only for those sources, one rule per family. A socket on such a port counts as declared for rule B. `keel diff` warns of each item that opens a database port (3306, 5432, 6379) with no `from` |
 
-`enforce`, `report` and `enabled: true` need `appliance.name`: the ports
+What each spelling means, as `keel spec apply --system` reads it
+(decision 0097; tested from the command in
+`tests/test_appliance_cli.py`, `TestLiveEntry`):
+
+| The spec says | The state | Who moves it |
+| --- | --- | --- |
+| no `firewall:` key (every published spec) | report, then enforce by rule B | the first apply a person runs whose sockets all belong to the manifests; never keel mesh. Once keel's file is in enforce, it stays |
+| `firewall: {enabled: false}` (what keel inspect of 0.23.97 wrote) | the same as no key | the same |
+| `firewall: {allow: [...]}` with no state | the same as no key, with those ports | the same |
+| `firewall: {enabled: true}` | enforce | an apply a person runs; keel mesh keeps report until then |
+| `firewall: {state: enforce}` | enforce | the same |
+| `firewall: {state: report}` | report, kept on purpose: rule B never moves it | only a change of the spec |
+| `firewall: {state: off}` | no table of keel's; the plan and keel diff warn | only a change of the spec |
+
+`state: report` is the one way to keep a node in report on purpose.
+
+: the ports
 come from its manifests. `apply --system` writes
 `/etc/keel/firewall/keel-manifest.nft` and loads it; under `--root` it
 writes the file and `keel-firewall.service` loads it at boot. An image

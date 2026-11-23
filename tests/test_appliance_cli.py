@@ -394,6 +394,93 @@ class TestFirewall(ApplianceCliCase):
             self.assertNotIn("firewall", err)
 
 
+SS_CORE = (
+    'tcp LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:(("sshd",pid=101,fd=3))\n'
+    'tcp LISTEN 0 128 0.0.0.0:12321 0.0.0.0:*'
+    ' users:(("miniserv.pl",pid=310,fd=5))\n'
+    'udp UNCONN 0 0 0.0.0.0:12321 0.0.0.0:*'
+    ' users:(("miniserv.pl",pid=310,fd=6))\n'
+    'tcp LISTEN 0 100 127.0.0.1:25 0.0.0.0:*'
+    ' users:(("master",pid=400,fd=13))\n')
+
+
+class TestLiveEntry(ApplianceCliCase):
+    """The whole decision from the command a person runs (decision 0097)
+
+    The tests of keel.system.firewall build a FirewallState by hand, so
+    they never saw that the observation, keel.system.appstate, listed
+    the sockets and asked sshd -T only when the spec had a `firewall:`
+    key, which no published spec has (the real test of PR 307). These
+    go through `keel spec apply` itself, with the root taken for the
+    live system, with a spec that has no firewall key in each mode."""
+
+    def setUp(self):
+        super().setUp()
+        for pid, unit in ((101, "ssh.service"), (310, "webmin.service"),
+                          (400, "postfix@-.service")):
+            os.makedirs(join(self.root, f"proc/{pid}"))
+            with open(join(self.root, f"proc/{pid}/cgroup"), "w") as fob:
+                fob.write(f"0::/system.slice/{unit}\n")
+        self.ss = SS_CORE
+        self.asked = []
+
+    def answer(self, argv, **kwargs):
+        """ss, sshd -T and nft answer as on a node; the rest fails"""
+        self.asked.append(argv[0])
+        answers = {"ss": (0, self.ss), "sshd": (0, "port 22\n"),
+                   "nft": (1, "")}
+        code, out = answers.get(argv[0], (1, ""))
+        return subprocess.CompletedProcess(argv, code, out, "")
+
+    def apply_live(self, mode: str, extra: str = "") -> str:
+        self.write(spec_text().replace("mode: simple", f"mode: {mode}")
+                   + extra)
+        with mock.patch("keel.system.appstate.ROOT_DEFAULT", self.root), \
+                mock.patch("keel.inspect.constants.ROOT_DEFAULT",
+                           self.root), \
+                mock.patch("subprocess.run", self.answer), \
+                mock.patch("shutil.which", return_value="/usr/sbin/x"):
+            code, out, err = self.cli("spec", "apply", "--spec", self.spec,
+                                      "--system-only", "--dry-run")
+        return out + err
+
+    def test_no_firewall_key_lets_rule_b_decide_in_each_mode(self):
+        for mode in ("simple", "cloud_simple", "cloud_advanced"):
+            with self.subTest(mode=mode):
+                out = self.apply_live(mode)
+                self.assertIn("derived.firewall: enforce: each socket on an"
+                              " address that is not a loopback belongs to a"
+                              " unit of the manifests", out)
+                self.assertIn("would write /etc/keel/firewall/"
+                              "keel-manifest.nft (enforce)", out)
+                self.assertIn("ss", self.asked)
+                self.assertIn("sshd", self.asked)
+
+    def test_an_undeclared_socket_keeps_report_from_the_command(self):
+        self.ss = SS_CORE + ("tcp LISTEN 0 1 [::]:9999 [::]:*"
+                             ' users:(("nc",pid=800,fd=3))\n')
+        out = self.apply_live("simple")
+        self.assertIn("derived.firewall: report: enforce waits, because these"
+                      " sockets belong to no unit of the manifests: tcp"
+                      " [::]:9999", out)
+
+    def test_each_spelling_from_the_command(self):
+        """the table of docs/spec.md: what each value means"""
+        cases = (("", "enforce"),
+                 ("firewall: {enabled: false}\n", "enforce"),
+                 ("firewall: {allow: []}\n", "enforce"),
+                 ("firewall: {enabled: true}\n", "enforce"),
+                 ("firewall: {state: enforce}\n", "enforce"),
+                 ("firewall: {state: report}\n", "report"))
+        for extra, state in cases:
+            with self.subTest(spec=extra):
+                out = self.apply_live("simple", extra)
+                self.assertIn("/etc/keel/firewall/keel-manifest.nft"
+                              f" ({state})", out)
+        out = self.apply_live("simple", "firewall: {state: off}\n")
+        self.assertIn("derived.firewall: off in the spec", out)
+
+
 class TestInspect(ApplianceCliCase):
     def inspect(self) -> tuple[dict, str]:
         code, out, err = self.cli("inspect")
