@@ -1,0 +1,25 @@
+#!/bin/sh
+# What keel-firewall-watch.timer runs every 30 s (handbook decision 0097).
+#
+# The cheap path: when the table keel's file loaded is still the one the
+# last good check saw (the sha256 of `nft -s list table inet keel`) and
+# the file is the same file (inode, size, time), there is nothing to do,
+# and no Python starts. On any difference, or with no mark, keel firewall
+# check --restore checks everything, loads a lost table again from a
+# sound file and writes the mark again (keel/system/fwwatch.py). With no
+# file of keel's, nothing runs.
+set -u
+file=${KEEL_FIREWALL_FILE:-/etc/keel/firewall/keel-manifest.nft}
+mark=${KEEL_FIREWALL_MARK:-/run/keel/firewall-watch.ok}
+keel=${KEEL_BIN:-/usr/bin/keel}
+nft=${KEEL_NFT:-/usr/sbin/nft}
+
+[ -e "$file" ] || exit 0
+if [ -r "$mark" ]; then
+    listed=$("$nft" -s list table inet keel 2>/dev/null) && {
+        now="$(printf '%s\n' "$listed" | sha256sum | cut -d' ' -f1)"
+        now="$now $(stat -c '%i %s %Y' "$file")"
+        [ "$now" = "$(cat "$mark")" ] && exit 0
+    }
+fi
+exec "$keel" firewall check --restore

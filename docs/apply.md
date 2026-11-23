@@ -1345,9 +1345,16 @@ nftables.service` the node stayed open until an apply. So:
 - `keel-firewall-watch.timer` runs `keel firewall check --restore`
   every 30 s (5 s of accuracy) for a flush by hand (`nft flush
   ruleset`, `nft delete table inet keel`), which leaves no trace a unit
-  could wait on: open for at most about 35 s. The package does not
-  start the timer (decision 0073); the apply that writes the firewall on
-  the live system starts it, and so does the boot;
+  could wait on: open for at most about 35 s. Each run is a few lines
+  of shell (`/usr/lib/keel/firewall-watch`): when the hash of `nft -s
+  list table inet keel` and the inode, size and time of keel's file are
+  the ones the last good check wrote under `/run/keel`, it exits, and
+  Python runs only on a difference (about 22 ms of CPU a run, against
+  0.5 s for the full check: about one CPU minute a day). A broken file is
+  said once per change of the problem and once an hour. An upgrade
+  neither stops nor starts the timer (decision 0073); the apply that
+  writes the firewall on the live system starts it, and so does the
+  boot. A masked or disabled timer is left alone and said;
 - `keel firewall check` trusts no comment: the rules in the file must
   be the ones its digest names, `nft -c` must accept the file, and the
   loaded table must carry that digest and the file's policy. `--restore`

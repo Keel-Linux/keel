@@ -170,8 +170,8 @@ def nft_refuses(path: str, run) -> str | None:
 
 def table_listing(run) -> str | None:
     try:
-        out = run(["nft", "-s", "list", "table", *TABLE], capture_output=True,
-                  text=True, check=False)
+        out = run(["nft", "-s", "list", "table", *TABLE],
+                  capture_output=True, text=True, check=False)
     except OSError:
         return None
     return out.stdout if out.returncode == 0 else None

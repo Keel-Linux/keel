@@ -401,23 +401,17 @@ def firewall_check(args) -> int:
     """Whether the kernel holds the table keel's file says (decision
     0097); with --restore, load a lost table again from a sound file,
     and say nothing when all is well (keel-firewall-watch.timer)"""
-    from keel.system import fwcheck
     root = getattr(args, "root", ROOT_DEFAULT)
+    if getattr(args, "restore", False):
+        from keel.system import fwwatch
+        code, lines = fwwatch.watch(root)
+        for line in lines:
+            (warn if code == exits.OK else error)(line)
+        return code
+    from keel.system import fwcheck
     found = fwcheck.check(root)
-    if not getattr(args, "restore", False):
-        (print if found.code == exits.OK else error)(found.message)
-        return found.code
-    if found.code == exits.OK:
-        return exits.OK
-    if not found.restorable:
-        error(found.message)
-        return found.code
-    problem = fwcheck.restore(root)
-    if problem is not None:
-        error(f"{found.message}; nft -f failed: {problem}")
-        return exits.APPLY_FAILED
-    warn(f"{found.message}: loaded again")
-    return exits.OK
+    (print if found.code == exits.OK else error)(found.message)
+    return found.code
 
 
 def network_wireguard_key(args) -> int:

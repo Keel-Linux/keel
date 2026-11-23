@@ -14,6 +14,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from os.path import join
@@ -58,8 +59,10 @@ class Nft:
     """nft as the check asks it: -c of the file, the listing of keel's
     table, and the load of --restore"""
 
-    def __init__(self, check=0, listing=None, load=0):
+    def __init__(self, check=0, listing=None, load=0, after=None):
         self.check, self.listing, self.load = check, listing, load
+        # the listing once a load succeeded
+        self.after = after
         self.calls = []
 
     def __call__(self, argv, **kwargs):
@@ -71,6 +74,8 @@ class Nft:
             if self.listing is None:
                 return subprocess.CompletedProcess(argv, 1, "", "No such")
             return subprocess.CompletedProcess(argv, 0, self.listing, "")
+        if self.load == 0 and self.after is not None:
+            self.listing = self.after
         return subprocess.CompletedProcess(argv, self.load, "", "denied")
 
 
@@ -224,8 +229,8 @@ class TestCheck(ManifestCase):
         self.assertIn("cannot be read", found.message)
 
     def test_restore_loads_a_lost_table(self):
-        self.ruleset()
-        nft = Nft()
+        digest = self.ruleset()
+        nft = Nft(after=listing(digest))
         with mock.patch("keel.system.fwcheck.subprocess.run", nft):
             code, out, err = self.cli("firewall", "check", "--restore")
         self.assertEqual(code, exits.OK, err)
@@ -253,8 +258,49 @@ class TestCheck(ManifestCase):
         self.ruleset()
         with mock.patch("keel.system.fwcheck.subprocess.run", Nft(load=1)):
             code, _, err = self.cli("firewall", "check", "--restore")
-        self.assertEqual(code, exits.APPLY_FAILED)
+        self.assertEqual(code, exits.DRIFT_FOUND)
         self.assertIn("denied", err)
+
+    def watch(self, nft, now):
+        from keel.system import fwwatch
+        return fwwatch.watch(self.root, nft, lambda: now)
+
+    def test_a_broken_file_is_said_once_per_change_and_hourly(self):
+        """the second review (N10): one line every 30 s before"""
+        self.ruleset()
+        nft = Nft(check=1)
+        self.assertEqual(self.watch(nft, 1000)[0], exits.DRIFT_FOUND)
+        self.assertEqual(self.watch(nft, 1030), (exits.OK, []))
+        self.assertEqual(self.watch(nft, 4599), (exits.OK, []))
+        self.assertEqual(self.watch(nft, 4601)[0], exits.DRIFT_FOUND)
+        self.assertEqual(self.watch(nft, 4631), (exits.OK, []))
+
+    def test_a_new_problem_and_the_recovery_are_said(self):
+        digest = self.ruleset()
+        self.assertEqual(self.watch(Nft(check=1), 1000)[0],
+                         exits.DRIFT_FOUND)
+        code, lines = self.watch(Nft(load=1), 1010)
+        self.assertEqual(code, exits.DRIFT_FOUND)
+        self.assertIn("denied", lines[0])
+        code, lines = self.watch(Nft(listing=listing(digest)), 1020)
+        self.assertEqual((code, lines[-1:]), (exits.OK, [
+            "recovered: table inet keel is the one keel's file says"
+            " again"]))
+        self.assertEqual(self.watch(Nft(listing=listing(digest)), 1050),
+                         (exits.OK, []))
+
+    def test_a_good_check_writes_the_mark_the_shell_compares(self):
+        from keel.system import fwwatch
+        digest = self.ruleset()
+        self.watch(Nft(listing=listing(digest)), 1000)
+        with open(join(self.root, fwwatch.MARK)) as fob:
+            mark = fob.read().strip()
+        found = os.stat(join(self.root, PATH))
+        self.assertEqual(mark.split(" ")[1:], [
+            str(found.st_ino), str(found.st_size),
+            str(int(found.st_mtime))])
+        self.watch(Nft(check=1), 1010)
+        self.assertFalse(os.path.exists(join(self.root, fwwatch.MARK)))
 
     def test_no_nft_is_drift_and_a_restore_says_why(self):
         self.ruleset()
@@ -333,6 +379,64 @@ class TestCheckReal(ManifestCase):
                     " 'dport 8080' | sed 's/.*handle //') accept && "))
                 self.assertIn("rule", fwcheck.rules_differ(swapped,
                                                            found.text))
+
+
+class TestWatchShell(TestCheckReal):
+    """firewall/firewall-watch for real, in a network namespace of its
+    own: after a good check (`keel firewall check --restore`, which
+    writes the mark) it starts no Python; a changed table or file, or
+    no mark, hands over to keel (a recorder here)"""
+
+    def scenario(self, between: str) -> str:
+        catalog = Catalog(self.root)
+        resolved, _ = resolve(catalog, catalog.read(APPLIANCE, "core"))
+        found = render_ruleset(resolved, CORE_OFF, None)
+        target = join(self.root, PATH)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "w") as fob:
+            fob.write(found.text)
+        log = join(self.root, "keel.log")
+        recorder = join(self.root, "keel")
+        with open(recorder, "w") as fob:
+            fob.write(f'#!/bin/sh\necho "$@" >> {log}\n')
+        os.chmod(recorder, 0o755)
+        watch = join(REPO, "firewall", "firewall-watch")
+        nftdir = os.path.dirname(self.nft)
+        script = (
+            f"export PATH={nftdir}:$PATH"
+            f" KEEL_FIREWALL_FILE={target}"
+            f" KEEL_FIREWALL_MARK={self.root}/run/keel/firewall-watch.ok"
+            f" KEEL_BIN={recorder} KEEL_NFT={self.nft}"
+            f" PYTHONPATH={REPO};"
+            f" {self.nft} -f {target} &&"
+            f" {sys.executable} -m keel firewall check --restore"
+            f" --root {self.root} && {between} sh {watch}")
+        done = subprocess.run([*self.prefix, "sh", "-c", script],
+                              capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        try:
+            with open(log) as fob:
+                return fob.read()
+        except FileNotFoundError:
+            return ""
+
+    def test_all_well_starts_no_python(self):
+        self.assertEqual(self.scenario(""), "")
+
+    def test_a_flushed_chain_hands_over_to_keel(self):
+        self.assertEqual(self.scenario(
+            f"{self.nft} flush chain inet keel input &&"),
+            "firewall check --restore\n")
+
+    def test_a_new_file_hands_over_to_keel(self):
+        target = join(self.root, PATH)
+        self.assertEqual(self.scenario(f"cp {target} {target}.n && mv"
+                                       f" {target}.n {target} &&"),
+                         "firewall check --restore\n")
+
+    def test_no_file_runs_nothing(self):
+        target = join(self.root, PATH)
+        self.assertEqual(self.scenario(f"rm {target} &&"), "")
 
 
 class TestDigest(ManifestCase):
@@ -428,7 +532,7 @@ class TestTableLoss(unittest.TestCase):
         service = lines(WATCH + ".service")
         for line in ("Type=oneshot",
                      f"ConditionPathExists=/{PATH}",
-                     "ExecStart=/usr/bin/keel firewall check --restore",
+                     "ExecStart=/usr/lib/keel/firewall-watch",
                      "LogLevelMax=notice", "SyslogLevel=warning"):
             self.assertIn(line, service)
 
