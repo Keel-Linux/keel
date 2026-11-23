@@ -47,6 +47,8 @@ class Checked:
     code: int
     message: str
     restorable: bool = False
+    # the listing of the table the check accepted (the watch's mark)
+    listing: str | None = None
 
 
 def check(root: str, run=None) -> Checked:
@@ -103,7 +105,8 @@ def compare(path: str, text: str, state: str, run) -> Checked:
     if differs is not None:
         return Checked(exits.DRIFT_FOUND, differs, True)
     return Checked(exits.OK,
-                   f"table inet keel is the one {path} says ({wanted})")
+                   f"table inet keel is the one {path} says ({wanted})",
+                   listing=listing)
 
 
 SET_RE = re.compile(r"\{ ([^{}]*) \}")

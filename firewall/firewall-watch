@@ -3,7 +3,7 @@
 #
 # The cheap path: when the table keel's file loaded is still the one the
 # last good check saw (the sha256 of `nft -s list table inet keel`) and
-# the file is the same file (inode, size, time), there is nothing to do,
+# the file is the same file (inode, size, mtime, ctime), there is nothing to do,
 # and no Python starts. On any difference, or with no mark, keel firewall
 # check --restore checks everything, loads a lost table again from a
 # sound file and writes the mark again (keel/system/fwwatch.py). With no
@@ -18,7 +18,7 @@ nft=${KEEL_NFT:-/usr/sbin/nft}
 if [ -r "$mark" ]; then
     listed=$("$nft" -s list table inet keel 2>/dev/null) && {
         now="$(printf '%s\n' "$listed" | sha256sum | cut -d' ' -f1)"
-        now="$now $(stat -c '%i %s %Y' "$file")"
+        now="$now $(stat -c '%i %s %Y %Z' "$file")"
         [ "$now" = "$(cat "$mark")" ] && exit 0
     }
 fi

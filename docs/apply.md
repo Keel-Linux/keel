@@ -1362,7 +1362,11 @@ nftables.service` the node stayed open until an apply. So:
   the ones the last good check wrote under `/run/keel`, it exits, and
   Python runs only on a difference (about 22 ms of CPU a run, against
   0.5 s for the full check: about one CPU minute a day). A broken file is
-  said once per change of the problem and once an hour. An upgrade
+  said once per change of the problem and once an hour; every run
+  fails while the problem lasts, so the unit stays failed and the node
+  degraded, and a table lost beside a broken file is a new problem,
+  said at once. The mark is the listing the check accepted, with the
+  file's inode, size, mtime and ctime. An upgrade
   neither stops nor starts the timer (decision 0073); the apply that
   writes the firewall on the live system starts it, and so does the
   boot. A masked or disabled timer is left alone and said;

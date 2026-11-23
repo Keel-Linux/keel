@@ -3,7 +3,8 @@
 # mark of the last good check, and only on a difference keel firewall
 # check --restore (firewall/firewall-watch). Silent when all is well; a
 # lost table is loaded again and said; a broken file is never loaded, and
-# is said once per change and once an hour (the run that says it fails).
+# is said once per change and once an hour, and every run fails while
+# the problem lasts, so the unit stays failed and the node degraded.
 # LogLevelMax keeps systemd's own lines of each run out of the journal;
 # SyslogLevel lets keel's own lines through.
 [Unit]

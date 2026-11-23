@@ -276,14 +276,65 @@ class TestCheck(ManifestCase):
         return fwwatch.watch(self.root, nft, lambda: now)
 
     def test_a_broken_file_is_said_once_per_change_and_hourly(self):
-        """the second review (N10): one line every 30 s before"""
+        """the second review (N10) and the third (F3): the line is said
+        once per change and once an hour, and the run stays non-zero
+        while the problem lasts, so a failed unit shows it all along"""
         self.ruleset()
         nft = Nft(check=1)
         self.assertEqual(self.watch(nft, 1000)[0], exits.DRIFT_FOUND)
-        self.assertEqual(self.watch(nft, 1030), (exits.OK, []))
-        self.assertEqual(self.watch(nft, 4599), (exits.OK, []))
-        self.assertEqual(self.watch(nft, 4601)[0], exits.DRIFT_FOUND)
-        self.assertEqual(self.watch(nft, 4631), (exits.OK, []))
+        self.assertEqual(self.watch(nft, 1030), (exits.DRIFT_FOUND, []))
+        self.assertEqual(self.watch(nft, 4599), (exits.DRIFT_FOUND, []))
+        code, lines = self.watch(nft, 4601)
+        self.assertEqual((code, len(lines)), (exits.DRIFT_FOUND, 1))
+
+    def test_a_lost_table_beside_a_broken_file_is_said_at_once(self):
+        """the third review (F3): the table's state is part of the
+        problem, so its loss is a new one"""
+        digest = self.ruleset()
+        code, lines = self.watch(Nft(check=1, listing=listing(digest)), 1000)
+        self.assertIn("table inet keel holds", lines[0])
+        code, lines = self.watch(Nft(check=1), 1030)
+        self.assertEqual(code, exits.DRIFT_FOUND)
+        self.assertIn("table inet keel is not loaded", lines[0])
+
+    def test_the_mark_is_the_listing_the_check_accepted(self):
+        """the third review (F2): a change between the check and the
+        mark wrote the changed table's hash, and the watch then slept"""
+        import hashlib
+        from keel.system import fwwatch
+        digest = self.ruleset()
+        good = listing(digest)
+        nft = Nft(listing=good)
+        real = nft.__call__
+        calls = []
+
+        def changing(argv, **kwargs):
+            out = real(argv, **kwargs)
+            if "list" in argv:
+                calls.append(1)
+                nft.listing = listing(digest, body=CORE_RULES[:-1]
+                                      + ("accept",))
+            return out
+        self.assertEqual(fwwatch.watch(self.root, changing,
+                                       lambda: 1000)[0], exits.OK)
+        with open(join(self.root, fwwatch.MARK)) as fob:
+            self.assertEqual(fob.read().split(" ")[0],
+                             hashlib.sha256(good.encode()).hexdigest())
+
+    def test_a_file_changed_during_the_check_writes_no_mark(self):
+        from keel.system import fwwatch
+        digest = self.ruleset()
+        target = join(self.root, PATH)
+        nft = Nft(listing=listing(digest))
+        real = nft.__call__
+
+        def touching(argv, **kwargs):
+            if argv[:2] == ["nft", "-c"]:
+                os.utime(target, (1, 1))
+            return real(argv, **kwargs)
+        self.assertEqual(fwwatch.watch(self.root, touching,
+                                       lambda: 1000)[0], exits.OK)
+        self.assertFalse(os.path.exists(join(self.root, fwwatch.MARK)))
 
     def test_a_new_problem_and_the_recovery_are_said(self):
         digest = self.ruleset()
@@ -308,7 +359,7 @@ class TestCheck(ManifestCase):
         found = os.stat(join(self.root, PATH))
         self.assertEqual(mark.split(" ")[1:], [
             str(found.st_ino), str(found.st_size),
-            str(int(found.st_mtime))])
+            str(int(found.st_mtime)), str(int(found.st_ctime))])
         self.watch(Nft(check=1), 1010)
         self.assertFalse(os.path.exists(join(self.root, fwwatch.MARK)))
 
@@ -644,3 +695,38 @@ class TestMaintainerScripts(unittest.TestCase):
         for unit in ("keel-firewall.service", "keel-firewall-watch.timer"):
             self.assertIn(f"deb-systemd-helper enable '{unit}'",
                           self.scripts["postinst"])
+
+
+class TestRemoval(unittest.TestCase):
+    """The third review (F5): with --no-start, debhelper writes no stop
+    of the watch timer on removal; keel's prerm stops it on remove, and
+    on upgrade stops nothing"""
+
+    def prerm(self, verb: str) -> str:
+        if not os.path.isdir("/run/systemd/system"):
+            self.skipTest("no systemd here: the prerm acts only under it")
+        with tempfile.TemporaryDirectory(
+                dir=os.environ.get("TMPDIR")) as tmp:
+            log = os.path.join(tmp, "invoked")
+            fake = os.path.join(tmp, "deb-systemd-invoke")
+            with open(fake, "w") as fob:
+                fob.write(f'#!/bin/sh\necho "$@" >> {log}\n')
+            os.chmod(fake, 0o755)
+            env = {**os.environ, "PATH": f"{tmp}:{os.environ['PATH']}"}
+            env.pop("DPKG_ROOT", None)
+            done = subprocess.run(
+                ["sh", os.path.join(REPO, "debian", "keel.prerm"), verb],
+                env=env, capture_output=True, text=True)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            try:
+                with open(log) as fob:
+                    return fob.read()
+            except FileNotFoundError:
+                return ""
+
+    def test_remove_stops_the_watch(self):
+        self.assertEqual(self.prerm("remove"), "stop keel-firewall-watch"
+                         ".timer keel-firewall-watch.service\n")
+
+    def test_an_upgrade_stops_nothing(self):
+        self.assertEqual(self.prerm("upgrade"), "")
