@@ -187,6 +187,35 @@ class TestMeshChangesUnderTheLock(unittest.TestCase):
         self.assertLess(time.monotonic() - began, 5)
         self.assertEqual(seen, [False])
 
+    def test_an_etcd_message_answers_busy_instead_of_waiting(self):
+        """the third review (F4): an etcd start from a channel message
+        does not hold the bridge for 600 s behind a person's apply"""
+        from keel.mesh import etcdserve, sync
+        member = mock.Mock(root=self.root)
+        taken, release = threading.Event(), threading.Event()
+
+        def holder():
+            with sync.sync_lock(self.root, 0, "keel spec apply"):
+                taken.set()
+                release.wait(30)
+        thread = threading.Thread(target=holder)
+        thread.start()
+        taken.wait(5)
+        try:
+            with mock.patch("keel.mesh.sync.BUSY_WAIT", 0.2), \
+                    mock.patch("keel.mesh.etcd.start") as start, \
+                    self.assertRaises(etcdserve.Refusal) as refused:
+                etcdserve.start_answered(member)
+        finally:
+            release.set()
+            thread.join()
+        self.assertEqual(refused.exception.status, 503)
+        self.assertIn("busy", refused.exception.reason)
+        start.assert_not_called()
+        with mock.patch("keel.mesh.etcd.start", return_value=True) as start:
+            self.assertTrue(etcdserve.start_answered(member))
+        start.assert_called_once_with(member)
+
     def test_the_lock_stays_one_per_process_elsewhere(self):
         from keel.mesh import sync
         with sync.sync_lock(self.root, 0, "first") as first:

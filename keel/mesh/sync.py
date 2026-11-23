@@ -85,6 +85,13 @@ PARALLEL = 8
 # the lock comes free. A wait that ends leaves the announcement to the next
 # keel mesh sync, which asks the peers again.
 LOCK_WAIT = 600.0
+# How long an answer to a peer (an invite admission, an etcd message)
+# waits for the sync lock before it answers busy: a person's keel spec
+# apply holds it for its whole run (decision 0097), and the peer's
+# exchange has a deadline of its own
+BUSY_WAIT = 5.0
+BUSY = ("busy: a keel spec apply or another keel mesh change holds this"
+        " node's sync lock; send it again in a minute")
 LOCK_POLL = 1.0
 
 

@@ -247,11 +247,21 @@ class Admitter:
         problem = self.reservation(self.invite)
         if problem:
             raise Refusal(409, problem)
-        try:
-            invites.consume(self.root, self.invite.invite_id, self.clock())
-        except invites.InviteError as e:
-            raise Refusal(410, str(e)) from None
-        return self.admitted(request, peer)
+        # a person's keel spec apply holds the sync lock for its whole
+        # run: a short wait, then busy, and the invite stays (the third
+        # review of decision 0097); Node.change then holds it already
+        from keel.mesh import sync
+        with sync.sync_lock(self.root, sync.BUSY_WAIT, "an invite admission",
+                            reentrant=True) as held:
+            if not held:
+                self.log(f"{self.name}: {sync.BUSY}; the invite stays")
+                return refusal(503, sync.BUSY)
+            try:
+                invites.consume(self.root, self.invite.invite_id,
+                                self.clock())
+            except invites.InviteError as e:
+                raise Refusal(410, str(e)) from None
+            return self.admitted(request, peer)
 
     def known(self, key: str) -> bool:
         """This node's own key, or a peer's of its spec"""
