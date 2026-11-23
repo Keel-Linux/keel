@@ -79,6 +79,23 @@ keel (0.23.99) unstable; urgency=high
 
  -- KeelLinux maintainers <admin@keellinux.org>  Mon, 23 Nov 2026 00:00:00 +0000
 
+keel (0.23.98) unstable; urgency=medium
+
+  * keel pull finds a parent by its sha256 when the plain name holds
+    another version (apt#112). A release with rebuilt base layers keeps
+    the plain names layers/core, web and lnmp on the versions that the
+    published layers name, and publishes the rebuilt layers also as
+    NAME-SHA256.manifest, .packages and .tar.zst (apt#124). With no
+    channel, keel pull read only PARENT.manifest, so the chain of a new
+    layer on the rebuilt base did not resolve. Now, when the plain parent
+    manifest holds another sha256 or is missing, keel pull reads
+    PARENT-PARENT_SHA256.manifest. The sha256 check of the parent does not
+    change, and a release revision or a channel does not use these names.
+    The package list is read from NAME-SHA256.packages first. A source
+    that does not have these names gives the same result as before.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Mon, 23 Nov 2026 00:00:00 +0000
+
 keel (0.23.97) unstable; urgency=medium
 
   * keel inspect describes the database server when redis-server runs
