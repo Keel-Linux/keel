@@ -4,3 +4,4 @@ systemd/postgresql@.service.d/keel-guard.conf /usr/lib/systemd/system/postgresql
 systemd/postgresql@.service.d/keel-stop.conf /usr/lib/systemd/system/postgresql@.service.d
 systemd/nftables.service.d/keel-firewall.conf /usr/lib/systemd/system/nftables.service.d
 firewall/firewall-watch /usr/lib/keel
+firewall/firewall-loaded /usr/lib/keel

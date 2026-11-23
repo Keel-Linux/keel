@@ -34,6 +34,9 @@ ConditionPathExists=/etc/keel/firewall/keel-manifest.nft
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/sbin/nft -f /etc/keel/firewall/keel-manifest.nft
+# an empty or cut file loads nothing and nft succeeds: fail unless the
+# table is loaded with the file's policy (firewall/firewall-loaded)
+ExecStartPost=/usr/lib/keel/firewall-loaded
 
 [Install]
 WantedBy=multi-user.target

@@ -59,6 +59,12 @@ keel (0.23.99) unstable; urgency=high
     file once an hour; every mesh change applies under the sync lock,
     and a node with no mesh gets no mesh directory; the fence exemption
     is the fence unit's own sockets.
+  * After the second real test: an empty or cut ruleset file is keel's
+    and the apply writes it again (only a non-empty file with no header
+    of keel's is foreign); keel-firewall.service fails, and the node is
+    degraded, unless inet keel is loaded with the file's policy; on a
+    node in enforce the plan names each undeclared listening socket the
+    firewall closes.
   * The package depends on nftables and iproute2. An upgrade changes no
     rule and starts or restarts no unit of the firewall (decision 0073):
     the change comes at the next apply, which also starts the timer.

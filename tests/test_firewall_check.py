@@ -196,14 +196,24 @@ class TestCheck(ManifestCase):
                             fwcheck.canonical("accept"))
 
     def test_an_empty_or_cut_file_is_drift(self):
-        """a power loss before the data reached the disk"""
-        for text in ("", HEADER + "\n"):
+        """a power loss before the data reached the disk: the apply
+        writes such a file again, and the check says so"""
+        for text in ("", HEADER + "\n", HEADER[:9]):
             with self.subTest(text=text):
                 self.ruleset(lambda _: text)
                 found = self.check(Nft())
                 self.assertEqual(found.code, exits.DRIFT_FOUND)
-                self.assertIn("not a ruleset keel wrote", found.message)
+                self.assertIn("is empty or cut short (it loads no table):"
+                              " keel spec apply --system writes it again",
+                              found.message)
                 self.assertFalse(found.restorable)
+
+    def test_a_foreign_file_is_said_as_foreign(self):
+        self.ruleset(lambda _: "table inet mine {}\n")
+        found = self.check(Nft())
+        self.assertEqual(found.code, exits.DRIFT_FOUND)
+        self.assertIn("is not keel's (no header of keel's): keel spec apply"
+                      " does not replace it; move it away", found.message)
 
     def test_a_broken_file_with_its_comment_intact_is_drift(self):
         """the case the real test found: a line nft cannot read"""
@@ -439,6 +449,42 @@ class TestWatchShell(TestCheckReal):
         self.assertEqual(self.scenario(f"rm {target} &&"), "")
 
 
+class TestLoadedAtBoot(TestCheckReal):
+    """keel-firewall.service fails, and the node is degraded, when the
+    file loads no table inet keel with its own policy: an empty file
+    loaded nothing and the unit said success (the second real test)"""
+
+    def boot(self, text: str, after: str = "") -> int:
+        target = join(self.root, "keel-manifest.nft")
+        with open(target, "w") as fob:
+            fob.write(text)
+        verify = join(REPO, "firewall", "firewall-loaded")
+        done = subprocess.run(
+            [*self.prefix, "sh", "-c",
+             f"{self.nft} -f {target}; {after}"
+             f" KEEL_FIREWALL_FILE={target} KEEL_NFT={self.nft}"
+             f" sh {verify}"], capture_output=True, text=True)
+        return done.returncode
+
+    def rendered(self, state="enforce") -> str:
+        catalog = Catalog(self.root)
+        resolved, _ = resolve(catalog, catalog.read(APPLIANCE, "core"))
+        return render_ruleset(resolved, CORE_OFF, None, state=state).text
+
+    def test_a_loaded_file_passes_in_each_state(self):
+        for state in ("enforce", "report"):
+            self.assertEqual(self.boot(self.rendered(state)), 0)
+
+    def test_an_empty_or_cut_file_fails(self):
+        for text in ("", HEADER + "\n", self.rendered()[:200]):
+            with self.subTest(size=len(text)):
+                self.assertNotEqual(self.boot(text), 0)
+
+    def test_a_table_that_is_not_there_fails(self):
+        self.assertNotEqual(self.boot(
+            self.rendered(), f"{self.nft} delete table inet keel;"), 0)
+
+
 class TestDigest(ManifestCase):
     def test_the_digest_of_the_rules_in_a_file(self):
         catalog = Catalog(self.root)
@@ -518,12 +564,13 @@ class TestTableLoss(unittest.TestCase):
             with open(log) as fob:
                 self.assertEqual(fob.read(), f"-f {ruleset}\n")
 
-    def test_the_watch_script_is_installed_and_executable(self):
-        script = os.path.join(REPO, "firewall", "firewall-watch")
-        self.assertTrue(os.access(script, os.X_OK))
+    def test_the_scripts_are_installed_and_executable(self):
         with open(os.path.join(REPO, "debian", "keel.install")) as fob:
-            self.assertIn("firewall/firewall-watch /usr/lib/keel\n",
-                          fob.read())
+            installed = fob.read()
+        for name in ("firewall-watch", "firewall-loaded"):
+            script = os.path.join(REPO, "firewall", name)
+            self.assertTrue(os.access(script, os.X_OK))
+            self.assertIn(f"firewall/{name} /usr/lib/keel\n", installed)
 
     def test_the_drop_in_is_installed(self):
         with open(os.path.join(REPO, "debian", "keel.install")) as fob:

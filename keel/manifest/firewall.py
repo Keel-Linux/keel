@@ -224,6 +224,17 @@ def _one_or_set(items: list[str]) -> str:
     return items[0] if len(items) == 1 else "{ " + ", ".join(items) + " }"
 
 
+def keel_owns(text: str | None) -> bool:
+    """Whether a file at keel's path is keel's to write again: empty,
+    cut inside keel's header, or carrying keel's header (a power loss
+    before the data reached the disk, or a cut copy). Only a non-empty
+    file with no mark of keel's is foreign"""
+    if text is None:
+        return True
+    return (not text.strip() or text.startswith(HEADER)
+            or HEADER.startswith(text))
+
+
 def file_state(text: str | None) -> str | None:
     """enforce or report, by the policy of a file keel wrote; None for no
     file or another's. A file of keel 0.23.97 and before has no state

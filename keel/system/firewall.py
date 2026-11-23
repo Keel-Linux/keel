@@ -46,7 +46,6 @@ import ipaddress
 
 from keel.manifest.firewall import (
     ENFORCE,
-    HEADER,
     OFF,
     PATH,
     REPORT,
@@ -54,6 +53,7 @@ from keel.manifest.firewall import (
     Ruleset,
     exposed,
     file_state,
+    keel_owns,
     render,
 )
 from keel.manifest.resolve import Resolved
@@ -93,7 +93,8 @@ PROMOTED = ("enforce: each socket on an address that is not a loopback"
 
 
 def written_by_keel(state: FirewallState) -> bool:
-    return (state.file.text or "").startswith(HEADER)
+    """keel's file, also empty or cut (keel_owns): keel writes it again"""
+    return state.file.readable and keel_owns(state.file.text)
 
 
 def waiting_notice(sockets: list[str]) -> str:
@@ -236,9 +237,11 @@ def told(doc: dict, resolved: Resolved, state: FirewallState,
     if state.listeners is None:
         return []
     if ruleset.state == ENFORCE:
+        found = sorting(doc, resolved, state)
         return [f"closes {item.describe()}: the manifests declare its"
-                " process, not this port"
-                for item in sorting(doc, resolved, state).closed]
+                " process, not this port" for item in found.closed] + [
+            f"{line}: listens, not declared, closed by the firewall"
+            for line in found.named()]
     overlay = overlay_of(doc)
     device = None if overlay is None else (
         overlay.get("interface") or wireguard.DEFAULT_INTERFACE)

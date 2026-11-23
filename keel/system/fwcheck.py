@@ -35,6 +35,7 @@ from keel.manifest.firewall import (
     TYPE_RE,
     digest_of,
     file_state,
+    keel_owns,
     loaded_digest,
 )
 
@@ -63,10 +64,14 @@ def check(root: str, run=None) -> Checked:
         return Checked(exits.OK,
                        f"{path}: no ruleset of keel's, nothing to compare")
     state = file_state(text)
+    if state is None and not keel_owns(text):
+        return Checked(exits.DRIFT_FOUND, (
+            f"{path} is not keel's (no header of keel's): keel spec apply"
+            " does not replace it; move it away, and the apply writes"
+            " keel's"))
     if state is None:
         return Checked(exits.DRIFT_FOUND, (
-            f"{path} is not a ruleset keel wrote, or it is cut short (an"
-            f" empty file loads no table): {APPLY}"))
+            f"{path} is empty or cut short (it loads no table): {APPLY}"))
     return compare(path, text or "", state, run)
 
 

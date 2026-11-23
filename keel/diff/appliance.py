@@ -212,7 +212,7 @@ def firewall_fields(declared: dict, resolved, states: dict,
     file = tree.read(fw.PATH)
     said = declared_state(declared)
     if said == fw.OFF:
-        keel_s = (file.text or "").startswith(fw.HEADER)
+        keel_s = file.readable and fw.keel_owns(file.text)
         return [FieldDiff("derived.firewall", DRIFT if keel_s else SAME,
                           None, KEEL_RULESET if keel_s else None),
                 FieldDiff("derived.firewall.state", NOT_COMPARED,

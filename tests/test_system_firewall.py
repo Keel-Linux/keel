@@ -304,6 +304,20 @@ class TestTransition(FirewallCase):
             self.assertEqual(found[-1].describe(), (
                 f"unchanged (/{PATH}, loaded as table inet keel)"))
 
+    def test_a_hand_listener_on_an_enforcing_node_is_named(self):
+        """the second real test: enforce closed it with no word; the
+        plan names it, and enforce still closes it"""
+        enforcing = render(self.resolved, STATES, WG)
+        found = self.implicit(file=File("/r/x", enforcing.text),
+                              loaded=enforcing.digest,
+                              listeners=(SSHD, STRANGER),
+                              listeners_source="ss")
+        self.assertIn("tcp [::]:9999 of session-3.scope (nc): listens, not"
+                      " declared, closed by the firewall",
+                      [a.describe() for a in found])
+        self.assertEqual(found[-1].describe(), (
+            f"unchanged (/{PATH}, loaded as table inet keel)"))
+
     def test_an_enforcing_node_stays_enforce_without_a_word(self):
         enforcing = render(self.resolved, STATES, WG)
         found = self.implicit(file=File("/r/x", enforcing.text),
@@ -432,6 +446,28 @@ class TestMeshExposed(FirewallCase):
 
     def implicit(self, **fields):
         return self.actions(doc(enabled=None), self.state(**fields))
+
+
+class TestCutFile(FirewallCase):
+    """The second real test: an empty or cut file at keel's path was
+    refused as "keel did not write it", while keel firewall check said
+    the apply writes it again. A file that is empty, cut inside keel's
+    header, or that carries keel's header, is keel's to write again;
+    only a non-empty file with no mark of keel's is foreign."""
+
+    def test_an_empty_or_cut_file_is_written_again(self):
+        for text in ("", "\n", HEADER[:12], HEADER + "\n# state: enf"):
+            with self.subTest(text=text):
+                found = self.actions(doc(enabled=None), self.state(
+                    file=File("/r/x", text), listeners=(SSHD,),
+                    listeners_source="ss"))
+                self.assertTrue([a for a in found
+                                 if isinstance(a, InstallRuleset)], found)
+
+    def test_a_foreign_file_is_still_not_replaced(self):
+        found = self.actions(doc(enabled=None), self.state(
+            file=File("/r/x", "table inet mine {}\n")))
+        self.assertIn("keel did not write it", found[0].describe())
 
 
 class TestWatch(FirewallCase):
@@ -593,6 +629,7 @@ class TestBootUnit(FirewallCase):
         self.assertIn(f"ExecStart=/usr/sbin/nft -f /{PATH}", lines)
         self.assertIn("After=local-fs.target nftables.service", lines)
         self.assertIn("Before=network-pre.target shutdown.target", lines)
+        self.assertIn("ExecStartPost=/usr/lib/keel/firewall-loaded", lines)
 
     def test_an_upgrade_starts_restarts_and_applies_nothing(self):
         """decision 0073 and 0097, section 5: the package never loads a

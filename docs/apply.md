@@ -1325,12 +1325,23 @@ is on the disk (`fsync`, then its directory) before it is renamed.
   refused one is removed, so the file the boot unit loads is always one
   nft accepted. `nft -f` then loads it in one transaction, so a ruleset
   nft refuses changes nothing;
-- a file at that path keel did not write is refused, never replaced.
+- a file at that path keel did not write is refused, never replaced:
+  a non-empty file with no header of keel's. An empty file, a file cut
+  inside keel's header, or one that carries keel's header is keel's,
+  and the apply writes it again (a power loss before the data reached
+  the disk; keel firewall check says the same).
 
 `keel-firewall.service`, shipped enabled, loads the file at every boot
 before the network comes up, and only while the file exists. A file nft
 refuses at boot fails the unit, and the node is degraded and open: the
-failure is visible.
+failure is visible. So does an empty or cut file, which nft loads as
+nothing: `/usr/lib/keel/firewall-loaded` (the unit's `ExecStartPost`)
+fails unless `inet keel` is loaded with the policy the file says. On a
+node in enforce, the plan names each socket that listens and that no
+unit of the manifests declares: enforce closes it, and the plan says
+so ("listens, not declared, closed by the firewall"). The watch does
+not list sockets: that needs `ss` and Python at every run, which the
+shell path avoids; `keel diff` and the next apply name them.
 
 **A lost table comes back, whatever the spec says.** The real test of
 pull request 307 found Monit's check useless on a published node: no
