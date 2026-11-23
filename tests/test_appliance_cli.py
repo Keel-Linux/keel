@@ -429,6 +429,8 @@ class TestLiveEntry(ApplianceCliCase):
         """ss, sshd -T and nft answer as on a node; the rest fails"""
         self.asked.append(argv[0])
         self.shown.append(tuple(argv[:3]))
+        if argv[:3] == ["systemctl", "show", "--value"]:
+            return subprocess.CompletedProcess(argv, 0, "101\n", "")
         answers = {"ss": (0, self.ss), "sshd": (0, "port 22\n"),
                    "nft": (1, "")}
         code, out = answers.get(argv[0], (1, ""))
@@ -437,7 +439,10 @@ class TestLiveEntry(ApplianceCliCase):
     def apply_live(self, mode: str, extra: str = "") -> str:
         self.write(spec_text().replace("mode: simple", f"mode: {mode}")
                    + extra)
-        with mock.patch("keel.system.appstate.ROOT_DEFAULT", self.root), \
+        # the test's /proc files are the user's; on a node, root's
+        owner = mock.patch("keel.system.listeners.ROOT_UID", os.getuid())
+        with owner, mock.patch("keel.system.appstate.ROOT_DEFAULT",
+                               self.root), \
                 mock.patch("keel.inspect.constants.ROOT_DEFAULT",
                            self.root), \
                 mock.patch("subprocess.run", self.answer), \
@@ -533,6 +538,17 @@ class TestLiveEntry(ApplianceCliCase):
         self.assertIn("derived.firewall: sshd listens now on tcp 2200,"
                       " which its configuration (sshd -T) does not name:"
                       " both stay open", out)
+
+    def test_a_process_named_sshd_of_another_user_opens_nothing(self):
+        """the third review (F1): www-data runs a copy named sshd on 4444"""
+        os.makedirs(join(self.root, "proc/500"))
+        with open(join(self.root, "proc/500/cgroup"), "w") as fob:
+            fob.write("0::/system.slice/nginx.service\n")
+        self.ss = SS_CORE + ('tcp LISTEN 0 1 0.0.0.0:4444 0.0.0.0:*'
+                             ' users:(("sshd",pid=500,fd=3))\n')
+        out = self.apply_live("simple")
+        self.assertNotIn("4444, 12320", out)
+        self.assertNotIn("listens now on tcp 4444", out)
 
     def test_each_spelling_from_the_command(self):
         """the table of docs/spec.md: what each value means"""

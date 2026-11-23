@@ -154,7 +154,8 @@ def ask(run, argv: tuple[str, ...]) -> str | None:
 def observe_firewall(tree: Tree, live: bool) -> FirewallState:
     ports, source = ssh_ports(tree, live)
     listeners, listened = observe_listeners(tree, live)
-    ports, ssh_note = with_running(ports, source, sshd_ports(listeners))
+    running = sshd_ports(listeners, sshd_main_pid() if live else None)
+    ports, ssh_note = with_running(ports, source, running)
     fence, fence_note = fence_ports(tree)
     return FirewallState(
         file=tree.read(PATH),
@@ -171,6 +172,22 @@ def observe_firewall(tree: Tree, live: bool) -> FirewallState:
         watch_enabled=watch_enabled() if live else None,
         ssh_note=ssh_note,
     )
+
+
+SSHD_MAIN = ("systemctl", "show", "--value", "-p", "MainPID", "ssh.service")
+
+
+def sshd_main_pid() -> int | None:
+    """ssh.service's MainPID, the listening daemon; None when it does
+    not run or systemctl cannot answer"""
+    try:
+        out = subprocess.run(list(SSHD_MAIN), capture_output=True,
+                             text=True, check=False)
+    except OSError:
+        return None
+    value = out.stdout.strip()
+    return int(value) if out.returncode == 0 and value.isdigit() \
+        and int(value) > 0 else None
 
 
 def with_running(configured: tuple[int, ...], source: str,

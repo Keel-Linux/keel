@@ -29,6 +29,7 @@ report and the socket is named, never guessed.
 """
 
 import ipaddress
+import os
 import re
 import subprocess
 from dataclasses import dataclass, replace
@@ -59,9 +60,12 @@ class Listener:
     pids: tuple[int, ...]
     names: tuple[str, ...] = ()
     units: tuple[str, ...] = ()
+    # the owner of /proc/PID of each pid, as far as it could be read
+    uids: tuple[int, ...] = ()
 
-    def with_units(self, units: tuple[str, ...]) -> "Listener":
-        return replace(self, units=units)
+    def with_units(self, units: tuple[str, ...],
+                   uids: tuple[int, ...] = ()) -> "Listener":
+        return replace(self, units=units, uids=uids)
 
     def describe(self) -> str:
         address = f"[{self.address}]" if ":" in self.address \
@@ -200,8 +204,7 @@ def classify(listeners: tuple[Listener, ...], units: frozenset[str], *,
 
 
 FENCE_UNIT = "turnkey-init-fence.service"
-SSH_UNITS = ("ssh.service", "ssh.socket")
-SSHD_NAMES = ("sshd",)
+ROOT_UID = 0
 
 
 def fenced(item: Listener, fence: tuple[int, ...]) -> bool:
@@ -211,18 +214,24 @@ def fenced(item: Listener, fence: tuple[int, ...]) -> bool:
             and all(unit == FENCE_UNIT for unit in item.units))
 
 
-def sshd_ports(listeners: tuple[Listener, ...] | None) -> tuple[int, ...]:
-    """The TCP ports a running sshd listens on now, on an address that is
-    not a loopback: its units (ssh.service, ssh.socket, sshd@...), or a
-    process named sshd. What `sshd -T` cannot see: SSHD_OPTS="-p N" of
-    /etc/default/ssh, or a Port edited and sshd not restarted"""
+def sshd_ports(listeners: tuple[Listener, ...] | None,
+               main_pid: int | None) -> tuple[int, ...]:
+    """The TCP ports the running sshd daemon listens on now, on an
+    address that is not a loopback: only sockets of ssh.service's
+    MainPID whose /proc/PID root owns (the third review of decision
+    0097: a process name, or a unit that also holds users' sessions, is
+    any user's to choose). What `sshd -T` cannot see: SSHD_OPTS="-p N"
+    of /etc/default/ssh, or a Port edited and sshd not restarted. A
+    socket-activated sshd's socket belongs to PID 1, and ssh.socket's
+    Listen gives it"""
+    if main_pid is None:
+        return ()
     found = set()
     for item in listeners or ():
         if item.protocol != "tcp" or loopback(item):
             continue
-        if any(unit in SSH_UNITS or unit.startswith("sshd@")
-               for unit in item.units) or any(
-                name in SSHD_NAMES for name in item.names):
+        owners = dict(zip(item.pids, item.uids))
+        if owners.get(main_pid) == ROOT_UID:
             found.add(item.port)
     return tuple(sorted(found))
 
@@ -296,8 +305,17 @@ def observe_listeners(tree: Tree, live: bool, run=None
         found = parse_ss(out.stdout)
     except ValueError as e:
         return None, str(e)
-    return tuple(item.with_units(units_of(tree, item.pids))
+    return tuple(item.with_units(units_of(tree, item.pids),
+                                 tuple(owner(tree, pid) for pid in item.pids))
                  for item in found), "ss"
+
+
+def owner(tree: Tree, pid: int) -> int:
+    """The uid that owns /proc/PID; -1 when it is gone"""
+    try:
+        return os.stat(tree.path(f"proc/{pid}")).st_uid
+    except OSError:
+        return -1
 
 
 def units_of(tree: Tree, pids: tuple[int, ...]) -> tuple[str, ...]:

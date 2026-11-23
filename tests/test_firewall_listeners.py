@@ -237,21 +237,29 @@ class TestClassify(unittest.TestCase):
                          overlay_addresses=frozenset({"10.9.0.1"}))
         self.assertTrue(found.clean)
 
-    def test_the_ports_a_running_sshd_listens_on(self):
+    def test_the_ports_the_root_sshd_daemon_listens_on(self):
+        """the third review (F1): only the listening daemon itself, the
+        MainPID of ssh.service owned by root; a name or a unit alone is
+        any user's to choose"""
         from keel.system.listeners import sshd_ports
-        found = sshd_ports((
-            Listener("tcp", "0.0.0.0", None, 2200, (1,), ("sshd",),
-                     ("ssh.service",)),
-            Listener("tcp", "::", None, 2201, (1,), ("systemd",),
-                     ("ssh.socket",)),
-            Listener("tcp", "::", None, 2202, (1,), ("sshd",),
-                     ("sshd@1-10.0.0.2:22-10.0.0.9:5000.service",)),
-            Listener("tcp", "127.0.0.1", None, 2203, (1,), ("sshd",),
-                     ("ssh.service",)),
-            Listener("tcp", "::", None, 80, (2,), ("nginx",),
-                     ("nginx.service",))))
-        self.assertEqual(found, (2200, 2201, 2202))
-        self.assertEqual(sshd_ports(None), ())
+        daemon = Listener("tcp", "0.0.0.0", None, 2200, (100,), ("sshd",),
+                          ("ssh.service",), (0,))
+        self.assertEqual(sshd_ports((daemon,), 100), (2200,))
+        # a non-root process named sshd (a copy, or PR_SET_NAME)
+        named = Listener("tcp", "0.0.0.0", None, 4444, (200,), ("sshd",),
+                         ("session-4.scope",), (33,))
+        # a user's own listener inside ssh.service (no logind)
+        session = Listener("tcp", "::", None, 4445, (201,), ("python3",),
+                           ("ssh.service",), (1000,))
+        # the MainPID, but not root (a mapped uid, a hand edit)
+        not_root = Listener("tcp", "::", None, 4446, (100,), ("sshd",),
+                            ("ssh.service",), (1000,))
+        loopback = Listener("tcp", "127.0.0.1", None, 2203, (100,),
+                            ("sshd",), ("ssh.service",), (0,))
+        self.assertEqual(sshd_ports((named, session, not_root, loopback),
+                                    100), ())
+        self.assertEqual(sshd_ports((daemon,), None), ())
+        self.assertEqual(sshd_ports(None, 100), ())
 
     def test_a_pending_invite_s_listener_is_keel_s(self):
         found = classify((Listener("tcp", "::", None, 40123, (7,),
