@@ -518,6 +518,13 @@ class TestTableLoss(unittest.TestCase):
             with open(log) as fob:
                 self.assertEqual(fob.read(), f"-f {ruleset}\n")
 
+    def test_the_watch_script_is_installed_and_executable(self):
+        script = os.path.join(REPO, "firewall", "firewall-watch")
+        self.assertTrue(os.access(script, os.X_OK))
+        with open(os.path.join(REPO, "debian", "keel.install")) as fob:
+            self.assertIn("firewall/firewall-watch /usr/lib/keel\n",
+                          fob.read())
+
     def test_the_drop_in_is_installed(self):
         with open(os.path.join(REPO, "debian", "keel.install")) as fob:
             self.assertIn("systemd/nftables.service.d/keel-firewall.conf"

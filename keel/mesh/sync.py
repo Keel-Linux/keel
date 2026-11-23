@@ -41,6 +41,7 @@ import fcntl
 import ipaddress
 import json
 import os
+import threading
 import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -120,15 +121,28 @@ def holder(root: str) -> str:
         return "an unknown process"
 
 
+# the roots whose sync lock this thread holds, so that Node.change,
+# called by keel mesh sync with the lock held, does not wait for itself
+_HELD = threading.local()
+
+
+def held_here(root: str) -> bool:
+    return root in getattr(_HELD, "roots", set())
+
+
 @contextmanager
 def sync_lock(root: str, wait: float, what: str = "keel mesh sync",
               say: Callable[[str], None] | None = None,
-              clock: Callable[[], float] = time.monotonic
-              ) -> Iterator[bool]:
+              clock: Callable[[], float] = time.monotonic,
+              reentrant: bool = False) -> Iterator[bool]:
     """Whether this process holds the lock of the members' changes after
     at most `wait` seconds: one sync at a time. `what` is the name that a
     process that waits reads. Not the mesh's own lock, which an invite
-    takes."""
+    takes. `reentrant`: true at once when this thread holds it already
+    (Node.change inside keel mesh sync)."""
+    if reentrant and held_here(root):
+        yield True
+        return
     invites.ensure(root)
     fd = os.open(path(root, SYNC_LOCK), os.O_RDWR | os.O_CREAT, FILE_MODE)
     try:
@@ -151,7 +165,12 @@ def sync_lock(root: str, wait: float, what: str = "keel mesh sync",
         os.ftruncate(fd, 0)
         os.pwrite(fd, f"{what} (pid {os.getpid()}, since"
                   f" {datetime.now(timezone.utc):%H:%M:%S} UTC)\n".encode(), 0)
-        yield True
+        roots = getattr(_HELD, "roots", set())
+        _HELD.roots = roots | {root}
+        try:
+            yield True
+        finally:
+            _HELD.roots = roots
     finally:
         os.close(fd)
 

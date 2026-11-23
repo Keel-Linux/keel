@@ -468,6 +468,60 @@ class TestLiveEntry(ApplianceCliCase):
                       " sockets belong to no unit of the manifests: tcp"
                       " [::]:9999", out)
 
+    def apply_executed(self, mode: str = "simple") -> tuple[int, str]:
+        """keel spec apply --system-only, carried out: the lock, the
+        writes under the root, the nft runs and the timer's start go
+        through, with ss, sshd, nft and systemctl answering as on a
+        node (the second review: TestLiveEntry ran --dry-run only)"""
+        self.write(spec_text().replace("mode: simple", f"mode: {mode}"))
+        os.makedirs(join(self.root, "var/lib/keel/mesh"), exist_ok=True)
+        with mock.patch("keel.system.appstate.ROOT_DEFAULT", self.root), \
+                mock.patch("keel.inspect.constants.ROOT_DEFAULT",
+                           self.root), \
+                mock.patch("keel.commands.ROOT_DEFAULT", self.root), \
+                mock.patch("subprocess.run", self.carried), \
+                mock.patch("shutil.which", return_value="/usr/sbin/x"):
+            code, out, err = self.cli("spec", "apply", "--spec", self.spec,
+                                      "--system-only")
+        return code, out + err
+
+    def carried(self, argv, **kwargs):
+        self.ran.append(tuple(argv))
+        if argv[0] == "nft" and "list" not in argv:
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if argv[:2] == ["systemctl", "start"]:
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        return self.answer(argv)
+
+    def test_an_executed_apply_writes_loads_and_starts_the_watch(self):
+        self.ran = []
+        code, out = self.apply_executed()
+        self.assertIn(f"write /{FIREWALL} (enforce)", out)
+        self.assertIn(("nft", "-f", f"/{FIREWALL}"), self.ran)
+        self.assertIn(("systemctl", "start", "keel-firewall-watch.timer"),
+                      self.ran)
+        with open(join(self.root, FIREWALL)) as fob:
+            self.assertIn("policy drop;", fob.read())
+        with open(join(self.root, "var/lib/keel/mesh/sync.lock")) as fob:
+            self.assertIn("keel spec apply", fob.read())
+
+    def test_an_executed_apply_survives_a_watch_that_does_not_start(self):
+        self.ran = []
+        real = self.carried
+
+        def refusing(argv, **kwargs):
+            if argv[:2] == ["systemctl", "start"]:
+                self.ran.append(tuple(argv))
+                return subprocess.CompletedProcess(argv, 1, "",
+                                                   "Unit is masked.")
+            return real(argv, **kwargs)
+        self.carried = refusing
+        code, out = self.apply_executed()
+        self.assertIn("start keel-firewall-watch.timer", out)
+        self.assertIn("not done", out)
+        self.assertNotIn("derived.firewall: refused", out)
+        self.assertNotIn("keel-firewall-watch.timer): failed", out)
+
     def test_the_port_a_running_sshd_holds_stays_open(self):
         """the second review: SSHD_OPTS="-p 2200" in /etc/default/ssh,
         or a Port edited and sshd not restarted: sshd -T says 22, the

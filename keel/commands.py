@@ -198,13 +198,26 @@ def spec_apply(args) -> int:
             return code
     if not with_system:
         return exits.OK
+    try:
+        code = locked_apply(args, doc, root, dry_run, system_only)
+    except LockError as e:
+        error(f"keel spec apply: {e}; nothing was applied")
+        return exits.APPLY_FAILED
+    if code == exits.OK and not dry_run:
+        from keel.system import bootrefusal
+        bootrefusal.clear(root)
+    return code
+
+
+def locked_apply(args, doc: dict, root: str, dry_run: bool,
+                 system_only: bool) -> int:
     with apply_lock(root, dry_run) as held:
         if not held:
             error("keel spec apply: a keel mesh operation holds the sync"
                   " lock and did not let it go; nothing was applied, apply"
                   " again")
             return exits.APPLY_FAILED
-        code = apply_system(
+        return apply_system(
             doc, root, dry_run, phase_label(system_only),
             getattr(args, "destroy_local_database", False),
             getattr(args, "defer_certificate", False),
@@ -213,25 +226,38 @@ def spec_apply(args) -> int:
             getattr(args, "skip_uplink", False),
             spec_path=args.spec, attended=True,
         )
-    if code == exits.OK and not dry_run:
-        from keel.system import bootrefusal
-        bootrefusal.clear(root)
-    return code
+
+
+class LockError(Exception):
+    """The sync lock's file cannot be opened"""
+
+
+MESH_DIR = "var/lib/keel/mesh"
 
 
 @contextlib.contextmanager
 def apply_lock(root: str, dry_run: bool):
     """The live apply holds the lock of keel mesh's applies, so the two
     never interleave: keel mesh could write the firewall's report over
-    the enforce a person's apply just wrote (decision 0097). A dry run
-    and a --root apply take none."""
-    if dry_run or os.path.abspath(root) != ROOT_DEFAULT:
+    the enforce a person's apply just wrote (decision 0097). A dry run,
+    a --root apply and a node with no mesh directory (no mesh apply can
+    run there; none is made) take none."""
+    if dry_run or os.path.abspath(root) != ROOT_DEFAULT or \
+            not os.path.isdir(os.path.join(root, MESH_DIR)):
         yield True
         return
     from keel.mesh import sync
-    with sync.sync_lock(root, sync.LOCK_WAIT, "keel spec apply",
-                        say=warn) as held:
-        yield held
+    entered = False
+    try:
+        with sync.sync_lock(root, sync.LOCK_WAIT, "keel spec apply",
+                            say=warn) as held:
+            entered = True
+            yield held
+    except OSError as e:
+        if entered:
+            raise
+        raise LockError(f"the sync lock of keel mesh cannot be taken:"
+                        f" {e.strerror or e}") from e
 
 
 def phase_label(system_only: bool) -> str:
