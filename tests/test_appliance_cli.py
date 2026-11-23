@@ -423,10 +423,12 @@ class TestLiveEntry(ApplianceCliCase):
                 fob.write(f"0::/system.slice/{unit}\n")
         self.ss = SS_CORE
         self.asked = []
+        self.shown = []
 
     def answer(self, argv, **kwargs):
         """ss, sshd -T and nft answer as on a node; the rest fails"""
         self.asked.append(argv[0])
+        self.shown.append(tuple(argv[:3]))
         answers = {"ss": (0, self.ss), "sshd": (0, "port 22\n"),
                    "nft": (1, "")}
         code, out = answers.get(argv[0], (1, ""))
@@ -455,6 +457,8 @@ class TestLiveEntry(ApplianceCliCase):
                               "keel-manifest.nft (enforce)", out)
                 self.assertIn("ss", self.asked)
                 self.assertIn("sshd", self.asked)
+                self.assertIn(("systemctl", "show", "ssh.socket"),
+                              self.shown)
 
     def test_an_undeclared_socket_keeps_report_from_the_command(self):
         self.ss = SS_CORE + ("tcp LISTEN 0 1 [::]:9999 [::]:*"

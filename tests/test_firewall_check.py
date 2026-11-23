@@ -73,10 +73,15 @@ class Nft:
         return subprocess.CompletedProcess(argv, self.load, "", "denied")
 
 
-def listing(digest: str, policy: str = "drop") -> str:
+RULES = 8
+
+
+def listing(digest: str, policy: str = "drop", rules: int = RULES) -> str:
+    body = "".join(f"\t\ttcp dport {1000 + n} accept\n"
+                   for n in range(rules))
     return (f'table inet keel {{\n\tcomment "keel-manifest {digest}"\n'
             "\tchain input {\n\t\ttype filter hook input priority filter;"
-            f" policy {policy};\n\t}}\n}}\n")
+            f" policy {policy};\n{body}\t}}\n}}\n")
 
 
 class TestCheck(ManifestCase):
@@ -96,6 +101,12 @@ class TestCheck(ManifestCase):
 
     def check(self, nft):
         return fwcheck.check(self.root, nft)
+
+    def test_the_core_ruleset_has_the_rules_the_listing_counts(self):
+        catalog = Catalog(self.root)
+        resolved, _ = resolve(catalog, catalog.read(APPLIANCE, "core"))
+        found = render_ruleset(resolved, CORE_OFF, None)
+        self.assertEqual(fwcheck.file_rules(found.text), RULES)
 
     def test_no_file_of_keel_s_is_nothing_to_check(self):
         found = self.check(Nft())
@@ -127,6 +138,29 @@ class TestCheck(ManifestCase):
         found = self.check(Nft(listing=listing(digest, "accept")))
         self.assertEqual(found.code, exits.DRIFT_FOUND)
         self.assertIn("policy accept, and the file says drop", found.message)
+
+    def test_a_flushed_or_grown_chain_is_drift(self):
+        """`nft flush chain inet keel input` and `nft insert rule ...`
+        keep the comment: the number of rules tells"""
+        digest = self.ruleset()
+        for rules in (0, RULES + 1):
+            with self.subTest(rules=rules):
+                found = self.check(Nft(listing=listing(digest,
+                                                       rules=rules)))
+                self.assertEqual(found.code, exits.DRIFT_FOUND)
+                self.assertIn(f"holds {rules} rule(s), and the file has"
+                              f" {RULES}", found.message)
+                self.assertTrue(found.restorable)
+
+    def test_an_empty_or_cut_file_is_drift(self):
+        """a power loss before the data reached the disk"""
+        for text in ("", HEADER + "\n"):
+            with self.subTest(text=text):
+                self.ruleset(lambda _: text)
+                found = self.check(Nft())
+                self.assertEqual(found.code, exits.DRIFT_FOUND)
+                self.assertIn("not a ruleset keel wrote", found.message)
+                self.assertFalse(found.restorable)
 
     def test_a_broken_file_with_its_comment_intact_is_drift(self):
         """the case the real test found: a line nft cannot read"""

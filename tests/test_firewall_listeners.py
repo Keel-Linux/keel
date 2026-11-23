@@ -183,6 +183,39 @@ class TestClassify(unittest.TestCase):
                            opened=frozenset(), overlay=None)
         self.assertEqual(len(unknown.undeclared), 2)
 
+    def test_a_mesh_port_on_a_public_address_holds_report(self):
+        """0097 section 7: MariaDB bound to every address for a client
+        outside the mesh; the ruleset opens 3306 on wg0 only, so enforce
+        would cut that client: rule B must not promote, and says why"""
+        wide = Listener("tcp", "0.0.0.0", None, 3306, (9,), ("mariadbd",),
+                        ("mariadb.service",))
+        on_wg0 = Listener("tcp", "fd00:1::1", None, 3306, (9,),
+                          ("mariadbd",), ("mariadb.service",))
+        on_vip = Listener("tcp", "fd00:1::ffff:100", None, 3306, (9,),
+                          ("mariadbd",), ("mariadb.service",))
+        args = dict(ssh=(22,), allow=frozenset(),
+                    opened=frozenset({(3306, "tcp")}),
+                    overlay=("wg0", 51820), mesh=frozenset({(3306, "tcp")}),
+                    overlay_addresses=frozenset({"fd00:1::1",
+                                                 "fd00:1::ffff:100"}))
+        found = classify((wide, on_wg0, on_vip),
+                         frozenset({"mariadb.service"}), **args)
+        self.assertEqual([item.describe() for item in found.undeclared],
+                         ["tcp 0.0.0.0:3306 of mariadb.service (mariadbd)"])
+        self.assertIn("on wg0 only", found.why(found.undeclared[0]))
+        allowed = classify((wide,), frozenset({"mariadb.service"}),
+                           **{**args, "allow": frozenset({(3306, "tcp")})})
+        self.assertTrue(allowed.clean)
+
+    def test_unopened_names_a_mesh_port_on_a_public_address(self):
+        wide = Listener("tcp", "0.0.0.0", None, 3306, (9,), ("mariadbd",),
+                        ("mariadb.service",))
+        on_wg0 = Listener("tcp", "fd00:1::1", None, 3306, (9,))
+        found = unopened((wide, on_wg0), frozenset({(3306, "tcp")}), "wg0",
+                         mesh=frozenset({(3306, "tcp")}),
+                         overlay_addresses=frozenset({"fd00:1::1"}))
+        self.assertEqual(found, (wide,))
+
     def test_a_pending_invite_s_listener_is_keel_s(self):
         found = classify((Listener("tcp", "::", None, 40123, (7,),
                                    ("python3",),

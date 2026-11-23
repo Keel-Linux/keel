@@ -90,6 +90,9 @@ class InstallRuleset:
     path: str
     content: str
     summary: str
+    # set where the run survives a refusal (no explicit enforce): what
+    # then; the step's later actions are skipped all the same
+    otherwise: str | None = None
 
     def describe(self) -> str:
         return (f"{self.summary}; checked by nft -c as a copy first, so a"

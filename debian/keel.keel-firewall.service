@@ -4,8 +4,9 @@
 # every installation mode (handbook decision 0097), enforce or report,
 # and loads it then; an image build writes it with --root and does not
 # load it. This unit loads it at every boot, before the network comes
-# up, so a new node is closed from its first packet and the table
-# survives a reboot. The file replaces keel's own table `inet keel` in
+# up, so the table survives a reboot, and a new node whose image wrote
+# the file in enforce (the image declares `firewall.state: enforce`) is
+# closed from its first packet; a file in report drops nothing. The file replaces keel's own table `inet keel` in
 # one transaction and touches no other rule. Without the file (a node
 # where no apply ran since the upgrade, or `firewall.state: off`),
 # systemd skips the unit.

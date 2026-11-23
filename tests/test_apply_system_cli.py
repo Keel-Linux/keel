@@ -230,7 +230,12 @@ class TestApplySystem(ApplySystemTestCase):
         outcome = mock.MagicMock(lines=("users.root: unchanged (x)",),
                                  failed=0)
         outcome.summary.return_value = "apply --system: 0 change(s), 0 failed"
+        # the sync lock of keel mesh lives under /var/lib/keel: stood in
+        # too (tests/test_firewall_attended.py tests it)
+        held = contextlib.nullcontext(True)
         with AS_ROOT, \
+                mock.patch("keel.commands.apply_lock",
+                           return_value=held), \
                 mock.patch.object(system, "observe",
                                   return_value=fake_state) as observe, \
                 mock.patch.object(system, "plan",

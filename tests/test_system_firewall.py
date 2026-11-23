@@ -219,8 +219,8 @@ class TestOff(FirewallCase):
         self.assertNotIn(RemoveFile, [type(a) for a in found])
         self.assertIn("policy drop", found[1].content)
 
-    def test_no_appliance_state_is_no_step(self):
-        self.assertEqual(plan_firewall(doc(), None, None, True, LIVE), [])
+    def test_no_appliance_state_under_a_root_is_no_step(self):
+        self.assertEqual(plan_firewall(doc(), None, None, False, LIVE), [])
 
 
 SSHD = Listener("tcp", "0.0.0.0", None, 22, (1,), ("sshd",),
@@ -364,6 +364,75 @@ class TestTransition(FirewallCase):
         self.assertIn("names no fence port", found[0].describe())
 
 
+class TestUndecided(FirewallCase):
+    """The review of 86370ed: a firewall that cannot be decided must not
+    fail the rest of the apply (and so the mesh apply, which puts the
+    spec back) on a node that never chose enforce. It degrades, loudly;
+    only an explicit enforce makes it a failure."""
+
+    def test_unknown_ssh_ports_without_a_word_are_a_loud_note(self):
+        found = self.actions(doc(enabled=None), self.state(
+            ssh_ports=(), ssh_source="/r/etc/ssh/sshd_config says Include"
+            " /opt/x.conf, which keel does not follow"))
+        self.assertEqual([type(a) for a in found], [Note])
+        self.assertTrue(found[0].describe().startswith(
+            "NOT APPLIED, the node keeps the firewall it has: the ports"
+            " sshd listens on cannot be determined"))
+        self.assertIn("`firewall.state: enforce` makes this an error",
+                      found[0].describe())
+
+    def test_a_file_keel_did_not_write_without_a_word_is_a_note(self):
+        found = self.actions(doc(enabled=None), self.state(
+            file=File("/r/x", "table inet mine {}\n")))
+        self.assertEqual([type(a) for a in found], [Note])
+        self.assertIn("keel did not write it", found[0].describe())
+
+    def test_an_explicit_enforce_still_refuses(self):
+        for spec in (doc(), doc(enabled=None, state="enforce")):
+            found = self.actions(spec, self.state(ssh_ports=(),
+                                                  ssh_source="x"))
+            self.assertEqual([type(a) for a in found], [Refuse])
+
+    def test_a_failed_check_or_load_without_a_word_fails_nothing(self):
+        steps = plan_firewall(doc(enabled=None), self.resolved,
+                              self.state(listeners=(SSHD,),
+                                         listeners_source="ss"),
+                              True, LIVE, True)
+
+        def nft(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 1, "",
+                                               "Operation not permitted")
+        with mock.patch("keel.system.fwinstall.subprocess.run", nft), \
+                mock.patch("keel.system.effects.subprocess.run", nft):
+            outcome = execute(Plan(tuple(steps)), Effects(self.root))
+        self.assertFalse(outcome.failed)
+        text = "\n".join(outcome.lines)
+        self.assertIn("not done: nft -c refused the ruleset", text)
+        self.assertIn("skipped: load it", text)
+
+    def test_no_appliance_on_the_live_system_is_said(self):
+        found = plan_firewall(doc(), None, None, True, LIVE)
+        self.assertEqual(found[0].actions[0].describe(), (
+            "no appliance manifest is resolved: keel writes no firewall,"
+            " and no inbound rule of keel's protects this node"))
+        self.assertEqual(plan_firewall(doc(), None, None, False, LIVE), [])
+
+
+class TestMeshExposed(FirewallCase):
+    def test_a_mesh_port_on_every_address_holds_report(self):
+        wide = Listener("tcp", "::", None, 2379, (8,), ("etcd",),
+                        ("etcd.service",))
+        found = self.implicit(listeners=(SSHD, wide),
+                              listeners_source="ss")
+        self.assertIn("report: enforce waits", found[0].describe())
+        self.assertIn("tcp [::]:2379 of etcd.service (etcd): enforce opens"
+                      " this port on wg0 only, and a client outside the mesh"
+                      " would be cut", found[0].describe())
+
+    def implicit(self, **fields):
+        return self.actions(doc(enabled=None), self.state(**fields))
+
+
 class TestWatch(FirewallCase):
     """keel-firewall-watch.timer loads a lost table again whatever the
     spec says (the real test of PR 307: no published spec enables the
@@ -456,6 +525,21 @@ class TestInstall(FirewallCase):
                                   target + ".keel-check")])
         self.assertEqual(os.listdir(os.path.dirname(target)),
                          ["keel-manifest.nft"])
+
+    def test_the_copy_and_its_directory_reach_the_disk(self):
+        """the review of 86370ed: no fsync, so a power loss could leave
+        an empty file that nft -f loads as no table"""
+        synced = []
+        real = os.fsync
+
+        def fsync(fd):
+            synced.append(os.path.realpath(f"/proc/self/fd/{fd}"))
+            real(fd)
+        with mock.patch("keel.system.fwinstall.os.fsync", fsync):
+            problem, target, _ = self.install(0)
+        self.assertIsNone(problem)
+        self.assertEqual(synced, [target + ".keel-check",
+                                  os.path.dirname(target)])
 
     def test_a_refused_copy_is_removed_and_the_old_file_kept(self):
         os.makedirs(os.path.dirname(join(self.root, PATH)))

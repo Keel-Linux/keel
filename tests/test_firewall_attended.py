@@ -10,11 +10,12 @@ line only, and the mesh's apply never passes it.
 """
 
 import argparse
+import contextlib
 import inspect
 import unittest
 from unittest import mock
 
-from keel import commands
+from keel import commands, exits
 from keel.mesh import node
 from keel.system.plan import plan
 
@@ -53,6 +54,57 @@ class TestAttended(unittest.TestCase):
         for function in (plan, commands.apply_system):
             self.assertIs(inspect.signature(function).parameters[
                 "attended"].default, False)
+
+
+class TestOneApplyAtATime(unittest.TestCase):
+    """The review of 86370ed: a person's apply and keel mesh's apply
+    could interleave, and the mesh could write report over the enforce
+    the person just wrote. keel spec apply on the live system takes the
+    lock keel mesh sync and the members' channel take."""
+
+    def args(self, root="/", dry_run=False):
+        return argparse.Namespace(spec="/r/i.yaml", conf="/r/c",
+                                  system_only=True, root=root,
+                                  dry_run=dry_run)
+
+    def run_apply(self, args, held=True):
+        seen = {}
+
+        @contextlib.contextmanager
+        def lock(root, wait, what="", say=None):
+            seen["lock"] = (root, what)
+            seen["inside"] = True
+            yield held
+            seen["inside"] = False
+
+        def apply(*a, **k):
+            seen["applied_inside"] = seen.get("inside", False)
+            return 0
+        with mock.patch("keel.commands.read_spec",
+                        return_value=({"version": 1}, 0)), \
+                mock.patch("keel.mesh.sync.sync_lock", lock), \
+                mock.patch("keel.system.needs_root", return_value=None), \
+                mock.patch("keel.commands.apply_system", side_effect=apply), \
+                mock.patch("keel.system.bootrefusal.clear"):
+            code = commands.spec_apply(args)
+        return code, seen
+
+    def test_the_live_apply_runs_under_the_sync_lock(self):
+        code, seen = self.run_apply(self.args())
+        self.assertEqual(code, 0)
+        self.assertEqual(seen["lock"], ("/", "keel spec apply"))
+        self.assertTrue(seen["applied_inside"])
+
+    def test_a_lock_that_does_not_come_fails_and_applies_nothing(self):
+        code, seen = self.run_apply(self.args(), held=False)
+        self.assertEqual(code, exits.APPLY_FAILED)
+        self.assertNotIn("applied_inside", seen)
+
+    def test_a_root_or_a_dry_run_takes_no_lock(self):
+        for args in (self.args(root="/srv/image"), self.args(dry_run=True)):
+            code, seen = self.run_apply(args)
+            self.assertNotIn("lock", seen)
+            self.assertTrue("applied_inside" in seen)
 
 
 class TestImports(unittest.TestCase):

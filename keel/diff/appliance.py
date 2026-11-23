@@ -35,7 +35,12 @@ from keel.spec import overlayrecord
 from keel.spec.validate_appliance import with_defaults
 from keel.network import wireguard
 from keel.spec.validate_firewall import declared_state
-from keel.system.firewall import allow_of, opened_ports, overlay_of
+from keel.system.firewall import (
+    allow_of,
+    mesh_context,
+    opened_ports,
+    overlay_of,
+)
 from keel.system.fwstate import (
     bridges_of,
     fence_ports,
@@ -237,7 +242,8 @@ def firewall_fields(declared: dict, resolved, states: dict,
     held = table_digest()
     fields.append(FieldDiff(key, SAME if held == ruleset.digest
                             else DRIFT, ruleset.digest, held))
-    return fields + [listener_field(declared, ruleset, tree)] + warnings
+    return fields + [listener_field(declared, resolved, ruleset, tree)] \
+        + warnings
 
 
 def expected_state(said: str | None, current: str | None) -> str:
@@ -247,7 +253,8 @@ def expected_state(said: str | None, current: str | None) -> str:
     return fw.ENFORCE if current == fw.ENFORCE else fw.REPORT
 
 
-def listener_field(declared: dict, ruleset, tree: Tree) -> FieldDiff:
+def listener_field(declared: dict, resolved, ruleset,
+                   tree: Tree) -> FieldDiff:
     """The sockets on an address that is not a loopback whose port the
     ruleset does not open"""
     key = "derived.firewall.listeners"
@@ -257,7 +264,9 @@ def listener_field(declared: dict, ruleset, tree: Tree) -> FieldDiff:
     wg = overlay_of(declared)
     device = (wg.get("interface") or wireguard.DEFAULT_INTERFACE
               if wg else None)
-    closed = unopened(found, opened_ports(ruleset, declared), device)
+    mesh, addresses = mesh_context(declared, resolved)
+    closed = unopened(found, opened_ports(ruleset, declared), device, mesh,
+                      addresses)
     verb = ("enforce would close" if ruleset.state == fw.REPORT
             else "enforce closes")
     named = "; ".join(item.describe() for item in closed) or "nothing"

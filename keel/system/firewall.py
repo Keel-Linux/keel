@@ -42,6 +42,8 @@ keel-firewall.service loads the file at boot, so the table survives a
 reboot; nothing but keel's own `inet keel` table is ever touched.
 """
 
+import ipaddress
+
 from keel.manifest.firewall import (
     ENFORCE,
     HEADER,
@@ -59,6 +61,7 @@ from keel.network import wireguard
 from keel.spec.validate_firewall import declared_state
 from keel.system.actions import (
     Action,
+    Attempt,
     InstallRuleset,
     Note,
     Refuse,
@@ -67,6 +70,7 @@ from keel.system.actions import (
     Step,
     WriteFile,
 )
+from keel.system.dbmariadb import overlay_addresses
 from keel.system.fwstate import WATCH_TIMER, FirewallState
 from keel.system.listeners import classify, declared_units, unopened
 
@@ -82,6 +86,8 @@ UNATTENDED_DECLARED = ("report until an apply a person runs: the spec says"
                        " (decision 0097)")
 KEPT = ("enforce, as keel's file already says; `firewall.state: report`"
         " goes back")
+NO_APPLIANCE = ("no appliance manifest is resolved: keel writes no firewall,"
+                " and no inbound rule of keel's protects this node")
 PROMOTED = ("enforce: each socket on an address that is not a loopback"
             " belongs to a unit of the manifests (decision 0097, B)")
 
@@ -108,7 +114,9 @@ def plan_firewall(doc: dict, resolved: Resolved | None,
                   available: frozenset[str],
                   attended: bool = False) -> list[Step]:
     if resolved is None or state is None:
-        return []
+        if not live:
+            return []
+        return [Step(FIELD, (Note(NO_APPLIANCE),))]
     declared = declared_state(doc)
     if declared == OFF:
         return [Step(FIELD, (Note(OFF_WARNING),)
@@ -181,9 +189,26 @@ def choose(doc: dict, resolved: Resolved, state: FirewallState,
                         " `firewall.state: enforce` enforces anyway"]
     found = sorting(doc, resolved, state)
     if found.undeclared:
-        return REPORT, [waiting_notice([item.describe()
-                                        for item in found.undeclared])]
+        return REPORT, [waiting_notice(found.named())]
     return ENFORCE, [PROMOTED]
+
+
+def mesh_context(doc: dict, resolved: Resolved
+                 ) -> tuple[frozenset, frozenset[str]]:
+    """The manifests' mesh ports, with or without an overlay, and this
+    node's overlay addresses and VIP, the only addresses whose mesh
+    ports enforce serves"""
+    _, by_process = exposed(resolved, doc.get("overlays") or {})
+    mesh = frozenset(port for ports in by_process.values()
+                     for port in ports)
+    addresses = set(overlay_addresses(doc))
+    vip = (doc.get("appliance") or {}).get("vip")
+    try:
+        if vip:
+            addresses.add(str(ipaddress.ip_interface(str(vip)).ip))
+    except ValueError:
+        pass
+    return mesh, frozenset(addresses)
 
 
 def sorting(doc: dict, resolved: Resolved, state: FirewallState):
@@ -200,7 +225,9 @@ def sorting(doc: dict, resolved: Resolved, state: FirewallState):
         overlay=None if overlay is None else (
             overlay.get("interface") or wireguard.DEFAULT_INTERFACE,
             overlay.get("listen_port") or wireguard.DEFAULT_PORT),
-        fence=state.fence)
+        fence=state.fence,
+        mesh=mesh_context(doc, resolved)[0],
+        overlay_addresses=mesh_context(doc, resolved)[1])
 
 
 def told(doc: dict, resolved: Resolved, state: FirewallState,
@@ -215,8 +242,10 @@ def told(doc: dict, resolved: Resolved, state: FirewallState,
     overlay = overlay_of(doc)
     device = None if overlay is None else (
         overlay.get("interface") or wireguard.DEFAULT_INTERFACE)
+    mesh, addresses = mesh_context(doc, resolved)
     return [f"enforce would close {item.describe()}" for item in unopened(
-        state.listeners, opened_ports(ruleset, doc), device)]
+        state.listeners, opened_ports(ruleset, doc), device, mesh,
+        addresses)]
 
 
 def ssh_said(resolved: Resolved, doc: dict, state: FirewallState
@@ -235,7 +264,11 @@ def on(doc: dict, resolved: Resolved, state: FirewallState, live: bool,
        attended: bool) -> tuple[Action, ...]:
     refusal = guard(state, live, available)
     if refusal is not None:
-        return (refusal,)
+        if declared == ENFORCE:
+            return (refusal,)
+        return (Note(f"NOT APPLIED, the node keeps the firewall it has:"
+                     f" {refusal.summary}; `firewall.state: enforce` makes"
+                     " this an error"),)
     if state.pending:
         return (Note(
             "a network change waits for keel network confirm (decision"
@@ -249,11 +282,16 @@ def on(doc: dict, resolved: Resolved, state: FirewallState, live: bool,
     said += [state.fence_note] if state.fence_note else []
     actions: list[Action] = [Note(note) for note in
                              said + list(ruleset.notes)]
-    return tuple(actions + load(ruleset, state, live, overlay_of(doc)))
+    return tuple(actions + load(ruleset, state, live, overlay_of(doc),
+                                declared == ENFORCE))
+
+
+NOT_LOADED = ("the node keeps the firewall it had; `firewall.state:"
+              " enforce` makes this an error")
 
 
 def load(ruleset: Ruleset, state: FirewallState, live: bool,
-         wg: dict | None) -> list[Action]:
+         wg: dict | None, required: bool = True) -> list[Action]:
     """Write and load the ruleset where it differs from what is there"""
     actions: list[Action] = []
     written = state.file.text != ruleset.text
@@ -271,7 +309,12 @@ def load(ruleset: Ruleset, state: FirewallState, live: bool,
         if not written:
             actions.append(Note(f"unchanged (/{PATH})"))
     elif written:
-        actions += [InstallRuleset(PATH, ruleset.text, summary), nft_load]
+        actions += [InstallRuleset(PATH, ruleset.text, summary,
+                                   None if required else NOT_LOADED),
+                    nft_load if required else Attempt(
+                        nft_load.argv, nft_load.summary, NOT_LOADED)]
+    elif state.loaded != ruleset.digest and not required:
+        actions.append(Attempt(nft_load.argv, nft_load.summary, NOT_LOADED))
     elif state.loaded != ruleset.digest:
         actions += [
             Run(("nft", "-c", "-f", f"/{PATH}"),

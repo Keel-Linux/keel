@@ -74,17 +74,33 @@ class Listener:
         return f"{self.protocol} {address}:{self.port} of {owner}{names}"
 
 
+EXPOSED = ("enforce opens this port on {iface} only, and a client outside"
+           " the mesh would be cut")
+
+
 @dataclass(frozen=True)
 class Classified:
-    # sockets of no unit of the manifests: they keep the node in report
+    # sockets that keep the node in report: of no unit of the manifests,
+    # or on a mesh port on an address outside the overlay
     undeclared: tuple[Listener, ...]
     # sockets of a declared unit on a port the ruleset does not open:
     # enforce closes them, which is information
     closed: tuple[Listener, ...]
+    reasons: tuple[tuple[Listener, str], ...] = ()
 
     @property
     def clean(self) -> bool:
         return not self.undeclared
+
+    def why(self, item: Listener) -> str:
+        return dict(self.reasons).get(item, "")
+
+    def named(self) -> list[str]:
+        """Each socket that keeps report, with why where it is not the
+        plain lack of a unit"""
+        return [item.describe() + (f": {self.why(item)}"
+                                   if self.why(item) else "")
+                for item in self.undeclared]
 
 
 def parse_ss(text: str) -> tuple[Listener, ...]:
@@ -156,11 +172,17 @@ def classify(listeners: tuple[Listener, ...], units: frozenset[str], *,
              ssh: tuple[int, ...], allow: frozenset[Port],
              opened: frozenset[Port],
              overlay: tuple[str, int] | None,
-             fence: tuple[int, ...] = ()) -> Classified:
+             fence: tuple[int, ...] = (),
+             mesh: frozenset[Port] = frozenset(),
+             overlay_addresses: frozenset[str] = frozenset()) -> Classified:
     """`opened` the ports the ruleset opens; `overlay` the WireGuard
     interface and UDP port, None without an overlay; `fence` the init
-    fence's ports while its unit is enabled"""
-    undeclared, closed = [], []
+    fence's ports while its unit is enabled; `mesh` the manifests' mesh
+    ports and `overlay_addresses` this node's overlay addresses and VIP:
+    a mesh port on another address serves someone the ruleset cuts
+    (decision 0097, section 7), so it keeps report too"""
+    undeclared, closed, reasons = [], [], []
+    iface = overlay[0] if overlay else wireguard_default()
     for item in listeners:
         if loopback(item) or (overlay and item.device == overlay[0]):
             continue
@@ -168,11 +190,28 @@ def classify(listeners: tuple[Listener, ...], units: frozenset[str], *,
         if known(item, ssh, allow, overlay) or (
                 item.protocol == "tcp" and item.port in fence):
             continue
-        if not any(belongs(unit, units) for unit in item.units):
+        if port in mesh and not on_overlay(item, overlay_addresses):
+            undeclared.append(item)
+            reasons.append((item, EXPOSED.format(iface=iface)))
+        elif not any(belongs(unit, units) for unit in item.units):
             undeclared.append(item)
         elif port not in opened:
             closed.append(item)
-    return Classified(tuple(undeclared), tuple(closed))
+    return Classified(tuple(undeclared), tuple(closed), tuple(reasons))
+
+
+def wireguard_default() -> str:
+    from keel.network import wireguard
+    return wireguard.DEFAULT_INTERFACE
+
+
+def on_overlay(item: Listener, addresses: frozenset[str]) -> bool:
+    """Bound to an overlay address or the VIP, which only wg0 reaches
+    under enforce"""
+    try:
+        return str(ipaddress.ip_address(item.address)) in addresses
+    except ValueError:
+        return False
 
 
 def known(item: Listener, ssh: tuple[int, ...], allow: frozenset[Port],
@@ -190,14 +229,24 @@ def known(item: Listener, ssh: tuple[int, ...], allow: frozenset[Port],
 
 
 def unopened(listeners: tuple[Listener, ...], opened: frozenset[Port],
-             overlay_device: str | None) -> tuple[Listener, ...]:
+             overlay_device: str | None,
+             mesh: frozenset[Port] = frozenset(),
+             overlay_addresses: frozenset[str] = frozenset()
+             ) -> tuple[Listener, ...]:
     """Sockets on an address that is not a loopback whose port the
-    ruleset does not open: what enforce would close (keel diff)"""
+    ruleset does not open, or a mesh port on an address outside the
+    overlay: what enforce would close (keel diff)"""
+    def closes(item: Listener) -> bool:
+        port = (item.port, item.protocol)
+        if port in DHCP_CLIENT:
+            return False
+        if port in mesh and not on_overlay(item, overlay_addresses):
+            return True
+        return port not in opened
     return tuple(item for item in listeners
                  if not loopback(item)
                  and not (overlay_device and item.device == overlay_device)
-                 and (item.port, item.protocol) not in opened
-                 and (item.port, item.protocol) not in DHCP_CLIENT)
+                 and closes(item))
 
 
 def observe_listeners(tree: Tree, live: bool, run=None

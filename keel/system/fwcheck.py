@@ -25,10 +25,13 @@ from dataclasses import dataclass
 
 from keel import exits
 from keel.manifest.firewall import (
+    CHAIN_HEAD,
     PATH,
     POLICY,
     POLICY_RE,
     TABLE,
+    TAIL,
+    TYPE_RE,
     digest_of,
     file_state,
     loaded_digest,
@@ -55,10 +58,14 @@ def check(root: str, run=None) -> Checked:
     except OSError as e:
         return Checked(exits.DRIFT_FOUND,
                        f"{path} cannot be read: {e.strerror}")
-    state = file_state(text)
-    if state is None:
+    if text is None:
         return Checked(exits.OK,
                        f"{path}: no ruleset of keel's, nothing to compare")
+    state = file_state(text)
+    if state is None:
+        return Checked(exits.DRIFT_FOUND, (
+            f"{path} is not a ruleset keel wrote, or it is cut short (an"
+            f" empty file loads no table): {APPLY}"))
     return compare(path, text or "", state, run)
 
 
@@ -86,8 +93,34 @@ def compare(path: str, text: str, state: str, run) -> Checked:
         return Checked(exits.DRIFT_FOUND, (
             f"table inet keel has policy {found}, and the file says"
             f" {POLICY[state]}"), True)
+    held_rules, file_has = listed_rules(listing), file_rules(text)
+    if held_rules != file_has:
+        return Checked(exits.DRIFT_FOUND, (
+            f"table inet keel holds {held_rules} rule(s), and the file has"
+            f" {file_has} (a chain flushed or edited by hand)"), True)
     return Checked(exits.OK,
                    f"table inet keel is the one {path} says ({wanted})")
+
+
+def file_rules(text: str) -> int:
+    """The rules of the input chain in a file keel wrote"""
+    head = TYPE_RE.search(text, text.index(CHAIN_HEAD))
+    return len([line for line in text[head.end():-len(TAIL)].splitlines()
+                if line.strip()])
+
+
+def listed_rules(listing: str) -> int:
+    """The rules of the input chain in `nft list table inet keel`: the
+    lines after its type line, up to the chain's closing brace"""
+    head = POLICY_RE.search(listing)
+    if head is None:
+        return 0
+    count = 0
+    for line in listing[listing.index("\n", head.end()) + 1:].splitlines():
+        if line.strip() == "}":
+            break
+        count += bool(line.strip())
+    return count
 
 
 def nft_refuses(path: str, run) -> str | None:

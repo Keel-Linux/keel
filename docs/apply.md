@@ -1269,6 +1269,13 @@ node is in report, and the maintainer's rule B (decision 0097, answered
   interface is not public. A socket ss shows with no process, or a run
   of ss that fails, keeps the node in report, and the plan names it.
 
+A socket on a mesh port (3306, 5432, 6379, 2379, 2380, 22000) bound to
+an address that is not this node's overlay address or its VIP (a
+MariaDB on `0.0.0.0` for a client outside the mesh) also keeps report:
+enforce opens that port on the WireGuard interface only, and would cut
+that client with no word (decision 0097, section 7). `firewall.allow`
+with `from` declares such a client.
+
 Else the node stays in report, and the plan says which sockets keep it
 there and what to do: declare each in `firewall.allow`, stop it, or set
 `firewall.state: enforce`. A port of a declared process that the
@@ -1281,6 +1288,18 @@ the plan's line (`keel.system.firewall.waiting_notice`).
  The table's comment carries a digest of the
 rules, which is how apply and diff tell whether the table the kernel
 holds is the one the file says.
+
+**A firewall that cannot be decided.** Where the spec does not say
+`enforce` (no key, `enabled: false`, or `report`), a guard that refuses
+(sshd's ports unknown, a file keel did not write, no `nft`) or a ruleset
+`nft -c` or `nft -f` refuses does not fail the apply: the plan says
+`NOT APPLIED, the node keeps the firewall it has` with the reason, the
+other steps run, and keel mesh does not put the spec back. Only an
+explicit `state: enforce` (or `enabled: true`) makes it a failure of
+the apply. `keel spec apply` on the live system holds the lock keel mesh
+sync and the members' channel hold, so a mesh apply never writes report
+over the enforce a person's apply just wrote. The copy of the ruleset
+is on the disk (`fsync`, then its directory) before it is renamed.
 
 **What keeps it from locking anyone out.** Before anything is written:
 

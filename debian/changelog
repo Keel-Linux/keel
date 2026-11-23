@@ -43,6 +43,13 @@ keel (0.23.99) unstable; urgency=high
     whatever the monitor section says; keel firewall check verifies the
     file's rules, nft -c and the loaded policy, not the digest comment
     alone; the running init fence no longer keeps rule B in report.
+  * After the review of the change: a mesh port on an address outside
+    the overlay keeps rule B in report and is named; a firewall that
+    cannot be decided fails the apply only where the spec says enforce,
+    else it says NOT APPLIED and the rest of the apply runs; keel spec
+    apply holds keel mesh's sync lock; keel firewall check counts the
+    rules and treats an empty file as drift; the ruleset is fsynced
+    before its rename; the plan says when no appliance is resolved.
   * The package depends on nftables and iproute2. An upgrade changes no
     rule and starts or restarts no unit of the firewall (decision 0073):
     the change comes at the next apply, which also starts the timer.

@@ -198,19 +198,40 @@ def spec_apply(args) -> int:
             return code
     if not with_system:
         return exits.OK
-    code = apply_system(
-        doc, root, dry_run, phase_label(system_only),
-        getattr(args, "destroy_local_database", False),
-        getattr(args, "defer_certificate", False),
-        getattr(args, "network_window", DEFAULT_WINDOW),
-        getattr(args, "skip_network", False),
-        getattr(args, "skip_uplink", False),
-        spec_path=args.spec, attended=True,
-    )
+    with apply_lock(root, dry_run) as held:
+        if not held:
+            error("keel spec apply: a keel mesh operation holds the sync"
+                  " lock and did not let it go; nothing was applied, apply"
+                  " again")
+            return exits.APPLY_FAILED
+        code = apply_system(
+            doc, root, dry_run, phase_label(system_only),
+            getattr(args, "destroy_local_database", False),
+            getattr(args, "defer_certificate", False),
+            getattr(args, "network_window", DEFAULT_WINDOW),
+            getattr(args, "skip_network", False),
+            getattr(args, "skip_uplink", False),
+            spec_path=args.spec, attended=True,
+        )
     if code == exits.OK and not dry_run:
         from keel.system import bootrefusal
         bootrefusal.clear(root)
     return code
+
+
+@contextlib.contextmanager
+def apply_lock(root: str, dry_run: bool):
+    """The live apply holds the lock of keel mesh's applies, so the two
+    never interleave: keel mesh could write the firewall's report over
+    the enforce a person's apply just wrote (decision 0097). A dry run
+    and a --root apply take none."""
+    if dry_run or os.path.abspath(root) != ROOT_DEFAULT:
+        yield True
+        return
+    from keel.mesh import sync
+    with sync.sync_lock(root, sync.LOCK_WAIT, "keel spec apply",
+                        say=warn) as held:
+        yield held
 
 
 def phase_label(system_only: bool) -> str:
