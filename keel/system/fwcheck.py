@@ -20,6 +20,7 @@ loaded: that is for keel spec apply --system.
 """
 
 import os
+import re
 import subprocess
 from dataclasses import dataclass
 
@@ -93,34 +94,67 @@ def compare(path: str, text: str, state: str, run) -> Checked:
         return Checked(exits.DRIFT_FOUND, (
             f"table inet keel has policy {found}, and the file says"
             f" {POLICY[state]}"), True)
-    held_rules, file_has = listed_rules(listing), file_rules(text)
-    if held_rules != file_has:
-        return Checked(exits.DRIFT_FOUND, (
-            f"table inet keel holds {held_rules} rule(s), and the file has"
-            f" {file_has} (a chain flushed or edited by hand)"), True)
+    differs = rules_differ(listing, text)
+    if differs is not None:
+        return Checked(exits.DRIFT_FOUND, differs, True)
     return Checked(exits.OK,
                    f"table inet keel is the one {path} says ({wanted})")
 
 
-def file_rules(text: str) -> int:
+SET_RE = re.compile(r"\{ ([^{}]*) \}")
+HOST_RE = re.compile(r"(\b\d{1,3}(?:\.\d{1,3}){3})/32\b|"
+                     r"([0-9a-fA-F:]*:[0-9a-fA-F:]*)/128\b")
+COUNTERS_RE = re.compile(r"counter packets \d+ bytes \d+")
+
+
+def canonical(rule: str) -> str:
+    """One rule in the form nft prints it: a host prefix (/32, /128)
+    dropped, the elements of an anonymous set in one order, counters
+    without their numbers, one space between words"""
+    rule = COUNTERS_RE.sub("counter", " ".join(rule.split()))
+    rule = HOST_RE.sub(lambda m: m.group(1) or m.group(2), rule)
+    return SET_RE.sub(lambda m: "{ " + ", ".join(
+        sorted(m.group(1).split(", "))) + " }", rule)
+
+
+def file_rule_lines(text: str) -> list[str]:
     """The rules of the input chain in a file keel wrote"""
     head = TYPE_RE.search(text, text.index(CHAIN_HEAD))
-    return len([line for line in text[head.end():-len(TAIL)].splitlines()
-                if line.strip()])
+    return [line.strip() for line in text[head.end():-len(TAIL)]
+            .splitlines() if line.strip()]
 
 
-def listed_rules(listing: str) -> int:
-    """The rules of the input chain in `nft list table inet keel`: the
-    lines after its type line, up to the chain's closing brace"""
+def file_rules(text: str) -> int:
+    return len(file_rule_lines(text))
+
+
+def listed_rule_lines(listing: str) -> list[str]:
+    """The rules of the input chain in `nft -s list table inet keel`:
+    the lines after its type line, up to the chain's closing brace"""
     head = POLICY_RE.search(listing)
     if head is None:
-        return 0
-    count = 0
+        return []
+    found = []
     for line in listing[listing.index("\n", head.end()) + 1:].splitlines():
         if line.strip() == "}":
             break
-        count += bool(line.strip())
-    return count
+        if line.strip():
+            found.append(line.strip())
+    return found
+
+
+def rules_differ(listing: str, text: str) -> str | None:
+    """Why the loaded input chain is not the one the file loads, rule by
+    rule and in order; None when it is"""
+    held, wanted = listed_rule_lines(listing), file_rule_lines(text)
+    if len(held) != len(wanted):
+        return (f"table inet keel holds {len(held)} rule(s), and the file"
+                f" has {len(wanted)} (a chain flushed or edited by hand)")
+    for number, (one, other) in enumerate(zip(held, wanted), 1):
+        if canonical(one) != canonical(other):
+            return (f"rule {number} of table inet keel is '{one}', and the"
+                    f" file says '{other}' (a rule edited by hand)")
+    return None
 
 
 def nft_refuses(path: str, run) -> str | None:
@@ -136,7 +170,7 @@ def nft_refuses(path: str, run) -> str | None:
 
 def table_listing(run) -> str | None:
     try:
-        out = run(["nft", "list", "table", *TABLE], capture_output=True,
+        out = run(["nft", "-s", "list", "table", *TABLE], capture_output=True,
                   text=True, check=False)
     except OSError:
         return None

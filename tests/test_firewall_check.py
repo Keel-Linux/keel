@@ -23,7 +23,7 @@ from manifest_helpers import ManifestCase
 from test_manifest_monit import CORE_OFF, NOTIFY, RenderCase
 
 from keel import exits
-from keel.manifest.firewall import HEADER, PATH, digest_of
+from keel.manifest.firewall import HEADER, PATH, Allow, digest_of
 from keel.manifest.firewall import render as render_ruleset
 from keel.manifest.catalog import Catalog
 from keel.manifest.constants import APPLIANCE
@@ -67,22 +67,35 @@ class Nft:
         if argv[:2] == ["nft", "-c"]:
             return subprocess.CompletedProcess(argv, self.check, "",
                                                "Error: syntax error")
-        if argv[:2] == ["nft", "list"]:
+        if "list" in argv:
             if self.listing is None:
                 return subprocess.CompletedProcess(argv, 1, "", "No such")
             return subprocess.CompletedProcess(argv, 0, self.listing, "")
         return subprocess.CompletedProcess(argv, self.load, "", "denied")
 
 
-RULES = 8
+# the core ruleset's input chain as `nft -s list table inet keel` prints
+# it after a load
+CORE_RULES = (
+    'iif "lo" accept',
+    "ct state established,related accept",
+    "ct state invalid drop",
+    "meta l4proto ipv6-icmp accept",
+    "icmp type echo-request accept",
+    "ip6 saddr fe80::/10 udp dport 546 accept",
+    "udp dport 68 accept",
+    "tcp dport { 22, 12320, 12321 } accept",
+)
+RULES = len(CORE_RULES)
 
 
-def listing(digest: str, policy: str = "drop", rules: int = RULES) -> str:
-    body = "".join(f"\t\ttcp dport {1000 + n} accept\n"
-                   for n in range(rules))
+def listing(digest: str, policy: str = "drop", rules: int = RULES,
+            body: tuple[str, ...] = CORE_RULES) -> str:
+    lines = (list(body) + ["accept"] * rules)[:rules]
+    chain = "".join(f"\t\t{line}\n" for line in lines)
     return (f'table inet keel {{\n\tcomment "keel-manifest {digest}"\n'
             "\tchain input {\n\t\ttype filter hook input priority filter;"
-            f" policy {policy};\n{body}\t}}\n}}\n")
+            f" policy {policy};\n{chain}\t}}\n}}\n")
 
 
 class TestCheck(ManifestCase):
@@ -152,6 +165,30 @@ class TestCheck(ManifestCase):
                 self.assertIn(f"holds {rules} rule(s), and the file has"
                               f" {RULES}", found.message)
                 self.assertTrue(found.restorable)
+
+    def test_a_rule_swapped_for_accept_is_drift(self):
+        """the second review: one port rule replaced by `accept` keeps
+        the count; the rules themselves are compared"""
+        digest = self.ruleset()
+        swapped = CORE_RULES[:-1] + ("accept",)
+        found = self.check(Nft(listing=listing(digest, body=swapped)))
+        self.assertEqual(found.code, exits.DRIFT_FOUND)
+        self.assertIn("rule 8 of table inet keel is 'accept', and the file"
+                      " says 'tcp dport { 22, 12320, 12321 } accept'",
+                      found.message)
+        self.assertTrue(found.restorable)
+
+    def test_the_forms_nft_prints_are_the_file_s(self):
+        """nft drops /32 and /128 and may reorder an anonymous set"""
+        self.assertEqual(
+            fwcheck.canonical('iifname { "lxcbr0", "docker0" } ip saddr'
+                              " { 198.51.100.7, 192.0.2.0/24 } accept"),
+            fwcheck.canonical('iifname { "docker0", "lxcbr0" } ip saddr'
+                              " { 192.0.2.0/24, 198.51.100.7/32 } accept"))
+        self.assertEqual(fwcheck.canonical("ip6 saddr 2001:db8::5/128 accept"),
+                         "ip6 saddr 2001:db8::5 accept")
+        self.assertNotEqual(fwcheck.canonical("tcp dport 22 accept"),
+                            fwcheck.canonical("accept"))
 
     def test_an_empty_or_cut_file_is_drift(self):
         """a power loss before the data reached the disk"""
@@ -241,6 +278,61 @@ class TestCheck(ManifestCase):
             code, _, err = self.cli("firewall", "check")
         self.assertEqual(code, exits.DRIFT_FOUND)
         self.assertIn("is not loaded", err)
+
+
+class TestCheckReal(ManifestCase):
+    """The check against what nft really prints: each ruleset loaded in a
+    network namespace of its own (tests/wgtools.py), listed with nft -s;
+    nothing on the machine running the tests changes"""
+
+    def setUp(self):
+        super().setUp()
+        from wgtools import namespace_prefix
+        nft = os.environ.get("KEEL_NFT") or shutil.which("nft") or (
+            "/usr/sbin/nft" if os.path.exists("/usr/sbin/nft") else None)
+        self.prefix = namespace_prefix() if nft else None
+        if self.prefix is None:
+            if os.environ.get("CI"):
+                self.fail("nft in a namespace of its own is needed in CI")
+            self.skipTest("no nft, or no namespace of its own")
+        self.nft = nft
+
+    def loaded(self, text: str, after: str = "") -> str:
+        path = join(self.root, "rules.nft")
+        with open(path, "w") as fob:
+            fob.write(text)
+        done = subprocess.run(
+            [*self.prefix, "sh", "-c",
+             f"{self.nft} -f {path} && {after}{self.nft} -s list table"
+             " inet keel"], capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return done.stdout
+
+    def test_every_form_keel_renders_reads_back_as_the_file(self):
+        catalog = Catalog(self.root)
+        resolved, _ = resolve(catalog, catalog.read(APPLIANCE, "core"))
+        states = {"installer": "enabled", "wireguard": "enabled",
+                  "etcd": "enabled", "crowdsec": "enabled"}
+        for state in ("enforce", "report"):
+            with self.subTest(state=state):
+                found = render_ruleset(
+                    resolved, states, {"address": "fd00:1::1/64"},
+                    ("lxcbr0", "docker0"), state=state, ssh=(22, 2222),
+                    allow=(Allow(8080, "tcp"),
+                           Allow(5432, "tcp", ("192.0.2.0/24",
+                                               "2001:db8::/32",
+                                               "198.51.100.7/32")),
+                           Allow(9000, "udp", ("2001:db8:1::5",))),
+                    fence=(60080, 60443))
+                listed = self.loaded(found.text)
+                self.assertIsNone(fwcheck.rules_differ(listed, found.text),
+                                  listed)
+                swapped = self.loaded(found.text, (
+                    f"{self.nft} replace rule inet keel input handle"
+                    f" $({self.nft} -a list chain inet keel input | grep"
+                    " 'dport 8080' | sed 's/.*handle //') accept && "))
+                self.assertIn("rule", fwcheck.rules_differ(swapped,
+                                                           found.text))
 
 
 class TestDigest(ManifestCase):
