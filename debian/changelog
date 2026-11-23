@@ -1,3 +1,45 @@
+keel (0.23.99) unstable; urgency=high
+
+  * Security (decision 0097, urgent lane): keel writes its firewall in
+    every mode, simple, cloud simple and cloud advanced, the etcd
+    witness included. The real-node tests of 2026-11-23 found every
+    published node open: nothing loaded TurnKey's rules.v4, and no mode
+    screen turned firewall.enabled on. The table inet keel has a drop
+    policy on input in the state enforce; mesh ports are accepted only
+    on the WireGuard interface, so the database, etcd and Syncthing no
+    longer answer a neighbour that routes the wg0 address or the VIP
+    through the uplink.
+  * firewall.state: enforce, report (the same rules with an accept
+    policy and a counter of what enforce would drop) or off.
+    firewall.enabled: true reads as enforce; false and no section read
+    as report. firewall.allow opens the administrator's ports, on every
+    interface or from given prefixes. The section is valid in every
+    mode.
+  * Rule B (the maintainer, 2026-11-23): with no state in the spec, an
+    apply a person runs (keel spec apply) moves the node to enforce when
+    each socket on an address that is not a loopback belongs to a unit
+    of the manifests; else it stays in report and says which sockets
+    keep it there. keel mesh never begins enforcement. Once keel's file
+    is in enforce, it stays there.
+  * Each port sshd listens on is opened and named; keel no longer
+    refuses the whole ruleset for a port the manifests do not open.
+    Unknown sshd ports still refuse, and nothing is written or loaded.
+  * The init fence's ports, for redirected packets only, while its unit
+    is enabled.
+  * keel firewall check and Monit's check keel-firewall: a lost table is
+    loaded again by keel-firewall.service.
+  * keel diff: the state, the sockets enforce closes or would close,
+    warnings for off, for TurnKey's rules.v4/rules.v6 and for a database
+    port allowed with no from. keel inspect writes firewall.state:
+    enforce, and leaves report out.
+  * Syncthing listens on the loopback, not on a random port of every
+    address, when the node has no overlay address.
+  * The package depends on nftables and iproute2. An upgrade changes no
+    rule and starts or restarts no unit (decision 0073): the change
+    comes at the next apply.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Mon, 23 Nov 2026 00:00:00 +0000
+
 keel (0.23.97) unstable; urgency=medium
 
   * keel inspect describes the database server when redis-server runs
