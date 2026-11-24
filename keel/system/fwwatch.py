@@ -43,7 +43,7 @@ def watch(root: str, run=None, clock=time.time) -> tuple[int, list[str]]:
     before = file_stat(root)
     found = fwcheck.check(root, run)
     if found.code == exits.OK:
-        return settle(root, before, found, [])
+        return settle(root, before, found, cleared(root, run))
     message = found.message
     if found.restorable:
         problem = fwcheck.restore(root, run)
@@ -51,7 +51,8 @@ def watch(root: str, run=None, clock=time.time) -> tuple[int, list[str]]:
             again = fwcheck.check(root, run)
             if again.code == exits.OK:
                 return settle(root, before, again,
-                              [f"{found.message}: loaded again"])
+                              [f"{found.message}: loaded again"]
+                              + cleared(root, run))
             message = again.message
         else:
             message = f"{found.message}; nft -f failed: {problem}"
@@ -60,7 +61,8 @@ def watch(root: str, run=None, clock=time.time) -> tuple[int, list[str]]:
         if code == exits.OK:
             again = fwcheck.check(root, run)
             if again.code == exits.OK:
-                return settle(root, file_stat(root), again, lines)
+                return settle(root, file_stat(root), again,
+                              lines + cleared(root, run))
         message = "; ".join([message, *lines, table_state(run)])
     return failing(root, clock, message)
 
@@ -80,6 +82,26 @@ def table_state(run) -> str:
     if listing is None:
         return "table inet keel is not loaded"
     return f"table inet keel holds {fwcheck.loaded_digest(listing)}"
+
+
+LIVE_ROOT = "/"
+
+
+def cleared(root: str, run) -> list[str]:
+    """keel#310: a keel-firewall.service that failed at boot (a broken
+    spec, a fallback) stays failed after the spec is put back, until an
+    apply. On a good run on the live system the watch restarts it: it
+    loads the same sound file, and the node is not degraded any more"""
+    from keel.system.fwstate import BOOT_UNIT, unit_failed
+    if os.path.abspath(root) != LIVE_ROOT or not unit_failed(BOOT_UNIT):
+        return []
+    try:
+        run(["systemctl", "restart", "--no-block", BOOT_UNIT],
+            capture_output=True, text=True, check=False)
+    except OSError:
+        return []
+    return [f"{BOOT_UNIT} restarted: it failed at boot, and the ruleset is"
+            " sound now"]
 
 
 def settle(root: str, before: str | None, found: fwcheck.Checked,
