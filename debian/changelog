@@ -1,3 +1,22 @@
+keel (0.23.100) unstable; urgency=high
+
+  * keel#308: the apply writes keel's last good copy and its record
+    before the ruleset file and its load. Where /var/lib/keel/firewall
+    cannot be written (read-only, full), the step stops before any rule
+    changes: the node stays on the ruleset of its last complete apply,
+    which the copy and the record still name, so the repair never
+    restores an older ruleset in silence. Before, the new ruleset was
+    loaded, the old copy and record stayed, and after a later loss of
+    the ruleset file the repair opened a removed port again.
+  * keel#309: a ruleset that cannot be written (a full disk) fails the
+    apply, in any state; before, the apply said "not done" and exited
+    0. The other steps still run.
+  * keel#310: a good run of keel-firewall-watch restarts a
+    keel-firewall.service that failed at boot, so putting the spec back
+    is enough; before, it stayed failed until an apply.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Tue, 24 Nov 2026 00:00:00 +0000
+
 keel (0.23.99) unstable; urgency=high
 
   * Security (decision 0097, urgent lane): keel writes its firewall in

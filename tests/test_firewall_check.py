@@ -401,6 +401,29 @@ class TestCheck(ManifestCase):
         self.assertEqual(code, exits.DRIFT_FOUND)
         self.assertIn("the closed fallback table is loaded", lines[0])
 
+    def test_a_good_run_clears_a_boot_unit_that_failed(self):
+        """keel#310: the spec put back after a boot in the fallback; the
+        watch found all well, and keel-firewall.service stayed failed
+        until an apply. A good run of the watch restarts it (it loads
+        the same sound file), so the node is not degraded any more"""
+        from keel.system import fwwatch
+        digest = self.ruleset()
+        nft = Nft(listing=listing(digest))
+        with mock.patch("keel.system.fwwatch.LIVE_ROOT", self.root), \
+                mock.patch("keel.system.fwstate.unit_failed",
+                           return_value=True):
+            code, lines = fwwatch.watch(self.root, nft, lambda: 1000)
+        self.assertEqual(code, exits.OK)
+        self.assertIn(("systemctl", "restart", "--no-block",
+                       "keel-firewall.service"), nft.calls)
+        self.assertIn("keel-firewall.service restarted", " ".join(lines))
+        nft.calls.clear()
+        with mock.patch("keel.system.fwwatch.LIVE_ROOT", self.root), \
+                mock.patch("keel.system.fwstate.unit_failed",
+                           return_value=False):
+            fwwatch.watch(self.root, nft, lambda: 1030)
+        self.assertNotIn("systemctl", [c[0] for c in nft.calls])
+
     def test_a_good_check_writes_the_mark_the_shell_compares(self):
         from keel.system import fwwatch
         digest = self.ruleset()

@@ -351,7 +351,23 @@ NOT_LOADED = ("the node keeps the firewall it had; `firewall.state:"
 def load(ruleset: Ruleset, state: FirewallState, live: bool,
          wg: dict | None, required: bool = True) -> list[Action]:
     """Write and load the ruleset where it differs from what is there"""
+    # keel#308: the copy and the record first, then the ruleset file and
+    # its load. Where the state directory cannot be written (read-only,
+    # full), the step stops before any rule changes: the node stays on
+    # the ruleset of its last complete apply, which the copy and the
+    # record still name, so the repair never restores an older one. The
+    # copy before the record that names its hash: a copy that fails to be
+    # written leaves the record of the copy that is there.
     actions: list[Action] = []
+    if state.copy != ruleset.text:
+        actions.append(KeepCopy(ruleset.text, (
+            f"keep /{COPY}: the last good copy keel firewall repair"
+            " restores first")))
+    digest = ruleset_hash(ruleset.text)
+    if (state.recorded, state.recorded_digest) != (ruleset.state, digest):
+        actions.append(RecordState(ruleset.state, (
+            f"record /{RECORD}: {ruleset.state} and the hash of this"
+            " ruleset, which a broken file cannot lose"), digest))
     written = state.file.text != ruleset.text
     summary = (f"write /{PATH} ({ruleset.state}):"
                f" {opened(ruleset, wg, state.bridges)}")
@@ -382,17 +398,6 @@ def load(ruleset: Ruleset, state: FirewallState, live: bool,
     else:
         actions.append(Note(f"unchanged (/{PATH}, loaded as table inet"
                             " keel)"))
-    # the copy first, then the record that names its hash: a copy that
-    # fails to be written leaves the record of the copy that is there
-    if state.copy != ruleset.text:
-        actions.append(KeepCopy(ruleset.text, (
-            f"keep /{COPY}: the last good copy keel firewall repair"
-            " restores first")))
-    digest = ruleset_hash(ruleset.text)
-    if (state.recorded, state.recorded_digest) != (ruleset.state, digest):
-        actions.append(RecordState(ruleset.state, (
-            f"record /{RECORD}: {ruleset.state} and the hash of this"
-            " ruleset, which a broken file cannot lose"), digest))
     if live and state.boot_failed:
         actions.append(Attempt(("systemctl", "restart", BOOT_UNIT), (
             f"restart {BOOT_UNIT}, failed since the boot: it loads this"

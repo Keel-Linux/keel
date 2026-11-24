@@ -70,11 +70,14 @@ def execute(
                                  + f": not done: {problem};"
                                  f" {action.otherwise}")
                 elif getattr(action, "otherwise", None):
-                    # a failure the run survives, whose later actions
-                    # need it (a ruleset nft refused is not loaded)
+                    # the other steps run, and the later actions of this
+                    # one, which need it, are skipped (a ruleset nft
+                    # refused is not loaded); the exit says the failure
+                    # (keel#309: a full disk, `not done`, exit 0)
                     lines.append(prefix + action.describe()
                                  + f": not done: {problem};"
                                  f" {action.otherwise}")
+                    failed += 1
                     broken = True
                 else:
                     lines.append(prefix + action.describe()
