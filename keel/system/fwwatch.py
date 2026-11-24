@@ -56,8 +56,21 @@ def watch(root: str, run=None, clock=time.time) -> tuple[int, list[str]]:
         else:
             message = f"{found.message}; nft -f failed: {problem}"
     else:
-        message += f"; {table_state(run)}"
+        code, lines = repaired(root, run)
+        if code == exits.OK:
+            again = fwcheck.check(root, run)
+            if again.code == exits.OK:
+                return settle(root, file_stat(root), again, lines)
+        message = "; ".join([message, *lines, table_state(run)])
     return failing(root, clock, message)
+
+
+def repaired(root: str, run) -> tuple[int, list[str]]:
+    """keel firewall repair for a broken or missing file: the apply's
+    firewall step, else the closed fallback (keel.system.fwrepair)"""
+    from keel.system import fwrepair
+    live = os.path.abspath(root) == "/"
+    return fwrepair.repair(root, live, run)
 
 
 def table_state(run) -> str:

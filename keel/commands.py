@@ -440,6 +440,19 @@ def firewall_check(args) -> int:
     return found.code
 
 
+def firewall_repair(args) -> int:
+    """An empty, cut or missing ruleset file of a node in enforce, written
+    again by the apply's firewall step, else a closed fallback loaded and
+    a failure (decision 0097); silent when there is nothing to repair"""
+    from keel.system import fwrepair
+    root = getattr(args, "root", ROOT_DEFAULT)
+    code, lines = fwrepair.repair(root, os.path.abspath(root) == ROOT_DEFAULT,
+                                  boot=getattr(args, "boot", False))
+    for line in lines:
+        (print if code == exits.OK else error)(line)
+    return code
+
+
 def network_wireguard_key(args) -> int:
     """Print this node's WireGuard public key, making the key pair first
 

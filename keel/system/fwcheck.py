@@ -63,6 +63,11 @@ def check(root: str, run=None) -> Checked:
         return Checked(exits.DRIFT_FOUND,
                        f"{path} cannot be read: {e.strerror}")
     if text is None:
+        from keel.system import fwrepair
+        if fwrepair.wants_firewall(fwrepair.spec_doc(root)):
+            return Checked(exits.DRIFT_FOUND, (
+                f"{path}: no ruleset file, and the spec does not say off;"
+                " keel spec apply --system writes it"))
         return Checked(exits.OK,
                        f"{path}: no ruleset of keel's, nothing to compare")
     state = file_state(text)

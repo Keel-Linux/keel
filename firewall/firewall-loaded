@@ -9,6 +9,10 @@ set -u
 file=${KEEL_FIREWALL_FILE:-/etc/keel/firewall/keel-manifest.nft}
 nft=${KEEL_NFT:-/usr/sbin/nft}
 
+# no file: keel firewall repair, before the load, has found the spec off
+# or none (and passed), or has failed the unit itself
+[ -e "$file" ] || exit 0
+
 policy=$(sed -n 's/.*hook input priority filter; policy \(drop\|accept\);.*/\1/p' "$file")
 if [ -z "$policy" ] || [ "$(tail -n 1 "$file")" != "}" ]; then
     echo "keel-firewall: $file is empty or cut short; keel spec apply --system writes it again" >&2

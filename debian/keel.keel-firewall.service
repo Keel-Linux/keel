@@ -7,9 +7,10 @@
 # up, so the table survives a reboot, and a new node whose image wrote
 # the file in enforce (the image declares `firewall.state: enforce`) is
 # closed from its first packet; a file in report drops nothing. The file replaces keel's own table `inet keel` in
-# one transaction and touches no other rule. Without the file (a node
-# where no apply ran since the upgrade, or `firewall.state: off`),
-# systemd skips the unit.
+# one transaction and touches no other rule. Before the load, keel
+# firewall repair writes an empty, cut or missing file of a node in
+# enforce again (or loads a closed fallback and fails the unit); with
+# no spec, systemd skips the unit.
 #
 # A file nft refuses fails the unit: the node comes up without keel's
 # table, and is degraded, which is visible. A table lost later comes
@@ -23,17 +24,22 @@
 [Unit]
 Description=Load the firewall keel derived from the appliance manifests
 DefaultDependencies=no
-RequiresMountsFor=/etc/keel
+RequiresMountsFor=/etc/keel /var/lib/keel
 After=local-fs.target nftables.service
 Wants=network-pre.target
 Before=network-pre.target shutdown.target
 Conflicts=shutdown.target
-ConditionPathExists=/etc/keel/firewall/keel-manifest.nft
+ConditionPathExists=/etc/keel/instance.yaml
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/sbin/nft -f /etc/keel/firewall/keel-manifest.nft
+# an empty, cut or missing file of a node in enforce is written again by
+# the apply's firewall step, else a closed fallback is loaded and the
+# unit fails (keel firewall repair, decision 0097); nothing when the
+# file is sound or the spec says off
+ExecStartPre=/usr/bin/keel firewall repair --boot
+ExecStart=/bin/sh -c '[ ! -e /etc/keel/firewall/keel-manifest.nft ] || exec /usr/sbin/nft -f /etc/keel/firewall/keel-manifest.nft'
 # an empty or cut file loads nothing and nft succeeds: fail unless the
 # table is loaded with the file's policy (firewall/firewall-loaded)
 ExecStartPost=/usr/lib/keel/firewall-loaded

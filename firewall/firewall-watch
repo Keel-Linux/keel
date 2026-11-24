@@ -13,8 +13,16 @@ file=${KEEL_FIREWALL_FILE:-/etc/keel/firewall/keel-manifest.nft}
 mark=${KEEL_FIREWALL_MARK:-/run/keel/firewall-watch.ok}
 keel=${KEEL_BIN:-/usr/bin/keel}
 nft=${KEEL_NFT:-/usr/sbin/nft}
+spec=${KEEL_SPEC_FILE:-/etc/keel/instance.yaml}
 
-[ -e "$file" ] || exit 0
+if [ ! -e "$file" ]; then
+    # no file: nothing to watch where there is no spec, or where it says
+    # off; else keel says it, and writes the file again from its record
+    # or the loaded table (keel firewall repair)
+    [ -e "$spec" ] || exit 0
+    grep -Eq 'state:[[:space:]]*(off|false)\b' "$spec" && exit 0
+    exec "$keel" firewall check --restore
+fi
 if [ -r "$mark" ]; then
     listed=$("$nft" -s list table inet keel 2>/dev/null) && {
         now="$(printf '%s\n' "$listed" | sha256sum | cut -d' ' -f1)"

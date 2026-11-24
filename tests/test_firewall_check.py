@@ -350,6 +350,34 @@ class TestCheck(ManifestCase):
         self.assertEqual(self.watch(Nft(listing=listing(digest)), 1050),
                          (exits.OK, []))
 
+    def test_the_watch_repairs_a_broken_file(self):
+        """the fourth real test: the watch never wrote the file again"""
+        from keel.system import fwwatch
+        digest = self.ruleset(lambda _: "")
+        fixed = listing(digest)
+
+        def repaired(root, live=True, run=None):
+            self.ruleset()
+            return exits.OK, ["written again"]
+        with mock.patch("keel.system.fwrepair.repair",
+                        side_effect=repaired) as repair:
+            code, lines = fwwatch.watch(self.root, Nft(listing=fixed),
+                                        lambda: 1000)
+        repair.assert_called_once()
+        self.assertEqual(code, exits.OK)
+        self.assertIn("written again", lines)
+
+    def test_a_repair_that_fails_keeps_the_watch_failed(self):
+        from keel.system import fwwatch
+        self.ruleset(lambda _: "")
+        with mock.patch("keel.system.fwrepair.repair",
+                        return_value=(exits.APPLY_FAILED,
+                                      ["the closed fallback table is"
+                                       " loaded"])):
+            code, lines = fwwatch.watch(self.root, Nft(), lambda: 1000)
+        self.assertEqual(code, exits.DRIFT_FOUND)
+        self.assertIn("the closed fallback table is loaded", lines[0])
+
     def test_a_good_check_writes_the_mark_the_shell_compares(self):
         from keel.system import fwwatch
         digest = self.ruleset()
@@ -448,7 +476,7 @@ class TestWatchShell(TestCheckReal):
     writes the mark) it starts no Python; a changed table or file, or
     no mark, hands over to keel (a recorder here)"""
 
-    def scenario(self, between: str) -> str:
+    def scenario(self, between: str, spec: str = "") -> str:
         catalog = Catalog(self.root)
         resolved, _ = resolve(catalog, catalog.read(APPLIANCE, "core"))
         found = render_ruleset(resolved, CORE_OFF, None)
@@ -468,6 +496,7 @@ class TestWatchShell(TestCheckReal):
             f" KEEL_FIREWALL_FILE={target}"
             f" KEEL_FIREWALL_MARK={self.root}/run/keel/firewall-watch.ok"
             f" KEEL_BIN={recorder} KEEL_NFT={self.nft}"
+            f" KEEL_SPEC_FILE={spec or join(self.root, 'instance.yaml')}"
             f" PYTHONPATH={REPO};"
             f" {self.nft} -f {target} &&"
             f" {sys.executable} -m keel firewall check --restore"
@@ -495,9 +524,21 @@ class TestWatchShell(TestCheckReal):
                                        f" {target}.n {target} &&"),
                          "firewall check --restore\n")
 
-    def test_no_file_runs_nothing(self):
+    def test_no_file_hands_over_to_keel_unless_off(self):
+        """the fourth real test: file and record lost, the watch was
+        silent; a spec that says off, or no spec, runs nothing"""
         target = join(self.root, PATH)
-        self.assertEqual(self.scenario(f"rm {target} &&"), "")
+        spec = join(self.root, "instance.yaml")
+        with open(spec, "w") as fob:
+            fob.write("version: 1\nappliance: {name: core}\n")
+        self.assertEqual(self.scenario(f"rm {target} &&", spec),
+                         "firewall check --restore\n")
+        with open(spec, "w") as fob:
+            fob.write("version: 1\nfirewall: {state: off}\n")
+        os.remove(join(self.root, "keel.log"))
+        self.assertEqual(self.scenario(f"rm {target} &&", spec), "")
+        self.assertEqual(self.scenario(f"rm {target} &&",
+                                       join(self.root, "none.yaml")), "")
 
 
 class TestLoadedAtBoot(TestCheckReal):
@@ -521,6 +562,16 @@ class TestLoadedAtBoot(TestCheckReal):
         catalog = Catalog(self.root)
         resolved, _ = resolve(catalog, catalog.read(APPLIANCE, "core"))
         return render_ruleset(resolved, CORE_OFF, None, state=state).text
+
+    def test_no_file_passes_the_repair_decided(self):
+        """keel firewall repair runs before: with no file it has said off
+        or failed the unit itself"""
+        verify = join(REPO, "firewall", "firewall-loaded")
+        done = subprocess.run(
+            ["sh", verify], env={**os.environ, "KEEL_FIREWALL_FILE":
+                                 join(self.root, "absent.nft")},
+            capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
 
     def test_a_loaded_file_passes_in_each_state(self):
         for state in ("enforce", "report"):
@@ -636,7 +687,7 @@ class TestTableLoss(unittest.TestCase):
             self.assertIn(line, timer)
         service = lines(WATCH + ".service")
         for line in ("Type=oneshot",
-                     f"ConditionPathExists=/{PATH}",
+                     "ConditionPathExists=/etc/keel/instance.yaml",
                      "ExecStart=/usr/lib/keel/firewall-watch",
                      "LogLevelMax=notice", "SyslogLevel=warning"):
             self.assertIn(line, service)

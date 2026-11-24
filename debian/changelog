@@ -77,6 +77,14 @@ keel (0.23.99) unstable; urgency=high
     the state the node was in, from /var/lib/keel/firewall/state, which
     a broken file cannot lose; a busy inviter answers 409 and keeps the
     invite, so the same join line works again.
+  * After the fourth real test: keel firewall repair (the boot unit
+    before its load, and the watch) writes an empty, cut or missing file
+    of a node in enforce again by the apply's firewall step, else loads
+    a closed fallback and fails, so the node is never open in silence;
+    keel firewall check fails on a missing file unless the spec says
+    off; an apply keeps enforce when a loaded table has policy drop; the
+    record is trusted only as root's own regular file, written by a
+    rename, and apt purge removes it.
   * The package depends on nftables and iproute2. An upgrade changes no
     rule and starts or restarts no unit of the firewall (decision 0073):
     the change comes at the next apply, which also starts the timer.

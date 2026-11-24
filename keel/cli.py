@@ -413,6 +413,20 @@ def add_firewall_parser(subparsers) -> None:
     )
     add_root_option(check_parser, "read keel's ruleset file of")
     check_parser.set_defaults(handler="keel.commands.firewall_check")
+    repair_parser = firewall_actions.add_parser(
+        "repair",
+        help="write an empty, cut or missing ruleset file of a node in"
+        " enforce again by the apply's firewall step, else load a closed"
+        " fallback and fail; what keel-firewall.service runs at boot",
+    )
+    repair_parser.add_argument(
+        "--boot",
+        action="store_true",
+        help="a node that never wrote a ruleset does not fail: what the"
+        " boot unit passes, before a new node's first apply",
+    )
+    add_root_option(repair_parser, "repair keel's ruleset file of")
+    repair_parser.set_defaults(handler="keel.commands.firewall_repair")
 
 
 def add_manifest_parser(subparsers) -> None:

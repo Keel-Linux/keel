@@ -1336,8 +1336,24 @@ is on the disk (`fsync`, then its directory) before it is renamed.
 `keel-firewall.service`, shipped enabled, loads the file at every boot
 before the network comes up, and only while the file exists. A file nft
 refuses at boot fails the unit, and the node is degraded and open: the
-failure is visible. So does an empty or cut file, which nft loads as
-nothing: `/usr/lib/keel/firewall-loaded` (the unit's `ExecStartPost`)
+failure is visible. Before its load, `keel firewall repair --boot`
+writes an empty, cut or missing file of a node in enforce again, by the
+apply's own firewall step run unattended (the state from keel's record
+or the loaded table); where that step cannot write it (the spec cannot
+be read, sshd's ports are unknown), it loads a closed fallback table
+(drop; loopback, established, ICMPv6, the DHCP client, sshd's ports or
+22, the WireGuard port and the overlay's interface where there is a
+mesh) and fails the unit, so the node stays degraded until an apply. A
+node in enforce is never left open in silence. The watch does the same
+on a broken or missing file, and `keel firewall check` fails on a
+missing file where the spec does not say off. An apply that finds no
+file and no record but a loaded table with policy drop keeps enforce:
+the table is evidence, and only the spec moves a node out of enforce.
+keel's record, `/var/lib/keel/firewall/state`, is trusted only as a
+regular file root owns and no group or other may write (no symlink is
+followed), and is written by a rename; only root can write it, the
+power the spec has. `apt purge` removes it. So does an empty or cut
+file, which nft loads as nothing: `/usr/lib/keel/firewall-loaded` (the unit's `ExecStartPost`)
 fails unless `inet keel` is loaded with the policy the file says. On a
 node in enforce, the plan names each socket that listens and that no
 unit of the manifests declares: enforce closes it, and the plan says

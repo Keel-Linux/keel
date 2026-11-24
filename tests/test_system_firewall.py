@@ -707,9 +707,14 @@ class TestBootUnit(FirewallCase):
             __file__))), "debian", "keel.keel-firewall.service")
         with open(unit) as fob:
             lines = fob.read().splitlines()
-        self.assertIn(f"ConditionPathExists=/{PATH}", lines)
-        self.assertIn(f"ExecStart=/usr/sbin/nft -f /{PATH}", lines)
+        # the fourth real test: the boot repairs an empty, cut or
+        # missing file of a node in enforce before its load
+        self.assertIn("ConditionPathExists=/etc/keel/instance.yaml", lines)
+        self.assertIn("ExecStartPre=/usr/bin/keel firewall repair --boot", lines)
+        self.assertIn(f"ExecStart=/bin/sh -c '[ ! -e /{PATH} ] || exec"
+                      f" /usr/sbin/nft -f /{PATH}'", lines)
         self.assertIn("After=local-fs.target nftables.service", lines)
+        self.assertIn("RequiresMountsFor=/etc/keel /var/lib/keel", lines)
         self.assertIn("Before=network-pre.target shutdown.target", lines)
         self.assertIn("ExecStartPost=/usr/lib/keel/firewall-loaded", lines)
 
