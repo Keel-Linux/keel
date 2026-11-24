@@ -112,14 +112,21 @@ class TestRepair(RepairCase):
         os.remove(join(self.root, fwrepair.SPEC))
         self.assertEqual(self.repair()[0], (exits.OK, []))
 
-    def test_no_evidence_and_no_file_is_said_and_writes_nothing(self):
-        """never applied, or file, record and table all lost: nothing
-        says it was in enforce; the failure is loud, nothing is opened"""
+    def test_no_evidence_and_no_file_is_not_applied_not_a_failure(self):
+        """a node upgraded from 0.23.97, or a new node before its first
+        apply: no file, no record, no table. 0073: an upgrade changes
+        nothing by itself; 0097: such a node is NOT APPLIED, a state.
+        Nothing is written, loaded or failed"""
         (code, lines), nft = self.repair()
-        self.assertEqual(code, exits.DRIFT_FOUND)
-        self.assertIn("the spec does not say off", lines[0])
+        self.assertEqual((code, lines), (exits.OK, []))
         self.assertIsNone(self.file())
         self.assertEqual(nft.loaded, [])
+
+    def test_a_missing_file_with_a_record_is_written_again(self):
+        fwrecord.write(self.root, "report")
+        (code, lines), _ = self.repair()
+        self.assertEqual(code, exits.OK, lines)
+        self.assertEqual(file_state(self.file()), "report")
 
     def test_at_boot_a_node_never_applied_does_not_fail_its_unit(self):
         """a new node boots before its first apply: no file, no record,
@@ -154,11 +161,20 @@ class TestRepair(RepairCase):
 class TestCheckMissing(RepairCase):
     """the fourth real test: file and record lost, check exit 0"""
 
-    def test_a_missing_file_with_no_off_is_drift(self):
+    def test_a_missing_file_with_evidence_is_drift(self):
+        """a trusted record says the node had a firewall"""
+        fwrecord.write(self.root, "enforce")
         found = fwcheck.check(self.root, Loads())
         self.assertEqual(found.code, exits.DRIFT_FOUND)
-        self.assertIn("no ruleset file, and the spec does not say off",
+        self.assertIn("no ruleset file, and keel's record says enforce",
                       found.message)
+
+    def test_a_missing_file_with_no_evidence_is_not_applied(self):
+        """the same exit as before this change (0), and said plainly"""
+        found = fwcheck.check(self.root, Loads())
+        self.assertEqual(found.code, exits.OK)
+        self.assertIn("NOT APPLIED", found.message)
+        self.assertIn("keel spec apply --system writes it", found.message)
 
     def test_a_missing_file_with_off_or_no_spec_is_fine(self):
         self.spec(SPEC + "firewall: {state: off}\n")
@@ -176,9 +192,26 @@ class TestCommand(RepairCase):
         self.assertIn("written again", out)
         self.assertEqual(file_state(self.file()), "enforce")
 
-    def test_the_command_says_a_missing_file_and_fails(self):
-        code, _, err = self.cli("firewall", "repair")
-        self.assertEqual(code, exits.DRIFT_FOUND)
-        self.assertIn("the spec does not say off", err)
-        code, _, _ = self.cli("firewall", "repair", "--boot")
-        self.assertEqual(code, exits.OK)
+    def test_the_command_is_silent_with_no_evidence(self):
+        for extra in ((), ("--boot",)):
+            code, out, err = self.cli("firewall", "repair", *extra)
+            self.assertEqual((code, out, err), (exits.OK, "", ""))
+
+
+class TestUpgradeFrom0_23_97(RepairCase):
+    """upgrade from 0.23.97 with the timer enabled: 10 watch runs, the
+    unit never failed, the system not degraded (no file, no record, no
+    loaded table: the watch is silent and exits 0)"""
+
+    def test_ten_watch_runs_never_fail_and_say_nothing(self):
+        from keel.system import fwwatch
+
+        def no_table(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 1, "", "No such file")
+        for run in range(10):
+            with self.subTest(run=run):
+                self.assertEqual(fwwatch.watch(self.root, no_table,
+                                               lambda: 1000 + 30 * run),
+                                 (exits.OK, []))
+        self.assertIsNone(self.file())
+        self.assertFalse(os.path.exists(join(self.root, fwwatch.STATE)))

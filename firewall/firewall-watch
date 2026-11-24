@@ -14,6 +14,7 @@ mark=${KEEL_FIREWALL_MARK:-/run/keel/firewall-watch.ok}
 keel=${KEEL_BIN:-/usr/bin/keel}
 nft=${KEEL_NFT:-/usr/sbin/nft}
 spec=${KEEL_SPEC_FILE:-/etc/keel/instance.yaml}
+record=${KEEL_FIREWALL_RECORD:-/var/lib/keel/firewall/state}
 
 if [ ! -e "$file" ]; then
     # no file: nothing to watch where there is no spec, or where it says
@@ -21,6 +22,12 @@ if [ ! -e "$file" ]; then
     # or the loaded table (keel firewall repair)
     [ -e "$spec" ] || exit 0
     grep -Eq 'state:[[:space:]]*(off|false)\b' "$spec" && exit 0
+    # no evidence that this node had a firewall (no record of keel's, no
+    # table loaded): NOT APPLIED, a state, not a failure (0073, 0097): a
+    # node upgraded from 0.23.97, or a new node before its first apply
+    if [ ! -e "$record" ] && ! "$nft" list table inet keel >/dev/null 2>&1; then
+        exit 0
+    fi
     exec "$keel" firewall check --restore
 fi
 if [ -r "$mark" ]; then

@@ -1346,7 +1346,13 @@ be read, sshd's ports are unknown), it loads a closed fallback table
 mesh) and fails the unit, so the node stays degraded until an apply. A
 node in enforce is never left open in silence. The watch does the same
 on a broken or missing file, and `keel firewall check` fails on a
-missing file where the spec does not say off. An apply that finds no
+missing file, where there is evidence the node had a firewall (keel's
+trusted record, or a loaded table of keel's). With no evidence at all (a
+node upgraded from 0.23.97, or a new node before its first apply) the
+node is NOT APPLIED, a state: the boot unit and the watch exit 0 and say
+nothing, and `keel firewall check` says NOT APPLIED and exits 0. A file,
+record and table all lost by a reboot leave no evidence, and that node
+is then NOT APPLIED until the next apply (a known limit). An apply that finds no
 file and no record but a loaded table with policy drop keeps enforce:
 the table is evidence, and only the spec moves a node out of enforce.
 keel's record, `/var/lib/keel/firewall/state`, is trusted only as a

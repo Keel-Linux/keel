@@ -497,6 +497,7 @@ class TestWatchShell(TestCheckReal):
             f" KEEL_FIREWALL_MARK={self.root}/run/keel/firewall-watch.ok"
             f" KEEL_BIN={recorder} KEEL_NFT={self.nft}"
             f" KEEL_SPEC_FILE={spec or join(self.root, 'instance.yaml')}"
+            f" KEEL_FIREWALL_RECORD={self.root}/var/lib/keel/firewall/state"
             f" PYTHONPATH={REPO};"
             f" {self.nft} -f {target} &&"
             f" {sys.executable} -m keel firewall check --restore"
@@ -524,9 +525,25 @@ class TestWatchShell(TestCheckReal):
                                        f" {target}.n {target} &&"),
                          "firewall check --restore\n")
 
-    def test_no_file_hands_over_to_keel_unless_off(self):
-        """the fourth real test: file and record lost, the watch was
-        silent; a spec that says off, or no spec, runs nothing"""
+    def test_no_evidence_runs_nothing_ten_times(self):
+        """upgrade from 0.23.97, the timer enabled: no file, no record, no
+        table; ten runs of the shell watch, each exit 0, keel never run,
+        so the unit never fails and the system is not degraded"""
+        target = join(self.root, PATH)
+        spec = join(self.root, "instance.yaml")
+        with open(spec, "w") as fob:
+            fob.write("version: 1\nappliance: {name: core}\n")
+        watch = join(REPO, "firewall", "firewall-watch")
+        loop = ("for i in 1 2 3 4 5 6 7 8 9 10; do sh " + watch
+                + " || exit 9; done;")
+        self.assertEqual(self.scenario(
+            f"rm {target} && {self.nft} delete table inet keel &&"
+            f" {loop}", spec), "")
+
+    def test_no_file_with_a_table_hands_over_to_keel_unless_off(self):
+        """the fourth real test: file and record lost, the table still
+        loaded: keel says it; a spec that says off, or no spec, runs
+        nothing"""
         target = join(self.root, PATH)
         spec = join(self.root, "instance.yaml")
         with open(spec, "w") as fob:

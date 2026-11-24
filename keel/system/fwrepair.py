@@ -17,8 +17,10 @@ failed and the node degraded until an apply. The fallback lets in the
 loopback, established traffic, ICMPv6, the DHCP client, sshd's ports
 (22 when they cannot be read), and, where the spec declares a mesh, the
 WireGuard port and everything on the overlay's interface. It never
-opens. A missing file with nothing that says the node was in enforce is
-said, and nothing is written.
+opens. A missing file with no evidence of a firewall (no trusted record, no
+loaded table: a node upgraded from 0.23.97, or a new node before its
+first apply) is NOT APPLIED, a state: nothing is written, loaded or
+failed, and nothing is said.
 """
 
 import os
@@ -43,9 +45,6 @@ from keel.system import fwrecord
 
 SPEC = "etc/keel/instance.yaml"
 FALLBACK = "run/keel/firewall-fallback.nft"
-MISSING = ("no ruleset file, and the spec does not say off: nothing says"
-           " which state this node was in; keel spec apply --system"
-           " writes it")
 
 
 def spec_doc(root: str) -> dict | None:
@@ -82,10 +81,9 @@ def sound(text: str | None) -> bool:
 def repair(root: str, live: bool = True, run=None,
            boot: bool = False) -> tuple[int, list[str]]:
     """The exit code and the lines to say; (OK, []) when there is
-    nothing to repair. `boot`: a node that never wrote a ruleset (a new
-    node before its first apply) does not fail keel-firewall.service,
-    which would stay failed after that apply; the watch and keel
-    firewall check say a missing file"""
+    nothing to repair. A node with no evidence of a firewall (no file,
+    no trusted record, no loaded table) is NOT APPLIED, not a failure.
+    `boot` is kept for the unit's command line"""
     run = run or subprocess.run
     doc = spec_doc(root)
     text = read_file(root)
@@ -93,7 +91,11 @@ def repair(root: str, live: bool = True, run=None,
         return exits.OK, []
     evidence = prior(root, live, run)
     if text is None and evidence is None:
-        return (exits.OK, []) if boot else (exits.DRIFT_FOUND, [MISSING])
+        # no file, no trusted record, no loaded table: a node upgraded
+        # from 0.23.97, or a new node before its first apply. NOT
+        # APPLIED is a state (0097), and an upgrade changes nothing by
+        # itself (0073): no write, no load, no failure, no line
+        return exits.OK, []
     lines = step(root, doc, live)
     if sound(read_file(root)):
         return exits.OK, lines + [f"/{PATH} written again by the"
@@ -103,6 +105,11 @@ def repair(root: str, live: bool = True, run=None,
                                                          run)
     return exits.DRIFT_FOUND, lines + [f"/{PATH} is not written again:"
                                        " keel spec apply --system says why"]
+
+
+def evidence_of(root: str, run=None) -> str | None:
+    """prior() for keel firewall check: the live system when root is /"""
+    return prior(root, os.path.abspath(root) == "/", run or subprocess.run)
 
 
 def prior(root: str, live: bool, run) -> str | None:

@@ -63,13 +63,7 @@ def check(root: str, run=None) -> Checked:
         return Checked(exits.DRIFT_FOUND,
                        f"{path} cannot be read: {e.strerror}")
     if text is None:
-        from keel.system import fwrepair
-        if fwrepair.wants_firewall(fwrepair.spec_doc(root)):
-            return Checked(exits.DRIFT_FOUND, (
-                f"{path}: no ruleset file, and the spec does not say off;"
-                " keel spec apply --system writes it"))
-        return Checked(exits.OK,
-                       f"{path}: no ruleset of keel's, nothing to compare")
+        return missing(root, path, run)
     state = file_state(text)
     if state is None and not keel_owns(text):
         return Checked(exits.DRIFT_FOUND, (
@@ -80,6 +74,24 @@ def check(root: str, run=None) -> Checked:
         return Checked(exits.DRIFT_FOUND, (
             f"{path} is empty or cut short (it loads no table): {APPLY}"))
     return compare(path, text or "", state, run)
+
+
+def missing(root: str, path: str, run) -> Checked:
+    """No ruleset file: a failure only where there is evidence the node
+    had a firewall (a trusted record, or a loaded table of keel's);
+    else NOT APPLIED, a state, with the exit it always had (0)"""
+    from keel.system import fwrepair
+    if not fwrepair.wants_firewall(fwrepair.spec_doc(root)):
+        return Checked(exits.OK,
+                       f"{path}: no ruleset of keel's, nothing to compare")
+    found = fwrepair.evidence_of(root, run)
+    if found is None:
+        return Checked(exits.OK, (
+            f"NOT APPLIED: {path} is not there, and nothing says this node"
+            " had a firewall of keel's; keel spec apply --system writes it"))
+    return Checked(exits.DRIFT_FOUND, (
+        f"{path}: no ruleset file, and keel's record says {found} (or the"
+        " loaded table does): keel spec apply --system writes it again"))
 
 
 def compare(path: str, text: str, state: str, run) -> Checked:
