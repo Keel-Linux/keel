@@ -26,6 +26,7 @@ from keel.system.actions import (
     FollowVip,
     GenerateKey,
     InstallRuleset,
+    RecordState,
     LockReplica,
     MakeDir,
     PromoteReplica,
@@ -41,7 +42,7 @@ from keel.system.actions import (
 )
 from keel.network import marker, switch, wgkeys
 from keel.system import crowdsec, dbpgpromote, dbpgseed, dbreadonly, \
-    dbseed, fwinstall
+    dbseed, fwinstall, fwrecord
 
 NOT_RUNNABLE = 127
 # How long this run waits for a job of systemd. The job stays queued when
@@ -151,6 +152,8 @@ class Effects:
                 return crowdsec.set_mode(self.tree.root, action)
             if isinstance(action, InstallRuleset):
                 return fwinstall.install(self.tree.root, action)
+            if isinstance(action, RecordState):
+                return fwrecord.write(self.tree.root, action.state)
             if isinstance(action, RunSql):
                 return self.run(action.argv, action.statements)
             if isinstance(action, WriteFile):

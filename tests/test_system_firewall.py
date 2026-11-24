@@ -23,6 +23,7 @@ from keel.manifest.facts import gather
 from keel.manifest.firewall import HEADER, PATH, render
 from keel.system.actions import (
     Attempt,
+    RecordState,
     InstallRuleset,
     Note,
     Refuse,
@@ -491,14 +492,47 @@ class TestCutFile(FirewallCase):
 
     def test_the_record_follows_what_is_written(self):
         found = self.actions(state=self.state(recorded=None))
-        records = [a for a in found if isinstance(a, WriteFile)
-                   and a.path == RECORD]
-        self.assertEqual([a.content for a in records], ["enforce\n"])
+        records = [a for a in found if isinstance(a, RecordState)]
+        self.assertEqual([a.state for a in records], ["enforce"])
         ruleset = self.rendered()
         same = self.actions(state=self.state(
             file=File("/r/x", ruleset.text), loaded=ruleset.digest,
             recorded="enforce"))
-        self.assertFalse([a for a in same if isinstance(a, WriteFile)])
+        self.assertFalse([a for a in same if isinstance(a, RecordState)])
+
+    def test_a_loaded_drop_table_is_evidence_of_enforce(self):
+        """the fourth real test: file and record both lost, the table
+        still loaded with policy drop; the apply wrote report and opened
+        the node. The table is evidence: enforce, and the record again"""
+        found = self.actions(doc(enabled=None), self.state(
+            file=ABSENT, recorded=None, loaded_policy="drop",
+            listeners=(SSHD, STRANGER), listeners_source="ss"))
+        self.assertEqual(found[0].describe(), (
+            "enforce, as the loaded table inet keel says (policy drop): its"
+            " file and keel's record are gone; `firewall.state: report`"
+            " goes back"))
+        ruleset = next(a for a in found if isinstance(a, InstallRuleset))
+        self.assertIn("policy drop", ruleset.content)
+        self.assertIn("enforce", [a.state for a in found
+                                  if isinstance(a, RecordState)])
+
+    def test_the_record_s_source_is_said(self):
+        found = self.actions(doc(enabled=None), self.state(
+            file=File("/r/x", ""), recorded="enforce",
+            listeners=(SSHD,), listeners_source="ss"))
+        self.assertEqual(found[0].describe(), (
+            "enforce, as keel's record says (/var/lib/keel/firewall/state):"
+            " the file is empty, cut or missing; `firewall.state: report`"
+            " goes back"))
+
+    def test_an_untrusted_record_is_said(self):
+        found = self.actions(doc(enabled=None), self.state(
+            recorded=None, recorded_warning="/var/lib/keel/firewall/state is"
+            " not trusted (root does not own it): it counts as no record;"
+            " the next apply writes it again",
+            listeners=(SSHD,), listeners_source="ss"))
+        self.assertIn("root does not own it", " ".join(
+            a.describe() for a in found))
 
     def test_the_spec_s_report_wins_over_the_record(self):
         found = self.actions(doc(enabled=None, state="report"), self.state(
@@ -854,10 +888,27 @@ class TestObserve(FirewallCase):
     def test_the_record_of_the_state(self):
         self.assertIsNone(observe_firewall(Tree(self.root), False).recorded)
         self.write(RECORD, "enforce\n")
-        self.assertEqual(observe_firewall(Tree(self.root), False).recorded,
-                         "enforce")
-        self.write(RECORD, "garbage\n")
-        self.assertIsNone(observe_firewall(Tree(self.root), False).recorded)
+        os.chmod(join(self.root, RECORD), 0o644)
+        os.chmod(os.path.dirname(join(self.root, RECORD)), 0o755)
+        with mock.patch("keel.system.fwrecord.ROOT_UID", os.getuid()):
+            self.assertEqual(observe_firewall(Tree(self.root),
+                                              False).recorded, "enforce")
+            self.write(RECORD, "garbage\n")
+            found = observe_firewall(Tree(self.root), False)
+        self.assertIsNone(found.recorded)
+        self.assertIn("not a state keel writes", found.recorded_warning)
+
+    def test_the_loaded_policy_on_the_live_system(self):
+        listing = ('table inet keel {\n\tcomment "keel-manifest 0123"\n'
+                   "\tchain input {\n\t\ttype filter hook input priority"
+                   " filter; policy drop;\n")
+
+        def run(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 0, listing, "")
+        with mock.patch("keel.system.fwstate.subprocess.run", run):
+            found = observe_firewall(Tree(self.root), True)
+        self.assertEqual((found.loaded, found.loaded_policy),
+                         ("0123", "drop"))
 
     def test_a_pending_network_change(self):
         self.write("var/lib/keel/network/pending.json", "{}\n")

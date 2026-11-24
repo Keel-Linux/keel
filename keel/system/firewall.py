@@ -64,6 +64,7 @@ from keel.system.actions import (
     Attempt,
     InstallRuleset,
     Note,
+    RecordState,
     Refuse,
     RemoveFile,
     Run,
@@ -86,6 +87,12 @@ UNATTENDED_DECLARED = ("report until an apply a person runs: the spec says"
                        " (decision 0097)")
 KEPT = ("enforce, as keel's file already says; `firewall.state: report`"
         " goes back")
+KEPT_RECORD = ("enforce, as keel's record says (/var/lib/keel/firewall/"
+               "state): the file is empty, cut or missing;"
+               " `firewall.state: report` goes back")
+KEPT_TABLE = ("enforce, as the loaded table inet keel says (policy drop):"
+              " its file and keel's record are gone; `firewall.state:"
+              " report` goes back")
 NO_APPLIANCE = ("no appliance manifest is resolved: keel writes no firewall,"
                 " and no inbound rule of keel's protects this node")
 PROMOTED = ("enforce: each socket on an address that is not a loopback"
@@ -176,10 +183,10 @@ def opened_ports(ruleset: Ruleset, doc: dict) -> frozenset:
 def choose(doc: dict, resolved: Resolved, state: FirewallState,
            declared: str | None, attended: bool) -> tuple[str, list[str]]:
     """The state to write, and what the plan says about it. The state the
-    node is in is its file's, or, when an empty or cut file has lost its
-    policy, keel's record of what it last wrote: a repair keeps enforce,
-    and rule B is only for the first move"""
-    current = file_state(state.file.text) or state.recorded
+    node is in comes from evidence (prior_state): a repair keeps enforce,
+    rule B is only for the first move, and only the spec moves a node out
+    of enforce"""
+    current, kept = prior_state(state)
     if declared == ENFORCE:
         if attended or current == ENFORCE:
             return ENFORCE, []
@@ -187,7 +194,7 @@ def choose(doc: dict, resolved: Resolved, state: FirewallState,
     if declared == REPORT:
         return REPORT, []
     if current == ENFORCE:
-        return ENFORCE, [KEPT]
+        return ENFORCE, [kept]
     if not attended:
         return REPORT, [UNATTENDED]
     if state.listeners is None:
@@ -216,6 +223,21 @@ def mesh_context(doc: dict, resolved: Resolved
     except ValueError:
         pass
     return mesh, frozenset(addresses)
+
+
+def prior_state(state: FirewallState) -> tuple[str | None, str]:
+    """The state the node is in, and how the plan says it kept enforce:
+    its file's policy; else keel's record (the file empty, cut or
+    missing); else the loaded table's policy drop (file and record both
+    lost: the fourth real test, where the apply then opened the node)"""
+    found = file_state(state.file.text)
+    if found:
+        return found, KEPT
+    if state.recorded:
+        return state.recorded, KEPT_RECORD
+    if state.loaded_policy == "drop":
+        return ENFORCE, KEPT_TABLE
+    return None, KEPT
 
 
 def sorting(doc: dict, resolved: Resolved, state: FirewallState):
@@ -289,6 +311,7 @@ def on(doc: dict, resolved: Resolved, state: FirewallState, live: bool,
     said += told(doc, resolved, state, ruleset)
     said += ssh_said(resolved, doc, state)
     said += [state.ssh_note] if state.ssh_note else []
+    said += [state.recorded_warning] if state.recorded_warning else []
     said += [state.fence_note] if state.fence_note else []
     actions: list[Action] = [Note(note) for note in
                              said + list(ruleset.notes)]
@@ -335,9 +358,9 @@ def load(ruleset: Ruleset, state: FirewallState, live: bool,
         actions.append(Note(f"unchanged (/{PATH}, loaded as table inet"
                             " keel)"))
     if state.recorded != ruleset.state:
-        actions.append(WriteFile(RECORD, f"{ruleset.state}\n", 0o644, None,
-                                 f"record /{RECORD}: {ruleset.state}, the"
-                                 " state a broken file cannot lose"))
+        actions.append(RecordState(ruleset.state, (
+            f"record /{RECORD}: {ruleset.state}, the state a broken file"
+            " cannot lose")))
     if live and state.watch is False:
         actions.append(watch_start(state))
     return actions

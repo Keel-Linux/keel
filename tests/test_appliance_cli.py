@@ -45,6 +45,11 @@ class ApplianceCliCase(ManifestCase):
         super().setUp()
         # Core alone, as a keel-core machine has it
         os.remove(self.path("appliances", "web"))
+        # keel trusts a firewall record root owns; the test's files are
+        # the user's (tests/test_firewall_record.py)
+        owner = mock.patch("keel.system.fwrecord.ROOT_UID", os.getuid())
+        owner.start()
+        self.addCleanup(owner.stop)
         # sshd's configuration, which every machine has: the firewall
         # (decision 0097, every mode) reads the ports it must keep open
         os.makedirs(join(self.root, "etc/ssh"), exist_ok=True)

@@ -26,8 +26,9 @@ import subprocess
 from dataclasses import dataclass
 
 from keel.inspect.tree import File, Tree
-from keel.manifest.firewall import PATH, TABLE, loaded_digest
+from keel.manifest.firewall import PATH, POLICY_RE, TABLE, loaded_digest
 from keel.network import marker
+from keel.system import fwrecord
 from keel.system.listeners import Listener, observe_listeners, sshd_ports
 
 SSHD_CONFIG = "etc/ssh/sshd_config"
@@ -52,8 +53,7 @@ STREAM_RE = re.compile(r"(\S+) \(Stream\)")
 # the state keel last wrote, enforce or report, beside the ruleset file
 # and apart from it: an empty or cut file loses its policy line, and the
 # state the node was in must survive it (the third real test of 0097)
-RECORD = "var/lib/keel/firewall/state"
-RECORDED = ("enforce", "report")
+RECORD = fwrecord.RECORD
 FENCE_UNIT = ("etc/systemd/system/multi-user.target.wants/"
               "turnkey-init-fence.service")
 FENCE_DEFAULTS = "etc/default/turnkey-init-fence"
@@ -88,8 +88,13 @@ class FirewallState:
     # said when a running sshd listens on a port its configuration does
     # not name (both are opened)
     ssh_note: str = ""
-    # the state keel last wrote (RECORD); None when there is none
+    # the state keel last wrote (RECORD); None when there is none, or
+    # when the record is not trusted, and recorded_warning then says why
     recorded: str | None = None
+    recorded_warning: str = ""
+    # the policy of the table the kernel holds, drop or accept; None
+    # when there is none, or when nothing was asked (--root)
+    loaded_policy: str | None = None
 
 
 def ports_in(lines: list[str]) -> set[int]:
@@ -164,9 +169,13 @@ def observe_firewall(tree: Tree, live: bool) -> FirewallState:
     running = sshd_ports(listeners, sshd_main_pid() if live else None)
     ports, ssh_note = with_running(ports, source, running)
     fence, fence_note = fence_ports(tree)
+    recorded, warning = fwrecord.read(tree)
+    listing = table_listing() if live else None
+    found = POLICY_RE.search(listing or "")
+    policy = found.group(1) if found else None
     return FirewallState(
         file=tree.read(PATH),
-        loaded=table_digest() if live else None,
+        loaded=loaded_digest(listing) if listing else None,
         ssh_ports=ports,
         ssh_source=source,
         pending=tree.exists(marker.PENDING),
@@ -178,14 +187,15 @@ def observe_firewall(tree: Tree, live: bool) -> FirewallState:
         watch=watch_active() if live else None,
         watch_enabled=watch_enabled() if live else None,
         ssh_note=ssh_note,
-        recorded=recorded_state(tree),
+        recorded=recorded,
+        recorded_warning=warning,
+        loaded_policy=policy,
     )
 
 
 def recorded_state(tree: Tree) -> str | None:
-    found = tree.read(RECORD)
-    value = (found.text or "").strip() if found.readable else ""
-    return value if value in RECORDED else None
+    """The trusted record, or None (keel.system.fwrecord)"""
+    return fwrecord.read(tree)[0]
 
 
 SSHD_MAIN = ("systemctl", "show", "--value", "-p", "MainPID", "ssh.service")
@@ -311,10 +321,16 @@ def default_route_devices(tree: Tree) -> set[str]:
     return devices
 
 
-def table_digest() -> str | None:
+def table_listing() -> str | None:
+    """`nft list table inet keel`, or None when there is none"""
     try:
         out = subprocess.run(["nft", "list", "table", *TABLE],
                              capture_output=True, text=True, check=False)
     except OSError:
         return None
-    return loaded_digest(out.stdout) if out.returncode == 0 else None
+    return out.stdout if out.returncode == 0 else None
+
+
+def table_digest() -> str | None:
+    listing = table_listing()
+    return loaded_digest(listing) if listing else None

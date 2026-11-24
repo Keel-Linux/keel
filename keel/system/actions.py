@@ -100,6 +100,18 @@ class InstallRuleset:
 
 
 @dataclass(frozen=True)
+class RecordState:
+    """Write keel's record of the firewall state (keel.system.fwrecord):
+    by a rename, so a link at its path is never followed"""
+
+    state: str
+    summary: str
+
+    def describe(self) -> str:
+        return f"{self.summary} (mode 0644, by a rename)"
+
+
+@dataclass(frozen=True)
 class SetBouncerMode:
     """Set the `mode:` line of CrowdSec's bouncer file, keeping the rest
 
@@ -464,7 +476,7 @@ class Refuse:
 Change = (Run | RunSql | WriteFile | RemoveFile | MakeDir | Symlink
           | SwitchNetwork | GenerateKey | AdoptKey | SeedReplica
           | LockReplica | UnlockAccounts | PromoteReplica | Attempt
-          | AddBouncer | SetBouncerMode | InstallRuleset
+          | AddBouncer | SetBouncerMode | InstallRuleset | RecordState
           | EnsureDatabaseTls | FollowVip)
 Action = Change | Note | Refuse
 
