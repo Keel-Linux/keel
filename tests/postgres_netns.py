@@ -793,7 +793,7 @@ def play(report: dict, pids: list[int], pairs, roots: list[str],
     report["a_quiet_follow_runs"] = {
         name: (agent_send(name, "followlog").get("runs") or 0)
         - (before[name] or 0) for name in ("A", "B")}
-    replica_cut(report, pids, roots)
+    replica_cut(report, pids, roots, samples)
     mark(report, "case_b")
     crashed(report, pids, roots)
     report["alerts"] = [one.get("text", "")[:160] for one in HOOKS["alerts"]]
@@ -866,14 +866,18 @@ def alerted(name: str, title: str, since: int) -> list[dict]:
             if str(one.get("text", "")).startswith(f"[{name}] {title}")]
 
 
-def replica_cut(report: dict, pids: list[int], roots: list[str]) -> None:
+def replica_cut(report: dict, pids: list[int], roots: list[str],
+                samples: list[dict]) -> None:
     """(b): the replica B cut off, both ways. A keeps the VIP (its lease
     is renewed through C, the majority); with etcd nothing is fenced,
     since B holds no lease. A commit on A waits for B, and A's watch
     alerts; after SYNC_FALLBACK_S of waiting A falls back to
     asynchronous commits (0054, amended 2026-11-06), so the commit is
     acknowledged during the cut and the fallback alerted. Once the link
-    heals the synchronous line comes back, the end alerted"""
+    heals the synchronous line comes back, the end alerted. The VIP's
+    holders are read from the driver's sampler through the full cut
+    (vip_holder_window), not one time: the etcd leader election that
+    follows a cut of the leader can delay A's renewals (keel#167, #316)"""
     import vip_netns
     from keel.system import dbwatch
     from vip_netns import wait_until
@@ -881,6 +885,9 @@ def replica_cut(report: dict, pids: list[int], roots: list[str]) -> None:
     report["b_sync_before_s"] = wait_until(
         lambda: sync_standbys(a_root) == "1", 120, 1)
     since = len(HOOKS["alerts"])
+    report["b_etcd_leader_before"] = [
+        name for index, name in enumerate(vip_netns.NAMES)
+        if vip_netns.was_leader(roots, index)]
     vip_netns.leg("to2", "100%")
     sh("tc", "qdisc", "replace", "dev", "uplink", "root", "netem", "loss",
        "100%", pid=pids[1])
@@ -892,11 +899,11 @@ def replica_cut(report: dict, pids: list[int], roots: list[str]) -> None:
     report["b_waits_alerted_s"] = wait_until(
         lambda: alerted("A", dbwatch.SYNC_WAITS, since), 120, 0.5)
     report["b_pending_at_alert"] = writing.is_alive()
-    report["b_a_holds_vip"] = vip_netns.holds(pids[0])
     report["b_fell_back_alerted_s"] = wait_until(
         lambda: alerted("A", dbwatch.SYNC_FELL_BACK, since), 150, 0.5)
     writing.join(60)
     report["b_acked_before_heal"] = not writing.is_alive()
+    report["b_vip"] = vip_holder_window(samples, cut_at, time.time(), "A")
     healed_at = vip_netns.heal(pids, 1)
     writing.join(600)
     report["b_cut_write"] = pending
@@ -911,6 +918,31 @@ def replica_cut(report: dict, pids: list[int], roots: list[str]) -> None:
         b_root, "SELECT count(*) FROM t WHERE v = 'cut-1'", APP_DB)
     report["b_alerts"] = [one.get("text", "")[:200]
                           for one in HOOKS["alerts"][since:]]
+
+
+def vip_holder_window(samples: list[dict], start: float, end: float,
+                      name: str) -> dict:
+    """The VIP's holders in the samples within [start, end]: each gap
+    on node `name` (its start from `start`, its length, both edges of
+    the window counted), the longest, whether `name` held the VIP in
+    the last sample, and the first samples where another node held it"""
+    import vip_netns
+    window = [one for one in samples if start <= one["t"] <= end]
+    held = [one["t"] for one in window if name in one["holders"]]
+    edges = [start] + held + [end]
+    gaps = [{"at_s": round(a - start, 2), "s": round(b - a, 3)}
+            for a, b in zip(edges, edges[1:])
+            if b - a > 2 * vip_netns.SAMPLE]
+    steps = [b["t"] - a["t"] for a, b in zip(window, window[1:])]
+    return {"samples": len(window),
+            "window_s": round(end - start, 2),
+            "sample_step_max_s": round(max(steps), 3) if steps else None,
+            "gap_max_s": vip_netns.gap(held, start, end),
+            "gaps": gaps,
+            "held_at_end": bool(window) and name in window[-1]["holders"],
+            "others": [{"at_s": round(one["t"] - start, 2),
+                        "holders": one["holders"]} for one in window
+                       if set(one["holders"]) - {name}][:10]}
 
 
 class Writer:

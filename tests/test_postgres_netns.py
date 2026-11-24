@@ -32,6 +32,8 @@ import unittest
 import wgtools
 from test_etcd_netns import etcd_dir
 
+from keel.mesh.vip import RELEASE_AFTER, TTL
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DRIVER = os.path.join(REPO, "tests", "postgres_netns.py")
 # the nodes' scratch roots, on disk and not under /tmp: a systemd unit
@@ -44,6 +46,20 @@ SCRATCH = "/var/tmp/keel-postgres-netns"
 # inside the job's own 50 minutes, apt and the image included, so that a
 # run that hangs ends with what it said, not killed with the job
 DRIVER_TIMEOUT = 1800
+
+# (b): the longest gap allowed with no VIP on the primary while the
+# replica is cut off (keel#316). The holder drops the address once its
+# last renewal the majority confirmed is RELEASE_AFTER old, and carries
+# it again at the next confirmed renewal (keel.mesh.vipetcd). etcd
+# cannot expire the lease before TTL after it received that renewal, so
+# a gap up to TTL - RELEASE_AFTER (5 s) is a renewal late within the
+# lease, and a longer one is a primary with no confirmed renewal for
+# more than TTL. A lost lease is caught by the other checks too: an
+# expired lease fences A, which never claims again (no VIP at the end
+# of the cut), and a claim by B is another holder. The gap is read from
+# samples every vip_netns.SAMPLE s, so it can be up to about two sample
+# steps longer than the real gap
+B_VIP_GAP_MAX_S = TTL - RELEASE_AFTER
 
 
 def _text(found) -> str:
@@ -200,14 +216,24 @@ class TestAPostgresqlPairOnAPoorNetwork(unittest.TestCase):
         the 10 s wait and one watch run; after SYNC_FALLBACK_S the
         primary falls back to asynchronous commits, the commit is
         acknowledged during the cut and the fallback alerted, and after
-        the heal the synchronous line comes back"""
+        the heal the synchronous line comes back. The VIP is sampled
+        through the cut: no other node carries it, A carries it at the
+        end, and no gap on A is longer than B_VIP_GAP_MAX_S"""
         from keel.system import dbwatch
         found = self.found
+        vip = found["b_vip"]
         print(f"(b): alerted {found['b_waits_alerted_s']} s after the cut;"
               f" fell back {found['b_fell_back_alerted_s']} s after it;"
               f" acknowledged {found['b_ack_after_cut_s']} s after the"
               f" cut; synchronous again {found['b_sync_after_heal_s']} s",
               file=sys.stderr)
+        print(f"(b) VIP: etcd leader before the cut"
+              f" {found['b_etcd_leader_before']}; longest gap on A"
+              f" {vip['gap_max_s']} s (limit {B_VIP_GAP_MAX_S:g} s);"
+              f" gaps {vip['gaps']}; {vip['samples']} samples in"
+              f" {vip['window_s']} s, step max {vip['sample_step_max_s']} s;"
+              f" held at the end {vip['held_at_end']}; other holders"
+              f" {vip['others']}", file=sys.stderr)
         self.assertIsNotNone(found["b_sync_before_s"], found)
         self.assertIsNotNone(found["b_waits_alerted_s"], found["b_alerts"])
         self.assertLess(found["b_waits_alerted_s"], 45, found["b_alerts"])
@@ -217,7 +243,10 @@ class TestAPostgresqlPairOnAPoorNetwork(unittest.TestCase):
         self.assertGreaterEqual(found["b_fell_back_alerted_s"],
                                 dbwatch.SYNC_FALLBACK_S, found["b_alerts"])
         self.assertTrue(found["b_acked_before_heal"], found["b_cut_write"])
-        self.assertTrue(found["b_a_holds_vip"], found)
+        self.assertEqual(vip["others"], [], vip)
+        self.assertTrue(vip["held_at_end"], vip)
+        self.assertIsNotNone(vip["gap_max_s"], vip)
+        self.assertLessEqual(vip["gap_max_s"], B_VIP_GAP_MAX_S, vip)
         self.assertTrue(found["b_cut_write"]["ok"], found["b_cut_write"])
         self.assertIsNotNone(found["b_sync_after_heal_s"], found)
         self.assertIsNotNone(found["b_back_alerted_s"], found["b_alerts"])
