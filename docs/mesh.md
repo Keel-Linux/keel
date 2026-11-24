@@ -604,8 +604,8 @@ Against a member, or anything on the overlay, that sends too much:
 
 When the overlay goes down and up, as each apply of it does, the
 interface comes back as another one and the socket is bound again.
-keel's firewall, where it is enabled, accepts TCP 51821 on the overlay's
-interface alone (docs/apply.md).
+keel's firewall, in each mode with an overlay (decision 0097), accepts
+TCP 51821 on the overlay's interface alone (docs/apply.md).
 
 ### What a member takes, and how it confirms
 
@@ -1502,9 +1502,9 @@ links, watches its leader, and cuts a member off.
 
 ## The firewall port
 
-keel touches no firewall it does not own. Where keel-firewall is enabled
-(cloud advanced, `firewall.enabled: true`), the derived ruleset in
-`inet keel` has a named set, `mesh_invites`, of TCP ports with a
+keel touches no firewall it does not own. keel writes its own table in
+every mode (decision 0097); in each mode with an overlay, the derived
+ruleset in `inet keel` has a named set, `mesh_invites`, of TCP ports with a
 timeout, and one rule that accepts them ([docs/apply.md](apply.md)).
 `invite` adds its port to the set for as long as the listener may run,
 the time left to its expiry and 180 seconds more (`nft add element inet
@@ -1512,8 +1512,10 @@ keel mesh_invites { 51820 timeout 3780s }`), so the port is open exactly
 while the invite is pending and closes by itself even if keel dies, and
 the helper's end removes it. Adding an
 element is not a ruleset change, so it neither waits on nor disturbs a
-network change in its window. Everywhere else keel opens nothing and
-`invite` says so: a closed port is what the fallback is for.
+network change in its window. Where keel's table is absent (a node with
+`firewall.state: off`, or where no apply ran since keel 0.23.99) keel
+opens nothing and `invite` says so: a closed port is what the fallback
+is for.
 
 ## The token
 

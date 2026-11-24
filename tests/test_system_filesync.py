@@ -170,11 +170,14 @@ class TestTheRender(SyncCase):
         self.assertIn("<paused>true</paused>", text)
         self.assertNotIn(f'<device id="{PEER}">', text)
 
-    def test_without_addresses_it_renders_no_peer_and_a_fallback_listen(
+    def test_without_addresses_it_renders_no_peer_and_a_loopback_listen(
             self):
+        """decision 0097, work item 8: no random port on every address;
+        with no overlay address no peer can come, so the loopback"""
         text = filesync.config_xml(DEVICE, None, None, None, "key",
                                    (CONTENT,), "primary")
-        self.assertIn("<listenAddress>tcp://:0</listenAddress>", text)
+        self.assertIn("<listenAddress>tcp://127.0.0.1:22000</listenAddress>",
+                      text)
         self.assertNotIn("<address>tcp://", text)
 
     def test_the_drop_in_grants_the_home_and_the_paths(self):

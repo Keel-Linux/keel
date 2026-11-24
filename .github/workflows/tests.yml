@@ -17,7 +17,12 @@ jobs:
     with:
       threshold: 95
       package: keel
-      apt-packages: bats shellcheck gnupg gpgv wireguard-tools
+      # debhelper generates the units' maintainer scripts that
+      # tests/test_firewall_check.py reads (decision 0097: an upgrade
+      # neither stops nor starts keel's firewall units), and nftables
+      # gives the ruleset tests their nft -c and their loads in a
+      # namespace of their own
+      apt-packages: bats shellcheck gnupg gpgv wireguard-tools debhelper nftables
   # keel mesh end to end (decision 0048) in a Debian trixie system
   # container, the release keel ships on: three network namespaces,
   # the real wg-quick and TLS, as root in the container

@@ -41,6 +41,7 @@ import fcntl
 import ipaddress
 import json
 import os
+import threading
 import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -84,6 +85,13 @@ PARALLEL = 8
 # the lock comes free. A wait that ends leaves the announcement to the next
 # keel mesh sync, which asks the peers again.
 LOCK_WAIT = 600.0
+# How long an answer to a peer (an invite admission, an etcd message)
+# waits for the sync lock before it answers busy: a person's keel spec
+# apply holds it for its whole run (decision 0097), and the peer's
+# exchange has a deadline of its own
+BUSY_WAIT = 5.0
+BUSY = ("busy: a keel spec apply or another keel mesh change holds this"
+        " node's sync lock; send it again in a minute")
 LOCK_POLL = 1.0
 
 
@@ -120,15 +128,28 @@ def holder(root: str) -> str:
         return "an unknown process"
 
 
+# the roots whose sync lock this thread holds, so that Node.change,
+# called by keel mesh sync with the lock held, does not wait for itself
+_HELD = threading.local()
+
+
+def held_here(root: str) -> bool:
+    return root in getattr(_HELD, "roots", set())
+
+
 @contextmanager
 def sync_lock(root: str, wait: float, what: str = "keel mesh sync",
               say: Callable[[str], None] | None = None,
-              clock: Callable[[], float] = time.monotonic
-              ) -> Iterator[bool]:
+              clock: Callable[[], float] = time.monotonic,
+              reentrant: bool = False) -> Iterator[bool]:
     """Whether this process holds the lock of the members' changes after
     at most `wait` seconds: one sync at a time. `what` is the name that a
     process that waits reads. Not the mesh's own lock, which an invite
-    takes."""
+    takes. `reentrant`: true at once when this thread holds it already
+    (Node.change inside keel mesh sync)."""
+    if reentrant and held_here(root):
+        yield True
+        return
     invites.ensure(root)
     fd = os.open(path(root, SYNC_LOCK), os.O_RDWR | os.O_CREAT, FILE_MODE)
     try:
@@ -151,7 +172,12 @@ def sync_lock(root: str, wait: float, what: str = "keel mesh sync",
         os.ftruncate(fd, 0)
         os.pwrite(fd, f"{what} (pid {os.getpid()}, since"
                   f" {datetime.now(timezone.utc):%H:%M:%S} UTC)\n".encode(), 0)
-        yield True
+        roots = getattr(_HELD, "roots", set())
+        _HELD.roots = roots | {root}
+        try:
+            yield True
+        finally:
+            _HELD.roots = roots
     finally:
         os.close(fd)
 

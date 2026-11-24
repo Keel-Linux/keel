@@ -141,6 +141,39 @@ class TestJoin(Case):
         self.assertIs(self.listener.confirmed, False)
         self.assertIn("apply exited 16", self.logged[-1])
 
+    def test_a_busy_node_answers_busy_and_the_invite_stays(self):
+        """the third review (F4) and the third real test: a person's
+        keel spec apply holds the sync lock for its whole run. The
+        admission answers busy after a short wait, with 409, which the
+        listener passes on and survives (a 503 is "the root side is
+        gone", and ended the invite); the invite is not consumed, and the
+        same join line works once the lock is free"""
+        import threading
+        from keel.mesh import sync
+        taken, release = threading.Event(), threading.Event()
+
+        def holder():
+            with sync.sync_lock(self.root, 0, "keel spec apply"):
+                taken.set()
+                release.wait(30)
+        thread = threading.Thread(target=holder)
+        thread.start()
+        taken.wait(5)
+        try:
+            with mock.patch("keel.mesh.sync.BUSY_WAIT", 0.2):
+                found = self.join()
+        finally:
+            release.set()
+            thread.join()
+        self.assertEqual(found.status, 409)
+        self.assertFalse(found.final)
+        self.assertIn("busy", self.error(found))
+        self.assertEqual(self.node.admitted, [])
+        kept = invites.find(self.root, INVITE, NOW)
+        self.assertIsNotNone(kept)
+        self.assertEqual(self.join().status, 200)
+        self.assertEqual(len(self.node.admitted), 1)
+
     def test_a_spec_that_cannot_take_the_peer_spends_the_invite(self):
         def refuse(peer, window=None):
             raise NodeError("instance.yaml cannot be written: disk full")

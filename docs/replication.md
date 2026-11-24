@@ -240,8 +240,8 @@ itself.
 - The replica's server listens on its own overlay address (for its pair
   peer: replication and the rejoin's comparison), `::1`, and the VIP it
   never receives. Clients are configured with the VIP, so they never
-  reach it. In cloud advanced the derived firewall accepts 3306 on
-  `wg0` only, never on the uplink (0041: a `mesh` port), from every
+  reach it. In the cloud modes the derived firewall (decision 0097, every
+  mode) accepts 3306 on `wg0` only, never on the uplink (0041: a `mesh` port), from every
   member of the mesh, as for every `mesh` port. The accounts decide
   who logs in: `repl` needs the pair's certificate (below). The real
   test of 2026-10-16 found that this text said "from the pair peer and

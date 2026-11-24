@@ -28,6 +28,10 @@ def install(root: str, action: InstallRuleset) -> str | None:
     os.fchmod(fd, MODE)
     with os.fdopen(fd, "w") as fob:
         fob.write(action.content)
+        fob.flush()
+        # on the disk before the rename: after a power loss the boot
+        # unit must not find an empty file, which nft loads as no table
+        os.fsync(fob.fileno())
     try:
         out = subprocess.run(["nft", "-c", "-f", copy], capture_output=True,
                              text=True, check=False)
@@ -41,4 +45,9 @@ def install(root: str, action: InstallRuleset) -> str | None:
         return ("nft -c refused the ruleset, which is not put in place:"
                 f" {detail}")
     os.replace(copy, target)
+    directory = os.open(os.path.dirname(target), os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
     return None

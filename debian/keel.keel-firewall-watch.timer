@@ -1,0 +1,20 @@
+# keel's table comes back after a flush by hand (handbook decision 0097).
+#
+# `nft flush ruleset` or `nft delete table inet keel` leaves no trace a
+# unit could wait on, so every 30 s keel firewall check --restore
+# compares the table the kernel holds with keel's file and loads a lost
+# one again: the node is open for at most about 35 s (30 s, 5 s of
+# accuracy, one run). It depends on nothing in the spec (Monit's check
+# runs only where the spec enables the monitor). The package does not
+# start it (decision 0073): keel spec apply --system starts it where it
+# writes the firewall, and the boot does.
+[Unit]
+Description=keel: load keel's firewall table again when it is lost
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

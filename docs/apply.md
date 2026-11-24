@@ -1161,11 +1161,14 @@ derived.monit: reload monit, where it runs (systemctl try-reload-or-restart moni
 ```
 
 **derived.firewall** (`/etc/keel/firewall/keel-manifest.nft`; handbook
-decision 0041)
+decisions 0041 and 0097)
 
-Only where the spec says `firewall.enabled: true`, which validation
-allows in a cloud advanced installation only (docs/spec.md, "firewall");
-in every other installation keel installs and changes no firewall rule.
+In every installation mode, simple, cloud simple and cloud advanced, the
+etcd witness included (decision 0097), in the state of
+`firewall.state` (docs/spec.md, "firewall"): `enforce`, `report` or
+`off`. The real-node tests of 2026-11-23 found every published node
+open in every mode: nothing loaded TurnKey's `rules.v4`, and no mode
+screen turned the firewall on.
 
 **Why nftables.** trixie's `iptables` is the nftables backend
 (`iptables-nft`) by default, and nftables 1.1.3 is in the archive.
@@ -1177,11 +1180,14 @@ writes. nftables gives keel a table of its own, replaced in one
 transaction, that touches no rule of iptables, of CrowdSec's bouncer or
 of the operator, and `nft -c` checks a file before anything is loaded.
 The kernel evaluates legacy iptables and nftables at the same hooks, so
-while a TurnKey image still loads its `rules.v4`, a packet must pass
-both: keel's table can only narrow what gets in, never widen it.
+where an administrator loads rules of his own, a packet must pass both:
+keel's table can only narrow what gets in, never widen it. `keel diff`
+warns where TurnKey's `/etc/iptables/rules.v4` or `rules.v6` is still
+there: `iptables-persistent` would load them, and they have no
+WireGuard port.
 
 The ruleset is one table, `inet keel`, one input chain whose policy is
-drop, and these rules:
+drop in `enforce`, and these rules:
 
 - always, whatever the manifests say: the loopback; established and
   related traffic, so the session that runs apply lives through the
@@ -1218,17 +1224,91 @@ drop, and these rules:
   holding the default route, is the uplink and gets nothing: those
   ports would be open to the internet. The bridges are read at every
   apply; one created later is drift in `keel diff` until the next apply
-  adds it.
+  adds it;
+- every TCP port sshd listens on (below), named in the plan where the
+  manifests do not open it;
+- each item of `firewall.allow`, on every interface, or with `from`
+  only for those prefixes (`ip saddr` and `ip6 saddr`);
+- while the init fence's unit (`turnkey-init-fence.service`) is
+  enabled, its ports from `/etc/default/turnkey-init-fence`
+  (`HTTP_FENCE_PORT`, `HTTPS_FENCE_PORT`, 60080 and 60443), for
+  redirected packets only (`ct status dnat`): the fence redirects 80
+  and 443 to them, and the input hook sees the port after the redirect.
+  A direct connection to them stays dropped.
 
-`loopback` opens nothing. The table's comment carries a digest of the
+`loopback` opens nothing. A `mesh` port is accepted only for a packet
+that comes in on the WireGuard interface: a neighbour on the uplink's
+link that routes a packet for the wg0 address or the VIP through eth0
+matches no rule (decision 0097, section 4a).
+
+In `report` the same rules are loaded with an accept policy, without the
+drop of `ct state invalid`, and with one counter as the last rule,
+`keel-report: enforce would drop these`: the table drops nothing, and
+the counter shows what enforce would drop.
+
+**The state, and rule B.** `enforce` and `report` in the spec are
+written as they are. With no word (no section, or `enabled: false`), the
+node is in report, and the maintainer's rule B (decision 0097, answered
+2026-11-23) moves it to enforce by itself, only:
+
+- in an apply a person runs: `keel spec apply --system` or
+  `--system-only` (the first boot hook and confconsole run the same
+  command for the person who installs or configures the node). keel
+  mesh applies the whole spec with no person (`keel-mesh-sync.timer`
+  every 15 minutes, `keel-mesh-members`), so it never begins
+  enforcement, not even where the spec says `enforce`: it writes report
+  and says so, until a person applies;
+- and when each socket on an address that is not a loopback belongs to
+  a unit of the resolved manifest. `ss -Hlnptu` lists the sockets and
+  their processes, and `/proc/PID/cgroup` names each process's unit; a
+  declared `NAME.service` covers its instances `NAME@X.service`
+  (`postgresql.service` and `postgresql@17-main.service`). Known without
+  a unit: the ports sshd listens on, the ports of `firewall.allow`, the
+  overlay's own UDP port (a socket of the kernel), and the DHCP client
+  (UDP 68 and 546). A socket bound to the loopback or to the overlay's
+  interface is not public. A socket ss shows with no process, or a run
+  of ss that fails, keeps the node in report, and the plan names it.
+
+A socket on a mesh port (3306, 5432, 6379, 2379, 2380, 22000) bound to
+an address that is not this node's overlay address or its VIP (a
+MariaDB on `0.0.0.0` for a client outside the mesh) also keeps report:
+enforce opens that port on the WireGuard interface only, and would cut
+that client with no word (decision 0097, section 7). `firewall.allow`
+with `from` declares such a client.
+
+Else the node stays in report, and the plan says which sockets keep it
+there and what to do: declare each in `firewall.allow`, stop it, or set
+`firewall.state: enforce`. A port of a declared process that the
+manifests do not list (UDP 12321 of Webmin's `miniserv.pl`) does not
+keep it there: enforce closes it, and the plan names it. Once keel's
+file is in enforce, it is the record (and `/var/lib/keel/firewall/state`
+beside it, which an empty or cut file cannot lose, so a repair keeps
+enforce: rule B is for the first move only): an apply with no word keeps it,
+and only `firewall.state: report` or `off` goes back. The ntfy notice of
+decision 0085 for a node that waits is not built; when it is, it sends
+the plan's line (`keel.system.firewall.waiting_notice`).
+ The table's comment carries a digest of the
 rules, which is how apply and diff tell whether the table the kernel
 holds is the one the file says.
 
+**A firewall that cannot be decided.** Where the spec does not say
+`enforce` (no key, `enabled: false`, or `report`), a guard that refuses
+(sshd's ports unknown, a file keel did not write, no `nft`) or a ruleset
+`nft -c` or `nft -f` refuses does not fail the apply: the plan says
+`NOT APPLIED, the node keeps the firewall it has` with the reason, the
+other steps run, and keel mesh does not put the spec back. Only an
+explicit `state: enforce` (or `enabled: true`) makes it a failure of
+the apply. `keel spec apply` on the live system holds the lock keel mesh
+sync and the members' channel hold, so a mesh apply never writes report
+over the enforce a person's apply just wrote. The copy of the ruleset
+is on the disk (`fsync`, then its directory) before it is renamed.
+
 **What keeps it from locking anyone out.** Before anything is written:
 
-- every port sshd listens on must be a `public` TCP port the ruleset
-  opens, or the step is refused and nothing is written or loaded. The
-  ports are never guessed: on the live system they are what `sshd -T`
+- every port sshd listens on is opened (decision 0097, section 3; keel
+  0.23.97 refused the whole ruleset when sshd listened on a port the
+  manifests did not open, which left the node open). The ports are
+  never guessed: on the live system they are what `sshd -T`
   says (its `port` and `listenaddress` lines), plus the `Listen` of
   `ssh.socket` while that socket is active; where `sshd -T` cannot
   answer, and under `--root`, `/etc/ssh/sshd_config` and
@@ -1236,7 +1316,8 @@ holds is the one the file says.
   `Port=22`, `ListenAddress [::1]:22 rdomain x`). A file that sets no
   port is sshd's documented default, 22; a file that cannot be read, or
   an `Include` of anything but `sshd_config.d/*.conf`, leaves the ports
-  unknown, and the step is refused;
+  unknown, and the step is refused: nothing is written or loaded, and
+  the old state stays;
 - while a network change waits for `keel network confirm` (decision
   0018), the firewall is left exactly as it is: the confirmation comes
   over a new session, and a ruleset changed inside the window could be
@@ -1246,15 +1327,119 @@ holds is the one the file says.
   refused one is removed, so the file the boot unit loads is always one
   nft accepted. `nft -f` then loads it in one transaction, so a ruleset
   nft refuses changes nothing;
-- a file at that path keel did not write is refused, never replaced.
+- a file at that path keel did not write is refused, never replaced:
+  a non-empty file with no header of keel's. An empty file, a file cut
+  inside keel's header, or one that carries keel's header is keel's,
+  and the apply writes it again (a power loss before the data reached
+  the disk; keel firewall check says the same).
 
 `keel-firewall.service`, shipped enabled, loads the file at every boot
-before the network comes up, and only while the file exists. `enabled:
-false` removes keel's file and deletes the `inet keel` table; a spec
-without the section leaves both as they are.
+before the network comes up, and only while the file exists. A file nft
+refuses at boot fails the unit, and the node is degraded and open: the
+failure is visible. Before its load, `keel firewall repair --boot`
+writes an empty, cut or missing file of a node in enforce again, by the
+apply's own firewall step run unattended (the state from keel's record
+or the loaded table); where that step cannot write it (the spec cannot
+be read, sshd's ports are unknown), it loads a closed fallback table
+(drop; loopback, established, ICMPv6, the DHCP client, sshd's ports or
+22, the WireGuard port and the overlay's interface where there is a
+mesh) and fails the unit, so the node stays degraded until an apply. A
+node in enforce is never left open in silence. The watch does the same
+on a broken or missing file, and `keel firewall check` fails on a
+missing file, where there is evidence the node had a firewall (keel's
+trusted record, or a loaded table of keel's). With no evidence at all (a
+node upgraded from 0.23.97, or a new node before its first apply) the
+node is NOT APPLIED, a state: the boot unit and the watch exit 0 and say
+nothing, and `keel firewall check` says NOT APPLIED and exits 0. A file,
+record and table all lost by a reboot leave no evidence, and that node
+is then NOT APPLIED until the next apply (a known limit). Each apply that loads the
+ruleset also keeps a last good copy of it,
+`/var/lib/keel/firewall/last-good.nft` (root's, written by a rename),
+and the repair restores that copy first: it needs no spec and keeps the
+declared ports open. A spec that cannot be read or parsed never means
+"do nothing" on a node in enforce: the copy is restored, else the closed
+fallback is loaded and the unit fails. keel's record also says `off`
+when the spec does, so the watch's shell knows it from that one file of
+keel's and never from text in the spec. Both units run with or without a spec: the
+program decides from evidence (the file, the record, the copy, the
+loaded table), and is silent where there is none. The record holds the
+sha256 of the ruleset the last apply loaded, and the copy is restored
+only when it has that hash; else the node in enforce gets the closed
+fallback, and a node in report a loud failure. While the spec cannot be
+read or parsed, the node keeps its last ruleset and `keel firewall
+check`, the watch and the repair fail until the spec is put right. The
+watch's shell trusts keel's record only as Python does (a root-owned
+0700 directory, a root-owned regular 0600 file, no symlink); any doubt
+goes to Python. The apply and the repair take one lock,
+`/run/keel/firewall.lock`: the repair skips its run while an apply holds
+it, and never makes an apply fail. An apply also clears a failed watch
+unit at once. A successful apply restarts a
+`keel-firewall.service` that failed at boot, so the node is no longer
+degraded, and puts keel's directory right (root's, 0700). A pair node
+whose copy is lost too and that runs in the bare fallback serves no
+HTTP or HTTPS on its public address while it holds the VIP (a known
+limit). An apply that finds no
+file and no record but a loaded table with policy drop keeps enforce:
+the table is evidence, and only the spec moves a node out of enforce.
+keel's record, `/var/lib/keel/firewall/state`, is trusted only as a
+regular file root owns and no group or other may write (no symlink is
+followed), and is written by a rename; only root can write it, the
+power the spec has. `apt purge` removes it. So does an empty or cut
+file, which nft loads as nothing: `/usr/lib/keel/firewall-loaded` (the unit's `ExecStartPost`)
+fails unless `inet keel` is loaded with the policy the file says. On a
+node in enforce, the plan names each socket that listens and that no
+unit of the manifests declares: enforce closes it, and the plan says
+so ("listens, not declared, closed by the firewall"). The watch does
+not list sockets: that needs `ss` and Python at every run, which the
+shell path avoids; `keel diff` and the next apply name them.
+
+**A lost table comes back, whatever the spec says.** The real test of
+pull request 307 found Monit's check useless on a published node: no
+published spec has a `monitor` section, and after `systemctl restart
+nftables.service` the node stayed open until an apply. So:
+
+- a drop-in for `nftables.service`
+  (`/usr/lib/systemd/system/nftables.service.d/keel-firewall.conf`)
+  loads keel's file right after each start, reload and stop of that
+  unit, whose `/etc/nftables.conf` and `ExecStop` flush the whole
+  ruleset: the node is open between the two nft runs, milliseconds;
+- `keel-firewall-watch.timer` runs `keel firewall check --restore`
+  every 30 s (5 s of accuracy) for a flush by hand (`nft flush
+  ruleset`, `nft delete table inet keel`), which leaves no trace a unit
+  could wait on: open for at most about 35 s. Each run is a few lines
+  of shell (`/usr/lib/keel/firewall-watch`): when the hash of `nft -s
+  list table inet keel` and the inode, size and time of keel's file are
+  the ones the last good check wrote under `/run/keel`, it exits, and
+  Python runs only on a difference (about 22 ms of CPU a run, against
+  0.5 s for the full check: about one CPU minute a day). A broken file is
+  said once per change of the problem and once an hour; every run
+  fails while the problem lasts, so the unit stays failed and the node
+  degraded, and a table lost beside a broken file is a new problem,
+  said at once. The mark is the listing the check accepted, with the
+  file's inode, size, mtime and ctime. An upgrade
+  neither stops nor starts the timer (decision 0073); the apply that
+  writes the firewall on the live system starts it, and so does the
+  boot. A masked or disabled timer is left alone and said;
+- `keel firewall check` trusts no comment: the rules in the file must
+  be the ones its digest names, `nft -c` must accept the file, and the
+  loaded table must carry that digest and the file's policy. `--restore`
+  loads a sound file again with `nft -f` and says so; a broken file is
+  never loaded, the timer's unit fails, and the node is degraded;
+- where the spec enables the monitor, Monit's check `keel-firewall`
+  runs the same check and restarts `keel-firewall.service`.
+
+CrowdSec's tables are CrowdSec's: keel does not put them back after a
+flush (decision 0097, section 1, item 4). `firewall.state: off` removes
+keel's file and deletes the `inet keel` table.
+
+An upgrade of the package changes no rule: the postinst applies
+nothing, and `keel-firewall.service` is never started or restarted by
+the package (decision 0073). The change comes at the next apply.
 
 ```
-derived.firewall: write /etc/keel/firewall/keel-manifest.nft: public tcp 22, 12320, 12321, DHCP and DNS for the guests of lxcbr0; checked by nft -c as a copy first, so a file nft refuses is never put in place (mode 0600): done
+derived.firewall: enforce: each socket on an address that is not a loopback belongs to a unit of the manifests (decision 0097, B)
+derived.firewall: closes udp 0.0.0.0:12321 of webmin.service (miniserv.pl): the manifests declare its process, not this port
+derived.firewall: write /etc/keel/firewall/keel-manifest.nft (enforce): public tcp 22, 12320, 12321, DHCP and DNS for the guests of lxcbr0; checked by nft -c as a copy first, so a file nft refuses is never put in place (mode 0600): done
 derived.firewall: load it in one transaction, replacing table inet keel only (nft -f /etc/keel/firewall/keel-manifest.nft): done
 ```
 
@@ -1621,10 +1806,11 @@ blog.yaml --root /tmp/scratch` then reports `instance.fqdn` and every
 - Masking or unmasking a unit, writing an overlay's configuration, which
   is its package's and the installer's, or making CrowdSec's identity
   under `--root`.
-- Any firewall rule outside a cloud advanced installation whose spec
-  says `firewall.enabled: true`; any table but `inet keel`; a ruleset
-  that would not open the ports sshd listens on; a firewall change while
-  a network change waits for its confirmation.
+- Any table but `inet keel`; a ruleset that would not open the ports
+  sshd listens on; a firewall change while a network change waits for
+  its confirmation; enforcement begun by keel mesh; a change to
+  `nftables.service`, `/etc/nftables.conf`, the iptables alternative or
+  TurnKey's `rules.v4` and `rules.v6` (decision 0097, section 1).
 - Exposing monit's web interface, writing a token into monit's file or
   the notify settings, or setting monit's cycle.
 - Converging a container's network from inside, more than one
@@ -1766,11 +1952,14 @@ plan in a tree: CrowdSec disabled, enabled, disabled, each converged, a
 second run changing nothing, `keel diff` clean and the file gaining and
 losing exactly CrowdSec's checks, with `systemctl` replaced by a fake that
 makes the links the real one makes under `--root`. The firewall has
-`tests/test_spec_firewall.py` (cloud advanced only),
+`tests/test_spec_firewall.py` (every mode, the states and `allow`),
 `tests/test_manifest_firewall.py` (the ruleset, given to `nft -c` in a
 network namespace of its own, made as for the WireGuard tests below,
-when an nft binary is on `PATH` or named by `KEEL_NFT`) and `tests/test_system_firewall.py`, one
-test per guard against a lockout.
+when an nft binary is on `PATH` or named by `KEEL_NFT`), `tests/test_system_firewall.py`, one
+test per guard against a lockout, rule B and a failed load,
+`tests/test_firewall_listeners.py` (the sockets and their units),
+`tests/test_firewall_attended.py` (keel mesh never begins enforcement)
+and `tests/test_firewall_check.py` (Monit's check).
 
 The overlay has its own files too. `tests/test_spec_overlay.py` covers
 the fields, `tests/test_system_overlay.py` the planner and its state,

@@ -30,6 +30,7 @@ stopped; turning one on adds checks Monit holds for two cycles, by
 which time the units have started.
 """
 
+from keel.manifest.firewall import OFF
 from keel.manifest.monit import render
 from keel.manifest.resolve import Resolved
 from keel.system.actions import (
@@ -55,6 +56,7 @@ from keel.system.etcd import OVERLAY as ETCD
 from keel.system.etcd import plan_etcd, waiting
 from keel.system.filesync import plan_filesync
 from keel.system.hooks import plan_hooks
+from keel.spec.validate_firewall import declared_state
 from keel.system.monitor import NOTIFY, reload
 
 MONIT_FIELD = "derived.monit"
@@ -246,7 +248,8 @@ def plan_monit(doc: dict, states: dict, state: ApplianceState, live: bool,
     wg = ((doc.get("network") or {}).get("overlay") or {}).get(
         "wireguard") or {}
     rendered = render(resolved, states, wg.get("address"), NOTIFY,
-                      state.cycle.seconds, state.waiting)
+                      state.cycle.seconds, state.waiting,
+                      firewall=declared_state(doc) != OFF)
     probes = sum(1 for name in rendered.services
                  if name.startswith("keel-check-"))
     summary = (f"{len(rendered.services) - probes} unit(s) and {probes}"

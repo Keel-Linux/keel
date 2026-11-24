@@ -57,9 +57,9 @@ class RenderCase(ManifestCase):
 
     def render(self, states: dict, name: str = "web",
                mesh: str | None = None, cycle: int = 30,
-               waiting: dict | None = None):
+               waiting: dict | None = None, firewall: bool = False):
         return render(self.resolved(name), states, mesh, NOTIFY, cycle,
-                      waiting)
+                      waiting, firewall=firewall)
 
     def assertMonitAccepts(self, text: str) -> None:
         if not monit_binary():

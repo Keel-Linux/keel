@@ -1,0 +1,17 @@
+# What keel-firewall-watch.timer runs (handbook decision 0097): a few
+# lines of shell that compare the loaded table and keel's file with the
+# mark of the last good check, and only on a difference keel firewall
+# check --restore (firewall/firewall-watch). Silent when all is well; a
+# lost table is loaded again and said; a broken file is never loaded, and
+# is said once per change and once an hour, and every run fails while
+# the problem lasts, so the unit stays failed and the node degraded.
+# LogLevelMax keeps systemd's own lines of each run out of the journal;
+# SyslogLevel lets keel's own lines through.
+[Unit]
+Description=keel: load keel's firewall table again when it is lost
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/keel/firewall-watch
+LogLevelMax=notice
+SyslogLevel=warning

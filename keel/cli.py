@@ -384,7 +384,49 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_assemble_options(assemble_parser)
     add_manifest_parser(subparsers)
+    add_firewall_parser(subparsers)
     return parser
+
+
+def add_firewall_parser(subparsers) -> None:
+    """keel firewall: keel's own nftables table (decision 0097)"""
+    firewall_parser = subparsers.add_parser(
+        "firewall",
+        help="keel's firewall table, which apply writes from the manifests"
+        " (decision 0097)",
+    )
+    firewall_actions = firewall_parser.add_subparsers(
+        dest="action", metavar="ACTION"
+    )
+    check_parser = firewall_actions.add_parser(
+        "check",
+        help="whether the table inet keel the kernel holds is the one keel's"
+        " ruleset file says; what monit runs, to load it again when it is"
+        " lost",
+    )
+    check_parser.add_argument(
+        "--restore",
+        action="store_true",
+        help="load the file again (nft -f) when the table is lost or"
+        " another and the file is sound; silent when all is well; what"
+        " keel-firewall-watch.timer runs",
+    )
+    add_root_option(check_parser, "read keel's ruleset file of")
+    check_parser.set_defaults(handler="keel.commands.firewall_check")
+    repair_parser = firewall_actions.add_parser(
+        "repair",
+        help="write an empty, cut or missing ruleset file of a node in"
+        " enforce again by the apply's firewall step, else load a closed"
+        " fallback and fail; what keel-firewall.service runs at boot",
+    )
+    repair_parser.add_argument(
+        "--boot",
+        action="store_true",
+        help="a node that never wrote a ruleset does not fail: what the"
+        " boot unit passes, before a new node's first apply",
+    )
+    add_root_option(repair_parser, "repair keel's ruleset file of")
+    repair_parser.set_defaults(handler="keel.commands.firewall_repair")
 
 
 def add_manifest_parser(subparsers) -> None:

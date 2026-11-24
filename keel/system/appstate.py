@@ -116,9 +116,10 @@ def observe_appliance(root: str, doc: dict, start: bool = False,
         cycle=monit_cycle(tree),
         crowdsec=observe_crowdsec(tree),
         root=tree.root,
-        # nft is asked only when the spec speaks of the firewall
-        firewall=observe_firewall(tree, tree.root == ROOT_DEFAULT
-                                  and doc.get("firewall") is not None),
+        # live whatever the spec says: keel writes the firewall in every
+        # mode, and a spec with no firewall key is rule B's (decision
+        # 0097), which needs the sockets, sshd -T and the loaded table
+        firewall=observe_firewall(tree, tree.root == ROOT_DEFAULT),
         hooks=hooks,
         etcd=etcd,
         anubis_key=anubis_key,

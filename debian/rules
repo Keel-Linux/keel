@@ -7,7 +7,8 @@ export PYTHONDONTWRITEBYTECODE=1
 
 override_dh_installsystemd:
 	dh_installsystemd --name=keel-network-revert --no-start
-	dh_installsystemd --name=keel-firewall --no-start
+	dh_installsystemd --name=keel-firewall --no-start --no-stop-on-upgrade
+	dh_installsystemd --name=keel-firewall-watch --no-start --no-stop-on-upgrade
 	dh_installsystemd --name=keel-mesh-members
 	dh_installsystemd --name=keel-mesh-sync
 	dh_installsystemd --name=keel-mesh-etcd

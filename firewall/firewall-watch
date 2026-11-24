@@ -1,0 +1,60 @@
+#!/bin/sh
+# What keel-firewall-watch.timer runs every 30 s (handbook decision 0097).
+#
+# The cheap path: when the table keel's file loaded is still the one the
+# last good check saw (the sha256 of `nft -s list table inet keel`) and
+# the file is the same file (inode, size, mtime, ctime), there is nothing
+# to do, and no Python starts. On any difference, or with no mark, keel
+# firewall check --restore checks everything, loads a lost table again,
+# repairs a lost file, and writes the mark again (keel/system/fwwatch.py).
+#
+# With no file: nothing runs where there is no evidence that this node had
+# a firewall of keel's (no record, no copy, no table: a node upgraded from
+# 0.23.97, or a new node before its first apply, which is NOT APPLIED, a
+# state), or where keel's record says off. The record counts only when
+# it passes the trust test Python uses (a root-owned 0700 directory, a
+# root-owned regular 0600 file, no symlink); any doubt goes to Python.
+# The spec is never read here: a missing spec, or text in it, decides
+# nothing (the fifth and sixth real tests).
+set -u
+file=${KEEL_FIREWALL_FILE:-/etc/keel/firewall/keel-manifest.nft}
+mark=${KEEL_FIREWALL_MARK:-/run/keel/firewall-watch.ok}
+keel=${KEEL_BIN:-/usr/bin/keel}
+nft=${KEEL_NFT:-/usr/sbin/nft}
+record=${KEEL_FIREWALL_RECORD:-/var/lib/keel/firewall/state}
+copy=${KEEL_FIREWALL_COPY:-/var/lib/keel/firewall/last-good.nft}
+root_uid=${KEEL_ROOT_UID:-0}
+
+# the state word of a record that passes the trust test; "?" for a record
+# that is there and does not; "" for none
+recorded() {
+    dir=$(dirname "$record")
+    [ -e "$record" ] || [ -L "$record" ] || { echo ""; return; }
+    if [ -d "$dir" ] && [ ! -L "$dir" ] && [ -f "$record" ] \
+        && [ ! -L "$record" ] \
+        && [ "$(stat -c '%u %a' "$dir")" = "$root_uid 700" ] \
+        && [ "$(stat -c '%u %a' "$record")" = "$root_uid 600" ]; then
+        read -r word _ < "$record" || true
+        echo "${word:-?}"
+    else
+        echo "?"
+    fi
+}
+
+if [ ! -e "$file" ]; then
+    state=$(recorded)
+    [ "$state" = off ] && exit 0
+    if [ -z "$state" ] && [ ! -e "$copy" ] \
+        && ! "$nft" list table inet keel >/dev/null 2>&1; then
+        exit 0
+    fi
+    exec "$keel" firewall check --restore
+fi
+if [ -r "$mark" ]; then
+    listed=$("$nft" -s list table inet keel 2>/dev/null) && {
+        now="$(printf '%s\n' "$listed" | sha256sum | cut -d' ' -f1)"
+        now="$now $(stat -c '%i %s %Y %Z' "$file")"
+        [ "$now" = "$(cat "$mark")" ] && exit 0
+    }
+fi
+exec "$keel" firewall check --restore

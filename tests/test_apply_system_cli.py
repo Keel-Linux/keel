@@ -230,7 +230,14 @@ class TestApplySystem(ApplySystemTestCase):
         outcome = mock.MagicMock(lines=("users.root: unchanged (x)",),
                                  failed=0)
         outcome.summary.return_value = "apply --system: 0 change(s), 0 failed"
+        # the sync lock of keel mesh lives under /var/lib/keel: stood in
+        # too (tests/test_firewall_attended.py tests it)
+        held = contextlib.nullcontext(True)
         with AS_ROOT, \
+                mock.patch("keel.commands.apply_lock",
+                           return_value=held), \
+                mock.patch("keel.commands.firewall_lock",
+                           return_value=contextlib.nullcontext(True)), \
                 mock.patch.object(system, "observe",
                                   return_value=fake_state) as observe, \
                 mock.patch.object(system, "plan",
@@ -681,9 +688,10 @@ class TestDeferCertificate(ApplySystemTestCase):
         real = system.plan
 
         def spy(doc, state, confirmed=False, defer_certificate=False,
-                *network):
+                *network, **named):
             seen["defer"] = defer_certificate
-            return real(doc, state, confirmed, defer_certificate, *network)
+            return real(doc, state, confirmed, defer_certificate, *network,
+                        **named)
 
         with mock.patch.object(system, "plan", side_effect=spy), \
                 mock.patch.object(effects.subprocess, "run",

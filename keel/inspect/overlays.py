@@ -85,13 +85,28 @@ def probe_appliance_sections(tree: Tree) -> tuple[dict, list[Finding]]:
             f" spec the installer emitted says it at {where}")))
     sections["overlays"], found = overlay_states(tree, facts.resolved,
                                                  emitted, where)
-    ruleset = tree.read(firewall.PATH)
-    enabled = (ruleset.text or "").startswith(firewall.HEADER)
-    sections["firewall"] = {"enabled": enabled}
-    found.append(inferred("firewall.enabled", str(enabled).lower(), (
-        f"{ruleset.path}, keel's ruleset" if enabled
-        else f"{ruleset.path}: no ruleset of keel's")))
+    found.append(firewall_finding(tree, sections))
     return sections, findings + found
+
+
+def firewall_finding(tree: Tree, sections: dict) -> Finding:
+    """firewall.state from keel's ruleset (decision 0097): enforce is
+    written back; report and no file are left out, since an absent state
+    is report and lets an apply a person runs move it to enforce (rule
+    B), where a written `report` would pin the node there"""
+    ruleset = tree.read(firewall.PATH)
+    state = firewall.file_state(ruleset.text)
+    if state == firewall.ENFORCE:
+        sections["firewall"] = {"state": state}
+        return inferred("firewall.state", state,
+                        f"{ruleset.path}, keel's ruleset")
+    if state == firewall.REPORT:
+        return missing("firewall.state", (
+            f"{ruleset.path} is keel's ruleset in report: left out, so an"
+            " apply a person runs may still move it to enforce"))
+    return missing("firewall.state", (
+        f"{ruleset.path}: no ruleset of keel's; with no state the next"
+        " apply writes report, and `off` is a choice inspect cannot see"))
 
 
 def top_of(catalog: Catalog, names: list[str]) -> list[str]:

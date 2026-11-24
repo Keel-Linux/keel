@@ -90,10 +90,40 @@ class InstallRuleset:
     path: str
     content: str
     summary: str
+    # set where the run survives a refusal (no explicit enforce): what
+    # then; the step's later actions are skipped all the same
+    otherwise: str | None = None
 
     def describe(self) -> str:
         return (f"{self.summary}; checked by nft -c as a copy first, so a"
                 " file nft refuses is never put in place (mode 0600)")
+
+
+@dataclass(frozen=True)
+class RecordState:
+    """Write keel's record of the firewall state (keel.system.fwrecord):
+    by a rename, so a link at its path is never followed"""
+
+    state: str
+    summary: str
+    # the sha256 of the ruleset the apply loaded (fwrecord.ruleset_hash)
+    digest: str = ""
+
+    def describe(self) -> str:
+        return f"{self.summary} (mode 0600, by a rename)"
+
+
+@dataclass(frozen=True)
+class KeepCopy:
+    """Write keel's last good copy of the ruleset (keel.system.fwrecord)
+    by a rename, beside the record: keel firewall repair restores it
+    first, with no spec needed"""
+
+    content: str
+    summary: str
+
+    def describe(self) -> str:
+        return f"{self.summary} (mode 0600, by a rename)"
 
 
 @dataclass(frozen=True)
@@ -461,7 +491,8 @@ class Refuse:
 Change = (Run | RunSql | WriteFile | RemoveFile | MakeDir | Symlink
           | SwitchNetwork | GenerateKey | AdoptKey | SeedReplica
           | LockReplica | UnlockAccounts | PromoteReplica | Attempt
-          | AddBouncer | SetBouncerMode | InstallRuleset
+          | AddBouncer | SetBouncerMode | InstallRuleset | RecordState
+          | KeepCopy
           | EnsureDatabaseTls | FollowVip)
 Action = Change | Note | Refuse
 

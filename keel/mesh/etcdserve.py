@@ -65,6 +65,20 @@ from keel.network.wireguard import is_key, same_key
 ENGINES = ("mariadb", "postgresql")
 
 
+def start_answered(member: Etcd) -> bool:
+    """etcd.start for an answer to a message: it waits a short time for
+    the sync lock that a person's keel spec apply holds, then answers
+    busy (503), rather than hold the bridge, one question at a time,
+    for up to 600 s; the sender sends it again (the third review of
+    decision 0097)"""
+    from keel.mesh import sync
+    with sync.sync_lock(member.root, sync.BUSY_WAIT, "an etcd message",
+                        reentrant=True) as held:
+        if not held:
+            raise Refusal(503, sync.BUSY)
+        return etcd.start(member)
+
+
 class Refusal(Exception):
     def __init__(self, status: int, reason: str):
         super().__init__(reason)
@@ -173,7 +187,7 @@ def taken(member: Etcd, message: etcdmsg.Message) -> Answer:
         if same(held, cluster):
             # the record this node took: started again, when it never
             # started (keel mesh etcd form sends it again)
-            started = etcd.start(member)
+            started = start_answered(member)
             return Answer(200, json.dumps({"taken": True,
                                            "started": started}).encode())
         raise Refusal(409, "this node is in a cluster already: a cluster"
@@ -205,7 +219,7 @@ def taken(member: Etcd, message: etcdmsg.Message) -> Answer:
         return Answer(200, b'{"taken": true, "started": false}')
     etcdstate.save_cluster(member.root, cluster)
     etcdca.taken(member.root, cluster)
-    started = etcd.start(member)
+    started = start_answered(member)
     member.err(f"etcd: a cluster of {len(cluster.members)} from"
                f" {message.sender}; {'started' if started else 'not started'}")
     return Answer(200, json.dumps({"taken": True,
@@ -239,7 +253,7 @@ def reissued(member: Etcd, message: etcdmsg.Message) -> Answer:
         raise Refusal(403, problem)
     etcdstate.take_grant(member.root, grant, etcd.own_address(member.node))
     started = etcdstate.cluster(member.root) is not None and \
-        etcd.start(member)
+        start_answered(member)
     member.err(f"etcd: this node's certificate signed by the root, from"
                f" {message.sender}; no intermediate held any more")
     return Answer(200, json.dumps({"taken": True,
@@ -255,7 +269,7 @@ def crl_taken(member: Etcd, message: etcdmsg.Message) -> Answer:
         raise Refusal(400, str(e)) from None
     kept = etcdstate.take_crl(member.root, found)
     if kept and etcdstate.cluster(member.root) is not None:
-        etcd.start(member)
+        start_answered(member)
     return Answer(200, json.dumps({"taken": kept}).encode())
 
 
@@ -408,7 +422,7 @@ def holder(member: Etcd, message: etcdmsg.Message) -> Answer:
                f" {message.sender}")
     if etcdstate.cluster(member.root) is not None:
         removed_from_etcd(member, address)
-        etcd.start(member)
+        start_answered(member)
     return Answer(200, json.dumps({"crl": found}).encode())
 
 

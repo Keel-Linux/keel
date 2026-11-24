@@ -15,6 +15,9 @@ from keel.system import filesync_io as io
 GUI_ADDRESS = "127.0.0.1"
 GUI_PORT = 8384
 PORT = 22000
+# where Syncthing listens with no overlay address: no peer can come, and
+# the loopback keeps it off every public address (decision 0097)
+LOOPBACK_LISTEN = "127.0.0.1"
 TIMEOUT = 5
 VERSIONING_KEEP = 5
 SEND = "sendonly"

@@ -69,6 +69,13 @@ def execute(
                     lines.append(prefix + action.describe()
                                  + f": not done: {problem};"
                                  f" {action.otherwise}")
+                elif getattr(action, "otherwise", None):
+                    # a failure the run survives, whose later actions
+                    # need it (a ruleset nft refused is not loaded)
+                    lines.append(prefix + action.describe()
+                                 + f": not done: {problem};"
+                                 f" {action.otherwise}")
+                    broken = True
                 else:
                     lines.append(prefix + action.describe()
                                  + f": failed: {problem}")

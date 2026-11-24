@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 
 import yaml
 
-from keel import spec
+from keel import exits, spec
 from keel.commands import apply_system, manifest_facts, paired_vips
 from keel.mesh.protocol import Peer
 from keel.network import confirm as netconfirm
@@ -61,10 +61,11 @@ class Change:
 
 
 def live_apply(doc: dict, root: str, window: int) -> int:
-    """apply --system-only --skip-uplink"""
+    """apply --system-only --skip-uplink, with no person: it never
+    begins the firewall's enforcement (decision 0097)"""
     return apply_system(doc, root, False, "keel mesh",
                         defer_certificate=True, network_window=window,
-                        skip_uplink=True)
+                        skip_uplink=True, attended=False)
 
 
 @dataclass
@@ -112,7 +113,23 @@ class Node:
                             f" {e.strerror or e}") from None
 
     def change(self, doc: dict, window: int | None = None) -> Change:
-        """Write `doc` and apply it; the change waiting, if any"""
+        """Write `doc` and apply it; the change waiting, if any
+
+        Under the sync lock (decision 0097, the second review of the
+        firewall change): invite admission, join, create and the etcd
+        start apply unattended here, and must not interleave with a
+        person's keel spec apply, which holds the same lock. Inside keel
+        mesh sync, which holds it in this thread, it does not wait."""
+        from keel.mesh import sync
+        with sync.sync_lock(self.root, sync.LOCK_WAIT, "a keel mesh change",
+                            reentrant=True) as held:
+            if not held:
+                return Change(exits.APPLY_FAILED, None, (
+                    f"{sync.holder(self.root)} holds the sync lock after"
+                    f" {sync.LOCK_WAIT:g} s: nothing was applied",))
+            return self.locked_change(doc, window)
+
+    def locked_change(self, doc: dict, window: int | None) -> Change:
         self.write(doc)
         said = io.StringIO()
         # standard output stays the command's own: the line to paste,

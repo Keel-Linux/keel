@@ -198,19 +198,66 @@ def spec_apply(args) -> int:
             return code
     if not with_system:
         return exits.OK
-    code = apply_system(
-        doc, root, dry_run, phase_label(system_only),
-        getattr(args, "destroy_local_database", False),
-        getattr(args, "defer_certificate", False),
-        getattr(args, "network_window", DEFAULT_WINDOW),
-        getattr(args, "skip_network", False),
-        getattr(args, "skip_uplink", False),
-        spec_path=args.spec,
-    )
+    try:
+        code = locked_apply(args, doc, root, dry_run, system_only)
+    except LockError as e:
+        error(f"keel spec apply: {e}; nothing was applied")
+        return exits.APPLY_FAILED
     if code == exits.OK and not dry_run:
         from keel.system import bootrefusal
         bootrefusal.clear(root)
     return code
+
+
+def locked_apply(args, doc: dict, root: str, dry_run: bool,
+                 system_only: bool) -> int:
+    with apply_lock(root, dry_run) as held:
+        if not held:
+            error("keel spec apply: a keel mesh operation holds the sync"
+                  " lock and did not let it go; nothing was applied, apply"
+                  " again")
+            return exits.APPLY_FAILED
+        return apply_system(
+            doc, root, dry_run, phase_label(system_only),
+            getattr(args, "destroy_local_database", False),
+            getattr(args, "defer_certificate", False),
+            getattr(args, "network_window", DEFAULT_WINDOW),
+            getattr(args, "skip_network", False),
+            getattr(args, "skip_uplink", False),
+            spec_path=args.spec, attended=True,
+        )
+
+
+class LockError(Exception):
+    """The sync lock's file cannot be opened"""
+
+
+MESH_DIR = "var/lib/keel/mesh"
+
+
+@contextlib.contextmanager
+def apply_lock(root: str, dry_run: bool):
+    """The live apply holds the lock of keel mesh's applies, so the two
+    never interleave: keel mesh could write the firewall's report over
+    the enforce a person's apply just wrote (decision 0097). A dry run,
+    a --root apply and a node with no mesh directory (no mesh apply can
+    run there; none is made) take none."""
+    if dry_run or os.path.abspath(root) != ROOT_DEFAULT or \
+            not os.path.isdir(os.path.join(root, MESH_DIR)):
+        yield True
+        return
+    from keel.mesh import sync
+    entered = False
+    try:
+        with sync.sync_lock(root, sync.LOCK_WAIT, "keel spec apply",
+                            say=warn) as held:
+            entered = True
+            yield held
+    except OSError as e:
+        if entered:
+            raise
+        raise LockError(f"the sync lock of keel mesh cannot be taken:"
+                        f" {e.strerror or e}") from e
 
 
 def phase_label(system_only: bool) -> str:
@@ -246,6 +293,7 @@ def apply_system(
     confirmed: bool = False, defer_certificate: bool = False,
     network_window: int = DEFAULT_WINDOW, skip_network: bool = False,
     skip_uplink: bool = False, spec_path: str | None = None,
+    attended: bool = False,
 ) -> int:
     """Observe, plan, then carry out or only print; one line per action
 
@@ -259,6 +307,11 @@ def apply_system(
 
     A run that is not a dry run may start the database server it
     converges before asking it anything (keel.system.dbready).
+
+    `attended` is keel spec apply, a person's command (the first boot
+    hook and confconsole run it for the person who installs or
+    configures the node); keel mesh applies with no person and leaves it
+    false, so it never begins the firewall's enforcement (decision 0097).
 
     An overlay the chain gained since the spec was last applied is
     converged to its manifest default; a run that did not fail then
@@ -275,11 +328,17 @@ def apply_system(
     doc, _ = with_defaults(doc, facts)
     state = system.observe(root, doc, start=not dry_run, spec=spec_path)
     plan = system.plan(doc, state, confirmed, defer_certificate,
-                       network_window, skip_network, skip_uplink, spec_path)
+                       network_window, skip_network, skip_uplink, spec_path,
+                       attended=attended)
     if not plan.steps:
         print(f"{label}: nothing declared that this phase converges")
         return exits.OK
-    outcome = system.execute(plan, system.Effects(root), dry_run, label)
+    with firewall_lock(root, dry_run) as held:
+        if not held:
+            error(f"{label}: keel firewall repair still holds the firewall"
+                  " lock; nothing was applied, apply again")
+            return exits.APPLY_FAILED
+        outcome = system.execute(plan, system.Effects(root), dry_run, label)
     for line in outcome.lines:
         print(line)
     print(outcome.summary())
@@ -288,6 +347,24 @@ def apply_system(
     if not dry_run:
         record_overlays(declared, facts, root)
     return exits.OK
+
+
+# how long an apply waits for keel firewall repair, which holds the lock
+# a few seconds: a repair never makes an apply fail
+FIREWALL_LOCK_WAIT = 120.0
+
+
+@contextlib.contextmanager
+def firewall_lock(root: str, dry_run: bool):
+    """The live apply carries out its plan under the lock keel firewall
+    repair holds (decision 0097, the sixth real test); a dry run and a
+    --root apply take none"""
+    if dry_run or os.path.abspath(root) != ROOT_DEFAULT:
+        yield True
+        return
+    from keel.system import fwlock
+    with fwlock.held(root, FIREWALL_LOCK_WAIT) as held:
+        yield held
 
 
 def record_overlays(doc: dict, facts, root: str) -> None:
@@ -367,6 +444,36 @@ def network_mtu(args) -> int:
         failed = failed or bad
         (error if bad else print)(line)
     return exits.APPLY_FAILED if failed else exits.OK
+
+
+def firewall_check(args) -> int:
+    """Whether the kernel holds the table keel's file says (decision
+    0097); with --restore, load a lost table again from a sound file,
+    and say nothing when all is well (keel-firewall-watch.timer)"""
+    root = getattr(args, "root", ROOT_DEFAULT)
+    if getattr(args, "restore", False):
+        from keel.system import fwwatch
+        code, lines = fwwatch.watch(root)
+        for line in lines:
+            (warn if code == exits.OK else error)(line)
+        return code
+    from keel.system import fwcheck
+    found = fwcheck.check(root)
+    (print if found.code == exits.OK else error)(found.message)
+    return found.code
+
+
+def firewall_repair(args) -> int:
+    """An empty, cut or missing ruleset file of a node in enforce, written
+    again by the apply's firewall step, else a closed fallback loaded and
+    a failure (decision 0097); silent when there is nothing to repair"""
+    from keel.system import fwrepair
+    root = getattr(args, "root", ROOT_DEFAULT)
+    code, lines = fwrepair.repair(root, os.path.abspath(root) == ROOT_DEFAULT,
+                                  boot=getattr(args, "boot", False))
+    for line in lines:
+        (print if code == exits.OK else error)(line)
+    return code
 
 
 def network_wireguard_key(args) -> int:

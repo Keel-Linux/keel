@@ -462,6 +462,11 @@ def server(index: int, pid: int, root: str) -> str:
         manifest_helpers.unit(root, name)
     for name in manifest_helpers.HOOKS:
         manifest_helpers.hook(root, name)
+    # sshd's file, as every machine has it: the firewall keel writes in
+    # every mode (decision 0097) refuses where its ports cannot be read
+    os.makedirs(os.path.join(root, "etc/ssh"), exist_ok=True)
+    with open(os.path.join(root, "etc/ssh/sshd_config"), "w") as fob:
+        fob.write("Port 22\n")
     # the spec where inspect reads the emitted one on a machine
     os.makedirs(os.path.join(root, "etc/keel"), exist_ok=True)
     emitted = os.path.join(root, "etc/keel/instance.yaml")

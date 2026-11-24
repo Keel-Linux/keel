@@ -224,6 +224,12 @@ def manifests(root: str) -> None:
         unit(root, name)
     for name in (*HOOKS, "40blog"):
         hook(root, name)
+    # sshd's file, as every machine has it: the firewall keel writes in
+    # every mode (decision 0097) refuses where the ports sshd listens on
+    # cannot be read
+    os.makedirs(os.path.join(root, "etc/ssh"), exist_ok=True)
+    with open(os.path.join(root, "etc/ssh/sshd_config"), "w") as fob:
+        fob.write("Port 22\n")
 
 
 def bound(pid: int, root: str) -> None:
