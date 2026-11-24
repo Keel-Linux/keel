@@ -28,8 +28,9 @@ from keel.inspect.tree import Tree
 RECORD = "var/lib/keel/firewall/state"
 STATES = ("enforce", "report")
 ROOT_UID = 0
-MODE = 0o644
-DIR_MODE = 0o755
+# root's alone: only keel, as root, reads it
+MODE = 0o600
+DIR_MODE = 0o700
 UNSAFE = stat.S_IWGRP | stat.S_IWOTH
 
 

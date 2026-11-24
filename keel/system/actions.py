@@ -108,7 +108,7 @@ class RecordState:
     summary: str
 
     def describe(self) -> str:
-        return f"{self.summary} (mode 0644, by a rename)"
+        return f"{self.summary} (mode 0600, by a rename)"
 
 
 @dataclass(frozen=True)

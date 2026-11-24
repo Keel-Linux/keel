@@ -110,7 +110,7 @@ class TestWrite(RecordCase):
         path = join(self.root, RECORD)
         found = os.lstat(path)
         self.assertTrue(stat.S_ISREG(found.st_mode))
-        self.assertEqual(stat.S_IMODE(found.st_mode), 0o644)
+        self.assertEqual(stat.S_IMODE(found.st_mode), 0o600)
         self.assertEqual(self.read(), ("enforce", ""))
 
     def test_a_link_at_its_path_is_replaced_not_followed(self):
