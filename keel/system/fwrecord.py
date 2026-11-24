@@ -92,9 +92,16 @@ def write(root: str, state: str) -> str | None:
     directory = os.path.dirname(path)
     try:
         os.makedirs(directory, mode=DIR_MODE, exist_ok=True)
-        if os.path.islink(directory):
+        # opened with no symlink followed, and its mode put right by fd
+        try:
+            held = os.open(directory, os.O_RDONLY | os.O_DIRECTORY
+                           | os.O_NOFOLLOW)
+        except OSError:
             return f"{directory} is a link: the record is not written"
-        os.chmod(directory, DIR_MODE)
+        try:
+            os.fchmod(held, DIR_MODE)
+        finally:
+            os.close(held)
         fd, copy = tempfile.mkstemp(dir=directory, prefix=".state.")
         with os.fdopen(fd, "w") as fob:
             fob.write(f"{state}\n")

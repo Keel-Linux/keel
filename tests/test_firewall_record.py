@@ -126,6 +126,14 @@ class TestWrite(RecordCase):
         self.assertFalse(os.path.islink(join(self.root, RECORD)))
         self.assertEqual(self.read(), ("enforce", ""))
 
+    def test_a_linked_directory_is_not_written_into(self):
+        elsewhere = os.path.join(self.root, "elsewhere")
+        os.makedirs(elsewhere)
+        os.makedirs(os.path.join(self.root, "var/lib/keel"))
+        os.symlink(elsewhere, os.path.join(self.root, "var/lib/keel/firewall"))
+        self.assertIn("is a link", self.apply("enforce"))
+        self.assertEqual(os.listdir(elsewhere), [])
+
     def test_a_wrong_mode_is_put_right(self):
         self.write("enforce\n", 0o666)
         self.assertIsNone(self.apply("enforce"))
