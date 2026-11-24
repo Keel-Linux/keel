@@ -106,6 +106,8 @@ class RecordState:
 
     state: str
     summary: str
+    # the sha256 of the ruleset the apply loaded (fwrecord.ruleset_hash)
+    digest: str = ""
 
     def describe(self) -> str:
         return f"{self.summary} (mode 0600, by a rename)"

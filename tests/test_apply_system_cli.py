@@ -236,6 +236,8 @@ class TestApplySystem(ApplySystemTestCase):
         with AS_ROOT, \
                 mock.patch("keel.commands.apply_lock",
                            return_value=held), \
+                mock.patch("keel.commands.firewall_lock",
+                           return_value=contextlib.nullcontext(True)), \
                 mock.patch.object(system, "observe",
                                   return_value=fake_state) as observe, \
                 mock.patch.object(system, "plan",

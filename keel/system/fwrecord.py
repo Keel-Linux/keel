@@ -19,7 +19,9 @@ has: a record that says enforce on a fresh node gives enforce at once
 """
 
 import contextlib
+import hashlib
 import os
+import re
 import stat
 import tempfile
 
@@ -33,6 +35,7 @@ STATES = ("enforce", "report", "off")
 # repair: it does not need the spec, and keeps the declared ports open
 COPY = "var/lib/keel/firewall/last-good.nft"
 COPY_LIMIT = 1 << 20
+HASH_RE = re.compile(r"[0-9a-f]{64}")
 ROOT_UID = 0
 # root's alone: only keel, as root, reads it
 MODE = 0o600
@@ -43,15 +46,32 @@ UNSAFE = stat.S_IWGRP | stat.S_IWOTH
 def read(tree: Tree) -> tuple[str | None, str]:
     """The recorded state, and a warning when a record is there and is
     not trusted; (None, "") when there is none"""
-    text, problem = read_file(tree, RECORD, 64)
+    state, _, warning = read_full(tree)
+    return state, warning
+
+
+def read_full(tree: Tree) -> tuple[str | None, str | None, str]:
+    """The recorded state, the sha256 of the ruleset the last apply
+    loaded (None when the record has none), and a warning"""
+    text, problem = read_file(tree, RECORD, 160)
     if problem:
-        return None, untrusted(RECORD, problem)
+        return None, None, untrusted(RECORD, problem)
     if text is None:
-        return None, ""
-    value = text.strip()
-    if value not in STATES:
-        return None, untrusted(RECORD, "it is not a state keel writes")
-    return value, ""
+        return None, None, ""
+    words = text.split()
+    state = words[0] if words else ""
+    digest = words[1] if len(words) == 2 else None
+    if state not in STATES or len(words) > 2 or (
+            digest is not None and not HASH_RE.fullmatch(digest)):
+        return None, None, untrusted(RECORD, "it is not a state keel writes")
+    return state, digest, ""
+
+
+def ruleset_hash(text: str) -> str:
+    """The sha256 of a ruleset as keel wrote it, state line included:
+    the record holds the one of the last apply, and the last good copy
+    is restored only when it has it (the sixth real test)"""
+    return hashlib.sha256(text.encode()).hexdigest()
 
 
 def read_copy(tree: Tree) -> tuple[str | None, str]:
@@ -113,9 +133,11 @@ def untrusted(relative: str, why: str) -> str:
             " the next apply writes it again, root's alone")
 
 
-def write(root: str, state: str) -> str | None:
-    """Write the record by a rename; None, or why it failed"""
-    return write_file(root, RECORD, f"{state}\n", "the record")
+def write(root: str, state: str, digest: str = "") -> str | None:
+    """Write the record by a rename: the state, and the sha256 of the
+    ruleset the apply loaded; None, or why it failed"""
+    line = f"{state} {digest}" if digest else state
+    return write_file(root, RECORD, f"{line}\n", "the record")
 
 
 def write_copy(root: str, text: str) -> str | None:

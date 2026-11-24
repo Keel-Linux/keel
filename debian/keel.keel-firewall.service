@@ -9,8 +9,9 @@
 # closed from its first packet; a file in report drops nothing. The file replaces keel's own table `inet keel` in
 # one transaction and touches no other rule. Before the load, keel
 # firewall repair writes an empty, cut or missing file of a node in
-# enforce again (or loads a closed fallback and fails the unit); with
-# no spec, systemd skips the unit.
+# enforce again (or loads a closed fallback and fails the unit). The
+# unit runs with or without a spec: the program decides from evidence
+# (file, record, copy, table), and is silent where there is none.
 #
 # A file nft refuses fails the unit: the node comes up without keel's
 # table, and is degraded, which is visible. A table lost later comes
@@ -29,7 +30,6 @@ After=local-fs.target nftables.service
 Wants=network-pre.target
 Before=network-pre.target shutdown.target
 Conflicts=shutdown.target
-ConditionPathExists=/etc/keel/instance.yaml
 
 [Service]
 Type=oneshot

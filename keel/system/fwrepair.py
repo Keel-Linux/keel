@@ -44,7 +44,12 @@ from keel.spec.validate_firewall import declared_state
 from keel.system import fwrecord
 
 SPEC = "etc/keel/instance.yaml"
+# how long the repair waits for an apply that holds the firewall lock
+LOCK_WAIT = 5.0
 FALLBACK = "run/keel/firewall-fallback.nft"
+SPEC_BROKEN = (f"/{SPEC} cannot be read or parsed: the node keeps the"
+               " ruleset of its last apply, and this stays a failure until"
+               " the spec is put right and keel spec apply --system runs")
 
 
 def spec_doc(root: str) -> dict | None:
@@ -78,12 +83,27 @@ def sound(text: str | None) -> bool:
         digest_of(text) == loaded_digest(text)
 
 
-def repair(root: str, live: bool = True, run=None,
-           boot: bool = False) -> tuple[int, list[str]]:
+def repair(root: str, live: bool = True, run=None, boot: bool = False,
+           lock: bool | None = None) -> tuple[int, list[str]]:
     """The exit code and the lines to say; (OK, []) when there is
     nothing to repair. A node with no evidence of a firewall (no file,
     no trusted record, no loaded table) is NOT APPLIED, not a failure.
-    `boot` is kept for the unit's command line"""
+    `boot` is kept for the unit's command line. On the live system (or
+    with `lock`) it holds the lock the apply holds, and skips its run
+    when an apply has it (keel.system.fwlock)"""
+    if not (live if lock is None else lock):
+        return attempt(root, live, run)
+    from keel.system import fwlock
+    with fwlock.held(root, LOCK_WAIT) as held:
+        if not held:
+            return exits.OK, ["an apply holds the firewall lock: this"
+                              " repair skips its run; the next one, or the"
+                              " apply, puts the ruleset right"]
+        return attempt(root, live, run)
+
+
+def attempt(root: str, live: bool, run) -> tuple[int, list[str]]:
+    """The repair itself, under the lock where there is one"""
     run = run or subprocess.run
     doc = spec_doc(root)
     text = read_file(root)
@@ -99,12 +119,19 @@ def repair(root: str, live: bool = True, run=None,
         if text is None or doc is None:
             return exits.OK, []
         return finish(root, doc, live, run, evidence, step(root, doc, live))
-    restored = restore_copy(root, live, run)
+    restored, said = restore_copy(root, live, run)
+    if restored and doc is None:
+        # closed by the copy, and loud until the spec is put right (the
+        # sixth real test: check exit 0, the node running)
+        return exits.DRIFT_FOUND, said + [SPEC_BROKEN]
     if restored:
-        return exits.OK, restored
+        return exits.OK, said
     if doc is None:
-        return unreadable(root, live, run, evidence)
-    return finish(root, doc, live, run, evidence, step(root, doc, live))
+        code, lines = unreadable(root, live, run, evidence)
+        return code, said + lines
+    code, lines = finish(root, doc, live, run, evidence,
+                         step(root, doc, live))
+    return code, said + lines
 
 
 def finish(root: str, doc: dict, live: bool, run, evidence: str | None,
@@ -135,29 +162,36 @@ def unreadable(root: str, live: bool, run,
     return exits.APPLY_FAILED, [said] + load_fallback(root, {}, live, run)
 
 
-def restore_copy(root: str, live: bool, run) -> list[str]:
+def restore_copy(root: str, live: bool, run) -> tuple[bool, list[str]]:
     """keel's last good copy of the ruleset, put back and loaded: it does
-    not need the spec, and keeps the declared ports open; [] when there
-    is no sound copy or it cannot be put back"""
+    not need the spec, and keeps the declared ports open. Valid only when
+    its sha256 is the one keel's record holds, the ruleset of the last
+    apply (the sixth real test: an old copy opened a removed port again,
+    and a report copy put an enforce node in report). Whether it was
+    restored, and what to say"""
     from keel.system.actions import InstallRuleset
     from keel.system.effects import Effects
     copy, _ = fwrecord.read_copy(Tree(root))
     if not sound(copy):
-        return []
+        return False, []
+    _, digest, _ = fwrecord.read_full(Tree(root))
+    if digest != fwrecord.ruleset_hash(copy):
+        return False, [f"/{fwrecord.COPY} is not the ruleset of the last"
+                       " apply (its hash is not the one keel's record"
+                       " holds): it is not restored"]
     problem = Effects(root).apply(InstallRuleset(
         PATH, copy, f"restore /{PATH} from keel's last good copy"))
-    if problem:
-        return []
-    if live:
+    if problem is None and live:
         try:
             out = run(["nft", "-f", os.path.join(root, PATH)],
                       capture_output=True, text=True, check=False)
-        except OSError:
-            return []
-        if out.returncode != 0:
-            return []
-    return [f"/{PATH} restored from keel's last good copy"
-            f" (/{fwrecord.COPY})"]
+            problem = None if out.returncode == 0 else "nft -f refused it"
+        except OSError as e:
+            problem = f"nft cannot run: {e.strerror}"
+    if problem:
+        return False, [f"keel's last good copy is not restored: {problem}"]
+    return True, [f"/{PATH} restored from keel's last good copy"
+                  f" (/{fwrecord.COPY})"]
 
 
 def evidence_of(root: str, run=None) -> str | None:

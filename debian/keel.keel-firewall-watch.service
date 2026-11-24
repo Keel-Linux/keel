@@ -9,7 +9,6 @@
 # SyslogLevel lets keel's own lines through.
 [Unit]
 Description=keel: load keel's firewall table again when it is lost
-ConditionPathExists=/etc/keel/instance.yaml
 
 [Service]
 Type=oneshot

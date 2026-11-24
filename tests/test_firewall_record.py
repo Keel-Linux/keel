@@ -165,6 +165,30 @@ class TestDirectoryPutRight(RecordCase):
         self.assertEqual(self.read(), ("off", ""))
 
 
+class TestDigest(RecordCase):
+    """the sixth real test: the repair loaded an old copy; the record
+    now holds the sha256 of the ruleset the last apply loaded, and the
+    copy is valid only when it has that hash"""
+
+    def test_the_record_holds_the_state_and_the_ruleset_s_hash(self):
+        digest = fwrecord.ruleset_hash("table x\n")
+        self.assertIsNone(fwrecord.write(self.root, "enforce", digest))
+        self.assertEqual(fwrecord.read_full(Tree(self.root)),
+                         ("enforce", digest, ""))
+        self.assertEqual(self.read(), ("enforce", ""))
+
+    def test_a_record_with_no_hash_has_none(self):
+        self.write("enforce\n")
+        self.assertEqual(fwrecord.read_full(Tree(self.root)),
+                         ("enforce", None, ""))
+
+    def test_a_hash_that_is_not_one_is_not_trusted(self):
+        self.write("enforce nothex\n")
+        state, digest, warning = fwrecord.read_full(Tree(self.root))
+        self.assertEqual((state, digest), (None, None))
+        self.assertIn("is not a state keel writes", warning)
+
+
 class TestCopy(RecordCase):
     def test_the_last_good_copy_round_trip(self):
         self.assertEqual(fwrecord.read_copy(Tree(self.root)), (None, ""))

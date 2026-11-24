@@ -73,8 +73,14 @@ from keel.system.actions import (
     WriteFile,
 )
 from keel.system.dbmariadb import overlay_addresses
-from keel.system.fwrecord import COPY
-from keel.system.fwstate import BOOT_UNIT, RECORD, WATCH_TIMER, FirewallState
+from keel.system.fwrecord import COPY, ruleset_hash
+from keel.system.fwstate import (
+    BOOT_UNIT,
+    RECORD,
+    WATCH_TIMER,
+    WATCH_UNIT,
+    FirewallState,
+)
 from keel.system.listeners import classify, declared_units, unopened
 
 FIELD = "derived.firewall"
@@ -376,19 +382,27 @@ def load(ruleset: Ruleset, state: FirewallState, live: bool,
     else:
         actions.append(Note(f"unchanged (/{PATH}, loaded as table inet"
                             " keel)"))
-    if state.recorded != ruleset.state:
-        actions.append(RecordState(ruleset.state, (
-            f"record /{RECORD}: {ruleset.state}, the state a broken file"
-            " cannot lose")))
+    # the copy first, then the record that names its hash: a copy that
+    # fails to be written leaves the record of the copy that is there
     if state.copy != ruleset.text:
         actions.append(KeepCopy(ruleset.text, (
             f"keep /{COPY}: the last good copy keel firewall repair"
             " restores first")))
+    digest = ruleset_hash(ruleset.text)
+    if (state.recorded, state.recorded_digest) != (ruleset.state, digest):
+        actions.append(RecordState(ruleset.state, (
+            f"record /{RECORD}: {ruleset.state} and the hash of this"
+            " ruleset, which a broken file cannot lose"), digest))
     if live and state.boot_failed:
         actions.append(Attempt(("systemctl", "restart", BOOT_UNIT), (
             f"restart {BOOT_UNIT}, failed since the boot: it loads this"
             " file, and the node is not degraded any more"),
             f"{BOOT_UNIT} stays failed: systemctl reset-failed clears it"))
+    if live and state.watch_failed:
+        actions.append(Attempt(("systemctl", "reset-failed", WATCH_UNIT), (
+            f"clear {WATCH_UNIT}: the ruleset is loaded, and the node is"
+            " not degraded any more"),
+            f"{WATCH_UNIT} stays failed until its next run"))
     if live and state.watch is False:
         actions.append(watch_start(state))
     return actions

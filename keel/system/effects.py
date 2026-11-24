@@ -154,7 +154,8 @@ class Effects:
             if isinstance(action, InstallRuleset):
                 return fwinstall.install(self.tree.root, action)
             if isinstance(action, RecordState):
-                return fwrecord.write(self.tree.root, action.state)
+                return fwrecord.write(self.tree.root, action.state,
+                                      action.digest)
             if isinstance(action, KeepCopy):
                 return fwrecord.write_copy(self.tree.root, action.content)
             if isinstance(action, RunSql):

@@ -1360,7 +1360,20 @@ declared ports open. A spec that cannot be read or parsed never means
 "do nothing" on a node in enforce: the copy is restored, else the closed
 fallback is loaded and the unit fails. keel's record also says `off`
 when the spec does, so the watch's shell knows it from that one file of
-keel's and never from text in the spec. A successful apply restarts a
+keel's and never from text in the spec. Both units run with or without a spec: the
+program decides from evidence (the file, the record, the copy, the
+loaded table), and is silent where there is none. The record holds the
+sha256 of the ruleset the last apply loaded, and the copy is restored
+only when it has that hash; else the node in enforce gets the closed
+fallback, and a node in report a loud failure. While the spec cannot be
+read or parsed, the node keeps its last ruleset and `keel firewall
+check`, the watch and the repair fail until the spec is put right. The
+watch's shell trusts keel's record only as Python does (a root-owned
+0700 directory, a root-owned regular 0600 file, no symlink); any doubt
+goes to Python. The apply and the repair take one lock,
+`/run/keel/firewall.lock`: the repair skips its run while an apply holds
+it, and never makes an apply fail. An apply also clears a failed watch
+unit at once. A successful apply restarts a
 `keel-firewall.service` that failed at boot, so the node is no longer
 degraded, and puts keel's directory right (root's, 0700). A pair node
 whose copy is lost too and that runs in the bare fallback serves no

@@ -109,6 +109,30 @@ class TestCheck(ManifestCase):
     intact passed. It now checks the file's rules against the digest,
     nft -c of the file, and the loaded table's digest and policy."""
 
+    def setUp(self):
+        super().setUp()
+        self.spec("version: 1\nappliance: {name: core}\n")
+
+    def spec(self, text: str) -> None:
+        os.makedirs(join(self.root, "etc/keel"), exist_ok=True)
+        with open(join(self.root, "etc/keel/instance.yaml"), "w") as fob:
+            fob.write(text)
+
+    def test_a_sound_table_with_a_spec_that_cannot_be_parsed_fails(self):
+        """the sixth real test: the copy kept the node closed, and check
+        said 0 while the spec did not parse"""
+        digest = self.ruleset()
+        for broken in ("broken: [unclosed\n", None):
+            with self.subTest(spec=broken):
+                if broken is None:
+                    os.remove(join(self.root, "etc/keel/instance.yaml"))
+                else:
+                    self.spec(broken)
+                found = self.check(Nft(listing=listing(digest)))
+                self.assertEqual(found.code, exits.DRIFT_FOUND)
+                self.assertIn("cannot be read or parsed", found.message)
+                self.assertFalse(found.restorable)
+
     def ruleset(self, edit=None) -> str:
         catalog = Catalog(self.root)
         resolved, _ = resolve(catalog, catalog.read(APPLIANCE, "core"))
@@ -129,9 +153,8 @@ class TestCheck(ManifestCase):
 
     def test_no_file_of_keel_s_is_nothing_to_check(self):
         found = self.check(Nft())
-        self.assertEqual((found.code, found.message), (exits.OK, (
-            f"{self.root}/{PATH}: no ruleset of keel's, nothing to"
-            " compare")))
+        self.assertEqual(found.code, exits.OK)
+        self.assertIn("NOT APPLIED", found.message)
 
     def test_the_table_the_file_says(self):
         digest = self.ruleset()
@@ -491,6 +514,9 @@ class TestWatchShell(TestCheckReal):
         os.chmod(recorder, 0o755)
         watch = join(REPO, "firewall", "firewall-watch")
         nftdir = os.path.dirname(self.nft)
+        os.makedirs(join(self.root, "etc/keel"), exist_ok=True)
+        with open(join(self.root, "etc/keel/instance.yaml"), "w") as fob:
+            fob.write("version: 1\nappliance: {name: core}\n")
         script = (
             f"export PATH={nftdir}:$PATH"
             f" KEEL_FIREWALL_FILE={target}"
@@ -498,6 +524,8 @@ class TestWatchShell(TestCheckReal):
             f" KEEL_BIN={recorder} KEEL_NFT={self.nft}"
             f" KEEL_SPEC_FILE={spec or join(self.root, 'instance.yaml')}"
             f" KEEL_FIREWALL_RECORD={self.root}/var/lib/keel/firewall/state"
+            f" KEEL_FIREWALL_COPY={self.root}/var/lib/keel/firewall/"
+            f"last-good.nft KEEL_ROOT_UID=$(id -u)"
             f" PYTHONPATH={REPO};"
             f" {self.nft} -f {target} &&"
             f" {sys.executable} -m keel firewall check --restore"
@@ -540,26 +568,46 @@ class TestWatchShell(TestCheckReal):
             f"rm {target} && {self.nft} delete table inet keel &&"
             f" {loop}", spec), "")
 
+    def record(self, text: str, dir_mode: int = 0o700,
+               mode: int = 0o600) -> None:
+        record = join(self.root, "var/lib/keel/firewall/state")
+        os.makedirs(os.path.dirname(record), exist_ok=True)
+        with open(record, "w") as fob:
+            fob.write(text)
+        os.chmod(record, mode)
+        os.chmod(os.path.dirname(record), dir_mode)
+
     def test_no_file_with_a_table_hands_over_to_keel_unless_off(self):
         """the fourth real test: file and record lost, the table still
         loaded: keel says it. Off comes from keel's record alone, never
         from text in the spec (the fifth real test: a comment that said
-        `state: off` silenced the watch); no spec runs nothing"""
+        `state: off` silenced the watch)"""
         target = join(self.root, PATH)
-        spec = join(self.root, "instance.yaml")
-        with open(spec, "w") as fob:
-            fob.write("version: 1\nappliance: {name: core}\n"
-                      "# old note: firewall state: off was the choice\n")
-        self.assertEqual(self.scenario(f"rm {target} &&", spec),
+        self.assertEqual(self.scenario(f"rm {target} &&"),
                          "firewall check --restore\n")
         os.remove(join(self.root, "keel.log"))
-        record = join(self.root, "var/lib/keel/firewall/state")
-        os.makedirs(os.path.dirname(record), exist_ok=True)
-        with open(record, "w") as fob:
-            fob.write("off\n")
-        self.assertEqual(self.scenario(f"rm {target} &&", spec), "")
-        self.assertEqual(self.scenario(f"rm {target} &&",
-                                       join(self.root, "none.yaml")), "")
+        self.record("off\n")
+        self.assertEqual(self.scenario(f"rm {target} &&"), "")
+
+    def test_a_record_that_fails_the_trust_test_goes_to_keel(self):
+        """the sixth real test: an unprivileged owner of keel's directory
+        planted `off`, and the shell watch stayed silent on an open
+        node; the shell now applies Python's trust test"""
+        target = join(self.root, PATH)
+        for dir_mode, mode in ((0o777, 0o600), (0o700, 0o644)):
+            with self.subTest(dir=oct(dir_mode), file=oct(mode)):
+                self.record("off\n", dir_mode, mode)
+                self.assertEqual(self.scenario(f"rm {target} &&"),
+                                 "firewall check --restore\n")
+                os.remove(join(self.root, "keel.log"))
+
+    def test_a_missing_spec_still_watches(self):
+        """the sixth real test: a unit condition on the spec skipped the
+        watch, with the table lost and the node open"""
+        target = join(self.root, PATH)
+        self.assertEqual(self.scenario(
+            f"rm {self.root}/etc/keel/instance.yaml && rm {target} &&"),
+            "firewall check --restore\n")
 
 
 class TestLoadedAtBoot(TestCheckReal):
@@ -707,8 +755,9 @@ class TestTableLoss(unittest.TestCase):
                      "AccuracySec=5s", "WantedBy=timers.target"):
             self.assertIn(line, timer)
         service = lines(WATCH + ".service")
+        self.assertFalse([line for line in service
+                          if line.startswith("ConditionPathExists=")])
         for line in ("Type=oneshot",
-                     "ConditionPathExists=/etc/keel/instance.yaml",
                      "ExecStart=/usr/lib/keel/firewall-watch",
                      "LogLevelMax=notice", "SyslogLevel=warning"):
             self.assertIn(line, service)

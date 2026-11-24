@@ -333,7 +333,12 @@ def apply_system(
     if not plan.steps:
         print(f"{label}: nothing declared that this phase converges")
         return exits.OK
-    outcome = system.execute(plan, system.Effects(root), dry_run, label)
+    with firewall_lock(root, dry_run) as held:
+        if not held:
+            error(f"{label}: keel firewall repair still holds the firewall"
+                  " lock; nothing was applied, apply again")
+            return exits.APPLY_FAILED
+        outcome = system.execute(plan, system.Effects(root), dry_run, label)
     for line in outcome.lines:
         print(line)
     print(outcome.summary())
@@ -342,6 +347,24 @@ def apply_system(
     if not dry_run:
         record_overlays(declared, facts, root)
     return exits.OK
+
+
+# how long an apply waits for keel firewall repair, which holds the lock
+# a few seconds: a repair never makes an apply fail
+FIREWALL_LOCK_WAIT = 120.0
+
+
+@contextlib.contextmanager
+def firewall_lock(root: str, dry_run: bool):
+    """The live apply carries out its plan under the lock keel firewall
+    repair holds (decision 0097, the sixth real test); a dry run and a
+    --root apply take none"""
+    if dry_run or os.path.abspath(root) != ROOT_DEFAULT:
+        yield True
+        return
+    from keel.system import fwlock
+    with fwlock.held(root, FIREWALL_LOCK_WAIT) as held:
+        yield held
 
 
 def record_overlays(doc: dict, facts, root: str) -> None:

@@ -92,6 +92,8 @@ class FirewallState:
     # when the record is not trusted, and recorded_warning then says why
     recorded: str | None = None
     recorded_warning: str = ""
+    # the sha256 of the ruleset the last apply loaded, from the record
+    recorded_digest: str | None = None
     # the policy of the table the kernel holds, drop or accept; None
     # when there is none, or when nothing was asked (--root)
     loaded_policy: str | None = None
@@ -99,6 +101,8 @@ class FirewallState:
     copy: str | None = None
     # whether keel-firewall.service is failed; None when not asked
     boot_failed: bool | None = None
+    # whether keel-firewall-watch.service is failed; None when not asked
+    watch_failed: bool | None = None
 
 
 def ports_in(lines: list[str]) -> set[int]:
@@ -173,7 +177,7 @@ def observe_firewall(tree: Tree, live: bool) -> FirewallState:
     running = sshd_ports(listeners, sshd_main_pid() if live else None)
     ports, ssh_note = with_running(ports, source, running)
     fence, fence_note = fence_ports(tree)
-    recorded, warning = fwrecord.read(tree)
+    recorded, digest, warning = fwrecord.read_full(tree)
     listing = table_listing() if live else None
     found = POLICY_RE.search(listing or "")
     policy = found.group(1) if found else None
@@ -193,21 +197,24 @@ def observe_firewall(tree: Tree, live: bool) -> FirewallState:
         ssh_note=ssh_note,
         recorded=recorded,
         recorded_warning=warning,
+        recorded_digest=digest,
         loaded_policy=policy,
         copy=fwrecord.read_copy(tree)[0],
         boot_failed=unit_failed() if live else None,
+        watch_failed=unit_failed(WATCH_UNIT) if live else None,
     )
 
 
 BOOT_UNIT = "keel-firewall.service"
+WATCH_UNIT = "keel-firewall-watch.service"
 
 
-def unit_failed() -> bool | None:
-    """Whether keel-firewall.service is failed (a boot in the fallback)"""
+def unit_failed(unit: str = BOOT_UNIT) -> bool | None:
+    """Whether a unit of keel's firewall is failed (a boot in the
+    fallback, a watch that said a problem)"""
     try:
-        out = subprocess.run(["systemctl", "is-failed", "--quiet",
-                              BOOT_UNIT], capture_output=True, text=True,
-                             check=False)
+        out = subprocess.run(["systemctl", "is-failed", "--quiet", unit],
+                             capture_output=True, text=True, check=False)
     except OSError:
         return None
     return out.returncode == 0

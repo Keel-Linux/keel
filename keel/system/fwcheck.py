@@ -129,6 +129,13 @@ def compare(path: str, text: str, state: str, run) -> Checked:
     differs = rules_differ(listing, text)
     if differs is not None:
         return Checked(exits.DRIFT_FOUND, differs, True)
+    root = path[:-len(PATH)].rstrip("/") or "/"
+    from keel.system import fwrepair
+    if fwrepair.spec_doc(root) is None:
+        # closed by keel's file (or its last good copy), and a failure
+        # until the spec is put right (the sixth real test)
+        return Checked(exits.DRIFT_FOUND, f"table inet keel is the one"
+                       f" {path} says; but {fwrepair.SPEC_BROKEN}")
     return Checked(exits.OK,
                    f"table inet keel is the one {path} says ({wanted})",
                    listing=listing)

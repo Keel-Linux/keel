@@ -93,6 +93,13 @@ keel (0.23.99) unstable; urgency=high
     longer matches text in the spec; an untrusted record is the closed
     side, and the apply puts keel's directory right; a successful apply
     restarts a keel-firewall.service that failed at boot.
+  * After the sixth real test: both firewall units run without a spec
+    and decide from evidence; the record holds the hash of the last
+    applied ruleset, and the copy is restored only when it matches;
+    keel firewall check, the watch and the repair fail while the spec
+    cannot be parsed, the node kept closed; the watch's shell trusts the
+    record only as Python does; the apply and the repair share one lock;
+    an apply clears a failed watch at once.
   * The package depends on nftables and iproute2. An upgrade changes no
     rule and starts or restarts no unit of the firewall (decision 0073):
     the change comes at the next apply, which also starts the timer.

@@ -36,6 +36,7 @@ from keel.system.effects import Effects
 from keel.system.execute import execute
 from keel.system.firewall import PROMOTED, plan_firewall, waiting_notice
 from keel.system.listeners import Listener
+from keel.system.fwrecord import ruleset_hash
 from keel.system.fwstate import (
     RECORD,
     FirewallState,
@@ -90,6 +91,10 @@ class FirewallCase(ManifestCase):
         base = FirewallState(file=ABSENT, loaded=None, ssh_ports=(22,),
                              ssh_source="/r/etc/ssh/sshd_config",
                              pending=False, bridges=())
+        # an established node: its record names the copy it keeps
+        if fields.get("copy") and fields.get("recorded") and \
+                "recorded_digest" not in fields:
+            fields["recorded_digest"] = ruleset_hash(fields["copy"])
         return dataclasses.replace(base, **fields)
 
     def rendered(self):
@@ -499,11 +504,23 @@ class TestCutFile(FirewallCase):
     def test_the_record_follows_what_is_written(self):
         found = self.actions(state=self.state(recorded=None))
         records = [a for a in found if isinstance(a, RecordState)]
-        self.assertEqual([a.state for a in records], ["enforce"])
+        self.assertEqual([(a.state, a.digest) for a in records], [
+            ("enforce", ruleset_hash(self.rendered().text))])
+        kinds = [type(a) for a in found]
+        self.assertLess(kinds.index(KeepCopy), kinds.index(RecordState))
+
+    def test_a_record_of_another_ruleset_is_written_again(self):
         ruleset = self.rendered()
+        found = self.actions(state=self.state(
+            file=File("/r/x", ruleset.text), loaded=ruleset.digest,
+            recorded="enforce", recorded_digest="0" * 64,
+            copy=ruleset.text))
+        self.assertEqual([a.digest for a in found
+                          if isinstance(a, RecordState)],
+                         [ruleset_hash(ruleset.text)])
         same = self.actions(state=self.state(
             file=File("/r/x", ruleset.text), loaded=ruleset.digest,
-            recorded="enforce"))
+            recorded="enforce", copy=ruleset.text))
         self.assertFalse([a for a in same if isinstance(a, RecordState)])
 
     def test_a_loaded_drop_table_is_evidence_of_enforce(self):
@@ -589,6 +606,17 @@ class TestCutFile(FirewallCase):
             file=File("/r/x", ruleset.text), loaded=ruleset.digest,
             recorded="enforce", copy=ruleset.text))
         self.assertFalse([a for a in same if isinstance(a, KeepCopy)])
+
+    def test_a_failed_watch_is_cleared_by_the_apply_at_once(self):
+        """the sixth real test: degraded for 20 to 30 s after the apply,
+        until the watch's next run"""
+        ruleset = self.rendered()
+        found = self.actions(state=self.state(
+            file=File("/r/x", ruleset.text), loaded=ruleset.digest,
+            recorded="enforce", copy=ruleset.text, watch_failed=True))
+        self.assertEqual(found[-1].argv, ("systemctl", "reset-failed",
+                                          "keel-firewall-watch.service"))
+        self.assertIsInstance(found[-1], Attempt)
 
     def test_a_failed_boot_unit_is_restarted_by_the_apply(self):
         """the fifth real test: after a boot in the fallback, the apply
@@ -770,7 +798,10 @@ class TestBootUnit(FirewallCase):
             lines = fob.read().splitlines()
         # the fourth real test: the boot repairs an empty, cut or
         # missing file of a node in enforce before its load
-        self.assertIn("ConditionPathExists=/etc/keel/instance.yaml", lines)
+        # the sixth real test: a condition on the spec skipped the unit
+        # with the table lost; the program decides, from evidence
+        self.assertFalse([line for line in lines
+                          if line.startswith("ConditionPathExists=")])
         self.assertIn("ExecStartPre=/usr/bin/keel firewall repair --boot", lines)
         self.assertIn(f"ExecStart=/bin/sh -c '[ ! -e /{PATH} ] || exec"
                       f" /usr/sbin/nft -f /{PATH}'", lines)

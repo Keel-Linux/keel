@@ -171,7 +171,32 @@ class TestSpecOrCopy(RepairCase):
         with open(join(self.root, PATH)) as fob:
             text = fob.read()
         fwrecord.write_copy(self.root, text)
+        fwrecord.write(self.root, "enforce", fwrecord.ruleset_hash(text))
         return text
+
+    def test_a_copy_that_is_not_the_last_apply_s_is_not_restored(self):
+        """the sixth real test: an old copy opened a removed port again,
+        and a report copy put an enforce node in report"""
+        self.good_copy()
+        # the record names the ruleset of a later apply than the copy's
+        fwrecord.write(self.root, "enforce", "2" * 64)
+        os.remove(join(self.root, PATH))
+        with mock.patch("keel.system.fwinstall.subprocess.run", Loads()):
+            self.broken_spec()
+            (code, lines), nft = self.repair()
+        self.assertEqual(code, exits.APPLY_FAILED)
+        self.assertIn("is not the ruleset of the last apply", " ".join(lines))
+        self.assertIn("keel-fallback", nft.loaded[0])
+        self.assertIsNone(self.file())
+
+    def test_a_report_node_with_a_stale_copy_fails_and_loads_nothing(self):
+        text = self.good_copy()
+        fwrecord.write(self.root, "report", "1" * 64)
+        os.remove(join(self.root, PATH))
+        self.broken_spec()
+        (code, lines), nft = self.repair()
+        self.assertEqual(code, exits.DRIFT_FOUND)
+        self.assertEqual(nft.loaded, [])
 
     def test_the_last_good_copy_is_restored_first_with_no_spec(self):
         text = self.good_copy()
@@ -185,10 +210,13 @@ class TestSpecOrCopy(RepairCase):
                 with mock.patch("keel.system.fwinstall.subprocess.run",
                                 Loads()):
                     (code, lines), _ = self.repair()
-                self.assertEqual(code, exits.OK, lines)
+                # closed by the copy, and a failure until the spec is
+                # put right (the sixth real test: check exit 0)
+                self.assertEqual(code, exits.DRIFT_FOUND, lines)
                 self.assertEqual(self.file(), text)
                 self.assertIn("restored from keel's last good copy",
                               " ".join(lines))
+                self.assertIn("cannot be read or parsed", " ".join(lines))
 
     def test_a_broken_spec_with_enforce_and_no_copy_closes_and_fails(self):
         fwrecord.write(self.root, "enforce")
