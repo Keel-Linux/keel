@@ -85,6 +85,11 @@ class FirewallCase(ManifestCase):
     def setUp(self):
         super().setUp()
         self.resolved = gather(self.root, "core").resolved
+        # keel's state directory is root's on a node; the test's, the
+        # user's (tests/test_firewall_record.py)
+        owner = mock.patch("keel.system.fwrecord.ROOT_UID", os.getuid())
+        owner.start()
+        self.addCleanup(owner.stop)
 
     def state(self, **fields) -> FirewallState:
         # recorded: what keel last wrote (none on a node in the field)
@@ -159,7 +164,8 @@ class TestEnabled(FirewallCase):
                           ("nft", "-f", f"/{PATH}")])
 
     def test_under_a_root_it_is_written_and_loaded_at_boot(self):
-        found = self.actions(live=False, available=frozenset())
+        found = [a for a in self.actions(live=False, available=frozenset())
+                 if not isinstance(a, (KeepCopy, RecordState))]
         self.assertIsInstance(found[0], WriteFile)
         self.assertEqual((found[0].path, found[0].mode), (PATH, 0o600))
         self.assertEqual(found[1].describe(), (
@@ -175,9 +181,9 @@ class TestEnabled(FirewallCase):
         self.assertEqual(found[0].describe(), (
             "SSH stays open: tcp 22, 2222, the ports sshd listens on"
             " (sshd -T)"))
-        self.assertIsInstance(found[1], InstallRuleset)
+        ruleset = next(a for a in found if isinstance(a, InstallRuleset))
         self.assertIn("tcp dport { 22, 2222, 12320, 12321 } accept",
-                      found[1].content)
+                      ruleset.content)
 
     def test_nothing_moves_while_a_network_change_waits(self):
         found = self.actions(state=self.state(pending=True))
@@ -428,7 +434,10 @@ class TestUndecided(FirewallCase):
                                                   ssh_source="x"))
             self.assertEqual([type(a) for a in found], [Refuse])
 
-    def test_a_failed_check_or_load_without_a_word_fails_nothing(self):
+    def test_a_ruleset_that_cannot_be_written_fails_the_apply(self):
+        """keel#309: a full disk; the apply said `not done` and exited 0.
+        The rest of the apply still runs (only this step stops), and the
+        exit says the failure"""
         steps = plan_firewall(doc(enabled=None), self.resolved,
                               self.state(listeners=(SSHD,),
                                          listeners_source="ss"),
@@ -440,7 +449,7 @@ class TestUndecided(FirewallCase):
         with mock.patch("keel.system.fwinstall.subprocess.run", nft), \
                 mock.patch("keel.system.effects.subprocess.run", nft):
             outcome = execute(Plan(tuple(steps)), Effects(self.root))
-        self.assertFalse(outcome.failed)
+        self.assertEqual(outcome.failed, 1)
         text = "\n".join(outcome.lines)
         self.assertIn("not done: nft -c refused the ruleset", text)
         self.assertIn("skipped: load it", text)
@@ -689,6 +698,44 @@ class TestWatch(FirewallCase):
         self.assertTrue(found.watch)
         self.assertEqual(found.watch_enabled, "masked")
         self.assertIsNone(observe_firewall(Tree(self.root), False).watch)
+
+
+class TestStateBeforeLoad(FirewallCase):
+    """keel#308: with a read-only state directory, an apply loaded a new
+    ruleset and could not write the copy or the record; after a later
+    loss of the ruleset file, the repair restored the older copy, and a
+    removed port answered again. The copy and the record are now written
+    before the ruleset file and its load: where they cannot be written,
+    the step stops, and the node stays on the ruleset of its last
+    complete apply, which the copy and the record still name"""
+
+    def test_the_copy_and_the_record_come_before_the_file_and_the_load(self):
+        found = self.actions(state=self.state(recorded=None))
+        kinds = [type(a) for a in found]
+        self.assertLess(kinds.index(KeepCopy), kinds.index(InstallRuleset))
+        self.assertLess(kinds.index(RecordState), kinds.index(InstallRuleset))
+        loads = [i for i, a in enumerate(found)
+                 if getattr(a, "argv", ())[:2] == ("nft", "-f")]
+        self.assertLess(kinds.index(RecordState), loads[0])
+
+    def test_a_read_only_state_directory_changes_no_rule(self):
+        steps = plan_firewall(doc(), self.resolved, self.state(recorded=None),
+                              True, LIVE, True)
+        ran = []
+
+        def nft(argv, **kwargs):
+            ran.append(tuple(argv))
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        with mock.patch("keel.system.fwrecord.write_copy",
+                        return_value="the last good copy cannot be written:"
+                        " Read-only file system"), \
+                mock.patch("keel.system.fwinstall.subprocess.run", nft), \
+                mock.patch("keel.system.effects.subprocess.run", nft):
+            outcome = execute(Plan(tuple(steps)), Effects(self.root))
+        self.assertEqual(outcome.failed, 1)
+        self.assertEqual(ran, [])
+        self.assertFalse(os.path.exists(join(self.root, PATH)))
+        self.assertIn("Read-only file system", "\n".join(outcome.lines))
 
 
 class TestFailedLoad(FirewallCase):
