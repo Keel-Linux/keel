@@ -158,6 +158,78 @@ class TestRepair(RepairCase):
         self.assertNotIn("wg0", fwrepair.fallback((22,), None))
 
 
+class TestSpecOrCopy(RepairCase):
+    """the fifth real test: a spec that did not parse turned off the
+    repair and the fallback, and the node rebooted open and silent"""
+
+    def broken_spec(self):
+        self.spec(SPEC + "broken: [unclosed\n")
+
+    def good_copy(self) -> str:
+        fwrecord.write(self.root, "enforce")
+        self.repair()
+        with open(join(self.root, PATH)) as fob:
+            text = fob.read()
+        fwrecord.write_copy(self.root, text)
+        return text
+
+    def test_the_last_good_copy_is_restored_first_with_no_spec(self):
+        text = self.good_copy()
+        self.broken_spec()
+        for broken in (None, "", text[:100]):
+            with self.subTest(size=None if broken is None else len(broken)):
+                if broken is None:
+                    os.remove(join(self.root, PATH))
+                else:
+                    self.ruleset(broken)
+                with mock.patch("keel.system.fwinstall.subprocess.run",
+                                Loads()):
+                    (code, lines), _ = self.repair()
+                self.assertEqual(code, exits.OK, lines)
+                self.assertEqual(self.file(), text)
+                self.assertIn("restored from keel's last good copy",
+                              " ".join(lines))
+
+    def test_a_broken_spec_with_enforce_and_no_copy_closes_and_fails(self):
+        fwrecord.write(self.root, "enforce")
+        self.broken_spec()
+        (code, lines), nft = self.repair()
+        self.assertEqual(code, exits.APPLY_FAILED)
+        self.assertIn("cannot be read or parsed", " ".join(lines))
+        self.assertIn("policy drop;", nft.loaded[0])
+
+    def test_a_missing_spec_with_enforce_closes_too(self):
+        fwrecord.write(self.root, "enforce")
+        os.remove(join(self.root, fwrepair.SPEC))
+        (code, lines), nft = self.repair()
+        self.assertEqual(code, exits.APPLY_FAILED)
+        self.assertIn("policy drop;", nft.loaded[0])
+
+    def test_a_broken_spec_with_report_fails_loudly_and_opens_nothing(self):
+        fwrecord.write(self.root, "report")
+        self.broken_spec()
+        (code, lines), nft = self.repair()
+        self.assertEqual(code, exits.DRIFT_FOUND)
+        self.assertEqual(nft.loaded, [])
+
+    def test_an_untrusted_record_and_a_broken_file_close(self):
+        """the fifth real test: the boot moved the node to report"""
+        fwrecord.write(self.root, "enforce")
+        self.ruleset("")
+        with mock.patch("keel.system.fwrecord.ROOT_UID", os.getuid() + 1):
+            (code, lines), nft = self.repair()
+        self.assertEqual(code, exits.APPLY_FAILED)
+        self.assertIn("policy drop;", nft.loaded[0])
+        self.assertNotEqual(file_state(self.file()), "report")
+
+    def test_check_with_a_broken_spec_and_enforce_is_drift(self):
+        fwrecord.write(self.root, "enforce")
+        self.broken_spec()
+        found = fwcheck.check(self.root, Loads())
+        self.assertEqual(found.code, exits.DRIFT_FOUND)
+        self.assertIn("cannot be read or parsed", found.message)
+
+
 class TestCheckMissing(RepairCase):
     """the fourth real test: file and record lost, check exit 0"""
 

@@ -1352,7 +1352,20 @@ node upgraded from 0.23.97, or a new node before its first apply) the
 node is NOT APPLIED, a state: the boot unit and the watch exit 0 and say
 nothing, and `keel firewall check` says NOT APPLIED and exits 0. A file,
 record and table all lost by a reboot leave no evidence, and that node
-is then NOT APPLIED until the next apply (a known limit). An apply that finds no
+is then NOT APPLIED until the next apply (a known limit). Each apply that loads the
+ruleset also keeps a last good copy of it,
+`/var/lib/keel/firewall/last-good.nft` (root's, written by a rename),
+and the repair restores that copy first: it needs no spec and keeps the
+declared ports open. A spec that cannot be read or parsed never means
+"do nothing" on a node in enforce: the copy is restored, else the closed
+fallback is loaded and the unit fails. keel's record also says `off`
+when the spec does, so the watch's shell knows it from that one file of
+keel's and never from text in the spec. A successful apply restarts a
+`keel-firewall.service` that failed at boot, so the node is no longer
+degraded, and puts keel's directory right (root's, 0700). A pair node
+whose copy is lost too and that runs in the bare fallback serves no
+HTTP or HTTPS on its public address while it holds the VIP (a known
+limit). An apply that finds no
 file and no record but a loaded table with policy drop keeps enforce:
 the table is evidence, and only the spec moves a node out of enforce.
 keel's record, `/var/lib/keel/firewall/state`, is trusted only as a

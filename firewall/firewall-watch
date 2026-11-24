@@ -17,11 +17,13 @@ spec=${KEEL_SPEC_FILE:-/etc/keel/instance.yaml}
 record=${KEEL_FIREWALL_RECORD:-/var/lib/keel/firewall/state}
 
 if [ ! -e "$file" ]; then
-    # no file: nothing to watch where there is no spec, or where it says
-    # off; else keel says it, and writes the file again from its record
-    # or the loaded table (keel firewall repair)
+    # no file: nothing to watch where there is no spec, or where keel's
+    # record says off; else keel says it, and writes the file again
+    # (keel firewall repair)
     [ -e "$spec" ] || exit 0
-    grep -Eq 'state:[[:space:]]*(off|false)\b' "$spec" && exit 0
+    # off from keel's own record, never from text in the spec (a comment
+    # that said `state: off` silenced the watch: the fifth real test)
+    [ "$(cat "$record" 2>/dev/null)" = off ] && exit 0
     # no evidence that this node had a firewall (no record of keel's, no
     # table loaded): NOT APPLIED, a state, not a failure (0073, 0097): a
     # node upgraded from 0.23.97, or a new node before its first apply

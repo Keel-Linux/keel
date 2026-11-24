@@ -86,6 +86,13 @@ keel (0.23.99) unstable; urgency=high
     (else NOT APPLIED, silent, exit 0); an apply keeps enforce when a
     loaded table has policy drop; the record is trusted only as root's
     own regular file, written by a rename, and apt purge removes it.
+  * After the fifth real test: each apply keeps a last good copy of the
+    ruleset, restored first by keel firewall repair with no spec needed;
+    a spec that cannot be parsed never disables the repair or the closed
+    fallback of a node in enforce; the record says off, and the watch no
+    longer matches text in the spec; an untrusted record is the closed
+    side, and the apply puts keel's directory right; a successful apply
+    restarts a keel-firewall.service that failed at boot.
   * The package depends on nftables and iproute2. An upgrade changes no
     rule and starts or restarts no unit of the firewall (decision 0073):
     the change comes at the next apply, which also starts the timer.

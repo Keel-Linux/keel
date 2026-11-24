@@ -542,17 +542,21 @@ class TestWatchShell(TestCheckReal):
 
     def test_no_file_with_a_table_hands_over_to_keel_unless_off(self):
         """the fourth real test: file and record lost, the table still
-        loaded: keel says it; a spec that says off, or no spec, runs
-        nothing"""
+        loaded: keel says it. Off comes from keel's record alone, never
+        from text in the spec (the fifth real test: a comment that said
+        `state: off` silenced the watch); no spec runs nothing"""
         target = join(self.root, PATH)
         spec = join(self.root, "instance.yaml")
         with open(spec, "w") as fob:
-            fob.write("version: 1\nappliance: {name: core}\n")
+            fob.write("version: 1\nappliance: {name: core}\n"
+                      "# old note: firewall state: off was the choice\n")
         self.assertEqual(self.scenario(f"rm {target} &&", spec),
                          "firewall check --restore\n")
-        with open(spec, "w") as fob:
-            fob.write("version: 1\nfirewall: {state: off}\n")
         os.remove(join(self.root, "keel.log"))
+        record = join(self.root, "var/lib/keel/firewall/state")
+        os.makedirs(os.path.dirname(record), exist_ok=True)
+        with open(record, "w") as fob:
+            fob.write("off\n")
         self.assertEqual(self.scenario(f"rm {target} &&", spec), "")
         self.assertEqual(self.scenario(f"rm {target} &&",
                                        join(self.root, "none.yaml")), "")

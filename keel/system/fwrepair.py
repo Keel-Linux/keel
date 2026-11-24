@@ -87,16 +87,30 @@ def repair(root: str, live: bool = True, run=None,
     run = run or subprocess.run
     doc = spec_doc(root)
     text = read_file(root)
-    if not wants_firewall(doc) or sound(text):
+    if sound(text) or (doc is not None and not wants_firewall(doc)):
         return exits.OK, []
     evidence = prior(root, live, run)
-    if text is None and evidence is None:
-        # no file, no trusted record, no loaded table: a node upgraded
-        # from 0.23.97, or a new node before its first apply. NOT
-        # APPLIED is a state (0097), and an upgrade changes nothing by
-        # itself (0073): no write, no load, no failure, no line
-        return exits.OK, []
-    lines = step(root, doc, live)
+    if evidence is None:
+        # no trusted record, no loaded table: a node upgraded from
+        # 0.23.97, or a new node before its first apply, is NOT APPLIED,
+        # a state (0097); an upgrade changes nothing by itself (0073).
+        # A broken file with no evidence goes to the step if the spec
+        # can be read, which writes what an unattended apply writes
+        if text is None or doc is None:
+            return exits.OK, []
+        return finish(root, doc, live, run, evidence, step(root, doc, live))
+    restored = restore_copy(root, live, run)
+    if restored:
+        return exits.OK, restored
+    if doc is None:
+        return unreadable(root, live, run, evidence)
+    return finish(root, doc, live, run, evidence, step(root, doc, live))
+
+
+def finish(root: str, doc: dict, live: bool, run, evidence: str | None,
+           lines: list[str]) -> tuple[int, list[str]]:
+    """After the step: the file sound, else the fallback where the node
+    was in enforce, else a loud failure"""
     if sound(read_file(root)):
         return exits.OK, lines + [f"/{PATH} written again by the"
                                   " firewall step of the apply"]
@@ -107,6 +121,45 @@ def repair(root: str, live: bool = True, run=None,
                                        " keel spec apply --system says why"]
 
 
+def unreadable(root: str, live: bool, run,
+               evidence: str) -> tuple[int, list[str]]:
+    """A spec that cannot be read or parsed never means do nothing on a
+    node with evidence of a firewall (the fifth real test): closed and
+    failed where it was in enforce, loud where it was in report"""
+    said = (f"/{SPEC} cannot be read or parsed, and keel's record (or the"
+            f" loaded table) says {evidence}")
+    if evidence != "enforce":
+        return exits.DRIFT_FOUND, [f"{said}: /{PATH} is not written again;"
+                                   " keel spec apply --system writes it"
+                                   " once the spec is put right"]
+    return exits.APPLY_FAILED, [said] + load_fallback(root, {}, live, run)
+
+
+def restore_copy(root: str, live: bool, run) -> list[str]:
+    """keel's last good copy of the ruleset, put back and loaded: it does
+    not need the spec, and keeps the declared ports open; [] when there
+    is no sound copy or it cannot be put back"""
+    from keel.system.actions import InstallRuleset
+    from keel.system.effects import Effects
+    copy, _ = fwrecord.read_copy(Tree(root))
+    if not sound(copy):
+        return []
+    problem = Effects(root).apply(InstallRuleset(
+        PATH, copy, f"restore /{PATH} from keel's last good copy"))
+    if problem:
+        return []
+    if live:
+        try:
+            out = run(["nft", "-f", os.path.join(root, PATH)],
+                      capture_output=True, text=True, check=False)
+        except OSError:
+            return []
+        if out.returncode != 0:
+            return []
+    return [f"/{PATH} restored from keel's last good copy"
+            f" (/{fwrecord.COPY})"]
+
+
 def evidence_of(root: str, run=None) -> str | None:
     """prior() for keel firewall check: the live system when root is /"""
     return prior(root, os.path.abspath(root) == "/", run or subprocess.run)
@@ -115,9 +168,16 @@ def evidence_of(root: str, run=None) -> str | None:
 def prior(root: str, live: bool, run) -> str | None:
     """enforce or report from keel's record, else from the loaded
     table's policy; None when nothing says"""
-    recorded, _ = fwrecord.read(Tree(root))
-    if recorded:
+    recorded, warning = fwrecord.read(Tree(root))
+    if recorded in ("enforce", "report"):
         return recorded
+    if recorded == "off":
+        return None
+    if warning:
+        # a record that is there and not trusted: the state is unknown,
+        # and the safe side is closed (the fifth real test: the boot
+        # moved such a node from enforce to report)
+        return "enforce"
     if not live:
         return None
     from keel.system.fwcheck import table_listing

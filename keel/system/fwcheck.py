@@ -79,19 +79,27 @@ def check(root: str, run=None) -> Checked:
 def missing(root: str, path: str, run) -> Checked:
     """No ruleset file: a failure only where there is evidence the node
     had a firewall (a trusted record, or a loaded table of keel's);
-    else NOT APPLIED, a state, with the exit it always had (0)"""
+    else NOT APPLIED, a state, with the exit it always had (0). A spec
+    that cannot be read or parsed does not hide that evidence"""
     from keel.system import fwrepair
-    if not fwrepair.wants_firewall(fwrepair.spec_doc(root)):
+    doc = fwrepair.spec_doc(root)
+    if doc is not None and not fwrepair.wants_firewall(doc):
         return Checked(exits.OK,
                        f"{path}: no ruleset of keel's, nothing to compare")
     found = fwrepair.evidence_of(root, run)
     if found is None:
+        if doc is None:
+            return Checked(exits.OK,
+                           f"{path}: no ruleset of keel's, nothing to compare")
         return Checked(exits.OK, (
             f"NOT APPLIED: {path} is not there, and nothing says this node"
             " had a firewall of keel's; keel spec apply --system writes it"))
+    spec = "" if doc is not None else (
+        f"; /{fwrepair.SPEC} cannot be read or parsed")
     return Checked(exits.DRIFT_FOUND, (
         f"{path}: no ruleset file, and keel's record says {found} (or the"
-        " loaded table does): keel spec apply --system writes it again"))
+        f" loaded table does){spec}: keel spec apply --system writes it"
+        " again"))
 
 
 def compare(path: str, text: str, state: str, run) -> Checked:
