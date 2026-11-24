@@ -1373,7 +1373,15 @@ watch's shell trusts keel's record only as Python does (a root-owned
 goes to Python. The apply and the repair take one lock,
 `/run/keel/firewall.lock`: the repair skips its run while an apply holds
 it, and never makes an apply fail. An apply also clears a failed watch
-unit at once. A successful apply restarts a
+unit at once. The apply writes the copy and the record
+before the ruleset file and its load (keel#308): where keel's state
+directory cannot be written (read-only, full), the step stops before any
+rule changes, the apply fails, and the node stays on the ruleset of its
+last complete apply, which the copy and the record still name. A ruleset
+that cannot be written fails the apply too (keel#309), on a node in any
+state; the other steps still run. A good run of the watch restarts a
+`keel-firewall.service` that failed at boot (keel#310), so putting the
+spec back is enough. A successful apply restarts a
 `keel-firewall.service` that failed at boot, so the node is no longer
 degraded, and puts keel's directory right (root's, 0700). A pair node
 whose copy is lost too and that runs in the bare fallback serves no
