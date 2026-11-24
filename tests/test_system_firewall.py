@@ -23,6 +23,7 @@ from keel.manifest.facts import gather
 from keel.manifest.firewall import HEADER, PATH, render
 from keel.system.actions import (
     Attempt,
+    KeepCopy,
     RecordState,
     InstallRuleset,
     Note,
@@ -105,7 +106,8 @@ class FirewallCase(ManifestCase):
 class TestEnabled(FirewallCase):
     def test_checked_as_a_copy_put_in_place_then_loaded(self):
         """a file nft refuses never reaches the path the boot unit loads"""
-        found = self.actions(state=self.state(recorded="enforce"))
+        found = self.actions(state=self.state(recorded="enforce",
+                                             copy=self.rendered().text))
         self.assertIsInstance(found[0], InstallRuleset)
         self.assertEqual(found[0].path, PATH)
         self.assertEqual(found[0].content, self.rendered().text)
@@ -137,14 +139,16 @@ class TestEnabled(FirewallCase):
     def test_the_same_file_loaded_is_unchanged(self):
         ruleset = self.rendered()
         found = self.actions(state=self.state(
-            file=File("/r/x", ruleset.text), loaded=ruleset.digest, recorded="enforce"))
+            file=File("/r/x", ruleset.text), loaded=ruleset.digest, recorded="enforce",
+            copy=ruleset.text))
         self.assertEqual([a.describe() for a in found], [
             f"unchanged (/{PATH}, loaded as table inet keel)"])
 
     def test_a_table_that_is_not_the_file_s_is_loaded_again(self):
         ruleset = self.rendered()
         found = self.actions(state=self.state(
-            file=File("/r/x", ruleset.text), loaded=None, recorded="enforce"))
+            file=File("/r/x", ruleset.text), loaded=None, recorded="enforce",
+            copy=ruleset.text))
         self.assertEqual([a.argv for a in found],
                          [("nft", "-c", "-f", f"/{PATH}"),
                           ("nft", "-f", f"/{PATH}")])
@@ -197,7 +201,7 @@ class TestEnabled(FirewallCase):
 class TestOff(FirewallCase):
     def test_off_removes_keel_s_file_and_table_and_warns(self):
         found = self.actions(doc(enabled=None, state="off"), self.state(
-            file=File("/r/x", HEADER + "\n"), loaded="abc", recorded=None))
+            file=File("/r/x", HEADER + "\n"), loaded="abc", recorded="off"))
         self.assertEqual(found[0].describe(), (
             "off in the spec: no inbound rule of keel's protects this"
             " node; `firewall.state: enforce` closes it"))
@@ -210,13 +214,13 @@ class TestOff(FirewallCase):
         found = self.actions(doc(enabled=None, state="off", mode="simple"),
                              self.state(file=File("/r/x",
                                                   "table inet mine {}\n"),
-                                        recorded=None))
+                                        recorded="off"))
         self.assertEqual([a.describe() for a in found][1:],
                          ["unchanged (off)"])
 
     def test_off_under_a_root_removes_the_file_only(self):
         found = self.actions(doc(enabled=None, state="off"), self.state(
-            file=File("/r/x", HEADER + "\n"), loaded=None, recorded=None),
+            file=File("/r/x", HEADER + "\n"), loaded=None, recorded="off"),
             live=False,
             available=frozenset())
         self.assertEqual([type(a) for a in found], [Note, RemoveFile])
@@ -308,7 +312,8 @@ class TestTransition(FirewallCase):
         enforcing = render(self.resolved, STATES, WG)
         for spec in (doc(enabled=None), doc(enabled=None, state="enforce")):
             found = self.actions(spec, self.state(
-                file=File("/r/x", enforcing.text), loaded=enforcing.digest, recorded="enforce"),
+                file=File("/r/x", enforcing.text), loaded=enforcing.digest, recorded="enforce",
+                copy=enforcing.text),
                 attended=False)
             self.assertEqual(found[-1].describe(), (
                 f"unchanged (/{PATH}, loaded as table inet keel)"))
@@ -320,7 +325,8 @@ class TestTransition(FirewallCase):
         found = self.implicit(file=File("/r/x", enforcing.text),
                               loaded=enforcing.digest,
                               listeners=(SSHD, STRANGER),
-                              listeners_source="ss", recorded="enforce")
+                              listeners_source="ss", recorded="enforce",
+                              copy=enforcing.text)
         self.assertIn("tcp [::]:9999 of session-3.scope (nc): listens, not"
                       " declared, closed by the firewall",
                       [a.describe() for a in found])
@@ -540,11 +546,65 @@ class TestCutFile(FirewallCase):
         ruleset = next(a for a in found if isinstance(a, InstallRuleset))
         self.assertIn("policy accept", ruleset.content)
 
-    def test_off_removes_the_record(self):
+    def test_off_is_recorded(self):
+        """the fifth real test: the watch's shell matched `state: off`
+        anywhere in the spec, a comment too; the record says off now,
+        and the shell reads that one file of keel's"""
         found = self.actions(doc(enabled=None, state="off"), self.state(
             file=File("/r/x", HEADER + "\n"), recorded="enforce"))
-        self.assertIn(RECORD, [a.path for a in found
-                               if isinstance(a, RemoveFile)])
+        self.assertEqual([a.state for a in found
+                          if isinstance(a, RecordState)], ["off"])
+        self.assertNotIn(RECORD, [a.path for a in found
+                                  if isinstance(a, RemoveFile)])
+
+    def test_a_record_of_off_is_no_evidence_of_a_state(self):
+        found = self.actions(doc(enabled=None), self.state(
+            recorded="off", listeners=(SSHD, STRANGER),
+            listeners_source="ss"))
+        self.assertIn("report: enforce waits", found[0].describe())
+
+    def test_an_untrusted_record_and_a_broken_file_write_nothing_unattended(
+            self):
+        """the fifth real test: at boot, an untrusted record and an
+        empty file moved a node in enforce to report with no word"""
+        found = self.actions(doc(enabled=None), self.state(
+            file=File("/r/x", ""), recorded=None,
+            recorded_warning="/var/lib/keel/firewall/state is not trusted"
+            " (its directory is not trusted: root does not own it)",
+            listeners=(SSHD, STRANGER), listeners_source="ss"),
+            attended=False)
+        self.assertFalse([a for a in found
+                          if isinstance(a, (InstallRuleset, WriteFile))])
+        self.assertTrue(found[0].describe().startswith(
+            "NOT APPLIED, the node keeps the firewall it has: keel's record"
+            " is not trusted"))
+
+    def test_the_last_good_copy_follows_what_is_loaded(self):
+        found = self.actions(state=self.state(recorded="enforce"))
+        copies = [a for a in found if isinstance(a, KeepCopy)]
+        self.assertEqual([a.content for a in copies],
+                         [self.rendered().text])
+        ruleset = self.rendered()
+        same = self.actions(state=self.state(
+            file=File("/r/x", ruleset.text), loaded=ruleset.digest,
+            recorded="enforce", copy=ruleset.text))
+        self.assertFalse([a for a in same if isinstance(a, KeepCopy)])
+
+    def test_a_failed_boot_unit_is_restarted_by_the_apply(self):
+        """the fifth real test: after a boot in the fallback, the apply
+        succeeded and keel-firewall.service stayed failed"""
+        ruleset = self.rendered()
+        found = self.actions(state=self.state(
+            file=File("/r/x", ruleset.text), loaded=ruleset.digest,
+            recorded="enforce", copy=ruleset.text, boot_failed=True))
+        self.assertEqual(found[-1].argv, ("systemctl", "restart",
+                                          "keel-firewall.service"))
+        self.assertIsInstance(found[-1], Attempt)
+        none = self.actions(state=self.state(
+            file=File("/r/x", ruleset.text), loaded=ruleset.digest,
+            recorded="enforce", copy=ruleset.text, boot_failed=False))
+        self.assertFalse([a for a in none
+                          if "keel-firewall.service" in a.describe()])
 
     def test_a_foreign_file_is_still_not_replaced(self):
         found = self.actions(doc(enabled=None), self.state(
@@ -608,7 +668,8 @@ class TestFailedLoad(FirewallCase):
     kernel holds as it was, and nothing after it runs"""
 
     def run_plan(self, nft):
-        steps = plan_firewall(doc(), self.resolved, self.state(recorded="enforce"), True,
+        steps = plan_firewall(doc(), self.resolved, self.state(recorded="enforce",
+                                         copy=self.rendered().text), True,
                               LIVE, True)
         with mock.patch("keel.system.fwinstall.subprocess.run", nft), \
                 mock.patch("keel.system.effects.subprocess.run", nft):

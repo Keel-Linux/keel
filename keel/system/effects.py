@@ -26,6 +26,7 @@ from keel.system.actions import (
     FollowVip,
     GenerateKey,
     InstallRuleset,
+    KeepCopy,
     RecordState,
     LockReplica,
     MakeDir,
@@ -154,6 +155,8 @@ class Effects:
                 return fwinstall.install(self.tree.root, action)
             if isinstance(action, RecordState):
                 return fwrecord.write(self.tree.root, action.state)
+            if isinstance(action, KeepCopy):
+                return fwrecord.write_copy(self.tree.root, action.content)
             if isinstance(action, RunSql):
                 return self.run(action.argv, action.statements)
             if isinstance(action, WriteFile):

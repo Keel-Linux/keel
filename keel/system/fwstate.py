@@ -95,6 +95,10 @@ class FirewallState:
     # the policy of the table the kernel holds, drop or accept; None
     # when there is none, or when nothing was asked (--root)
     loaded_policy: str | None = None
+    # keel's last good copy of the ruleset (fwrecord.COPY), when trusted
+    copy: str | None = None
+    # whether keel-firewall.service is failed; None when not asked
+    boot_failed: bool | None = None
 
 
 def ports_in(lines: list[str]) -> set[int]:
@@ -190,7 +194,23 @@ def observe_firewall(tree: Tree, live: bool) -> FirewallState:
         recorded=recorded,
         recorded_warning=warning,
         loaded_policy=policy,
+        copy=fwrecord.read_copy(tree)[0],
+        boot_failed=unit_failed() if live else None,
     )
+
+
+BOOT_UNIT = "keel-firewall.service"
+
+
+def unit_failed() -> bool | None:
+    """Whether keel-firewall.service is failed (a boot in the fallback)"""
+    try:
+        out = subprocess.run(["systemctl", "is-failed", "--quiet",
+                              BOOT_UNIT], capture_output=True, text=True,
+                             check=False)
+    except OSError:
+        return None
+    return out.returncode == 0
 
 
 def recorded_state(tree: Tree) -> str | None:

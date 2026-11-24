@@ -140,6 +140,43 @@ class TestWrite(RecordCase):
         self.assertEqual(self.read(), ("enforce", ""))
 
 
+class TestDirectoryPutRight(RecordCase):
+    """the fifth real test: a directory owned by another user was never
+    put right, so the record was never trusted again"""
+
+    def test_the_write_makes_the_directory_root_s_and_0700(self):
+        os.makedirs(os.path.dirname(join(self.root, RECORD)), mode=0o777)
+        os.chmod(os.path.dirname(join(self.root, RECORD)), 0o777)
+        owned = []
+        real = os.fchown
+
+        def fchown(fd, uid, gid):
+            owned.append((uid, gid))
+            real(fd, uid, gid)
+        with mock.patch("keel.system.fwrecord.os.fchown", fchown):
+            self.assertIsNone(fwrecord.write(self.root, "enforce"))
+        self.assertEqual(owned, [(os.getuid(), -1)])
+        self.assertEqual(stat.S_IMODE(os.stat(os.path.dirname(
+            join(self.root, RECORD))).st_mode), 0o700)
+        self.assertEqual(self.read(), ("enforce", ""))
+
+    def test_off_is_a_state_of_the_record(self):
+        self.assertIsNone(fwrecord.write(self.root, "off"))
+        self.assertEqual(self.read(), ("off", ""))
+
+
+class TestCopy(RecordCase):
+    def test_the_last_good_copy_round_trip(self):
+        self.assertEqual(fwrecord.read_copy(Tree(self.root)), (None, ""))
+        self.assertIsNone(fwrecord.write_copy(self.root, "table x\n"))
+        self.assertEqual(fwrecord.read_copy(Tree(self.root)),
+                         ("table x\n", ""))
+        os.chmod(join(self.root, fwrecord.COPY), 0o666)
+        text, warning = fwrecord.read_copy(Tree(self.root))
+        self.assertIsNone(text)
+        self.assertIn("group or others may write it", warning)
+
+
 class TestPurge(unittest.TestCase):
     def test_purge_removes_the_record_and_remove_keeps_it(self):
         repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -148,6 +185,7 @@ class TestPurge(unittest.TestCase):
         self.assertIn('if [ "$1" = "purge" ]; then', text)
         self.assertIn("rm -f \"${DPKG_ROOT:-}/var/lib/keel/firewall/state\"",
                       text)
+        self.assertIn("/var/lib/keel/firewall/last-good.nft", text)
         self.assertIn("#DEBHELPER#", text)
 
 

@@ -112,6 +112,19 @@ class RecordState:
 
 
 @dataclass(frozen=True)
+class KeepCopy:
+    """Write keel's last good copy of the ruleset (keel.system.fwrecord)
+    by a rename, beside the record: keel firewall repair restores it
+    first, with no spec needed"""
+
+    content: str
+    summary: str
+
+    def describe(self) -> str:
+        return f"{self.summary} (mode 0600, by a rename)"
+
+
+@dataclass(frozen=True)
 class SetBouncerMode:
     """Set the `mode:` line of CrowdSec's bouncer file, keeping the rest
 
@@ -477,6 +490,7 @@ Change = (Run | RunSql | WriteFile | RemoveFile | MakeDir | Symlink
           | SwitchNetwork | GenerateKey | AdoptKey | SeedReplica
           | LockReplica | UnlockAccounts | PromoteReplica | Attempt
           | AddBouncer | SetBouncerMode | InstallRuleset | RecordState
+          | KeepCopy
           | EnsureDatabaseTls | FollowVip)
 Action = Change | Note | Refuse
 

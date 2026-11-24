@@ -63,6 +63,7 @@ from keel.system.actions import (
     Action,
     Attempt,
     InstallRuleset,
+    KeepCopy,
     Note,
     RecordState,
     Refuse,
@@ -72,7 +73,8 @@ from keel.system.actions import (
     WriteFile,
 )
 from keel.system.dbmariadb import overlay_addresses
-from keel.system.fwstate import RECORD, WATCH_TIMER, FirewallState
+from keel.system.fwrecord import COPY
+from keel.system.fwstate import BOOT_UNIT, RECORD, WATCH_TIMER, FirewallState
 from keel.system.listeners import classify, declared_units, unopened
 
 FIELD = "derived.firewall"
@@ -139,9 +141,10 @@ def off(state: FirewallState, live: bool,
     if written_by_keel(state):
         actions.append(RemoveFile(PATH, f"remove /{PATH}, which keel wrote:"
                                   " the firewall is off in the spec"))
-    if state.recorded is not None:
-        actions.append(RemoveFile(RECORD, f"remove /{RECORD}: the firewall"
-                                  " is off in the spec"))
+    if state.recorded != "off":
+        actions.append(RecordState("off", (
+            f"record /{RECORD}: off, so the watch knows it from a file of"
+            " keel's")))
     if live and state.loaded is not None and "nft" in available:
         actions.append(Run(("nft", "delete", "table", *TABLE_ARGS),
                            "remove keel's table: the firewall is off in"
@@ -225,6 +228,16 @@ def mesh_context(doc: dict, resolved: Resolved
     return mesh, frozenset(addresses)
 
 
+def untrusted_and_broken(state: FirewallState, declared: str | None,
+                        attended: bool) -> bool:
+    """An unattended run (the boot's repair, keel mesh) with an untrusted
+    record and a ruleset file that has lost its state: it must not guess
+    report (the fifth real test)"""
+    return (not attended and declared is None and bool(
+        state.recorded_warning) and file_state(state.file.text) is None
+        and state.loaded_policy != "drop")
+
+
 def prior_state(state: FirewallState) -> tuple[str | None, str]:
     """The state the node is in, and how the plan says it kept enforce:
     its file's policy; else keel's record (the file empty, cut or
@@ -233,7 +246,7 @@ def prior_state(state: FirewallState) -> tuple[str | None, str]:
     found = file_state(state.file.text)
     if found:
         return found, KEPT
-    if state.recorded:
+    if state.recorded in (ENFORCE, REPORT):
         return state.recorded, KEPT_RECORD
     if state.loaded_policy == "drop":
         return ENFORCE, KEPT_TABLE
@@ -306,6 +319,12 @@ def on(doc: dict, resolved: Resolved, state: FirewallState, live: bool,
             " 0018): the firewall is left as it is until it is confirmed"
             " or reverted, so it cannot refuse the session that confirms;"
             " apply again then"),)
+    if untrusted_and_broken(state, declared, attended):
+        return (Note(
+            "NOT APPLIED, the node keeps the firewall it has: keel's record"
+            " is not trusted and the ruleset file is broken, so the state"
+            " this node was in is unknown; an apply a person runs decides"
+            f" and puts the record right ({state.recorded_warning})"),)
     target, said = choose(doc, resolved, state, declared, attended)
     ruleset = build(doc, resolved, state, target)
     said += told(doc, resolved, state, ruleset)
@@ -361,6 +380,15 @@ def load(ruleset: Ruleset, state: FirewallState, live: bool,
         actions.append(RecordState(ruleset.state, (
             f"record /{RECORD}: {ruleset.state}, the state a broken file"
             " cannot lose")))
+    if state.copy != ruleset.text:
+        actions.append(KeepCopy(ruleset.text, (
+            f"keep /{COPY}: the last good copy keel firewall repair"
+            " restores first")))
+    if live and state.boot_failed:
+        actions.append(Attempt(("systemctl", "restart", BOOT_UNIT), (
+            f"restart {BOOT_UNIT}, failed since the boot: it loads this"
+            " file, and the node is not degraded any more"),
+            f"{BOOT_UNIT} stays failed: systemctl reset-failed clears it"))
     if live and state.watch is False:
         actions.append(watch_start(state))
     return actions

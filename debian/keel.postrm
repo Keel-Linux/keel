@@ -1,12 +1,14 @@
 #!/bin/sh
 # keel's postrm: `apt purge` removes keel's record of the firewall state
-# (/var/lib/keel/firewall/state, decision 0097), which no package file
+# and its last good copy of the ruleset (/var/lib/keel/firewall/state
+# and last-good.nft, decision 0097), which no package file
 # holds, so a later install does not read a record of the node it was;
 # `remove` keeps it, as it keeps the ruleset file keel wrote.
 set -e
 
 if [ "$1" = "purge" ]; then
-    rm -f "${DPKG_ROOT:-}/var/lib/keel/firewall/state"
+    rm -f "${DPKG_ROOT:-}/var/lib/keel/firewall/state" \
+        "${DPKG_ROOT:-}/var/lib/keel/firewall/last-good.nft"
     rmdir "${DPKG_ROOT:-}/var/lib/keel/firewall" 2>/dev/null || true
 fi
 

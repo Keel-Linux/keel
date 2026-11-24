@@ -26,7 +26,13 @@ import tempfile
 from keel.inspect.tree import Tree
 
 RECORD = "var/lib/keel/firewall/state"
-STATES = ("enforce", "report")
+# off too: the watch's shell then reads one file of keel's to know that
+# the spec says off, and never matches text in the spec
+STATES = ("enforce", "report", "off")
+# the ruleset as keel last loaded it, restored first by keel firewall
+# repair: it does not need the spec, and keeps the declared ports open
+COPY = "var/lib/keel/firewall/last-good.nft"
+COPY_LIMIT = 1 << 20
 ROOT_UID = 0
 # root's alone: only keel, as root, reads it
 MODE = 0o600
@@ -37,26 +43,47 @@ UNSAFE = stat.S_IWGRP | stat.S_IWOTH
 def read(tree: Tree) -> tuple[str | None, str]:
     """The recorded state, and a warning when a record is there and is
     not trusted; (None, "") when there is none"""
-    path = tree.path(RECORD)
+    text, problem = read_file(tree, RECORD, 64)
+    if problem:
+        return None, untrusted(RECORD, problem)
+    if text is None:
+        return None, ""
+    value = text.strip()
+    if value not in STATES:
+        return None, untrusted(RECORD, "it is not a state keel writes")
+    return value, ""
+
+
+def read_copy(tree: Tree) -> tuple[str | None, str]:
+    """keel's last good copy of the ruleset, and a warning when it is
+    there and is not trusted"""
+    text, problem = read_file(tree, COPY, COPY_LIMIT)
+    if problem:
+        return None, untrusted(COPY, problem)
+    return text, ""
+
+
+def read_file(tree: Tree, relative: str,
+              limit: int) -> tuple[str | None, str | None]:
+    """A file of keel's directory, read with no symlink followed: its
+    text, or the reason it is not trusted; (None, None) when absent"""
+    path = tree.path(relative)
     problem = unsafe_dir(os.path.dirname(path))
     if problem == "absent":
-        return None, ""
+        return None, None
     if problem:
-        return None, untrusted(f"its directory {problem}")
+        return None, f"its directory {problem}"
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
-        return None, ""
+        return None, None
     except OSError:
-        return None, untrusted("it is not a regular file")
+        return None, "it is not a regular file"
     with os.fdopen(fd, "rb") as fob:
         problem = unsafe(os.fstat(fob.fileno()), "it")
         if problem:
-            return None, untrusted(problem)
-        value = fob.read(64).decode("ascii", "replace").strip()
-    if value not in STATES:
-        return None, untrusted("it is not a state keel writes")
-    return value, ""
+            return None, problem
+        return fob.read(limit).decode("utf-8", "replace"), None
 
 
 def unsafe(found: os.stat_result, what: str,
@@ -81,30 +108,35 @@ def unsafe_dir(path: str) -> str | None:
     return f"is not trusted: {problem}" if problem else None
 
 
-def untrusted(why: str) -> str:
-    return (f"/{RECORD} is not trusted ({why}): it counts as no record;"
-            " the next apply writes it again")
+def untrusted(relative: str, why: str) -> str:
+    return (f"/{relative} is not trusted ({why}): it counts as none;"
+            " the next apply writes it again, root's alone")
 
 
 def write(root: str, state: str) -> str | None:
     """Write the record by a rename; None, or why it failed"""
-    path = os.path.join(root, RECORD)
+    return write_file(root, RECORD, f"{state}\n", "the record")
+
+
+def write_copy(root: str, text: str) -> str | None:
+    """keel's last good copy of the ruleset, by a rename"""
+    return write_file(root, COPY, text, "the last good copy")
+
+
+def write_file(root: str, relative: str, content: str,
+               what: str) -> str | None:
+    """A file of keel's directory, written by a rename of a new file
+    beside it, the directory put right first (root's, 0700; opened with
+    no symlink followed); None, or why it failed"""
+    path = os.path.join(root, relative)
     directory = os.path.dirname(path)
     try:
-        os.makedirs(directory, mode=DIR_MODE, exist_ok=True)
-        # opened with no symlink followed, and its mode put right by fd
-        try:
-            held = os.open(directory, os.O_RDONLY | os.O_DIRECTORY
-                           | os.O_NOFOLLOW)
-        except OSError:
-            return f"{directory} is a link: the record is not written"
-        try:
-            os.fchmod(held, DIR_MODE)
-        finally:
-            os.close(held)
-        fd, copy = tempfile.mkstemp(dir=directory, prefix=".state.")
+        problem = own_directory(directory)
+        if problem:
+            return f"{problem}: {what} is not written"
+        fd, copy = tempfile.mkstemp(dir=directory, prefix=".keel.")
         with os.fdopen(fd, "w") as fob:
-            fob.write(f"{state}\n")
+            fob.write(content)
             fob.flush()
             os.fchmod(fob.fileno(), MODE)
             os.fsync(fob.fileno())
@@ -112,5 +144,23 @@ def write(root: str, state: str) -> str | None:
     except OSError as e:
         with contextlib.suppress(NameError, OSError):
             os.remove(copy)
-        return f"the record cannot be written: {e.strerror or e}"
+        return f"{what} cannot be written: {e.strerror or e}"
+    return None
+
+
+def own_directory(directory: str) -> str | None:
+    """Make keel's directory root's and 0700, by fd: the fifth real test
+    found one owned by another user, never put right, so the record was
+    never trusted again; None, or why it cannot be"""
+    os.makedirs(directory, mode=DIR_MODE, exist_ok=True)
+    try:
+        held = os.open(directory, os.O_RDONLY | os.O_DIRECTORY
+                       | os.O_NOFOLLOW)
+    except OSError:
+        return f"{directory} is a link"
+    try:
+        os.fchown(held, ROOT_UID, -1)
+        os.fchmod(held, DIR_MODE)
+    finally:
+        os.close(held)
     return None
