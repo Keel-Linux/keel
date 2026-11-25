@@ -416,8 +416,8 @@ route of the session that runs the apply.
 
 The database relay (answer 5): where `database.server.engine` is
 `mariadb` or `postgresql`, keel writes `keel-access-relay-<port>.socket`
-on `[<address>]:<port>` (FreeBind, BindToDevice the access interface)
-and its `.service`, which runs
+on `[<address>]:<port>` (FreeBind; keel's firewall drops what comes to
+that address on another interface) and its `.service`, which runs
 `systemd-socket-proxyd 127.0.0.1:<port>` with a dynamic user. The
 database's bind addresses and accounts do not change: the connection
 comes from the loopback.
@@ -1111,12 +1111,13 @@ comes in on it; both drops are in `report` too. SSH (answer 6, B): the
 ports sshd listens on open on IPv6 and on the access interface only,
 where the live node has a global IPv6 address and an IPv6 default route
 and sshd listens on IPv6 (`sshd -T`), the first time at an apply a person
-runs; else keel refuses to close them on IPv4 and the plan says so. A
-load that is not an apply (the boot, nftables.service, the watch) runs
-`/usr/lib/keel/firewall-ssh-guard`: where the file closes IPv4 22 and the
-node has no global IPv6 address and IPv6 default route any more, it opens
+runs; else keel refuses to close them on IPv4 and the plan says so.
+`/usr/lib/keel/firewall-ssh-guard` runs once the network is online at
+boot (`keel-firewall-ssh-guard.service`) and at each run of
+`keel-firewall-watch` (every 30 s): where the file closes IPv4 22 and the
+node has no global IPv6 address and IPv6 default route now, it opens
 IPv4 22 again with one rule of its own and a line in the journal, so the
-node is never closed. Decision 0097 ends the scope of
+node is never closed; when IPv6 is back, it removes that rule. Decision 0097 ends the scope of
 2026-09-30 (cloud advanced only): keel writes it in every mode, simple,
 cloud simple and cloud advanced, the etcd witness included, and the
 section is valid in each.

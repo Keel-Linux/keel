@@ -170,9 +170,10 @@ def relay_ports(doc: dict) -> tuple[int, ...]:
 
 def relay_files(access: dict, doc: dict) -> dict[str, str]:
     """The relay units, by path under the root: a socket on the access
-    address and port, bound to the access interface (a packet that comes
-    in on another interface never reaches it, in report too), and a
-    service that carries each connection to the loopback, so the
+    address and port (no BindToDevice: it would tie the socket to the
+    device's unit, which comes up after sockets.target; keel's firewall
+    drops what comes to the access address on another interface, in
+    report too), and a service that carries each connection to the loopback, so the
     database's binds and accounts do not change"""
     files = {}
     here = address(access).ip
@@ -187,7 +188,6 @@ def relay_files(access: dict, doc: dict) -> dict[str, str]:
             "[Socket]",
             f"ListenStream=[{here}]:{number}",
             "FreeBind=yes",
-            f"BindToDevice={interface(access)}",
             "BindIPv6Only=ipv6-only",
             "",
             "[Install]",

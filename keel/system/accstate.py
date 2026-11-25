@@ -44,6 +44,8 @@ class AccessState:
     relays: dict[str, str | None] = field(default_factory=dict)
     wanted: dict[str, str] = field(default_factory=dict)
     sockets_enabled: frozenset[str] = frozenset()
+    # the relay sockets that run now, on the live system
+    sockets_active: frozenset[str] = frozenset()
 
 
 def keel_file(text: str | None) -> bool:
@@ -69,6 +71,16 @@ def held_peers(iface: str) -> dict[str, str] | None:
     if out.returncode != 0:
         return None
     return acc.parse_allowed(out.stdout)
+
+
+def active(unit: str) -> bool:
+    try:
+        out = subprocess.run(["systemctl", "is-active", unit],
+                             capture_output=True, text=True, check=False,
+                             timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return out.stdout.strip() == "active"
 
 
 def relay_files(tree: Tree) -> dict[str, str | None]:
@@ -121,4 +133,7 @@ def observe_access(root: str, doc: dict) -> AccessState | None:
         sockets_enabled=frozenset(
             unit for unit in acc.relay_socket_units(wanted)
             if tree.exists(SOCKET_WANTS.format(unit=unit))),
+        sockets_active=frozenset(
+            unit for unit in acc.relay_socket_units(wanted)
+            if is_live and active(unit)),
     )

@@ -1,0 +1,18 @@
+# The SSH guard of handbook decision 0098, answer 6, B, once the network
+# is online at boot: keel-firewall.service loads keel's file before the
+# network, where no global IPv6 address is seen yet. Where the file
+# closes SSH on IPv4 and the node has no global IPv6 address and IPv6
+# default route, firewall-ssh-guard opens IPv4 22 again with a rule of
+# its own; keel-firewall-watch runs it again every 30 s, which also
+# removes that rule when IPv6 is back.
+[Unit]
+Description=keel: open SSH on IPv4 again where IPv6 is gone (decision 0098)
+After=network-online.target keel-firewall.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/keel/firewall-ssh-guard
+
+[Install]
+WantedBy=multi-user.target
