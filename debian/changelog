@@ -1,3 +1,23 @@
+keel (0.23.107) unstable; urgency=medium
+
+  * keel#328: only an apply a person runs closes TCP 22 on IPv4
+    (decision 0098, answer 6, B). The first boot's run of inithooks
+    (RUN_FIRSTBOOT=true and no /run/inithooks-complete) applies with
+    nobody there, so it keeps IPv4 22 open; rule B of 0097 does not
+    change. A run with no person keeps what keel's file says of IPv4
+    22, also while IPv6 is gone for a moment, and keel diff compares
+    with the file's choice.
+  * keel#329: at boot, the SSH guard waits up to about 60 s for a
+    global IPv6 address and an IPv6 default route before it opens IPv4
+    22 (DHCPv6 comes after network-online), with no lock held; the
+    watch leaves the decision to it meanwhile, and until it is done,
+    for at most 180 s of uptime. The unit is Type=exec.
+  * keel#330, keel#303: keel writes a CrowdSec whitelist with the
+    access /64 and the mesh /64, and the ignoreip of fail2ban with the
+    access /64 after the [DEFAULT] ignoreip of jail.local, where the
+    package is on the node; keel diff compares both files.
+ -- KeelLinux maintainers <admin@keellinux.org>  Wed, 25 Nov 2026 00:00:00 +0000
+
 keel (0.23.106) unstable; urgency=medium
 
   * wireguard-tools moves from Suggests to Depends: keel-access@ runs
