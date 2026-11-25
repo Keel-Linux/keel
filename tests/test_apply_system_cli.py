@@ -703,6 +703,89 @@ class TestDeferCertificate(ApplySystemTestCase):
         self.assertEqual(seen, {"defer": True})
 
 
+class TestCertificateOnly(ApplySystemTestCase):
+    """--certificate-only: tls.acme alone, for keel-certificate.service
+    when the init fence stops for good (keel#320)
+
+    After keel-init the operator's answers stand: the rest of the system
+    phase is not run again over them, as firstboot.d/10keel-system does
+    not run under keel-init.
+    """
+
+    ACME = ("tls:\n  acme:\n    enabled: true\n    agree_tos: true\n"
+            "    domains: [blog.example.org]\n")
+
+    def only(self, *extra: str) -> tuple[int, str, str]:
+        with mock.patch.object(effects.subprocess, "run",
+                               side_effect=fake_shadow_tools):
+            return run_cli("spec", "apply", "--spec", self.spec, "--conf",
+                           self.conf, "--certificate-only", "--root",
+                           self.root, *extra)
+
+    def test_only_tls_acme_is_converged(self):
+        self.write_spec(SPEC + self.ACME)
+        code, out, err = self.only()
+        self.assertEqual((code, err), (exits.OK, ""))
+        self.assertEqual(out.splitlines()[0],
+                         f"apply --certificate-only: {self.conf}"
+                         " not read or written")
+        self.assertIn("tls.acme:", out)
+        self.assertNotIn("users.", out)
+        self.assertNotIn("locale.", out)
+        self.assertEqual(self.read("etc/passwd"), "")
+        self.assertFalse(os.path.exists(self.conf))
+        self.assertIn("blog.example.org",
+                      self.read("etc/dehydrated/confconsole.domains.txt"))
+
+    def test_a_spec_without_tls_acme_is_a_no_op(self):
+        code, out, _ = self.only()
+        self.assertEqual(code, exits.OK)
+        self.assertIn("apply --certificate-only: nothing declared that this"
+                      " phase converges", out)
+        self.assertEqual(self.read("etc/passwd"), "")
+
+    def test_no_database_server_is_started(self):
+        self.write_spec(SPEC + self.ACME)
+        real = system.observe
+        seen = {}
+
+        def spy(root, doc, start=False, spec=None):
+            seen["start"] = start
+            return real(root, doc, start, spec)
+
+        with mock.patch.object(system, "observe", side_effect=spy):
+            code, _, _ = self.only()
+        self.assertEqual((code, seen), (exits.OK, {"start": False}))
+
+    def test_the_live_system_refusal_names_the_flag_that_asked(self):
+        with AS_USER:
+            code, _, err = run_cli("spec", "apply", "--spec", self.spec,
+                                   "--conf", self.conf, "--certificate-only")
+        self.assertEqual(code, exits.APPLY_NEEDS_ROOT)
+        self.assertIn("apply --certificate-only on the live system must run"
+                      " as root", err)
+
+    def test_with_another_phase_flag_is_a_usage_error(self):
+        for other in ("--system", "--system-only"):
+            with self.assertRaises(SystemExit) as raised:
+                run_cli("spec", "apply", "--spec", self.spec, other,
+                        "--certificate-only")
+            self.assertEqual(raised.exception.code, exits.USAGE, other)
+
+    def test_deferring_the_certificate_is_a_usage_error(self):
+        with self.assertRaises(SystemExit) as raised:
+            run_cli("spec", "apply", "--spec", self.spec,
+                    "--certificate-only", "--defer-certificate")
+        self.assertEqual(raised.exception.code, exits.USAGE)
+
+    def test_a_successful_run_keeps_a_recorded_refusal(self):
+        self.write_spec(SPEC + self.ACME)
+        with mock.patch("keel.system.bootrefusal.clear") as clear:
+            code, _, _ = self.only()
+        self.assertEqual(code, exits.OK)
+        clear.assert_not_called()
+
+
 class TestHubRegistration(ApplySystemTestCase):
     """hub.api_key: skip against a machine registered with the TurnKey Hub"""
 

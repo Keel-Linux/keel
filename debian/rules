@@ -16,3 +16,4 @@ override_dh_installsystemd:
 	dh_installsystemd --name=keel-database-watch
 	dh_installsystemd --name=keel-database-dump
 	dh_installsystemd --name=keel-database-position
+	dh_installsystemd --name=keel-certificate --no-enable --no-start

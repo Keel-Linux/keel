@@ -1,0 +1,15 @@
+# keel: request the certificate of tls.acme after the init fence (keel#320)
+#
+# Started, never enabled, by /usr/lib/keel/certificate-after-fence from
+# the ExecStopPost of turnkey-init-fence.service, when the fence stops for
+# good. keel spec apply --certificate-only converges tls.acme alone: it
+# asks the certificate authority only when the description declares
+# tls.acme and the certificate in use does not carry its domains.
+[Unit]
+Description=Keel: request the certificate of tls.acme after the init fence
+After=turnkey-init-fence.service network-online.target nginx.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/keel/certificate-after-fence --request

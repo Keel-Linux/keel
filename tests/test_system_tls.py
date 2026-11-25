@@ -7,16 +7,19 @@ successful request finds nothing to do and Let's Encrypt is asked only
 when the machine needs it.
 """
 
+import subprocess
 import unittest
 from datetime import datetime, timezone
 from os.path import abspath, dirname, join
+from unittest import mock
 
 from helpers import spec  # noqa: F401
 
 from keel.inspect.tree import NOT_PRESENT, File
+from keel.system import state as state_module
 from keel.system.actions import Note, Refuse, Run, WriteFile
 from keel.system.state import SystemState
-from keel.system.tls import CRON, DOMAINS, WRAPPER, plan_tls
+from keel.system.tls import CRON, DOMAINS, FENCED, WRAPPER, plan_tls
 
 CERTS = join(dirname(abspath(__file__)), "fixtures", "certificates")
 ABSENT = File("/x/absent", problem=NOT_PRESENT)
@@ -163,6 +166,67 @@ class TestDeferred(unittest.TestCase):
         steps = plan_tls({"acme": {"enabled": False}}, found, defer=True)
         self.assertIn(("turnkey-make-ssl-cert", "--default", "--force"),
                       runs(steps))
+
+
+class TestInitFence(unittest.TestCase):
+    """The init fence answers ports 80 and 443 from outside until keel-init
+    is finished: a certificate authority gets its 404 for the http-01
+    challenge, and each attempt uses the failed-validation limit (keel#320)
+    """
+
+    def test_a_fenced_run_writes_the_domains_and_asks_nothing(self):
+        steps = plan_tls(acme(agree_tos=True), state(init_fence=True))
+        self.assertEqual(runs(steps), [])
+        self.assertFalse(any(isinstance(a, Refuse) for a in actions(steps)))
+        self.assertTrue(any(isinstance(a, WriteFile) for a in actions(steps)))
+        [note] = [a for a in actions(steps) if isinstance(a, Note)]
+        self.assertEqual(note.summary, FENCED)
+        self.assertIn("first-login setup not finished; the certificate is"
+                      " requested after it", note.summary)
+
+    def test_a_refusal_is_still_said_while_the_fence_is_up(self):
+        steps = plan_tls(acme(), state(init_fence=True))
+        self.assertEqual(runs(steps), [])
+        self.assertTrue(any(isinstance(a, Refuse) for a in actions(steps)))
+
+    def test_a_certificate_that_carries_the_domains_is_unchanged(self):
+        found = state(tls_cert=cert("acme-blog"), init_fence=True,
+                      acme_domains=domains_file(BLOG))
+        [note] = actions(plan_tls(acme(), found))
+        self.assertTrue(note.summary.startswith("unchanged"))
+
+    def test_turning_acme_off_asks_nobody_and_is_not_held(self):
+        found = state(tls_cert=cert("acme-blog"), init_fence=True)
+        steps = plan_tls({"acme": {"enabled": False}}, found)
+        self.assertIn(("turnkey-make-ssl-cert", "--default", "--force"),
+                      runs(steps))
+
+
+class TestFenceProbe(unittest.TestCase):
+    def test_the_fence_is_up_while_its_unit_is_active(self):
+        done = subprocess.CompletedProcess([], 0)
+        with mock.patch.object(state_module.subprocess, "run",
+                               return_value=done) as run:
+            self.assertTrue(state_module.init_fence_up(True))
+        self.assertEqual(run.call_args.args[0],
+                         ["systemctl", "--quiet", "is-active",
+                          "turnkey-init-fence.service"])
+
+    def test_the_fence_is_down_when_its_unit_is_not_active(self):
+        done = subprocess.CompletedProcess([], 3)
+        with mock.patch.object(state_module.subprocess, "run",
+                               return_value=done):
+            self.assertFalse(state_module.init_fence_up(True))
+
+    def test_no_systemctl_is_no_fence(self):
+        with mock.patch.object(state_module.subprocess, "run",
+                               side_effect=OSError("no systemctl")):
+            self.assertFalse(state_module.init_fence_up(True))
+
+    def test_a_scratch_tree_has_no_fence_and_asks_nothing(self):
+        with mock.patch.object(state_module.subprocess, "run") as run:
+            self.assertFalse(state_module.init_fence_up(False))
+        run.assert_not_called()
 
 
 class TestTurnOff(unittest.TestCase):

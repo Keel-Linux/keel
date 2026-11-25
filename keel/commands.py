@@ -171,8 +171,10 @@ def spec_apply(args) -> int:
     A caller that builds the Namespace by hand, as confconsole does, gets
     the conf only.
     """
-    system_only = getattr(args, "system_only", False)
+    certificate_only = getattr(args, "certificate_only", False)
+    system_only = getattr(args, "system_only", False) or certificate_only
     with_system = system_only or getattr(args, "system", False)
+    label = phase_label(system_only, certificate_only)
     dry_run = getattr(args, "dry_run", False)
     root = getattr(args, "root", ROOT_DEFAULT)
     no_secrets = dry_run or system_only
@@ -183,13 +185,13 @@ def spec_apply(args) -> int:
 
     if with_system and not dry_run:
         from keel import system
-        refusal = system.needs_root(root, phase_label(system_only))
+        refusal = system.needs_root(root, label)
         if refusal:
             error(refusal)
             return exits.APPLY_NEEDS_ROOT
 
     if system_only:
-        print(f"{phase_label(True)}: {args.conf} not read or written")
+        print(f"{label}: {args.conf} not read or written")
     elif dry_run:
         print(f"dry run: {args.conf} not written")
     else:
@@ -199,18 +201,19 @@ def spec_apply(args) -> int:
     if not with_system:
         return exits.OK
     try:
-        code = locked_apply(args, doc, root, dry_run, system_only)
+        code = locked_apply(args, doc, root, dry_run, label)
     except LockError as e:
         error(f"keel spec apply: {e}; nothing was applied")
         return exits.APPLY_FAILED
-    if code == exits.OK and not dry_run:
+    # a refusal of the whole spec is cleared by a run that converged it all
+    if code == exits.OK and not dry_run and not certificate_only:
         from keel.system import bootrefusal
         bootrefusal.clear(root)
     return code
 
 
 def locked_apply(args, doc: dict, root: str, dry_run: bool,
-                 system_only: bool) -> int:
+                 label: str) -> int:
     with apply_lock(root, dry_run) as held:
         if not held:
             error("keel spec apply: a keel mesh operation holds the sync"
@@ -218,13 +221,14 @@ def locked_apply(args, doc: dict, root: str, dry_run: bool,
                   " again")
             return exits.APPLY_FAILED
         return apply_system(
-            doc, root, dry_run, phase_label(system_only),
+            doc, root, dry_run, label,
             getattr(args, "destroy_local_database", False),
             getattr(args, "defer_certificate", False),
             getattr(args, "network_window", DEFAULT_WINDOW),
             getattr(args, "skip_network", False),
             getattr(args, "skip_uplink", False),
             spec_path=args.spec, attended=True,
+            certificate_only=getattr(args, "certificate_only", False),
         )
 
 
@@ -260,8 +264,10 @@ def apply_lock(root: str, dry_run: bool):
                         f" {e.strerror or e}") from e
 
 
-def phase_label(system_only: bool) -> str:
+def phase_label(system_only: bool, certificate_only: bool = False) -> str:
     """How the run names itself in its own output: the flag that asked"""
+    if certificate_only:
+        return "apply --certificate-only"
     return "apply --system-only" if system_only else "apply --system"
 
 
@@ -293,7 +299,7 @@ def apply_system(
     confirmed: bool = False, defer_certificate: bool = False,
     network_window: int = DEFAULT_WINDOW, skip_network: bool = False,
     skip_uplink: bool = False, spec_path: str | None = None,
-    attended: bool = False,
+    attended: bool = False, certificate_only: bool = False,
 ) -> int:
     """Observe, plan, then carry out or only print; one line per action
 
@@ -316,6 +322,9 @@ def apply_system(
     An overlay the chain gained since the spec was last applied is
     converged to its manifest default; a run that did not fail then
     records the overlays the spec itself declared (keel.spec.overlayrecord).
+
+    `certificate_only` keeps the tls.acme step alone (keel#320): no
+    database server is started, and no overlay is recorded.
     """
     from keel import system
     from keel.system import filesync
@@ -326,10 +335,17 @@ def apply_system(
         error(problem)
         return exits.SPEC_INVALID
     doc, _ = with_defaults(doc, facts)
-    state = system.observe(root, doc, start=not dry_run, spec=spec_path)
+    state = system.observe(root, doc,
+                           start=not (dry_run or certificate_only),
+                           spec=spec_path)
     plan = system.plan(doc, state, confirmed, defer_certificate,
                        network_window, skip_network, skip_uplink, spec_path,
                        attended=attended)
+    if certificate_only:
+        from keel.system.actions import Plan
+        from keel.system.tls import FIELD as TLS_FIELD
+        plan = Plan(tuple(step for step in plan.steps
+                          if step.field == TLS_FIELD))
     if not plan.steps:
         print(f"{label}: nothing declared that this phase converges")
         return exits.OK
@@ -344,7 +360,7 @@ def apply_system(
     print(outcome.summary())
     if outcome.failed:
         return exits.APPLY_FAILED
-    if not dry_run:
+    if not dry_run and not certificate_only:
         record_overlays(declared, facts, root)
     return exits.OK
 

@@ -1,0 +1,73 @@
+#!/bin/bash
+# /usr/lib/keel/certificate-after-fence: the certificate of tls.acme when
+# inithooks' init fence stops for good (keel#320)
+#
+# While the fence (turnkey-init-fence.service) is up, ports 80 and 443
+# answer its page to the outside, so keel spec apply defers the http-01
+# request ("first-login setup not finished; the certificate is requested
+# after it") and confconsole's dehydrated-wrapper refuses one (exit 75).
+# This script requests it when the fence goes away. No polling:
+#
+# - No argument: ExecStopPost of turnkey-init-fence.service, through
+#   keel's drop-in turnkey-init-fence.service.d/keel-certificate.conf. It
+#   runs at each stop of the fence, so it starts keel-certificate.service
+#   (--no-block: the fence's stop does not wait for the certificate
+#   authority) only when the stop is for good:
+#   - the fence is no longer enabled. inithooks' 97turnkey-init-fence-disable
+#     disables the unit, then stops it; a shutdown or a stop by hand
+#     leaves it enabled, and the fence comes back at the next boot;
+#   - the first boot's run (inithooks.service) is not active. The first
+#     boot defers the certificate (--defer-certificate): DNS rarely points
+#     at a machine that is still booting, and a golden image copied with
+#     its domain would send a request from each copy. After keel-init, an
+#     operator has set this machine up.
+#   It never fails: the stop of the fence must succeed.
+# - --request: ExecStart of keel-certificate.service. keel spec apply
+#   --certificate-only converges tls.acme and nothing else, so the answers
+#   given to keel-init stand. With no tls.acme in the description, or a
+#   certificate that already carries its domains, nothing is asked.
+#
+# KEEL_SPEC_PATHS: where the description is looked for, the paths and the
+# order of firstboot.d/10keel-system.
+
+set -u
+
+KEEL_SPEC_PATHS="${KEEL_SPEC_PATHS:-/etc/keel/instance.yaml:/etc/inithooks.yaml}"
+FENCE=turnkey-init-fence.service
+BOOT_RUN=inithooks.service
+UNIT=keel-certificate.service
+
+say() {
+    echo "keel: $*"
+}
+
+after_stop() {
+    systemctl --quiet is-enabled "$FENCE" && return 0
+    if systemctl --quiet is-active "$BOOT_RUN"; then
+        say "$FENCE stopped in the first boot's run: the first boot defers the certificate"
+        return 0
+    fi
+    systemctl --no-block start "$UNIT" || say "$UNIT did not start; the next keel spec apply --system requests the certificate"
+    return 0
+}
+
+request() {
+    local candidate
+    local -a candidates
+    IFS=: read -r -a candidates <<< "$KEEL_SPEC_PATHS"
+    for candidate in "${candidates[@]}"; do
+        [ -e "$candidate" ] || continue
+        keel spec apply --certificate-only --spec "$candidate"
+        exit $?
+    done
+    say "no instance description (searched $KEEL_SPEC_PATHS): no certificate to request"
+}
+
+case "${1:-}" in
+    "") after_stop ;;
+    --request) request ;;
+    *)
+        echo "usage: certificate-after-fence [--request]" >&2
+        exit 2
+        ;;
+esac

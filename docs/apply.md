@@ -59,6 +59,7 @@ exactly as `inspect` is.
 | --- | --- |
 | `--system` | Run phase 2 after phase 1. Root on the live system (exit 15 otherwise) |
 | `--system-only` | Run phase 2 and not phase 1: the conf is neither read nor written and no secret is resolved. Root on the live system |
+| `--certificate-only` | Run the `tls.acme` step of phase 2 and nothing else. The conf is neither read nor written, no secret is resolved, no database server is started, and no overlay is recorded. `keel-certificate.service` passes it when the init fence stops for good (keel#320). Root on the live system. Not with `--system`, `--system-only` or `--defer-certificate` |
 | `--dry-run` | With either flag: print the plan and change nothing, not even the conf. Reads no secret, so the secret files need not exist. Needs no root |
 | `--root DIR` | The filesystem phase 2 converges: `/` (the default, the live system) or a scratch tree. Phase 1 is not affected; the conf path is `--conf` |
 | `--defer-certificate` | With either flag: write `tls.acme` but ask no certificate authority for a certificate in this run. The first boot hook passes it. See "tls.acme" below |
@@ -302,6 +303,29 @@ cloned with its domain would spend Let's Encrypt's limit on failed
 validations with every copy; the next `apply --system`, run when the
 name resolves, requests it. Turning ACME off asks no outside service and
 is not deferred.
+
+While inithooks' init fence (`turnkey-init-fence.service`) is active,
+ports 80 and 443 answer the fence's page to the outside. The certificate
+authority would get its 404 for the http-01 challenge and count a failed
+validation. So the domains file is written and the line says
+`certificate request deferred: first-login setup not finished; the
+certificate is requested after it` (keel#320). A refusal (below) is still
+said first. A confconsole that carries confconsole#45 also refuses an
+http-01 request from its `dehydrated-wrapper` while the fence is up, with
+the same message and exit code 75.
+
+The request comes by itself when the fence stops for good. No polling:
+keel's drop-in `turnkey-init-fence.service.d/keel-certificate.conf` runs
+`/usr/lib/keel/certificate-after-fence` after each stop of the fence.
+When the fence is no longer enabled (keel-init's
+`97turnkey-init-fence-disable` disables it, then stops it) and the first
+boot's run (`inithooks.service`) is not active, the script starts
+`keel-certificate.service`. That unit runs `keel spec apply
+--certificate-only` on the first description found
+(`/etc/keel/instance.yaml`, then `/etc/inithooks.yaml`). A shutdown or a
+stop by hand leaves the fence enabled, and nothing starts. The first boot
+keeps `--defer-certificate`. With no `tls.acme`, or a certificate that
+already carries the domains, nothing is asked.
 
 Refused, with the reason, and the run fails: `dns-01` (a DNS provider and
 its credentials have no field in the spec yet), no Let's Encrypt account

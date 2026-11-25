@@ -23,6 +23,12 @@ Three refusals, each with its reason, where a request would be wrong:
   no field for yet;
 - enabled with no domains.
 
+While inithooks' init fence is up (keel-init not finished), ports 80 and
+443 answer the fence's page to the outside, so the certificate authority
+would get its 404 for the challenge and count a failed validation: the
+request is deferred with a note, and keel-certificate.service requests it
+when the fence stops for good (keel#320). A refusal is still said first.
+
 `enabled: false`, stated, over a certificate that a CA issued goes back
 to the self-signed certificate the machine makes for itself, disables the
 renewal job and restarts the services that read it. Absent is not false:
@@ -44,6 +50,9 @@ RENEW_WITHIN = timedelta(days=30)
 HEADER = "# written by keel apply --system"
 DEFERRED = ("certificate request deferred: this run asks no outside"
             " service; the next apply --system requests it")
+# keel-certificate.service requests it when the fence stops for good
+FENCED = ("certificate request deferred: first-login setup not finished;"
+          " the certificate is requested after it")
 
 
 def plan_tls(tls: dict, state: SystemState, defer: bool = False) -> list[Step]:
@@ -100,6 +109,8 @@ def request_step(acme: dict, state: SystemState, defer: bool) -> Step:
     refusal = why_not(acme, challenge, state)
     if refusal is not None:
         return Step(FIELD, (*actions, Refuse(refusal)))
+    if state.init_fence:
+        return Step(FIELD, (*actions, Note(FENCED)))
     argv = ("/bin/bash", WRAPPER, "--log-info", "--challenge", challenge)
     if not state.acme_account:
         argv += ("--register",)

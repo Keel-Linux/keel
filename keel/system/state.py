@@ -27,6 +27,10 @@ LOCALE_GEN = "etc/locale.gen"
 MAILNAME = "etc/mailname"
 POSTFIX_MAIN = "etc/postfix/main.cf"
 ACME_WRAPPER = "usr/lib/confconsole/plugins.d/Lets_Encrypt/dehydrated-wrapper"
+# inithooks' init fence: ports 80 and 443 answer its page for traffic from
+# outside until keel-init is finished (keel#320)
+FENCE_UNIT = "turnkey-init-fence.service"
+FENCE_PROBE_TIMEOUT = 10
 # dehydrated 0.7.2's names for its CAs, and the one it uses when none is set
 ACME_CAS = {
     "letsencrypt": "https://acme-v02.api.letsencrypt.org/directory",
@@ -83,6 +87,7 @@ class SystemState:
     acme_domains: File | None = None
     acme_account: bool = False
     acme_wrapper: bool = False
+    init_fence: bool = False
     now: datetime | None = None
     service_units: frozenset[str] = frozenset()
     network: NetworkState | None = None
@@ -135,6 +140,7 @@ def observe(root: str, doc: dict, start: bool = False,
         acme_domains=tree.read(paths.DEHYDRATED_DOMAINS),
         acme_account=acme_account(tree),
         acme_wrapper=tree.exists(ACME_WRAPPER),
+        init_fence=init_fence_up(live),
         now=datetime.now(timezone.utc),
         service_units=frozenset(
             unit for unit in TLS_SERVICES
@@ -189,3 +195,21 @@ def acme_account(tree: Tree) -> bool:
                     "/registration_info.json")
         for one in candidates
     )
+
+
+def init_fence_up(live: bool) -> bool:
+    """Whether the init fence is active; only the live system has one
+
+    A machine without systemctl, or one that does not answer, has no
+    fence that keel can see: the request then goes on, as before.
+    """
+    if not live:
+        return False
+    try:
+        done = subprocess.run(
+            ["systemctl", "--quiet", "is-active", FENCE_UNIT],
+            check=False, timeout=FENCE_PROBE_TIMEOUT,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return done.returncode == 0
