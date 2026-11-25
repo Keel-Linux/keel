@@ -319,12 +319,17 @@ keel's drop-in `turnkey-init-fence.service.d/keel-certificate.conf` runs
 `/usr/lib/keel/certificate-after-fence` after each stop of the fence.
 When the fence is no longer enabled (keel-init's
 `97turnkey-init-fence-disable` disables it, then stops it) and the first
-boot's run (`inithooks.service`) is not active, the script starts
+boot's run is not in its hooks, the script starts
 `keel-certificate.service`. That unit runs `keel spec apply
 --certificate-only` on the first description found
 (`/etc/keel/instance.yaml`, then `/etc/inithooks.yaml`). A shutdown or a
 stop by hand leaves the fence enabled, and nothing starts. The first boot
-keeps `--defer-certificate`. With no `tls.acme`, or a certificate that
+keeps `--defer-certificate`: a fence that its own hooks stop starts
+nothing. The run is in its hooks when `inithooks.service` is active and
+`/run/inithooks-complete` is not there. The run writes that marker after
+its hooks, and the unit stays active while confconsole's usage screen
+waits on the console. Thus a `keel-init` over SSH while that screen is
+open also gets the certificate (keel#327). With no `tls.acme`, or a certificate that
 already carries the domains, nothing is asked.
 
 Refused, with the reason, and the run fails: `dns-01` (a DNS provider and
