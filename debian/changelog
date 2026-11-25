@@ -1,3 +1,20 @@
+keel (0.23.102) unstable; urgency=medium
+
+  * keel#320: while inithooks' init fence is up, tls.acme writes the
+    domains and defers the request ("first-login setup not finished;
+    the certificate is requested after it"): the certificate authority
+    got the fence's 404 for the http-01 challenge and counted a failed
+    validation. A refusal is still said first. When the fence stops for
+    good (keel-init disables it), the new drop-in
+    turnkey-init-fence.service.d/keel-certificate.conf runs
+    /usr/lib/keel/certificate-after-fence, which starts
+    keel-certificate.service. That unit runs the new `keel spec apply
+    --certificate-only`: tls.acme alone, so the answers given to
+    keel-init stand. No polling. The first boot still defers
+    (--defer-certificate).
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Wed, 25 Nov 2026 12:00:00 +0000
+
 keel (0.23.101) unstable; urgency=medium
 
   * keel#318: keel diff foretells rule B of decision 0097. It asks the
