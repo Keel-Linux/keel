@@ -10,8 +10,14 @@
 # Where keel's file closes IPv4 22 and that does not hold now, this
 # opens IPv4 22 again with one rule of its own, at the head of keel's
 # input chain, and says so in the journal: so the node is never closed.
-# When it holds again, the rule goes. keel firewall check reads that
-# rule as keel's, so the watch does not load the file over it.
+# When it holds again, or the file no longer closes IPv4 22, the rule
+# goes. keel firewall check reads that rule as keel's, so the watch does
+# not load the file over it.
+#
+# It holds keel's firewall lock (/run/keel/firewall.lock, keel.system.
+# fwlock) while it reads and changes the table, so an apply or a repair
+# never loads a table between its reading and its change. A busy lock
+# skips this round: the watch runs it again within 30 s.
 set -u
 file=${KEEL_FIREWALL_FILE:-/etc/keel/firewall/keel-manifest.nft}
 nft=${KEEL_NFT:-/usr/sbin/nft}
@@ -19,8 +25,17 @@ inet6=${KEEL_IF_INET6:-/proc/net/if_inet6}
 route6=${KEEL_ROUTE6:-/proc/net/ipv6_route}
 line='# ssh: IPv6 and the access interface only (decision 0098)'
 comment='"keel-ssh-guard"'
+lock=${KEEL_FIREWALL_LOCK:-/run/keel/firewall.lock}
 
-[ -r "$file" ] && grep -qxF "$line" "$file" || exit 0
+# a lock that cannot be opened skips the round too, as a busy one
+{ mkdir -p "$(dirname "$lock")" && touch "$lock"; } 2>/dev/null || exit 0
+exec 9>>"$lock"
+flock -n 9 || exit 0
+
+narrowed=no
+if [ -r "$file" ] && grep -qxF "$line" "$file"; then
+    narrowed=yes
+fi
 
 global_address() {
     [ -r "$inet6" ] || return 1
@@ -49,11 +64,12 @@ held=$("$nft" -a list chain inet keel input 2>/dev/null \
     | sed -n "s/.*comment $comment # handle \([0-9][0-9]*\).*/\1/p" \
     | head -n 1)
 
-if global_address && default_route; then
+if [ "$narrowed" = no ] || { global_address && default_route; }; then
     if [ -n "$held" ]; then
         "$nft" delete rule inet keel input handle "$held"
-        echo "keel-firewall: closed IPv4 SSH again: this node has a global" \
-            "IPv6 address and an IPv6 default route again (decision 0098)" >&2
+        echo "keel-firewall: removed the rule that opened IPv4 SSH again:" \
+            "the node has a global IPv6 address and an IPv6 default route" \
+            "again, or $file no longer closes IPv4 (decision 0098)" >&2
     fi
     exit 0
 fi
