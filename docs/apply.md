@@ -1258,7 +1258,27 @@ drop in `enforce`, and these rules:
   (`HTTP_FENCE_PORT`, `HTTPS_FENCE_PORT`, 60080 and 60443), for
   redirected packets only (`ct status dnat`): the fence redirects 80
   and 443 to them, and the input hook sees the port after the redirect.
-  A direct connection to them stays dropped.
+  A direct connection to them stays dropped. The first boot's apply
+  (`10keel-system`) runs while the fence is enabled, so it writes and
+  loads this rule. Then `97turnkey-init-fence-disable` disables the
+  fence and stops it. keel's drop-in
+  `turnkey-init-fence.service.d/10-keel-firewall.conf` runs `keel firewall
+  refresh` after each stop of the fence (keel#322). When the fence is no
+  longer enabled, that runs the apply's firewall step, unattended, from
+  `/etc/keel/instance.yaml`: the file is written again without the
+  fence rule and loaded, before the stop ends, so `keel diff` after the
+  first boot says `derived.firewall: same`. The state stays what the
+  evidence says (an unattended run never begins enforcement nor leaves
+  it). While the fence is enabled (a shutdown, a stop by hand) the
+  refresh does nothing. It never begins a firewall on a node with no
+  evidence of one, never restores the copy and never loads the
+  fallback: with a spec it cannot read, or while an apply holds the
+  lock, the old ruleset stays and the line says why. It never fails,
+  so the stop of the fence always succeeds. Before keel#322 the rule
+  stayed in the file and in the loaded table until a person applied.
+  The stale rule accepted only packets redirected to the fence ports:
+  the fence's own stop removes its redirect, so 80 and 443 went to the
+  application, and nothing listened on the fence ports.
 
 `loopback` opens nothing. A `mesh` port is accepted only for a packet
 that comes in on the WireGuard interface: a neighbour on the uplink's
