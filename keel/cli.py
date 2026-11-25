@@ -413,6 +413,15 @@ def add_firewall_parser(subparsers) -> None:
     )
     add_root_option(check_parser, "read keel's ruleset file of")
     check_parser.set_defaults(handler="keel.commands.firewall_check")
+    refresh_parser = firewall_actions.add_parser(
+        "refresh",
+        help="write the ruleset again by the apply's firewall step,"
+        " unattended, once the init fence is no longer enabled; nothing"
+        " while it is;"
+        " what the ExecStopPost of turnkey-init-fence.service runs",
+    )
+    add_root_option(refresh_parser, "refresh keel's ruleset file of")
+    refresh_parser.set_defaults(handler="keel.commands.firewall_refresh")
     repair_parser = firewall_actions.add_parser(
         "repair",
         help="write an empty, cut or missing ruleset file of a node in"

@@ -1,3 +1,19 @@
+keel (0.23.103) unstable; urgency=medium
+
+  * keel#322: the ruleset loses the init fence rule when the fence is
+    disabled. 10keel-system applies while turnkey-init-fence is
+    enabled, so the ruleset accepted the fence ports for redirected
+    packets, and keel diff said derived.firewall drift on each new
+    node after 97turnkey-init-fence-disable. keel's drop-in
+    turnkey-init-fence.service.d/10-keel-firewall.conf runs the new
+    keel firewall refresh after each stop of the fence: when the fence
+    is no longer enabled, the apply's firewall step runs unattended,
+    and the file is written again and loaded. While the fence is
+    enabled it does nothing. It never begins a firewall, never loads
+    the fallback, and never fails the stop of the fence.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Wed, 25 Nov 2026 18:00:00 +0000
+
 keel (0.23.102) unstable; urgency=medium
 
   * keel#320: while inithooks' init fence is up, tls.acme writes the
