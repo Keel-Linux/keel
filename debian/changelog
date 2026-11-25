@@ -1,3 +1,22 @@
+keel (0.23.101) unstable; urgency=medium
+
+  * keel#318: keel diff foretells rule B of decision 0097. It asks the
+    decision of apply (keel.system.firewall.foretell, one function for
+    both), for an apply a person runs. On a node whose spec has no
+    firewall key and whose sockets all belong to the manifests, the
+    diff now says that apply writes enforce, and names each socket it
+    closes; where a socket keeps report, it names that socket. The new
+    line derived.firewall.state says why, and says that keel mesh
+    writes report until then. Under --root no socket is seen, and the
+    diff says report and why. A diff that does not run as root cannot
+    see the process of each socket: where rule B needs it, the diff
+    says unknown and asks for root. Where the apply changes no rule (a
+    guard of its plan, or a network change that waits for keel network
+    confirm), the diff says so. Before, the diff said report and
+    the next apply wrote enforce. Apply is not changed.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Wed, 25 Nov 2026 00:00:00 +0000
+
 keel (0.23.100) unstable; urgency=high
 
   * keel#308: the apply writes keel's last good copy and its record

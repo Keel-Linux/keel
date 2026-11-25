@@ -207,6 +207,12 @@ FENCE_UNIT = "turnkey-init-fence.service"
 ROOT_UID = 0
 
 
+def sees_every_process() -> bool:
+    """Whether ss names the process of every socket: root only; for
+    another user it leaves out the processes of root's daemons"""
+    return os.geteuid() == ROOT_UID
+
+
 def fenced(item: Listener, fence: tuple[int, ...]) -> bool:
     """A socket of the init fence's own unit on one of its ports"""
     return (item.protocol == "tcp" and item.port in fence

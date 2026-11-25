@@ -13,6 +13,8 @@ with the default apply converges it to, and said to be not declared.
 """
 
 import ipaddress
+import shutil
+from dataclasses import replace
 from datetime import datetime, timezone
 
 from keel.diff.report import (
@@ -33,22 +35,10 @@ from keel.manifest.resolve import overlay_units
 from keel.mesh import etcdstate
 from keel.spec import overlayrecord
 from keel.spec.validate_appliance import with_defaults
-from keel.network import wireguard
 from keel.spec.validate_firewall import declared_state
-from keel.system.firewall import (
-    allow_of,
-    mesh_context,
-    opened_ports,
-    overlay_of,
-)
-from keel.system.fwstate import (
-    bridges_of,
-    fence_ports,
-    recorded_state,
-    ssh_ports,
-    table_digest,
-)
-from keel.system.listeners import observe_listeners, unopened
+from keel.system.firewall import allow_of, foretell, guard, settled
+from keel.system.fwstate import observe_firewall, table_digest
+from keel.system.listeners import sees_every_process
 from keel.system.monitor import NOTIFY
 
 RENEWED = "renewed by keel mesh etcd tend"
@@ -67,6 +57,21 @@ NO_MONITOR = ("no monitor section: the include is left as an earlier apply"
               " set it")
 RULESET = "the ruleset apply renders from the manifests"
 KEEL_RULESET = "keel's ruleset"
+# keel#318: diff speaks for the apply a person runs, the only one rule B
+# lets begin enforcement
+PERSON = "an apply a person runs (keel spec apply --system) writes"
+MESH_KEEPS = ("; keel mesh, which runs with no person, writes report until"
+              " then: it never begins enforcement (decision 0097)")
+FROM_SPEC = {
+    fw.ENFORCE: "the spec says enforce",
+    fw.REPORT: "the spec says firewall.state: report, so rule B never"
+               " moves it",
+}
+PERSON_HOLDS = ("an apply a person runs (keel spec apply --system) changes"
+                " no rule")
+PENDING = "a network change waits for keel network confirm (decision 0018)"
+AS_ROOT = ("ss shows the process of each socket to root only: run keel"
+           " diff as root")
 OFF_WARNING = ("warning: off in the spec, no inbound rule of keel's"
                " protects this node")
 LEGACY_RULES = ("etc/iptables/rules.v4", "etc/iptables/rules.v6")
@@ -218,25 +223,33 @@ def firewall_fields(declared: dict, resolved, states: dict,
                           None, KEEL_RULESET if keel_s else None),
                 FieldDiff("derived.firewall.state", NOT_COMPARED,
                           reason=OFF_WARNING)] + warnings
-    expected = expected_state(said, fw.file_state(file.text)
-                              or recorded_state(tree))
-    wanted = f"{RULESET}, {expected}"
     live = tree.root == LIVE_ROOT
-    ssh, source = ssh_ports(tree, live)
-    if not ssh:
+    state = observe_firewall(tree, live)
+    if live and not sees_every_process():
+        state = replace(state, listeners=None, listeners_source=AS_ROOT)
+        if settled(state, said, True) is None:
+            return [FieldDiff("derived.firewall", UNKNOWN, RULESET, None,
+                              "rule B needs the process of each socket,"
+                              " and ss shows it to root only: run keel"
+                              " diff as root")] + warnings
+    if not state.ssh_ports:
+        decided = settled(state, said, True)
+        wanted = f"{RULESET}, {decided[0]}" if decided else RULESET
         return [FieldDiff("derived.firewall", UNKNOWN, wanted, None,
                           "the ports sshd listens on cannot be determined"
-                          f" ({source})")] + warnings
-    fence, _ = fence_ports(tree)
-    wg = overlay_of(declared)
-    ruleset = fw.render(resolved, states, wg, bridges_of(tree),
-                        state=expected, ssh=ssh, allow=allow_of(declared),
-                        fence=fence)
+                          f" ({state.ssh_source})")] + warnings
+    foretold = foretell(declared, resolved, state, said, True)
+    ruleset = foretold.ruleset
+    wanted = f"{RULESET}, {ruleset.state}"
     if file.text == ruleset.text:
         fields = [FieldDiff("derived.firewall", SAME, wanted, wanted)]
     else:
         fields = [FieldDiff("derived.firewall", DRIFT, wanted,
                             DIFFERS if file.readable else None)]
+    withheld = withheld_by(state, live)
+    fields.append(FieldDiff("derived.firewall.state", NOT_COMPARED,
+                            reason=f"{PERSON_HOLDS}: {withheld}")
+                  if withheld else state_field(said, state, foretold))
     key = "derived.firewall.loaded"
     if not live:
         return fields + [FieldDiff(key, NOT_COMPARED, None, None,
@@ -244,36 +257,50 @@ def firewall_fields(declared: dict, resolved, states: dict,
     held = table_digest()
     fields.append(FieldDiff(key, SAME if held == ruleset.digest
                             else DRIFT, ruleset.digest, held))
-    return fields + [listener_field(declared, resolved, ruleset, tree)] \
-        + warnings
+    listeners = (FieldDiff("derived.firewall.listeners", NOT_COMPARED,
+                           reason=f"{PERSON_HOLDS}, so it closes nothing")
+                 if withheld else listener_field(state, foretold))
+    return fields + [listeners] + warnings
 
 
-def expected_state(said: str | None, current: str | None) -> str:
-    """What apply writes with no person: diff never promotes (rule B)"""
-    if said in (fw.ENFORCE, fw.REPORT):
-        return said
-    return fw.ENFORCE if current == fw.ENFORCE else fw.REPORT
+def withheld_by(state, live: bool) -> str:
+    """Why the apply a person runs leaves the firewall as it is: the
+    guards of its plan (keel.system.firewall.guard), and a network
+    change that waits for keel network confirm; empty when it writes"""
+    available = frozenset({"nft"}) if live and shutil.which("nft") \
+        else frozenset()
+    refusal = guard(state, live, available)
+    if refusal is not None:
+        return refusal.summary
+    return PENDING if state.pending else ""
 
 
-def listener_field(declared: dict, resolved, ruleset,
-                   tree: Tree) -> FieldDiff:
-    """The sockets on an address that is not a loopback whose port the
-    ruleset does not open"""
+def state_field(said: str | None, state, foretold) -> FieldDiff:
+    """What an apply a person runs writes, and why, in the words of its
+    plan; and where keel mesh, which runs with no person, writes report"""
+    target = foretold.ruleset.state
+    reasons = foretold.reasons or [FROM_SPEC[target]]
+    text = "; ".join(reason.removeprefix(f"{target}: ").removeprefix(
+        f"{target}, ") for reason in reasons)
+    joiner = ", " if text.startswith("as ") else ": "
+    mesh = settled(state, said, False)
+    tail = MESH_KEEPS if target == fw.ENFORCE and mesh is not None and \
+        mesh[0] == fw.REPORT else ""
+    return FieldDiff("derived.firewall.state", NOT_COMPARED,
+                     reason=f"{PERSON} {target}{joiner}{text}{tail}")
+
+
+def listener_field(state, foretold) -> FieldDiff:
+    """The sockets on an address that is not a loopback that the apply
+    closes, or that enforce would close, as its plan names them"""
     key = "derived.firewall.listeners"
-    found, why = observe_listeners(tree, True)
-    if found is None:
-        return FieldDiff(key, NOT_COMPARED, reason=why)
-    wg = overlay_of(declared)
-    device = (wg.get("interface") or wireguard.DEFAULT_INTERFACE
-              if wg else None)
-    mesh, addresses = mesh_context(declared, resolved)
-    closed = unopened(found, opened_ports(ruleset, declared), device, mesh,
-                      addresses)
-    verb = ("enforce would close" if ruleset.state == fw.REPORT
-            else "enforce closes")
-    named = "; ".join(item.describe() for item in closed) or "nothing"
-    return FieldDiff(key, NOT_COMPARED, reason=f"{ruleset.state}: {verb}"
-                     f" {named}")
+    if state.listeners is None:
+        return FieldDiff(key, NOT_COMPARED, reason=state.listeners_source)
+    target = foretold.ruleset.state
+    named = "; ".join(foretold.closes) or (
+        "closes nothing" if target == fw.ENFORCE
+        else "enforce would close nothing")
+    return FieldDiff(key, NOT_COMPARED, reason=f"{target}: {named}")
 
 
 def firewall_warnings(declared: dict, tree: Tree) -> list[FieldDiff]:
