@@ -5,3 +5,5 @@ systemd/postgresql@.service.d/keel-stop.conf /usr/lib/systemd/system/postgresql@
 systemd/nftables.service.d/keel-firewall.conf /usr/lib/systemd/system/nftables.service.d
 firewall/firewall-watch /usr/lib/keel
 firewall/firewall-loaded /usr/lib/keel
+certificate/certificate-after-fence /usr/lib/keel
+systemd/turnkey-init-fence.service.d/keel-certificate.conf /usr/lib/systemd/system/turnkey-init-fence.service.d

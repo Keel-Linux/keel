@@ -723,6 +723,14 @@ def add_apply_options(parser: argparse.ArgumentParser) -> None:
         " the hooks already applied is never regenerated; for a machine"
         " whose conf phase has already run (docs/apply.md)",
     )
+    phase.add_argument(
+        "--certificate-only",
+        action="store_true",
+        help="tls.acme and nothing else, as --system-only does it: the"
+        " certificate the spec declares, when the machine needs one;"
+        " keel-certificate.service runs it when the init fence stops for"
+        " good, so the answers given to keel-init stand (keel#320)",
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -911,7 +919,8 @@ def main(argv: list[str] | None = None) -> int:
         return exits.USAGE
     system = getattr(args, "system", False) or getattr(
         args, "system_only", False
-    ) or args.command in ("database", "mesh", "vip")
+    ) or getattr(args, "certificate_only", False) or args.command in (
+        "database", "mesh", "vip")
     if getattr(args, "dry_run", False) and not system:
         parser.error("--dry-run requires --system or --system-only")
     if getattr(args, "defer_certificate", False) and not system:
@@ -919,6 +928,10 @@ def main(argv: list[str] | None = None) -> int:
             "--defer-certificate requires --system or --system-only:"
             " the certificate is requested there"
         )
+    if getattr(args, "defer_certificate", False) and getattr(
+            args, "certificate_only", False):
+        parser.error("--defer-certificate with --certificate-only would"
+                     " converge nothing")
     for flag in ("skip_network", "skip_uplink"):
         if getattr(args, flag, False) and not system:
             parser.error(

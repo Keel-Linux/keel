@@ -22,6 +22,9 @@ SUITE = join(HERE, "hook.bats")
 # the package's postinst (keel#139)
 POSTINST_SUITE = join(HERE, "postinst.bats")
 HOOK = join(dirname(HERE), "firstboot.d", "10keel-system")
+# the certificate after the init fence (keel#320)
+CERTIFICATE_SUITE = join(HERE, "certificate.bats")
+CERTIFICATE = join(dirname(HERE), "certificate", "certificate-after-fence")
 
 
 class TestHookSuite(unittest.TestCase):
@@ -53,3 +56,17 @@ class TestHookSuite(unittest.TestCase):
                               text=True, check=False)
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertIn("ok 3 ", done.stdout)
+
+    def test_bats_reports_every_certificate_test_passing(self):
+        self.assertTrue(os.access(CERTIFICATE, os.X_OK), CERTIFICATE)
+        bats = shutil.which("bats")
+        if bats is None:
+            if os.environ.get("CI"):
+                self.fail("bats is not installed in CI: the certificate"
+                          " suite would not run, see"
+                          " .github/workflows/tests.yml")
+            self.skipTest("bats is not installed")
+        done = subprocess.run([bats, CERTIFICATE_SUITE], capture_output=True,
+                              text=True, check=False)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("ok 13 ", done.stdout)
