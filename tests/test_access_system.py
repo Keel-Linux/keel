@@ -59,7 +59,8 @@ def state(**fields) -> AccessState:
         key_present=True, enabled=True, up=True,
         held={KEY_A: PEER}, wanted_peers=acc.wanted_peers(access),
         relays=dict(wanted), wanted=wanted,
-        sockets_enabled=frozenset(acc.relay_socket_units(wanted)))
+        sockets_enabled=frozenset(acc.relay_socket_units(wanted)),
+        sockets_active=frozenset(acc.relay_socket_units(wanted)))
     return dataclasses.replace(base, **fields)
 
 
@@ -139,6 +140,13 @@ class TestPlan(unittest.TestCase):
         found = actions(state(key_problem="mode 0644"))
         self.assertIsInstance(found[0], Refuse)
 
+    def test_a_relay_that_should_run_and_does_not_is_started(self):
+        found = actions(state(sockets_active=frozenset()))
+        self.assertEqual(argvs(found), [
+            ("systemctl", "start", "keel-access-relay-3306.socket")])
+        found = actions(state(), live=False, available=frozenset())
+        self.assertEqual(argvs(found), [])
+
     def test_a_changed_relay_restarts_and_a_stale_one_goes(self):
         wanted = acc.relay_files(ACCESS, doc())
         stale = "etc/systemd/system/keel-access-relay-5432.socket"
@@ -209,6 +217,19 @@ class TestObserve(RootCase):
         self.assertEqual(found.sockets_enabled,
                          frozenset({"keel-access-relay-3306.socket"}))
         self.assertIsNone(found.held)
+
+    def test_the_active_relays_come_from_systemctl(self):
+        done = mock.Mock(returncode=0, stdout="active\n")
+        with mock.patch("keel.system.accstate.subprocess.run",
+                        return_value=done):
+            self.assertTrue(accstate.active("x.socket"))
+        done.stdout = "inactive\n"
+        with mock.patch("keel.system.accstate.subprocess.run",
+                        return_value=done):
+            self.assertFalse(accstate.active("x.socket"))
+        with mock.patch("keel.system.accstate.subprocess.run",
+                        side_effect=OSError):
+            self.assertFalse(accstate.active("x.socket"))
 
     def test_the_held_peers_come_from_wg_show(self):
         done = mock.Mock(returncode=0, stdout=f"{KEY_A}\t{PEER}\n")

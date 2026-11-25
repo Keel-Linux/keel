@@ -42,7 +42,8 @@ class TestGuard(unittest.TestCase):
         self.nft = join(self.dir, "nft")
         with open(self.nft, "w") as fob:
             fob.write(f'#!/bin/sh\necho "$*" >> {self.calls}\n'
-                      'case "$1" in list) echo "${LISTED:-}";; esac\n')
+                      'case "$1$2" in list*|-alist) echo "${LISTED:-}";;'
+                      ' esac\n')
         os.chmod(self.nft, 0o755)
 
     def put(self, name: str, text: str) -> str:
@@ -60,6 +61,12 @@ class TestGuard(unittest.TestCase):
                "LISTED": listed}
         return subprocess.run(["sh", GUARD], env=env, capture_output=True,
                               text=True)
+
+    def deleted(self) -> list[str]:
+        if not os.path.exists(self.calls):
+            return []
+        with open(self.calls) as fob:
+            return [line.strip() for line in fob if "delete" in line]
 
     def inserted(self) -> list[str]:
         if not os.path.exists(self.calls):
@@ -85,8 +92,23 @@ class TestGuard(unittest.TestCase):
                     ' dport { 22, 2222 } accept comment "keel-ssh-guard"'])
                 self.assertIn("opened IPv4", done.stderr)
 
+    def test_its_own_rule_goes_when_ipv6_is_back(self):
+        listed = ("\t\tmeta nfproto ipv4 tcp dport { 22, 2222 } accept"
+                  ' comment "keel-ssh-guard" # handle 17\n'
+                  "\t\tct state established,related accept # handle 4\n")
+        done = self.guard(GLOBAL, DEFAULT, listed=listed)
+        self.assertEqual(done.returncode, 0)
+        self.assertEqual(self.deleted(),
+                         ["delete rule inet keel input handle 17"])
+        self.assertIn("closed IPv4", done.stderr)
+        self.assertEqual(self.inserted(), [])
+
+    def test_nothing_to_remove_while_ipv6_holds_and_no_rule(self):
+        self.guard(GLOBAL, DEFAULT, listed="\t\tct state x # handle 4\n")
+        self.assertEqual(self.deleted(), [])
+
     def test_once_and_only_for_a_narrowed_file(self):
-        self.guard(ULA, "", listed='... comment "keel-ssh-guard"')
+        self.guard(ULA, "", listed='... comment "keel-ssh-guard" # handle 9')
         self.assertEqual(self.inserted(), [])
         self.guard(ULA, "", text="#!/usr/sbin/nft -f\n# state: enforce\n")
         self.assertEqual(self.inserted(), [])
@@ -102,16 +124,52 @@ class TestGuard(unittest.TestCase):
                               text=True)
         self.assertEqual(done.returncode, 0, done.stdout)
 
-    def test_the_units_and_the_watch_run_it(self):
+    def test_its_unit_runs_after_the_network_and_the_watch_runs_it(self):
+        """Not before network-pre: keel-firewall.service and the
+        nftables drop-in run before the network, where no global IPv6 is
+        seen yet; its own unit runs after network-online, and the watch
+        every 30 s, so a loss or a return of IPv6 while the node runs is
+        seen too"""
         root = dirname(dirname(abspath(__file__)))
         for path in ("debian/keel.keel-firewall.service",
-                     "systemd/nftables.service.d/keel-firewall.conf",
-                     "firewall/firewall-watch"):
+                     "systemd/nftables.service.d/keel-firewall.conf"):
             with open(join(root, path)) as fob:
-                self.assertIn("firewall-ssh-guard", fob.read(), path)
+                self.assertNotIn("firewall-ssh-guard", fob.read(), path)
+        with open(join(root, "debian/keel.keel-firewall-ssh-guard.service")
+                  ) as fob:
+            unit = fob.read()
+        self.assertIn("After=network-online.target", unit)
+        self.assertIn("ExecStart=/usr/lib/keel/firewall-ssh-guard", unit)
+        with open(join(root, "debian/rules")) as fob:
+            self.assertIn("--name=keel-firewall-ssh-guard", fob.read())
         with open(join(root, "debian/keel.install")) as fob:
             self.assertIn("firewall/firewall-ssh-guard /usr/lib/keel",
                           fob.read())
+
+
+class TestTheWatchRunsTheGuard(unittest.TestCase):
+    def test_each_run_of_the_watch_runs_the_guard_first(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ran = join(tmp, "ran")
+            guard = join(tmp, "guard")
+            with open(guard, "w") as fob:
+                fob.write(f"#!/bin/sh\ntouch {ran}\n")
+            os.chmod(guard, 0o755)
+            nft = join(tmp, "nft")
+            with open(nft, "w") as fob:
+                fob.write("#!/bin/sh\nexit 1\n")
+            os.chmod(nft, 0o755)
+            watch = join(dirname(dirname(abspath(__file__))), "firewall",
+                         "firewall-watch")
+            done = subprocess.run(["sh", watch], env={
+                "PATH": os.environ["PATH"], "KEEL_SSH_GUARD": guard,
+                "KEEL_NFT": nft,
+                "KEEL_FIREWALL_FILE": join(tmp, "none.nft"),
+                "KEEL_FIREWALL_RECORD": join(tmp, "none", "state"),
+                "KEEL_FIREWALL_COPY": join(tmp, "none.copy")},
+                capture_output=True, text=True)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertTrue(os.path.exists(ran))
 
 
 class TestCheckReadsTheGuard(unittest.TestCase):

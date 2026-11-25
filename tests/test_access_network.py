@@ -112,7 +112,10 @@ class TestFiles(unittest.TestCase):
         service = files["etc/systemd/system/keel-access-relay-5432.service"]
         self.assertIn("ListenStream=[fd12:3456:789a:1::1]:5432\n", socket)
         self.assertIn("FreeBind=yes\n", socket)
-        self.assertIn("BindToDevice=keel-access\n", socket)
+        # no BindToDevice: it binds the socket to the device's unit, which
+        # comes up after sockets.target; the firewall closes the address
+        # to every other interface instead
+        self.assertNotIn("BindToDevice", socket)
         self.assertIn("systemd-socket-proxyd 127.0.0.1:5432\n", service)
         self.assertIn("DynamicUser=yes\n", service)
         self.assertEqual(acc.relay_socket_units(files),

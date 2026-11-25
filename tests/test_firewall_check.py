@@ -725,9 +725,8 @@ class TestDigest(ManifestCase):
 
 
 DROPIN_COMMAND = ("-/bin/sh -c '[ ! -e /etc/keel/firewall/keel-manifest.nft ]"
-                  " || { /usr/sbin/nft -f"
-                  " /etc/keel/firewall/keel-manifest.nft &&"
-                  " /usr/lib/keel/firewall-ssh-guard; }'")
+                  " || exec /usr/sbin/nft -f"
+                  " /etc/keel/firewall/keel-manifest.nft'")
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DROPIN = os.path.join(REPO, "systemd", "nftables.service.d",
                       "keel-firewall.conf")
@@ -772,8 +771,7 @@ class TestTableLoss(unittest.TestCase):
             os.chmod(nft, 0o755)
             ruleset = os.path.join(tmp, "keel-manifest.nft")
             command = DROPIN_COMMAND.lstrip("-").replace(
-                "/usr/sbin/nft", nft).replace(f"/{PATH}", ruleset).replace(
-                "/usr/lib/keel/firewall-ssh-guard", "true")
+                "/usr/sbin/nft", nft).replace(f"/{PATH}", ruleset)
             argv = shlex.split(command)
             self.assertEqual(subprocess.run(argv).returncode, 0)
             self.assertFalse(os.path.exists(log))

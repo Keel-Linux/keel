@@ -22,12 +22,14 @@ keel (0.23.104) unstable; urgency=medium
     IPv4 and says so.
   * The access accepts match the node's access address too, and what
     comes to that address on another interface is dropped, in enforce
-    and report; the relay socket is bound to the access interface. A
+    and report. A
     peer that widens its AllowedIPs reaches no port on the mesh address
-    or a VIP. SSH closes on IPv4 only where sshd listens on IPv6 too, and
-    firewall-ssh-guard opens IPv4 22 again at a load that is not an
-    apply (boot, nftables.service, the watch) when the node lost its
-    global IPv6.
+    or a VIP. SSH closes on IPv4 only where sshd listens on IPv6 too.
+    firewall-ssh-guard runs once the network is online at boot
+    (keel-firewall-ssh-guard.service) and at each run of the watch: it
+    opens IPv4 22 again while the node has no global IPv6, and removes
+    its rule when IPv6 is back. A relay socket that should run and does
+    not is started.
   * keel access list (--json) and keel access remove NAME. keel diff
     compares the access file, the unit, each computer, each relay, and
     reports a peer the spec does not declare.

@@ -154,6 +154,9 @@ def relay_actions(state: AccessState, live: bool) -> list[Action]:
         elif path in changed:
             actions.append(Run(("systemctl", "restart", unit),
                                f"restart {unit}: its file changed"))
+        elif unit not in state.sockets_active:
+            actions.append(Run(("systemctl", "start", unit),
+                               f"start {unit}: enabled, and not running"))
     return actions
 
 

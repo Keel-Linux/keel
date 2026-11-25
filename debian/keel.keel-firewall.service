@@ -43,9 +43,6 @@ ExecStart=/bin/sh -c '[ ! -e /etc/keel/firewall/keel-manifest.nft ] || exec /usr
 # an empty or cut file loads nothing and nft succeeds: fail unless the
 # table is loaded with the file's policy (firewall/firewall-loaded)
 ExecStartPost=/usr/lib/keel/firewall-loaded
-# a file that closes IPv4 22 on a node that lost its global IPv6 opens
-# it again (decision 0098, firewall/firewall-ssh-guard)
-ExecStartPost=/usr/lib/keel/firewall-ssh-guard
 
 [Install]
 WantedBy=multi-user.target
