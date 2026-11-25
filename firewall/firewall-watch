@@ -41,6 +41,17 @@ recorded() {
     fi
 }
 
+guard=${KEEL_SSH_GUARD:-/usr/lib/keel/firewall-ssh-guard}
+
+# the check, and a restore where it loads the file; then the SSH guard of
+# decision 0098, since a restore is a load that is not an apply
+restore() {
+    "$keel" firewall check --restore
+    code=$?
+    [ ! -x "$guard" ] || "$guard"
+    exit "$code"
+}
+
 if [ ! -e "$file" ]; then
     state=$(recorded)
     [ "$state" = off ] && exit 0
@@ -48,7 +59,7 @@ if [ ! -e "$file" ]; then
         && ! "$nft" list table inet keel >/dev/null 2>&1; then
         exit 0
     fi
-    exec "$keel" firewall check --restore
+    restore
 fi
 if [ -r "$mark" ]; then
     listed=$("$nft" -s list table inet keel 2>/dev/null) && {
@@ -57,4 +68,4 @@ if [ -r "$mark" ]; then
         [ "$now" = "$(cat "$mark")" ] && exit 0
     }
 fi
-exec "$keel" firewall check --restore
+restore

@@ -141,6 +141,10 @@ def compare(path: str, text: str, state: str, run) -> Checked:
                    listing=listing)
 
 
+# the rule firewall/firewall-ssh-guard inserts at a load, where the file
+# closes IPv4 22 and the node lost its global IPv6 (decision 0098): keel's
+# own, and no edit by hand
+GUARD_COMMENT = 'comment "keel-ssh-guard"'
 SET_RE = re.compile(r"\{ ([^{}]*) \}")
 HOST_RE = re.compile(r"(\b\d{1,3}(?:\.\d{1,3}){3})/32\b|"
                      r"([0-9a-fA-F:]*:[0-9a-fA-F:]*)/128\b")
@@ -186,7 +190,9 @@ def listed_rule_lines(listing: str) -> list[str]:
 def rules_differ(listing: str, text: str) -> str | None:
     """Why the loaded input chain is not the one the file loads, rule by
     rule and in order; None when it is"""
-    held, wanted = listed_rule_lines(listing), file_rule_lines(text)
+    held = [line for line in listed_rule_lines(listing)
+            if GUARD_COMMENT not in line]
+    wanted = file_rule_lines(text)
     if len(held) != len(wanted):
         return (f"table inet keel holds {len(held)} rule(s), and the file"
                 f" has {len(wanted)} (a chain flushed or edited by hand)")

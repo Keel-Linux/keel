@@ -22,7 +22,9 @@ a named set holds the TCP ports of the pending mesh invites (decision
 Decision 0098 adds the access network, where the spec declares
 `network.access`: its UDP port on every interface, and on its interface
 (`keel-access`) only the `expose: access` ports of the manifests, the
-ports sshd listens on and the database relays. Those rules come right
+ports sshd listens on and the database relays, each to the node's access
+address only; what comes to that address on another interface is
+dropped. Those rules come right
 after the ones that are always let in, and a drop of everything else
 from that interface follows them, before the public ports: an access
 peer reaches no public port, no port of firewall.allow, no mesh port,
@@ -115,10 +117,12 @@ SSH_LINE = "# ssh: IPv6 and the access interface only (decision 0098)"
 @dataclass(frozen=True)
 class Access:
     """network.access as the ruleset needs it: the interface, its UDP
-    port, and the TCP ports of its database relays"""
+    port, the node's address on it, and the TCP ports of its database
+    relays"""
 
     iface: str
     port: int
+    address: str
     relays: tuple[int, ...] = ()
 
 
@@ -248,11 +252,17 @@ def render(resolved: Resolved, states: dict, wireguard: dict | None,
 
 
 def _access_rules(access: Access | None, ports: list[Port]) -> list[str]:
-    """The access interface's ports, then a drop of the rest from it"""
+    """The access interface's ports on the node's access address only,
+    then a drop of the rest from it, and a drop of what comes to the
+    access address on another interface: a peer that widens its own
+    AllowedIPs reaches no port on the mesh address or a VIP, and the
+    relays on the access address answer nobody outside the tunnel"""
     if access is None:
         return []
-    prefix = f'iifname "{access.iface}" '
-    return _rules(prefix, ports) + [f"{prefix}drop"]
+    iface = f'iifname "{access.iface}"'
+    daddr = f"ip6 daddr {access.address}"
+    return _rules(f"{iface} {daddr} ", ports) + [
+        f"{iface} drop", f'iifname != "{access.iface}" {daddr} drop']
 
 
 def _forward(iface: str) -> str:

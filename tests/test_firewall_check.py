@@ -528,7 +528,8 @@ class TestCheckReal(ManifestCase):
                 found = render_ruleset(
                     resolved, states, {"address": "fd00:1::1/64"},
                     state=state, ssh=(22,),
-                    access=Access("keel-access", 51822, (3306,)),
+                    access=Access("keel-access", 51822,
+                                  "fd12:3456:789a:1::1", (3306,)),
                     ssh_ipv6_only=True)
                 listed = self.loaded(found.text)
                 self.assertIsNone(fwcheck.rules_differ(listed, found.text),
@@ -724,8 +725,9 @@ class TestDigest(ManifestCase):
 
 
 DROPIN_COMMAND = ("-/bin/sh -c '[ ! -e /etc/keel/firewall/keel-manifest.nft ]"
-                  " || exec /usr/sbin/nft -f"
-                  " /etc/keel/firewall/keel-manifest.nft'")
+                  " || { /usr/sbin/nft -f"
+                  " /etc/keel/firewall/keel-manifest.nft &&"
+                  " /usr/lib/keel/firewall-ssh-guard; }'")
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DROPIN = os.path.join(REPO, "systemd", "nftables.service.d",
                       "keel-firewall.conf")
@@ -770,7 +772,8 @@ class TestTableLoss(unittest.TestCase):
             os.chmod(nft, 0o755)
             ruleset = os.path.join(tmp, "keel-manifest.nft")
             command = DROPIN_COMMAND.lstrip("-").replace(
-                "/usr/sbin/nft", nft).replace(f"/{PATH}", ruleset)
+                "/usr/sbin/nft", nft).replace(f"/{PATH}", ruleset).replace(
+                "/usr/lib/keel/firewall-ssh-guard", "true")
             argv = shlex.split(command)
             self.assertEqual(subprocess.run(argv).returncode, 0)
             self.assertFalse(os.path.exists(log))
@@ -782,7 +785,8 @@ class TestTableLoss(unittest.TestCase):
     def test_the_scripts_are_installed_and_executable(self):
         with open(os.path.join(REPO, "debian", "keel.install")) as fob:
             installed = fob.read()
-        for name in ("firewall-watch", "firewall-loaded"):
+        for name in ("firewall-watch", "firewall-loaded",
+                     "firewall-ssh-guard"):
             script = os.path.join(REPO, "firewall", name)
             self.assertTrue(os.access(script, os.X_OK))
             self.assertIn(f"firewall/{name} /usr/lib/keel\n", installed)

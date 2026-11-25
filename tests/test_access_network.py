@@ -112,6 +112,7 @@ class TestFiles(unittest.TestCase):
         service = files["etc/systemd/system/keel-access-relay-5432.service"]
         self.assertIn("ListenStream=[fd12:3456:789a:1::1]:5432\n", socket)
         self.assertIn("FreeBind=yes\n", socket)
+        self.assertIn("BindToDevice=keel-access\n", socket)
         self.assertIn("systemd-socket-proxyd 127.0.0.1:5432\n", service)
         self.assertIn("DynamicUser=yes\n", service)
         self.assertEqual(acc.relay_socket_units(files),
@@ -220,8 +221,8 @@ class TestRules(ManifestCase):
                   "{port: 12321, protocol: tcp, expose: access}")
         self.resolved = gather(self.root, "core").resolved
 
-    def ruleset(self, state=ENFORCE, access=Access("keel-access", 51822,
-                                                     (3306,)),
+    def ruleset(self, state=ENFORCE, access=Access(
+                "keel-access", 51822, "fd12:3456:789a:1::1", (3306,)),
                 ssh_ipv6_only=False, wireguard=WG):
         return render(self.resolved, STATES, wireguard, state=state,
                       ssh=(22,), access=access, ssh_ipv6_only=ssh_ipv6_only)
@@ -236,9 +237,12 @@ class TestRules(ManifestCase):
     def test_the_access_ports_come_first_then_a_drop(self):
         found = self.ruleset()
         lines = [line.strip() for line in found.text.splitlines()]
-        first = lines.index('iifname "keel-access" tcp dport'
+        first = lines.index('iifname "keel-access" ip6 daddr'
+                            ' fd12:3456:789a:1::1 tcp dport'
                             ' { 22, 3306, 12321 } accept')
         self.assertEqual(lines[first + 1], 'iifname "keel-access" drop')
+        self.assertEqual(lines[first + 2], 'iifname != "keel-access" ip6'
+                         ' daddr fd12:3456:789a:1::1 drop')
         public = next(index for index, line in enumerate(lines)
                       if line.startswith("tcp dport"))
         self.assertLess(first, public)
@@ -259,9 +263,29 @@ class TestRules(ManifestCase):
     def test_report_keeps_both_access_drops(self):
         found = self.ruleset(state=REPORT)
         self.assertIn('iifname "keel-access" drop', found.text)
+        # the relay on the access address is not reached from outside
+        # the tunnel, in report too
+        self.assertIn('iifname != "keel-access" ip6 daddr'
+                      ' fd12:3456:789a:1::1 drop', found.text)
         self.assertIn("policy accept;", found.text)
         self.assertEqual(digest_of(found.text), found.digest)
         self.assertNftAccepts(found.text)
+
+    def test_a_packet_from_keel_access_to_the_mesh_address_is_dropped(self):
+        """A peer that widens its own AllowedIPs sends to the mesh address
+        or a VIP through the tunnel: each accept on keel-access names the
+        access address, so the drop of keel-access takes it"""
+        found = self.ruleset()
+        lines = [line.strip() for line in found.text.splitlines()]
+        accepts = [line for line in lines
+                   if line.startswith('iifname "keel-access"')
+                   and line.endswith("accept")]
+        self.assertTrue(accepts)
+        self.assertTrue(all("ip6 daddr fd12:3456:789a:1::1 " in line
+                            for line in accepts))
+        # what no accept takes on keel-access, the next rule drops
+        last = max(lines.index(line) for line in accepts)
+        self.assertEqual(lines[last + 1], 'iifname "keel-access" drop')
 
     def test_without_the_access_network_the_access_ports_stay_closed(self):
         found = self.ruleset(access=None, wireguard=None)
