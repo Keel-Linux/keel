@@ -492,6 +492,18 @@ def firewall_repair(args) -> int:
     return code
 
 
+def firewall_refresh(args) -> int:
+    """The ruleset written again once the init fence is no longer enabled
+    (decision 0097, keel#322); never fails, so the fence's stop succeeds"""
+    from keel.system import fwrepair
+    root = getattr(args, "root", ROOT_DEFAULT)
+    code, lines = fwrepair.refresh(root,
+                                   os.path.abspath(root) == ROOT_DEFAULT)
+    for line in lines:
+        print(line)
+    return code
+
+
 def network_wireguard_key(args) -> int:
     """Print this node's WireGuard public key, making the key pair first
 

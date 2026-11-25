@@ -297,9 +297,16 @@ def watch_active() -> bool | None:
     return out.returncode == 0
 
 
+def fence_enabled(tree: Tree) -> bool:
+    """Whether the unit of the init fence is enabled: its link in
+    multi-user.target.wants, which 97turnkey-init-fence-disable removes
+    before it stops the fence"""
+    return tree.exists(FENCE_UNIT)
+
+
 def fence_ports(tree: Tree) -> tuple[tuple[int, ...], str]:
     """The ports turnkey-init-fence redirects to, while it is enabled"""
-    if not tree.exists(FENCE_UNIT):
+    if not fence_enabled(tree):
         return (), ""
     defaults = tree.read(FENCE_DEFAULTS)
     values = defaults.assignments() if defaults.readable else {}

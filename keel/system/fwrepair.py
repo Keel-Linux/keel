@@ -243,6 +243,53 @@ def step(root: str, doc: dict, live: bool) -> list[str]:
     return list(outcome.lines)
 
 
+FENCE_SPEC = (f"/{SPEC} cannot be read or parsed: /{PATH} keeps the"
+              " rule of the init fence, and keel spec apply --system writes"
+              " it again once the spec is put right")
+
+
+def refresh(root: str, live: bool = True, run=None,
+            lock: bool | None = None,
+            wait: float = LOCK_WAIT) -> tuple[int, list[str]]:
+    """keel firewall refresh: the ruleset written again when the init
+    fence is gone (decision 0097, section 2, item 4; keel#322)
+
+    The ExecStopPost of turnkey-init-fence.service runs it, through
+    keel's drop-in. While the fence is enabled (a shutdown, a stop by
+    hand) it does nothing: the fence comes back at the next boot, and its
+    rule stays. When the fence is no longer enabled, it runs the apply's
+    firewall step, unattended, from the spec on disk: the fence rule goes
+    from the file and from the loaded table, and the state stays what
+    the evidence says. It never begins a firewall (no evidence: NOT
+    APPLIED), never restores the copy and never loads the fallback: the
+    old ruleset stays, and the line says why. It never fails, because
+    the stop of the fence must succeed"""
+    from keel.system.fwstate import fence_enabled
+    if fence_enabled(Tree(root)):
+        return exits.OK, []
+    if not (live if lock is None else lock):
+        return exits.OK, refreshed(root, live, run or subprocess.run)
+    from keel.system import fwlock
+    with fwlock.held(root, wait) as held:
+        if not held:
+            return exits.OK, ["an apply holds the firewall lock: this"
+                              " refresh skips its run; the apply renders"
+                              " the ruleset from the same state"]
+        return exits.OK, refreshed(root, live, run or subprocess.run)
+
+
+def refreshed(root: str, live: bool, run) -> list[str]:
+    """The step, where keel's firewall is on; what it said"""
+    if prior(root, live, run) is None:
+        return []
+    doc = spec_doc(root)
+    if doc is None:
+        return [FENCE_SPEC]
+    if not wants_firewall(doc):
+        return []
+    return step(root, doc, live)
+
+
 def fallback(ssh: tuple[int, ...], overlay: tuple[str, int] | None) -> str:
     """A closed table: what keeps the node reachable and nothing else"""
     rules = list(ALWAYS)
