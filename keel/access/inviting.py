@@ -62,6 +62,12 @@ class Inviter:
 
 
 def invite(inviter: Inviter, name: str, endpoint: str | None) -> int:
+    if endpoint is not None:
+        try:
+            enrol.parse_endpoint(endpoint)
+        except ValueError as e:
+            inviter.err(f"--endpoint {endpoint!r}: {e}")
+            return exits.USAGE
     found = [endpoint] if endpoint else inviter.endpoints()
     if not found:
         inviter.err(NO_IPV6)
@@ -124,7 +130,7 @@ def made(inviter: Inviter, access: dict, name: str, endpoint: str,
         invite_id=invites.new_id(), name=name, address=address,
         expires=now + timedelta(minutes=minutes), port=port,
         certificate=certificate, tls_key=tls_key,
-        hmac_key=invites.derive(secret))
+        hmac_key=invites.derive(secret), endpoint=endpoint)
     invites.save(inviter.root, found)
     seconds = minutes * 60
     inviter.err(ports.open_port(port, seconds, inviter.run, inviter.output,
@@ -187,13 +193,14 @@ def serve(inviter: Inviter, invite_id: str) -> int:
         return exits.MESH_REFUSED
     access = acc.section(inviter.node.document()) or {}
     public, problem = inviter.public_key(access)
-    endpoints = inviter.endpoints()
     code = exits.OK
     try:
-        if public is None or not endpoints:
+        # the endpoint the invite was made with, --endpoint or the
+        # node's stable global address then: never asked again
+        if public is None or not found.endpoint:
             raise bridge.BridgeError(problem or NO_IPV6)
         admitter = enrol.AccessAdmitter(
-            inviter.root, found, inviter.node, public, endpoints[0],
+            inviter.root, found, inviter.node, public, found.endpoint,
             inviter.pin(found.certificate), inviter.clock, inviter.err)
         seconds = max(int(found.expires.timestamp()
                           - inviter.clock().timestamp()) + 1, 1)
@@ -229,7 +236,8 @@ def live(args, out, err) -> Inviter:
 
     def endpoints() -> list[str]:
         tree = Tree(root)
-        return global_addresses(tree) if ipv6_default(tree) else []
+        return (global_addresses(tree, stable=True) if ipv6_default(tree)
+                else [])
 
     def public_key(access: dict) -> tuple[str | None, str]:
         found, problem = wgkeys.public(

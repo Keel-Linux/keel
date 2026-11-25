@@ -13,6 +13,14 @@ keel (0.23.105) unstable; urgency=medium
     secret to the script, never in a URL. The script makes the key pair
     on the computer (Linux and macOS) and starts the tunnel. keel access
     invites lists the waiting enrolments, keel access cancel ends one.
+  * --endpoint (a global IPv6 literal or a DNS name, an optional port)
+    is validated first and kept with the enrolment, so the script and
+    the WireGuard Endpoint use it, also on a node with no IPv6 default
+    route; without it, only a stable global address is taken. A proof
+    that is not ASCII counts as one bad proof. The command writes the
+    script whole to a file before it runs, the script's body is one
+    function called on its last line, the secret comes on standard
+    input, and the HMAC is computed with no key on an argv.
 
  -- KeelLinux maintainers <admin@keellinux.org>  Wed, 25 Nov 2026 00:00:00 +0000
 

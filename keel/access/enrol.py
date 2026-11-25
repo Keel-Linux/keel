@@ -22,6 +22,7 @@ import hmac
 import ipaddress
 import json
 import os
+import re
 import subprocess
 import threading
 from base64 import b64encode
@@ -43,6 +44,63 @@ MAX_BODY = 1024
 MAX_FORGED = 5
 SCRIPT_FILE = os.path.join(os.path.dirname(__file__), "enrol.sh")
 TEXT = "text/plain"
+LABEL_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
+MAX_NAME = 253
+
+
+def parse_endpoint(text: str) -> tuple[str, int | None]:
+    """Where a computer reaches the node: a global IPv6 literal, bare or
+    `[address]:port`, or a DNS name with an optional `:port`; the port
+    is the WireGuard UDP port as the computer sees it. Raises
+    ValueError: an IPv4 literal (answer 8, A), a link local or loopback
+    address, or any character a name does not have"""
+    host, port = text, None
+    if text.startswith("["):
+        host, sep, rest = text[1:].partition("]")
+        if not sep or not rest.startswith(":"):
+            raise ValueError("an IPv6 literal with a port is [address]:port")
+        port = endpoint_port(rest[1:])
+    elif text.count(":") == 1:
+        host, _, digits = text.partition(":")
+        port = endpoint_port(digits)
+    if ":" in host:
+        address = ipaddress.IPv6Address(host)
+        if address.is_link_local or address.is_loopback or \
+                address.is_multicast or address.is_unspecified:
+            raise ValueError(f"{host} is not an address a computer"
+                             " reaches the node at")
+        return str(address), port
+    name = host.lower().rstrip(".")
+    labels = name.split(".")
+    try:
+        ipaddress.IPv4Address(name)
+    except ValueError:
+        pass
+    else:
+        raise ValueError("an IPv4 address: the access network is IPv6"
+                         " only (decision 0098, answer 8)")
+    if len(name) > MAX_NAME or len(labels) < 2 or not all(
+            LABEL_RE.match(label) for label in labels):
+        raise ValueError(f"{text!r} is not an IPv6 address or a DNS name")
+    return name, port
+
+
+def endpoint_port(digits: str) -> int:
+    if not digits.isdigit() or not 1 <= int(digits) <= 65535:
+        raise ValueError(f"{digits!r} is not a port number")
+    return int(digits)
+
+
+def url_host(endpoint: str) -> str:
+    host, _ = parse_endpoint(endpoint)
+    return f"[{host}]" if ":" in host else host
+
+
+def wg_endpoint(endpoint: str, access: dict) -> str:
+    """The WireGuard Endpoint line of the computer: the endpoint's port,
+    else the access network's"""
+    host, port = parse_endpoint(endpoint)
+    return f"{url_host(host)}:{port or acc.port(access)}"
 
 
 class AccessListener:
@@ -109,10 +167,11 @@ def script(endpoint: str, port: int, pin: str, invite_id: str,
            node_key: str, access: dict) -> str:
     with open(SCRIPT_FILE) as fob:
         text = fob.read()
-    values = {"@NODE@": endpoint, "@PORT@": str(port), "@PIN@": pin,
+    values = {"@URL_HOST@": url_host(endpoint),
+              "@WG_ENDPOINT@": wg_endpoint(endpoint, access),
+              "@PORT@": str(port), "@PIN@": pin,
               "@ID@": invite_id, "@NODE_KEY@": node_key,
               "@NODE_ADDRESS@": str(acc.address(access).ip),
-              "@WG_PORT@": str(acc.port(access)),
               "@IFACE@": client_interface(str(access["address"]))}
     for name, value in values.items():
         text = text.replace(name, value)
@@ -121,10 +180,15 @@ def script(endpoint: str, port: int, pin: str, invite_id: str,
 
 def command(endpoint: str, port: int, pin: str, invite_id: str,
             secret: str) -> str:
-    """The one line the administrator pastes on the computer"""
-    url = f"https://[{endpoint}]:{port}{SCRIPT.format(id=invite_id)}"
-    return (f"curl -fsS --proto '=https' -k --pinnedpubkey 'sha256//{pin}'"
-            f" '{url}' | sudo sh -s -- '{secret}'")
+    """The one line the administrator pastes on the computer: the script
+    is written whole to a file of mktemp's (0600) before it runs, so a
+    cut-off download runs nothing, and the secret reaches it on its
+    standard input from the shell's own printf, in no argv"""
+    path = SCRIPT.format(id=invite_id)
+    url = f"https://{url_host(endpoint)}:{port}{path}"
+    return (f"f=$(mktemp) && curl -fsS --proto '=https' -k --pinnedpubkey"
+            f" 'sha256//{pin}' -o \"$f\" '{url}' && printf '%s\\n'"
+            f" '{secret}' | sudo sh \"$f\"; rm -f \"$f\"")
 
 
 def spki_pin(certificate: str) -> str:
@@ -184,7 +248,9 @@ class AccessAdmitter:
         if not wireguard.is_key(public):
             return refusal(400, "public_key is not a WireGuard key")
         wanted = invites.proof(self.invite.hmac_key, public)
-        if not hmac.compare_digest(wanted, given):
+        # bytes: a str that is not ASCII makes compare_digest raise
+        if not hmac.compare_digest(wanted.encode(), given.encode(
+                "utf-8", "backslashreplace")):
             return self.forgery(peer)
         return self.admit(public, peer)
 

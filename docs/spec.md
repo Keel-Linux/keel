@@ -427,10 +427,19 @@ paste in a terminal on the computer, Linux or macOS, with
 wireguard-tools, curl and openssl:
 
 ```
-curl -fsS --proto '=https' -k --pinnedpubkey 'sha256//<pin>' 'https://[<node>]:<port>/access/<id>/enrol.sh' | sudo sh -s -- '<secret>'
+f=$(mktemp) && curl -fsS --proto '=https' -k --pinnedpubkey 'sha256//<pin>' -o "$f" 'https://[<node>]:<port>/access/<id>/enrol.sh' && printf '%s\n' '<secret>' | sudo sh "$f"; rm -f "$f"
 ```
 
-The node must have a global IPv6 address (answer 8). At the first
+The script runs only once it is whole on disk, and its body is one
+function called on its last line. The secret reaches it on its standard
+input from the shell's own printf, and the script computes the HMAC with
+`openssl dgst` on data alone: no secret and no key is on the argv of a
+process. The node must have a stable global IPv6 address (not temporary,
+not deprecated) and an IPv6 default route (answer 8), or `--endpoint`
+names where the computer reaches it: a global IPv6 literal or a DNS name,
+with an optional `:port` for WireGuard (`[address]:port`). The endpoint
+is kept with the enrolment, and the script and the WireGuard `Endpoint`
+use it. At the first
 enrolment it writes `network.access` with a random unique local /64 and
 applies it. The enrolment is valid once and for `token_minutes`: its TCP
 port is in keel's set `access_invites` (IPv6 only) with that timeout.

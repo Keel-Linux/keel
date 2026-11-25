@@ -37,7 +37,7 @@ def invite(**fields) -> invites.Invite:
                 address="fd12:3456:789a:1::9/128",
                 expires=NOW + timedelta(minutes=15), port=50000,
                 certificate="CERT", tls_key="KEY",
-                hmac_key=invites.derive(SECRET))
+                hmac_key=invites.derive(SECRET), endpoint="2001:db8::1")
     return invites.Invite(**{**base, **fields})
 
 
@@ -187,7 +187,7 @@ class TestAdmitter(RootCase):
             "/access/0123456789abcdef/enrol.sh", None, None, "::1", "x")
         text = found.body.decode()
         self.assertEqual(found.status, 200)
-        self.assertIn("node='2001:db8::1'", text)
+        self.assertIn("url_host='[2001:db8::1]'", text)
         self.assertIn(f"node_key='{NODE_KEY}'", text)
         self.assertIn("node_address='fd12:3456:789a:1::1'", text)
         self.assertNotIn(SECRET, text)
@@ -209,6 +209,14 @@ class TestAdmitter(RootCase):
         again = found.forward("/access/0123456789abcdef", None, body(),
                               "::1", "2001:db8::7")
         self.assertEqual(again.status, 410)
+
+    def test_a_non_ascii_proof_is_one_bad_proof(self):
+        found = admitter(self.root, FakeNode(self.doc()))
+        answer = found.forward("/access/0123456789abcdef", None,
+                               body(proof="\u00e9" * 64), "::1", "x")
+        self.assertEqual(answer.status, 403)
+        self.assertFalse(answer.final)
+        self.assertEqual(found.forged, 1)
 
     def test_a_bad_proof_is_refused_and_five_cancel_it(self):
         found = admitter(self.root, FakeNode(self.doc()))
@@ -259,7 +267,16 @@ class TestScript(unittest.TestCase):
                       "0123456789abcdef/enrol.sh'", line)
         url = line.split("https://", 1)[1].split("'", 1)[0]
         self.assertNotIn(SECRET, url)
-        self.assertTrue(line.endswith(f"| sudo sh -s -- '{SECRET}'"))
+        # the secret reaches the script on its standard input, by the
+        # shell's own printf: in no process's argv; the script runs only
+        # once it is whole on disk
+        self.assertIn(f"printf '%s\\n' '{SECRET}' | sudo sh \"$f\"", line)
+        self.assertNotIn("sh -s --", line)
+        self.assertIn(' -o "$f" ', line)
+        self.assertTrue(line.startswith('f=$(mktemp) && curl '))
+        named = enrol.command("node.example.org:51900", 50000, "PIN=",
+                              "0123456789abcdef", SECRET)
+        self.assertIn("'https://node.example.org:50000/access/", named)
 
     def test_the_interface_name_fits_wg_quick(self):
         self.assertEqual(enrol.client_interface("fd12:3456:789a:1::1/64"),
@@ -289,12 +306,48 @@ class TestScript(unittest.TestCase):
         start = text.index("# the proof: begin")
         end = text.index("# the proof: end")
         done = subprocess.run(
-            ["sh", "-c", text[start:end] + 'printf %s "$proof"',
+            ["sh", "-c", text[text.index("padded() {"):text.index(
+                "main() {")] + text[start:end] + 'printf %s "$proof"',
              "sh"], capture_output=True, text=True,
             env={"PATH": os.environ["PATH"], "secret": SECRET, "pub": KEY_A})
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(done.stdout, invites.proof(invites.derive(SECRET),
                                                     KEY_A))
+        # no key on an argv: openssl gets data on its standard input only
+        self.assertNotIn("-hmac", text)
+        self.assertNotIn("hexkey", text)
+
+    def test_a_cut_off_download_runs_nothing(self):
+        text = self.text()
+        self.assertIn("\nmain() {\n", text)
+        self.assertEqual(text.rstrip().splitlines()[-1], 'main "$@"')
+        self.assertIn("IFS= read -r secret", text)
+
+    def test_a_name_endpoint_with_a_port(self):
+        text = enrol.script(endpoint="node.example.org:51900", port=50000,
+                            pin="PIN=", invite_id="0123456789abcdef",
+                            node_key=NODE_KEY, access=ACCESS)
+        self.assertIn("url_host='node.example.org'", text)
+        self.assertIn("wg_endpoint='node.example.org:51900'", text)
+        text = self.text()
+        self.assertIn("url_host='[2001:db8::1]'", text)
+        self.assertIn("wg_endpoint='[2001:db8::1]:51822'", text)
+
+
+class TestEndpoint(unittest.TestCase):
+    def test_an_ipv6_literal_or_a_name_with_an_optional_port(self):
+        for text, wanted in (
+                ("2001:db8::1", ("2001:db8::1", None)),
+                ("[2001:db8::1]:51900", ("2001:db8::1", 51900)),
+                ("Node.Example.org", ("node.example.org", None)),
+                ("node.example.org:51900", ("node.example.org", 51900))):
+            self.assertEqual(enrol.parse_endpoint(text), wanted, text)
+        for text in ("", "192.0.2.1", "192.0.2.1:51820", "x;rm -rf",
+                     "a..b", "[2001:db8::1]", "[2001:db8::1]:0",
+                     "node:99999", "fe80::1", "::1", "-a.example.org",
+                     "[nonsense]:1", "a" * 64 + ".org", "$(id)"):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                enrol.parse_endpoint(text)
 
 
 class TestInvite(RootCase):
@@ -333,7 +386,7 @@ class TestInvite(RootCase):
         self.assertIn("--unit=keel-access-invite@" + found[0].invite_id,
                       self.ran[1])
         line = self.said[-1]
-        self.assertIn("sudo sh -s --", line)
+        self.assertIn('| sudo sh "$f"', line)
         self.assertIn("https://[2001:db8::1]:", line)
 
     def test_refusals(self):
@@ -406,10 +459,40 @@ class TestServe(TestInvite):
         self.assertEqual(inviting.serve(self.inviter(), "0123456789abcdef"),
                          exits.MESH_REFUSED)
 
+    def test_the_endpoint_of_the_invite_drives_serve(self):
+        """--endpoint on a node with no IPv6 default route: serve uses
+        the invite's endpoint, and asks the machine for none"""
+        self.node = FakeNode({"version": 1, "network": {"access": ACCESS}})
+        code = inviting.invite(self.inviter(endpoints=lambda: []), "desk",
+                               "node.example.org:51900")
+        self.assertEqual(code, exits.OK, self.said)
+        found = invites.pending(self.root, NOW)[0]
+        self.assertEqual(found.endpoint, "node.example.org:51900")
+        seen = {}
+
+        class Bridge:
+            def __init__(self, admitter, *rest):
+                seen["endpoint"] = admitter.endpoint
+
+            def run(self):
+                pass
+
+        with mock.patch("keel.mesh.bridge.Bridge", Bridge):
+            code = inviting.serve(self.inviter(endpoints=lambda: []),
+                                  found.invite_id)
+        self.assertEqual(code, exits.OK)
+        self.assertEqual(seen["endpoint"], "node.example.org:51900")
+
+    def test_a_bad_endpoint_is_refused_before_any_use(self):
+        code = inviting.invite(self.inviter(), "desk", "192.0.2.1")
+        self.assertEqual(code, exits.USAGE)
+        self.assertIsNone(self.node.written)
+        self.assertEqual(self.ran, [])
+
     def test_no_key_or_no_address_fails_and_cleans_up(self):
         invites.save(self.root, invite())
-        code = inviting.serve(self.inviter(endpoints=lambda: []),
-                              "0123456789abcdef")
+        code = inviting.serve(self.inviter(
+            public_key=lambda access: (None, "no key")), "0123456789abcdef")
         self.assertEqual(code, exits.APPLY_FAILED)
         self.assertIsNone(invites.find(self.root, "0123456789abcdef", NOW))
 

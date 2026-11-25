@@ -388,6 +388,15 @@ class TestGlobalIpv6(RootCase):
         self.assertEqual(fwstate.global_ipv6_source(tree),
                          "global IPv6 2001:db8::1, an IPv6 default route")
 
+    def test_an_endpoint_is_a_stable_address_only(self):
+        self.put(fwstate.IF_INET6, IF_INET6 + (
+            "20010db8000000000000000000000009 02 40 00 01 eth0\n"
+            "2001db8000000000000000000000000a 02 40 00 20 eth0\n"))
+        tree = Tree(self.root)
+        self.assertEqual(fwstate.global_addresses(tree, stable=True),
+                         ["2001:db8::1"])
+        self.assertEqual(len(fwstate.global_addresses(tree)), 3)
+
     def test_no_default_route_or_no_address_is_no_global_ipv6(self):
         self.put(fwstate.IF_INET6, IF_INET6)
         self.put(fwstate.ROUTE6, UNREACHABLE)

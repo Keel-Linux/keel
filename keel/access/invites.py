@@ -49,6 +49,9 @@ class Invite:
     tls_key: str = field(repr=False)
     hmac_key: bytes = field(repr=False)
     consumed: bool = False
+    # where the computer reaches the node: an IPv6 literal or a name,
+    # with an optional port (keel.access.enrol.parse_endpoint)
+    endpoint: str = ""
 
     def expired(self, now: datetime) -> bool:
         return now >= self.expires
@@ -84,7 +87,7 @@ def save(root: str, found: Invite) -> None:
             "expires": found.expires.strftime(EXPIRES_FORMAT),
             "port": found.port, "certificate": found.certificate,
             "tls_key": found.tls_key, "hmac_key": found.hmac_key.decode(),
-            "consumed": found.consumed}
+            "consumed": found.consumed, "endpoint": found.endpoint}
     write_private(path, f"{found.invite_id}.json", json.dumps(data))
 
 
@@ -105,7 +108,8 @@ def read(root: str, invite_id: str) -> Invite | None:
             port=int(data["port"]), certificate=str(data["certificate"]),
             tls_key=str(data["tls_key"]),
             hmac_key=str(data["hmac_key"]).encode(),
-            consumed=bool(data.get("consumed")))
+            consumed=bool(data.get("consumed")),
+            endpoint=str(data.get("endpoint") or ""))
     except (OSError, ValueError, KeyError, TypeError):
         return None
 
