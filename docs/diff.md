@@ -377,6 +377,21 @@ are never read as drift. A machine with no database server at all reports
 nothing, so a description that declares one **is** drift against it, which is
 the true statement: there is no server there.
 
+## The access network
+
+`network.access` (decision 0098) is compared with what apply renders,
+not with what inspect reads: `network.access.file` (keel's file under
+`/etc/keel/access`), `network.access.relays.<unit>` (each database relay
+unit, and one keel wrote that the spec no longer has), and on the live
+system `network.access.unit` (`keel-access@<interface>` enabled and up)
+and `network.access.peers.<name>` (each computer held with its `/128`).
+A peer the interface holds and the spec does not declare is drift,
+`network.access.peers.<public key>`: someone who can reach the access
+ports, which apply removes. A spec without the section, with keel's
+interface still there, is drift on `network.access`. The peers are read
+from `wg show <interface> allowed-ips`, never from `dump`, which holds
+the node's private key.
+
 ## JSON
 
 `--format json` prints one document to stdout:

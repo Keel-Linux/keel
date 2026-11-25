@@ -336,6 +336,8 @@ def build_parser() -> argparse.ArgumentParser:
         add_common_options, add_root_option, port_number, window_seconds)
     mesh_parser.add(subparsers, mesh_options)
     vipcli.add(subparsers, mesh_options)
+    from keel.access import parser as access_parser
+    access_parser.add(subparsers, mesh_options)
 
     # no --spec: notify reads the settings apply wrote, never the spec
     notify_parser = subparsers.add_parser(
@@ -920,7 +922,7 @@ def main(argv: list[str] | None = None) -> int:
     system = getattr(args, "system", False) or getattr(
         args, "system_only", False
     ) or getattr(args, "certificate_only", False) or args.command in (
-        "database", "mesh", "vip")
+        "database", "mesh", "vip", "access")
     if getattr(args, "dry_run", False) and not system:
         parser.error("--dry-run requires --system or --system-only")
     if getattr(args, "defer_certificate", False) and not system:

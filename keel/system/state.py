@@ -21,6 +21,7 @@ from keel.system.appstate import ApplianceState, observe_appliance
 from keel.system.dbstate import DatabaseState, observe_database
 from keel.system.monstate import MonitorState, observe_monitor
 from keel.system.netstate import NetworkState, observe_network
+from keel.system.accstate import AccessState, observe_access
 from keel.system.ovstate import OverlayState, observe_overlay
 
 LOCALE_GEN = "etc/locale.gen"
@@ -93,6 +94,7 @@ class SystemState:
     network: NetworkState | None = None
     monitor: MonitorState | None = None
     overlay: OverlayState | None = None
+    access: AccessState | None = None
     appliance: ApplianceState | None = None
 
 
@@ -149,6 +151,7 @@ def observe(root: str, doc: dict, start: bool = False,
         network=observe_network(root, doc),
         monitor=observe_monitor(root, doc),
         overlay=observe_overlay(root, doc),
+        access=observe_access(root, doc),
         appliance=observe_appliance(root, doc, start, spec),
     )
 

@@ -1,3 +1,31 @@
+keel (0.23.104) unstable; urgency=medium
+
+  * Decision 0098, the node side of the access network: the spec section
+    network.access (interface keel-access, UDP 51822, a unique local
+    /64, the node's own key, token_minutes 15 from 5 to 60, and the
+    peers, each a name, a public key, one /128 and the day of its
+    enrolment). keel spec apply --system writes
+    /etc/keel/access/<interface>.conf, makes the key on the node,
+    starts keel-access@<interface>, adds and removes peers live with
+    wg set, and writes a database relay (systemd-socket-proxyd to the
+    loopback) for MariaDB or PostgreSQL. An access peer is never a mesh
+    peer: a key in network.overlay.wireguard.peers is refused.
+  * The manifest exposure class access: its ports, the ports sshd
+    listens on and the relay open on the access interface only, before
+    every other rule, then a drop of the rest from that interface, and
+    a forward chain that drops what it brings, in enforce and report.
+    firewall.state: off is refused with network.access.
+  * Answer 6, B: the ports sshd listens on open on IPv6 and on the
+    access interface only, where the live node has a global IPv6
+    address and an IPv6 default route, the first time at an apply a
+    person runs. On a node with neither, keel refuses to close them on
+    IPv4 and says so.
+  * keel access list (--json) and keel access remove NAME. keel diff
+    compares the access file, the unit, each computer, each relay, and
+    reports a peer the spec does not declare.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Wed, 25 Nov 2026 00:00:00 +0000
+
 keel (0.23.102) unstable; urgency=medium
 
   * keel#320: while inithooks' init fence is up, tls.acme writes the

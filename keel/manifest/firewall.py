@@ -18,6 +18,20 @@ a named set holds the TCP ports of the pending mesh invites (decision
 0048), each with a timeout, and one rule accepts them. This replaces
 `WEBMIN_FW_TCP_INCOMING` of the recipes (0041, 6).
 
+Decision 0098 adds the access network, where the spec declares
+`network.access`: its UDP port on every interface, and on its interface
+(`keel-access`) only the `expose: access` ports of the manifests, the
+ports sshd listens on and the database relays. Those rules come right
+after the ones that are always let in, and a drop of everything else
+from that interface follows them, before the public ports: an access
+peer reaches no public port, no port of firewall.allow, no mesh port,
+and no mesh address or VIP through the node. A forward chain drops what
+comes in on that interface, so a node with ip_forward on is no router
+for an access peer either (0098, section 4, item 5). Both drops are in
+report too: the interface is new, so nothing that worked before stops.
+With `ssh_ipv6_only` (answer 6, B), the sshd ports open on IPv6 and on
+the access interface only; the plan decides it (keel.system.firewall).
+
 nftables, one table of keel's own, `inet keel`, one input chain whose
 policy is drop. What a machine needs to stay reachable is always let in,
 whatever the manifests say: the loopback, established and related
@@ -88,6 +102,18 @@ INVITES_SET_TEXT = (
 BRIDGE_SERVICES = ((53, "tcp"), (53, "udp"), (67, "udp"), (547, "udp"))
 
 Port = tuple[int, str]
+ACCESS = "access"
+SSH_LINE = "# ssh: IPv6 and the access interface only (decision 0098)"
+
+
+@dataclass(frozen=True)
+class Access:
+    """network.access as the ruleset needs it: the interface, its UDP
+    port, and the TCP ports of its database relays"""
+
+    iface: str
+    port: int
+    relays: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -111,23 +137,44 @@ class Ruleset:
     ssh: tuple[int, ...] = ()
     # the init fence's ports, accepted for redirected packets only
     fence: tuple[int, ...] = ()
+    # what the access interface opens (decision 0098), and its name
+    access: tuple[Port, ...] = ()
+    access_iface: str | None = None
+    ssh_ipv6_only: bool = False
 
 
 def render(resolved: Resolved, states: dict, wireguard: dict | None,
            bridges: tuple[str, ...] = (), *, state: str = ENFORCE,
            ssh: tuple[int, ...] = (), allow: tuple[Allow, ...] = (),
-           fence: tuple[int, ...] = ()) -> Ruleset:
+           fence: tuple[int, ...] = (), access: Access | None = None,
+           ssh_ipv6_only: bool = False) -> Ruleset:
     """`states` are the spec's overlays, `wireguard` its
     network.overlay.wireguard, None when it declares none, and `bridges`
     the machine's bridge interfaces, whose guests get their leases and
     names from the host (BRIDGE_SERVICES). `state` is enforce or report,
     `ssh` the ports sshd listens on, `allow` the spec's firewall.allow,
-    `fence` the ports of the init fence while it runs"""
+    `fence` the ports of the init fence while it runs, `access` the
+    spec's network.access, None when it declares none, and
+    `ssh_ipv6_only` answer 6, B of decision 0098"""
     if state not in POLICY:
         raise ValueError(f"a ruleset is enforce or report, not {state}")
     declared, mesh = exposed(resolved, states)
-    public: set[Port] = declared | {(port, "tcp") for port in ssh}
+    sshd = {(port, "tcp") for port in ssh}
+    public: set[Port] = declared | sshd
+    if ssh_ipv6_only:
+        public -= sshd
     notes = []
+    wanted = access_exposed(resolved, states)
+    opened_access: set[Port] = set()
+    if access is not None:
+        public.add((access.port, "udp"))
+        opened_access = wanted | sshd | {(port, "tcp")
+                                         for port in access.relays}
+    elif wanted:
+        notes.append(f"{', '.join(_named(sorted(wanted)))} not opened: they"
+                     " are access ports, and the spec declares no"
+                     " network.access (keel access invite makes it,"
+                     " decision 0098)")
     iface = None
     if wireguard is not None:
         iface = wireguard.get("interface") or wg.DEFAULT_INTERFACE
@@ -141,7 +188,10 @@ def render(resolved: Resolved, states: dict, wireguard: dict | None,
     opened_mesh = sorted({port for ports in mesh.values() for port in ports})
     always = [rule for rule in ALWAYS
               if state == ENFORCE or rule != INVALID]
-    rules = always + _rules("", sorted(public))
+    rules = always + _access_rules(access, sorted(opened_access))
+    if ssh_ipv6_only and ssh:
+        rules += _rules("meta nfproto ipv6 ", sorted(sshd))
+    rules += _rules("", sorted(public))
     rules += _allowed(allow)
     if fence:
         rules += _rules("ct status dnat ", [(port, "tcp")
@@ -154,6 +204,8 @@ def render(resolved: Resolved, states: dict, wireguard: dict | None,
         rules.append(f'iifname "{iface}" tcp dport {MEMBERS_PORT} accept')
         rules.append(f"tcp dport @{INVITES_SET} accept")
         sets = INVITES_SET_TEXT
+    if access is not None:
+        sets += _forward(access.iface)
     if bridges:
         rules += _rules(_iifname(sorted(set(bridges))) + " ",
                         list(BRIDGE_SERVICES))
@@ -167,6 +219,7 @@ def render(resolved: Resolved, states: dict, wireguard: dict | None,
     text = (
         f"{HEADER}\n"
         f"# state: {state}\n"
+        + (f"{SSH_LINE}\n" if ssh_ipv6_only else "") +
         f"table {family} {name}\n"
         f"delete table {family} {name}\n"
         f"table {family} {name} {{\n"
@@ -181,7 +234,44 @@ def render(resolved: Resolved, states: dict, wireguard: dict | None,
     )
     return Ruleset(text, tuple(sorted(public)), tuple(opened_mesh),
                    tuple(notes), digest, state, tuple(sorted(set(ssh))),
-                   tuple(sorted(set(fence))))
+                   tuple(sorted(set(fence))), tuple(sorted(opened_access)),
+                   access.iface if access else None, ssh_ipv6_only)
+
+
+def _access_rules(access: Access | None, ports: list[Port]) -> list[str]:
+    """The access interface's ports, then a drop of the rest from it"""
+    if access is None:
+        return []
+    prefix = f'iifname "{access.iface}" '
+    return _rules(prefix, ports) + [f"{prefix}drop"]
+
+
+def _forward(iface: str) -> str:
+    """A node is no router for an access peer (0098, 4.5); policy accept,
+    so nothing else that is forwarded changes"""
+    return ("\tchain forward {\n"
+            "\t\ttype filter hook forward priority filter; policy accept;\n"
+            f'\t\tiifname "{iface}" drop\n'
+            "\t}\n")
+
+
+def access_exposed(resolved: Resolved, states: dict) -> set[Port]:
+    """The `expose: access` ports of every process whose overlay is
+    enabled (decision 0098)"""
+    found: set[Port] = set()
+    for owned in resolved.processes:
+        if owned.overlay is not None and states.get(owned.overlay) != ENABLED:
+            continue
+        for listen in owned.item.get("listen") or []:
+            if listen["expose"] == ACCESS:
+                found.add((listen["port"], listen["protocol"]))
+    return found
+
+
+def file_ssh_ipv6_only(text: str | None) -> bool:
+    """Whether a file keel wrote narrows SSH to IPv6 (answer 6, B)"""
+    return bool(text) and text.startswith(HEADER) and \
+        f"\n{SSH_LINE}\n" in text
 
 
 def exposed(resolved: Resolved, states: dict

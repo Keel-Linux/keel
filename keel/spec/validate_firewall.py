@@ -62,6 +62,22 @@ def validate_firewall(doc: dict) -> list[str]:
     error = mapping_error(KEY, firewall)
     if error or not firewall:
         return [error] if error else []
+    return firewall_errors(doc, firewall) + access_errors(doc)
+
+
+def access_errors(doc: dict) -> list[str]:
+    """network.access needs keel's firewall (decision 0098): with the
+    firewall off, nothing holds an access peer to its ports"""
+    network = doc.get("network")
+    access = network.get("access") if isinstance(network, dict) else None
+    if access is not None and declared_state(doc) == OFF:
+        return [f"{KEY}.state: off with network.access: the access network"
+                " needs keel's firewall, which holds an access peer to its"
+                " ports (decision 0098)"]
+    return []
+
+
+def firewall_errors(doc: dict, firewall: dict) -> list[str]:
     errors = [f"{KEY}.{name}: unknown key" for name in firewall
               if name not in KEYS]
     enabled = firewall.get("enabled")

@@ -1,0 +1,18 @@
+# The access network of decision 0098: the WireGuard interface of the
+# administrators' computers. keel spec apply --system writes its file,
+# /etc/keel/access/%i.conf, and enables this unit; the file is not under
+# /etc/wireguard, where every file is the mesh's.
+[Unit]
+Description=keel access network %i (WireGuard, decision 0098)
+After=network-online.target nss-lookup.target
+Wants=network-online.target
+ConditionPathExists=/etc/keel/access/%i.conf
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/wg-quick up /etc/keel/access/%i.conf
+ExecStop=/usr/bin/wg-quick down /etc/keel/access/%i.conf
+
+[Install]
+WantedBy=multi-user.target

@@ -2,6 +2,7 @@
 """Build the plan for a spec from the observed state; pure"""
 
 from keel.system.actions import Plan, Step, SwitchNetwork
+from keel.system.access import plan_access
 from keel.system.appliance import plan_appliance
 from keel.system.database import plan_database
 from keel.system.firewall import plan_firewall
@@ -25,7 +26,7 @@ def plan(
 ) -> Plan:
     """Steps: instance, users, locale, security, tls, database, monitor,
     the appliance's overlays and Monit file (decision 0041), its firewall
-    where the spec enables it, network
+    where the spec enables it, the access network (decision 0098), network
 
     The database after the cheap fields because it is the only phase
     that restarts a database server and the only one that can lose data,
@@ -63,6 +64,9 @@ def plan(
         doc, appliance.resolved if appliance else None,
         appliance.firewall if appliance else None, state.live,
         state.available, attended)
+    # the access network after its firewall rules (decision 0098), and
+    # before the uplink, the one step that can cut the session
+    steps += plan_access(state.access, state.live, state.available)
     uplink = plan_network(doc.get("network") or {}, state.network,
                           state.live, state.available, network_window,
                           skip_network or skip_uplink,

@@ -7,3 +7,4 @@ firewall/firewall-watch /usr/lib/keel
 firewall/firewall-loaded /usr/lib/keel
 certificate/certificate-after-fence /usr/lib/keel
 systemd/turnkey-init-fence.service.d/keel-certificate.conf /usr/lib/systemd/system/turnkey-init-fence.service.d
+systemd/keel-access@.service /usr/lib/systemd/system

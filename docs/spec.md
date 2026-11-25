@@ -364,6 +364,71 @@ refuses and says so, and `keel inspect` reports it.
 The overlay is not removed when the section is: a spec without it leaves
 the interface as it is.
 
+### access: the administrators' WireGuard interface
+
+Handbook decision 0098. The computers of the administrators reach the
+node through a WireGuard interface of its own, `keel-access`, never
+through the mesh's `wg0`. A computer is an **access peer**: it is not in
+`network.overlay.wireguard.peers`, so `--adopt` never makes it an
+operator root and `keel mesh sync` never sends it to another node. On
+`keel-access`, keel's firewall opens only the `expose: access` ports of
+the manifests, the ports sshd listens on, and the database relay. The
+section works in every mode; a `simple` node has an access network and
+no mesh.
+
+```yaml
+network:
+  access:
+    interface: keel-access
+    address: fd12:3456:789a:1::1/64
+    listen_port: 51822
+    token_minutes: 15
+    peers:
+      - name: laptop
+        public_key: 0niNkgzhpbKmTSrWCzukb6jaYogKZkGhW+xWlh52Mh8=
+        address: fd12:3456:789a:1::2/128
+        enrolled: "2026-11-25"
+```
+
+| Field | State | Notes |
+| --- | --- | --- |
+| `network.access.interface` | system | The interface name, as wg-quick accepts it. Default `keel-access`. Not the overlay's interface and not a name of `network.interfaces` |
+| `network.access.address` | system | Required. This node's address on the access network: a unique local address (`fc00::/7`) in a `/64` of its own (answer 3). The prefix may not overlap the uplink, the mesh prefix, a mesh peer's `allowed_ips` or a mesh peer's endpoint |
+| `network.access.listen_port` | system | The UDP port, open on every interface. Default 51822 (answer 2). Not the overlay's port |
+| `network.access.private_key.file` | system | The node's key on the access network. Default `/etc/wireguard/<interface>.key`. Made on the node by `wg genkey` at the first converge, never under `--root`; a key of its own, not the mesh's. No private key of an administrator is ever on the node |
+| `network.access.token_minutes` | system | How long an enrolment token is valid: 5 to 60, default 15 (answer 10) |
+| `network.access.peers` | system | The computers. Each has `name` (1 to 32 of `a-z 0-9 -`), `public_key`, `address` (one `/128` in the access prefix, not the node's) and `enrolled` (`YYYY-MM-DD`). Each name, key and address once. A key that is also a mesh peer's is refused: an access peer is never a mesh member. A peer has no endpoint and no keepalive: the computer starts each handshake |
+
+`firewall.state: off` is refused with this section: the firewall is what
+holds an access peer to its ports.
+
+The file is `/etc/keel/access/<interface>.conf`, not under
+`/etc/wireguard`, where every file is the mesh's, and
+`keel-access@<interface>.service` gives it to `wg-quick up` by its path.
+As for the overlay, the private key is not in it: `PostUp` gives the key
+file to `wg set`. A change of a peer is made live with `wg set`, one peer
+at a time, so the other computers' sessions live; a peer the interface
+holds and the spec does not declare is removed. Only a change of the
+address, the port or the key file restarts the unit. There is no
+confirmation window: the interface routes only the `/128` of each
+computer inside its own unique local `/64`, so it cannot capture the
+route of the session that runs the apply.
+
+The database relay (answer 5): where `database.server.engine` is
+`mariadb` or `postgresql`, keel writes `keel-access-relay-<port>.socket`
+on `[<address>]:<port>` (FreeBind) and its `.service`, which runs
+`systemd-socket-proxyd 127.0.0.1:<port>` with a dynamic user. The
+database's bind addresses and accounts do not change: the connection
+comes from the loopback.
+
+`keel access list` prints the computers (`--json` for confconsole) and,
+on the live system, the last handshake of each. `keel access remove NAME`
+removes one from the spec and applies, so its packets get no answer from
+then on. In a pair, each node has its own access network and its own
+list: one enrolment for each node, and a removal on each node (answer
+7). A spec without the section takes keel's interface and relays down;
+the key file stays.
+
 ## tls
 
 ```yaml
@@ -1006,7 +1071,15 @@ The firewall derived from the manifests (decisions 0041 and 0097): every
 `public` port of the appliance's processes and of its enabled overlays'
 processes opened on every interface, every `mesh` one on the WireGuard
 interface only, the overlay's UDP port, every port sshd listens on, and
-the ports of `firewall.allow`. Decision 0097 ends the scope of
+the ports of `firewall.allow`. With `network.access` (decision 0098), every
+`access` port, the ports sshd listens on and the database relay on the
+access interface only, before every other rule, then a drop of
+everything else from that interface, and a forward chain that drops what
+comes in on it; both drops are in `report` too. SSH (answer 6, B): the
+ports sshd listens on open on IPv6 and on the access interface only,
+where the live node has a global IPv6 address and an IPv6 default route,
+the first time at an apply a person runs; on a node with neither, keel
+refuses to close them on IPv4 and the plan says so. Decision 0097 ends the scope of
 2026-09-30 (cloud advanced only): keel writes it in every mode, simple,
 cloud simple and cloud advanced, the etcd witness included, and the
 section is valid in each.
