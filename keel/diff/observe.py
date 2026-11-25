@@ -12,6 +12,7 @@ from keel.diff.report import DRIFT, Comparison, FieldDiff
 from keel.inspect import ROOT_DEFAULT, inspect_root
 from keel.inspect.tree import Tree
 from keel.inspect.units import read_units
+from keel.system.trusted import trusted_fields
 
 SOCKET_NOTE = (
     "{units} override bind-address with socket activation: the server"
@@ -34,6 +35,7 @@ def diff_root(declared: dict, root: str = ROOT_DEFAULT) -> Comparison:
         appliance_fields(declared, root) + vip_fields(declared, root)
         + handshake_fields(declared, root == ROOT_DEFAULT)
         + access_fields(declared, root, root == ROOT_DEFAULT)
+        + trusted_fields(declared, root)
         + mtu_fields(declared, root, root == ROOT_DEFAULT)
         + filesync_fields(declared, root, root == ROOT_DEFAULT)
         + first_boot_fields(root)))

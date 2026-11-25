@@ -1670,6 +1670,28 @@ never replaced: the step is refused. A spec without the section stops
 and disables the unit and the relays, and removes keel's files; the key
 file stays.
 
+**CrowdSec and fail2ban** (`/etc/crowdsec/parsers/s02-enrich/keel-whitelist.yaml`,
+`/etc/fail2ban/jail.d/keel-ignoreip.local`; keel#330, keel#303)
+
+After the access network, keel writes a CrowdSec whitelist with the
+access /64 (`network.access.address`) and the mesh /64
+(`network.overlay.wireguard.address`), and the `ignoreip` of fail2ban's
+`[DEFAULT]` with the access /64 after the `[DEFAULT] ignoreip` of
+`jail.local` (a later one replaces it; the loopback where `jail.local`
+has none), so a few failed logins
+from an administrator's computer, or 401 answers to a node of the mesh,
+ban nobody of keel's own (decision 0098, section 4.7; decision 0086,
+answer 1). Only the prefixes this node has, never all of `fd00::/8`.
+Each file is written mode 0644 only where its package is on the node
+(`/etc/crowdsec`, `/etc/fail2ban`) and while the spec declares a prefix
+for it; keel's file is removed when none is left. A file of that path
+that keel did not write is left alone, and the plan says so. Then
+`systemctl try-reload-or-restart crowdsec.service` (or
+`fail2ban.service`), which does nothing where the daemon does not run; a
+failure of the reload does not fail the apply. A ban made before the
+file is there stays until it ends (`cscli decisions delete`,
+`fail2ban-client unban`).
+
 **network.overlay** (`/etc/wireguard/<interface>.conf`; handbook decisions
 0018 and 0020)
 
