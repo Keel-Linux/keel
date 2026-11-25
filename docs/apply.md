@@ -1287,6 +1287,29 @@ enforce: rule B is for the first move only): an apply with no word keeps it,
 and only `firewall.state: report` or `off` goes back. The ntfy notice of
 decision 0085 for a node that waits is not built; when it is, it sends
 the plan's line (`keel.system.firewall.waiting_notice`).
+
+**The diff foretells rule B.** `keel diff`, the plan of `keel spec
+apply --system` and its `--dry-run` ask one function,
+`keel.system.firewall.foretell`, so the diff shows the state the next
+apply a person runs writes, and names each socket that apply closes
+(keel#318: before, the diff said report and the apply wrote enforce).
+keel mesh can write another state, and the diff says so: it never
+begins enforcement. On a node with no `firewall:` key whose sockets all
+belong to the manifests:
+
+```
+derived.firewall: drift (declared the ruleset apply renders from the manifests, enforce, observed nothing)
+derived.firewall.state: not compared (an apply a person runs (keel spec apply --system) writes enforce: each socket on an address that is not a loopback belongs to a unit of the manifests (decision 0097, B); keel mesh, which runs with no person, writes report until then: it never begins enforcement (decision 0097))
+derived.firewall.listeners: not compared (enforce: closes udp 0.0.0.0:12321 of webmin.service (miniserv.pl): the manifests declare its process, not this port)
+```
+
+With a socket that belongs to no unit, the diff says report and names
+it, in the words of the plan. Under `--root` no socket is seen, so the
+diff says report and why. ss shows the process of each socket to root
+only, so a diff that does not run as root says unknown where rule B
+must look at the sockets. Where the apply changes no rule (a guard of
+its plan, or a network change that waits for `keel network confirm`),
+the diff says so and promises nothing.
  The table's comment carries a digest of the
 rules, which is how apply and diff tell whether the table the kernel
 holds is the one the file says.

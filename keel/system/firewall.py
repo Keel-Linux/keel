@@ -43,6 +43,7 @@ reboot; nothing but keel's own `inet keel` table is ever touched.
 """
 
 import ipaddress
+from typing import NamedTuple
 
 from keel.manifest.firewall import (
     ENFORCE,
@@ -195,6 +196,23 @@ def choose(doc: dict, resolved: Resolved, state: FirewallState,
     node is in comes from evidence (prior_state): a repair keeps enforce,
     rule B is only for the first move, and only the spec moves a node out
     of enforce"""
+    found = settled(state, declared, attended)
+    if found is not None:
+        return found
+    if state.listeners is None:
+        return REPORT, [f"report: the sockets cannot be listed"
+                        f" ({state.listeners_source}), so enforce waits;"
+                        " `firewall.state: enforce` enforces anyway"]
+    found_sockets = sorting(doc, resolved, state)
+    if found_sockets.undeclared:
+        return REPORT, [waiting_notice(found_sockets.named())]
+    return ENFORCE, [PROMOTED]
+
+
+def settled(state: FirewallState, declared: str | None,
+            attended: bool) -> tuple[str, list[str]] | None:
+    """The state where the spec, the evidence or the absence of a person
+    decides it; None where rule B must look at the sockets"""
     current, kept = prior_state(state)
     if declared == ENFORCE:
         if attended or current == ENFORCE:
@@ -206,14 +224,25 @@ def choose(doc: dict, resolved: Resolved, state: FirewallState,
         return ENFORCE, [kept]
     if not attended:
         return REPORT, [UNATTENDED]
-    if state.listeners is None:
-        return REPORT, [f"report: the sockets cannot be listed"
-                        f" ({state.listeners_source}), so enforce waits;"
-                        " `firewall.state: enforce` enforces anyway"]
-    found = sorting(doc, resolved, state)
-    if found.undeclared:
-        return REPORT, [waiting_notice(found.named())]
-    return ENFORCE, [PROMOTED]
+    return None
+
+
+class Foretold(NamedTuple):
+    """What an apply writes: the ruleset, what chose its state, and what
+    it closes or would close of the sockets seen"""
+    ruleset: Ruleset
+    reasons: list[str]
+    closes: list[str]
+
+
+def foretell(doc: dict, resolved: Resolved, state: FirewallState,
+             declared: str | None, attended: bool) -> Foretold:
+    """The one decision of rule B: apply's plan (on) and keel diff
+    (keel.diff.appliance) both ask it, so diff never foretells another
+    state than the apply writes (keel#318)"""
+    target, reasons = choose(doc, resolved, state, declared, attended)
+    ruleset = build(doc, resolved, state, target)
+    return Foretold(ruleset, reasons, told(doc, resolved, state, ruleset))
 
 
 def mesh_context(doc: dict, resolved: Resolved
@@ -331,9 +360,9 @@ def on(doc: dict, resolved: Resolved, state: FirewallState, live: bool,
             " is not trusted and the ruleset file is broken, so the state"
             " this node was in is unknown; an apply a person runs decides"
             f" and puts the record right ({state.recorded_warning})"),)
-    target, said = choose(doc, resolved, state, declared, attended)
-    ruleset = build(doc, resolved, state, target)
-    said += told(doc, resolved, state, ruleset)
+    ruleset, reasons, closes = foretell(doc, resolved, state, declared,
+                                        attended)
+    said = reasons + closes
     said += ssh_said(resolved, doc, state)
     said += [state.ssh_note] if state.ssh_note else []
     said += [state.recorded_warning] if state.recorded_warning else []

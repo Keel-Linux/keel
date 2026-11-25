@@ -337,8 +337,11 @@ class TestFirewall(ApplianceCliCase):
             if argv[0] == "sshd":
                 return subprocess.CompletedProcess(argv, 0, "port 22\n", "")
             raise OSError(2, "none")
-        # one patch: these modules share the one subprocess module
+        # one patch: these modules share the one subprocess module; the
+        # diff runs as root, the only user ss names every process for
         with mock.patch("keel.diff.appliance.LIVE_ROOT", self.root), \
+                mock.patch("keel.system.listeners.ROOT_UID", os.getuid()), \
+                mock.patch("shutil.which", return_value="/usr/sbin/nft"), \
                 mock.patch("keel.diff.appliance.table_digest",
                            return_value=held), \
                 mock.patch("keel.system.listeners.subprocess.run", run):
@@ -409,15 +412,9 @@ SS_CORE = (
     ' users:(("master",pid=400,fd=13))\n')
 
 
-class TestLiveEntry(ApplianceCliCase):
-    """The whole decision from the command a person runs (decision 0097)
-
-    The tests of keel.system.firewall build a FirewallState by hand, so
-    they never saw that the observation, keel.system.appstate, listed
-    the sockets and asked sshd -T only when the spec had a `firewall:`
-    key, which no published spec has (the real test of PR 307). These
-    go through `keel spec apply` itself, with the root taken for the
-    live system, with a spec that has no firewall key in each mode."""
+class LiveCase(ApplianceCliCase):
+    """The root taken for the live system, with ss, sshd -T and nft
+    answering as on a node"""
 
     def setUp(self):
         super().setUp()
@@ -455,6 +452,17 @@ class TestLiveEntry(ApplianceCliCase):
             code, out, err = self.cli("spec", "apply", "--spec", self.spec,
                                       "--system-only", "--dry-run")
         return out + err
+
+
+class TestLiveEntry(LiveCase):
+    """The whole decision from the command a person runs (decision 0097)
+
+    The tests of keel.system.firewall build a FirewallState by hand, so
+    they never saw that the observation, keel.system.appstate, listed
+    the sockets and asked sshd -T only when the spec had a `firewall:`
+    key, which no published spec has (the real test of PR 307). These
+    go through `keel spec apply` itself, with the root taken for the
+    live system, with a spec that has no firewall key in each mode."""
 
     def test_no_firewall_key_lets_rule_b_decide_in_each_mode(self):
         for mode in ("simple", "cloud_simple", "cloud_advanced"):
@@ -570,6 +578,194 @@ class TestLiveEntry(ApplianceCliCase):
                               f" ({state})", out)
         out = self.apply_live("simple", "firewall: {state: off}\n")
         self.assertIn("derived.firewall: off in the spec", out)
+
+
+PERSON = "an apply a person runs (keel spec apply --system) writes"
+MESH_KEEPS = ("; keel mesh, which runs with no person, writes report until"
+              " then: it never begins enforcement (decision 0097)")
+
+
+class TestDiffForetellsRuleB(LiveCase):
+    """keel#318: keel diff said report, and the next apply a person ran
+    wrote enforce by rule B and closed two sockets. diff now asks the
+    decision of apply (keel.system.firewall.foretell), for an apply a
+    person runs"""
+
+    def diff_live(self, extra: str = "", root_uid: int | None = None
+                  ) -> dict:
+        self.write(spec_text() + extra)
+        owner = mock.patch("keel.system.listeners.ROOT_UID",
+                           os.getuid() if root_uid is None else root_uid)
+        with owner, mock.patch("keel.diff.appliance.LIVE_ROOT", self.root), \
+                mock.patch("subprocess.run", self.answer), \
+                mock.patch("shutil.which", return_value="/usr/sbin/nft"):
+            return {field.field: field.line() for field in appliance_fields(
+                yaml.safe_load(spec_text() + extra), self.root)}
+
+    def test_no_key_and_each_socket_in_the_manifests_foretells_enforce(self):
+        found = self.diff_live()
+        self.assertEqual(found["derived.firewall"], (
+            "derived.firewall: drift (declared the ruleset apply renders"
+            " from the manifests, enforce, observed nothing)"))
+        self.assertEqual(found["derived.firewall.state"], (
+            f"derived.firewall.state: not compared ({PERSON} enforce: each"
+            " socket on an address that is not a loopback belongs to a unit"
+            f" of the manifests (decision 0097, B){MESH_KEEPS})"))
+        self.assertEqual(found["derived.firewall.listeners"], (
+            "derived.firewall.listeners: not compared (enforce: closes udp"
+            " 0.0.0.0:12321 of webmin.service (miniserv.pl): the manifests"
+            " declare its process, not this port)"))
+
+    def test_no_key_and_a_foreign_socket_foretells_report(self):
+        self.ss = SS_CORE + ("tcp LISTEN 0 1 [::]:9999 [::]:*"
+                             ' users:(("nc",pid=800,fd=3))\n')
+        found = self.diff_live()
+        self.assertIn("renders from the manifests, report, observed",
+                      found["derived.firewall"])
+        self.assertEqual(found["derived.firewall.state"], (
+            f"derived.firewall.state: not compared ({PERSON} report:"
+            " enforce waits, because these sockets belong to no unit of the"
+            " manifests: tcp [::]:9999 of no process ss could read (nc)."
+            " Declare each in firewall.allow, or stop it, or set"
+            " firewall.state: enforce; then run keel spec apply --system)"))
+        self.assertEqual(found["derived.firewall.listeners"], (
+            "derived.firewall.listeners: not compared (report: enforce would"
+            " close udp 0.0.0.0:12321 of webmin.service (miniserv.pl);"
+            " enforce would close tcp [::]:9999 of no process ss could read"
+            " (nc))"))
+
+    def test_report_in_the_spec_is_never_moved_by_rule_b(self):
+        found = self.diff_live("firewall: {state: report}\n")
+        self.assertIn("renders from the manifests, report, observed",
+                      found["derived.firewall"])
+        self.assertEqual(found["derived.firewall.state"], (
+            f"derived.firewall.state: not compared ({PERSON} report: the"
+            " spec says firewall.state: report, so rule B never moves it)"))
+
+    def test_enabled_true_foretells_enforce_from_the_spec(self):
+        found = self.diff_live("firewall: {enabled: true}\n")
+        self.assertIn("renders from the manifests, enforce, observed",
+                      found["derived.firewall"])
+        self.assertEqual(found["derived.firewall.state"], (
+            f"derived.firewall.state: not compared ({PERSON} enforce: the"
+            f" spec says enforce{MESH_KEEPS})"))
+
+    def test_enforce_in_the_record_is_kept(self):
+        from keel.system import fwrecord
+        fwrecord.write(self.root, "enforce")
+        self.ss = SS_CORE + ("tcp LISTEN 0 1 [::]:9999 [::]:*"
+                             ' users:(("nc",pid=800,fd=3))\n')
+        found = self.diff_live()
+        self.assertIn("renders from the manifests, enforce, observed",
+                      found["derived.firewall"])
+        self.assertEqual(found["derived.firewall.state"], (
+            f"derived.firewall.state: not compared ({PERSON} enforce,"
+            " as keel's record says (/var/lib/keel/firewall/state): the"
+            " file is empty, cut or missing; `firewall.state: report` goes"
+            " back)"))
+        self.assertIn("tcp [::]:9999 of no process ss could read (nc):"
+                      " listens, not declared, closed by the firewall",
+                      found["derived.firewall.listeners"])
+
+    def test_a_root_with_no_socket_promises_no_enforce(self):
+        self.write(spec_text())
+        found = {field.field: field.line() for field in appliance_fields(
+            yaml.safe_load(spec_text()), self.root)}
+        self.assertIn("renders from the manifests, report, observed",
+                      found["derived.firewall"])
+        self.assertEqual(found["derived.firewall.state"], (
+            f"derived.firewall.state: not compared ({PERSON} report: the"
+            " sockets cannot be listed (not the live system: no socket is"
+            " seen), so enforce waits; `firewall.state: enforce` enforces"
+            " anyway)"))
+        self.assertNotIn("enforce,", found["derived.firewall"])
+
+    def test_a_diff_not_run_as_root_does_not_guess_rule_b(self):
+        """ss shows the process of a socket of another user to root only:
+        every socket would look foreign, and the diff would say report
+        where a root apply writes enforce"""
+        found = self.diff_live(root_uid=os.getuid() + 1)
+        self.assertEqual(found["derived.firewall"], (
+            "derived.firewall: unknown (declared the ruleset apply renders"
+            " from the manifests; not inferred: rule B needs the process of"
+            " each socket, and ss shows it to root only: run keel diff as"
+            " root)"))
+        found = self.diff_live("firewall: {state: report}\n",
+                               root_uid=os.getuid() + 1)
+        self.assertIn("renders from the manifests, report, observed",
+                      found["derived.firewall"])
+        self.assertIn("(ss shows the process of each socket to root only:"
+                      " run keel diff as root)",
+                      found["derived.firewall.listeners"])
+
+    def test_an_apply_that_changes_no_rule_promises_nothing(self):
+        """the plan's guards and a network change that waits: the apply
+        writes nothing, and the diff does not foretell enforce"""
+        from keel.network import marker
+        os.makedirs(join(self.root, os.path.dirname(marker.PENDING)),
+                    exist_ok=True)
+        with open(join(self.root, marker.PENDING), "w") as fob:
+            fob.write("{}\n")
+        found = self.diff_live()
+        self.assertEqual(found["derived.firewall.state"], (
+            "derived.firewall.state: not compared (an apply a person runs"
+            " (keel spec apply --system) changes no rule: a network change"
+            " waits for keel network confirm (decision 0018))"))
+        self.assertEqual(found["derived.firewall.listeners"], (
+            "derived.firewall.listeners: not compared (an apply a person"
+            " runs (keel spec apply --system) changes no rule, so it closes"
+            " nothing)"))
+        os.remove(join(self.root, marker.PENDING))
+        os.makedirs(join(self.root, os.path.dirname(FIREWALL)),
+                    exist_ok=True)
+        with open(join(self.root, FIREWALL), "w") as fob:
+            fob.write("table inet mine {\n}\n")
+        self.write(spec_text())
+        found = {field.field: field.line() for field in appliance_fields(
+            yaml.safe_load(spec_text()), self.root)}
+        self.assertIn("changes no rule: /etc/keel/firewall/keel-manifest.nft"
+                      " is there and keel did not write it",
+                      found["derived.firewall.state"])
+
+    def test_nothing_to_close_is_said(self):
+        self.ss = SS_CORE.split("udp")[0]
+        found = self.diff_live()
+        self.assertEqual(found["derived.firewall.listeners"], (
+            "derived.firewall.listeners: not compared (enforce: closes"
+            " nothing)"))
+        found = self.diff_live("firewall: {state: report}\n")
+        self.assertEqual(found["derived.firewall.listeners"], (
+            "derived.firewall.listeners: not compared (report: enforce would"
+            " close nothing)"))
+
+    def test_without_sshd_s_ports_rule_b_names_no_state(self):
+        os.remove(join(self.root, "etc/ssh/sshd_config"))
+        self.write(spec_text())
+        found = {field.field: field.line() for field in appliance_fields(
+            yaml.safe_load(spec_text()), self.root)}
+        self.assertTrue(found["derived.firewall"].startswith(
+            "derived.firewall: unknown (declared the ruleset apply renders"
+            " from the manifests; not inferred: the ports sshd listens on"
+            " cannot be determined"), found["derived.firewall"])
+
+    def test_diff_and_apply_agree_for_each_spelling(self):
+        """one decision: the state diff foretells is the one apply's plan
+        writes, for each spelling of docs/spec.md and with a foreign
+        socket"""
+        foreign = SS_CORE + ("tcp LISTEN 0 1 [::]:9999 [::]:*"
+                             ' users:(("nc",pid=800,fd=3))\n')
+        for ss in (SS_CORE, foreign):
+            for extra in ("", "firewall: {enabled: false}\n",
+                          "firewall: {enabled: true}\n",
+                          "firewall: {state: enforce}\n",
+                          "firewall: {state: report}\n"):
+                with self.subTest(spec=extra, foreign=ss is foreign):
+                    self.ss = ss
+                    line = self.diff_live(extra)["derived.firewall"]
+                    state = line.split(", observed")[0].rsplit(", ", 1)[1]
+                    self.assertIn("/etc/keel/firewall/keel-manifest.nft"
+                                  f" ({state})", self.apply_live(
+                                      "simple", extra))
 
 
 class TestInspect(ApplianceCliCase):
