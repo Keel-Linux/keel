@@ -31,6 +31,15 @@ class TestControl(unittest.TestCase):
         self.assertIn(f"inithooks (<< {FIRST})", field("Breaks"))
         self.assertNotIn("inithooks", field("Depends"))
 
+    def test_wireguard_tools_is_a_dependency(self):
+        """keel-access@ runs wg-quick, and the access network and the mesh
+        overlay make their keys with wg (decision 0098): a node that
+        declares either must not miss them"""
+        depends = [one.strip().split()[0]
+                   for one in field("Depends").split(",") if one.strip()]
+        self.assertIn("wireguard-tools", depends)
+        self.assertNotIn("wireguard-tools", field("Suggests"))
+
     @unittest.skipUnless(shutil.which("dpkg"), "dpkg is not installed")
     def test_the_bound_covers_every_older_keel_build_and_no_newer(self):
         for version, broken in (("2.3.6", True), ("2.3.6+keel8", True),
