@@ -194,6 +194,15 @@ class TestValidation(unittest.TestCase):
             self.assertTrue(any(said in one for one in found), (said, found))
         self.assertTrue(problems(spec(access={**ACCESS, "peers": "x"})))
 
+    def test_a_malformed_section_gives_errors_and_never_raises(self):
+        found = problems(spec(access={**ACCESS, "listen_port": "x",
+                                      "private_key": "x"}, overlay=WG))
+        self.assertTrue(any("listen_port" in one for one in found))
+        self.assertTrue(any("private_key" in one for one in found))
+        found = validate(spec(access={**ACCESS, "private_key": "x"}),
+                         check_secret_files=True)
+        self.assertTrue(any("private_key" in one for one in found))
+
     def test_the_firewall_off_is_refused_with_the_access_network(self):
         found = problems(spec(firewall={"state": "off"},
                               appliance={"name": "core"}))

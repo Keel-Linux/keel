@@ -71,7 +71,8 @@ def validate_access(access: Any, network: dict,
     prefix, found = address_errors(access.get("address"), reserved)
     errors += found
     errors += peers_errors(access.get("peers"), prefix, access, overlay)
-    if check_secret_files and isinstance(access.get("peers"), list):
+    if check_secret_files and isinstance(access.get("peers"), list) and \
+            isinstance(access.get("private_key", {}), dict):
         errors += own_key_errors(f"{KEY}.peers", {
             "interface": acc.interface(access),
             "private_key": {"file": acc.key_path(access)},
@@ -80,8 +81,10 @@ def validate_access(access: Any, network: dict,
 
 
 def apart_from_overlay(access: dict, overlay: dict) -> list[str]:
-    """Not the mesh's interface, not its UDP port"""
-    if not overlay:
+    """Not the mesh's interface, not its UDP port; a port that is no
+    number has its own error"""
+    if not overlay or not all(isinstance(one.get("listen_port", 0), int)
+                              for one in (access, overlay)):
         return []
     errors = []
     if acc.interface(access) == wireguard.interface(overlay):

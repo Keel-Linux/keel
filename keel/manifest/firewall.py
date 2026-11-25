@@ -4,8 +4,9 @@
 Decision 0097: written in every mode (simple, cloud simple, cloud
 advanced and the etcd witness), in one of two states. `enforce` has the
 drop policy below. `report` has the same rules, a policy accept, no
-drop at all, and one counter as its last rule: what reaches it is what
-enforce would drop. The ports sshd listens on (`ssh`), the spec's
+drop but the two of the access interface (decision 0098, below), and
+one counter as its last rule: what reaches it is what enforce would
+drop. The ports sshd listens on (`ssh`), the spec's
 `firewall.allow` and, while the init fence runs, its ports for
 redirected packets only (`ct status dnat`) are opened too.
 

@@ -515,6 +515,27 @@ class TestCheckReal(ManifestCase):
                 self.assertIn("rule", fwcheck.rules_differ(swapped,
                                                            found.text))
 
+    def test_the_access_forms_read_back_as_the_file(self):
+        """Decision 0098: the access rules, their drop, SSH on IPv6
+        alone, and a forward chain before the input chain"""
+        from keel.manifest.firewall import Access
+        catalog = Catalog(self.root)
+        resolved, _ = resolve(catalog, catalog.read(APPLIANCE, "core"))
+        states = {"installer": "enabled", "wireguard": "enabled",
+                  "etcd": "enabled", "crowdsec": "enabled"}
+        for state in ("enforce", "report"):
+            with self.subTest(state=state):
+                found = render_ruleset(
+                    resolved, states, {"address": "fd00:1::1/64"},
+                    state=state, ssh=(22,),
+                    access=Access("keel-access", 51822, (3306,)),
+                    ssh_ipv6_only=True)
+                listed = self.loaded(found.text)
+                self.assertIsNone(fwcheck.rules_differ(listed, found.text),
+                                  listed)
+                self.assertIn("chain forward", listed)
+                self.assertEqual(digest_of(found.text), found.digest)
+
 
 class TestWatchShell(TestCheckReal):
     """firewall/firewall-watch for real, in a network namespace of its

@@ -414,6 +414,21 @@ class TestSshRule(FirewallCase):
         self.assertFalse(ssh_narrowed(self.state(global_ipv6=True,
                                                  file=kept), False)[0])
 
+    def test_an_unattended_run_keeps_what_a_person_narrowed(self):
+        declared = fwdoc()
+        declared["network"]["access"] = ACCESS
+        first = self.actions(spec=declared,
+                             state=self.state(global_ipv6=True))
+        written = next(one for one in first if hasattr(one, "content"))
+        kept = self.state(global_ipv6=True,
+                          file=File("/r/x", written.content),
+                          copy=written.content, recorded="enforce")
+        found = self.actions(spec=declared, state=kept, attended=False)
+        self.assertFalse(any(hasattr(one, "content") for one in found))
+        said = " ".join(one.summary for one in found
+                        if isinstance(one, Note))
+        self.assertIn("SSH: tcp 22 on IPv6 and on keel-access only", said)
+
     def test_the_plan_narrows_ssh_and_says_so(self):
         declared = fwdoc()
         declared["network"]["access"] = ACCESS
