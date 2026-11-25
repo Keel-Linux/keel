@@ -1,0 +1,87 @@
+#!/bin/sh
+# The SSH guard of handbook decision 0098, answer 6, B. Its own unit
+# (keel-firewall-ssh-guard.service) runs it once the network is online
+# at boot, and keel-firewall-watch runs it every 30 s, so a loss or a
+# return of IPv6 while the node runs is seen too. Not before the
+# network: no global IPv6 address is seen there yet.
+#
+# An apply closes SSH on IPv4 only where the node has a global IPv6
+# address (not unique local, not tentative) and an IPv6 default route.
+# Where keel's file closes IPv4 22 and that does not hold now, this
+# opens IPv4 22 again with one rule of its own, at the head of keel's
+# input chain, and says so in the journal: so the node is never closed.
+# When it holds again, or the file no longer closes IPv4 22, the rule
+# goes. keel firewall check reads that rule as keel's, so the watch does
+# not load the file over it.
+#
+# It holds keel's firewall lock (/run/keel/firewall.lock, keel.system.
+# fwlock) while it reads and changes the table, so an apply or a repair
+# never loads a table between its reading and its change. A busy lock
+# skips this round: the watch runs it again within 30 s.
+set -u
+file=${KEEL_FIREWALL_FILE:-/etc/keel/firewall/keel-manifest.nft}
+nft=${KEEL_NFT:-/usr/sbin/nft}
+inet6=${KEEL_IF_INET6:-/proc/net/if_inet6}
+route6=${KEEL_ROUTE6:-/proc/net/ipv6_route}
+line='# ssh: IPv6 and the access interface only (decision 0098)'
+comment='"keel-ssh-guard"'
+lock=${KEEL_FIREWALL_LOCK:-/run/keel/firewall.lock}
+
+# a lock that cannot be opened skips the round too, as a busy one
+{ mkdir -p "$(dirname "$lock")" && touch "$lock"; } 2>/dev/null || exit 0
+exec 9>>"$lock"
+flock -n 9 || exit 0
+
+narrowed=no
+if [ -r "$file" ] && grep -qxF "$line" "$file"; then
+    narrowed=yes
+fi
+
+global_address() {
+    [ -r "$inet6" ] || return 1
+    while read -r address _ _ scope flags _; do
+        [ "$scope" = 00 ] || continue
+        case $address in fc*|fd*) continue ;; esac
+        [ $(( 0x$flags & 0x48 )) -eq 0 ] 2>/dev/null || continue
+        return 0
+    done < "$inet6"
+    return 1
+}
+
+default_route() {
+    [ -r "$route6" ] || return 1
+    zero=00000000000000000000000000000000
+    while read -r dst length _ _ _ _ _ _ _ dev; do
+        if [ "$dst" = "$zero" ] && [ "$length" = 00 ] && [ "$dev" != lo ]; then
+            return 0
+        fi
+    done < "$route6"
+    return 1
+}
+
+# the handle of the guard's own rule, empty when there is none
+held=$("$nft" -a list chain inet keel input 2>/dev/null \
+    | sed -n "s/.*comment $comment # handle \([0-9][0-9]*\).*/\1/p" \
+    | head -n 1)
+
+if [ "$narrowed" = no ] || { global_address && default_route; }; then
+    if [ -n "$held" ]; then
+        "$nft" delete rule inet keel input handle "$held"
+        echo "keel-firewall: removed the rule that opened IPv4 SSH again:" \
+            "the node has a global IPv6 address and an IPv6 default route" \
+            "again, or $file no longer closes IPv4 (decision 0098)" >&2
+    fi
+    exit 0
+fi
+[ -z "$held" ] || exit 0
+ports=$(sed -n 's/^[[:space:]]*meta nfproto ipv6 tcp dport \(.*\) accept$/\1/p' \
+    "$file" | head -n 1)
+[ -n "$ports" ] || exit 0
+# word splitting of $ports is wanted: nft joins its arguments
+# shellcheck disable=SC2086
+"$nft" insert rule inet keel input meta nfproto ipv4 tcp dport $ports \
+    accept comment "$comment"
+echo "keel-firewall: opened IPv4 tcp $ports again: $file closes SSH on" \
+    "IPv4, and this node has no global IPv6 address and IPv6 default route" \
+    "now (decision 0098); keel spec apply --system decides again" >&2
+exit 0

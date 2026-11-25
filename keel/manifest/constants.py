@@ -41,7 +41,7 @@ DUMP_ENGINES = ("mariadb", "postgresql")
 REPLICATION = ("native", "none")
 BACKUP = ("dump", "files", "none")
 
-EXPOSE = ("loopback", "mesh", "public")
+EXPOSE = ("access", "loopback", "mesh", "public")
 LOOPBACK = "loopback"
 PROTOCOLS = ("tcp", "udp")
 LOOPBACK_LITERALS = ("::1", "127.0.0.1")

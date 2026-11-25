@@ -424,6 +424,10 @@ def compare_section(
         # declared, as apply leaves it
         declared = {**declared, "enabled": False}
     if section == "network" and isinstance(declared, dict):
+        # the access network is compared with what apply renders
+        # (keel.diff.access), not with what inspect reads (decision 0098)
+        declared = {key: value for key, value in declared.items()
+                    if key != "access"}
         declared = with_overlay_defaults(with_slaac_default(declared))
     if section == "network":
         declared, observed = peers_by_key(declared), peers_by_key(observed)

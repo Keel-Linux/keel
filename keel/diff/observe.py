@@ -3,6 +3,7 @@
 
 from dataclasses import replace
 
+from keel.diff.access import access_fields
 from keel.diff.appliance import appliance_fields, vip_fields
 from keel.diff.compare import LISTEN_FIELD, compare
 from keel.diff.filesync import filesync_fields
@@ -32,6 +33,7 @@ def diff_root(declared: dict, root: str = ROOT_DEFAULT) -> Comparison:
     return Comparison(found.root, fields + tuple(
         appliance_fields(declared, root) + vip_fields(declared, root)
         + handshake_fields(declared, root == ROOT_DEFAULT)
+        + access_fields(declared, root, root == ROOT_DEFAULT)
         + mtu_fields(declared, root, root == ROOT_DEFAULT)
         + filesync_fields(declared, root, root == ROOT_DEFAULT)
         + first_boot_fields(root)))

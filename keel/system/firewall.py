@@ -40,6 +40,15 @@ before anything is written:
 
 keel-firewall.service loads the file at boot, so the table survives a
 reboot; nothing but keel's own `inet keel` table is ever touched.
+
+Decision 0098, answer 6, B: the ports sshd listens on open on IPv6 and
+on the access interface only. Closing 22 on IPv4 can lock a person out,
+so keel does it only where the live node has a global IPv6 address
+(not a unique local one) and an IPv6 default route, and the first time
+only at an apply a person runs, as rule B moves a node to enforce; from
+then on keel's file is the record. A node with no global IPv6 address
+keeps 22 on both families, and the plan says that keel refuses to close
+it. Under --root, where nothing live is seen, 22 stays on both.
 """
 
 import ipaddress
@@ -50,13 +59,16 @@ from keel.manifest.firewall import (
     OFF,
     PATH,
     REPORT,
+    Access,
     Allow,
     Ruleset,
     exposed,
+    file_ssh_ipv6_only,
     file_state,
     keel_owns,
     render,
 )
+from keel.network import access as accessnet
 from keel.manifest.resolve import Resolved
 from keel.network import wireguard
 from keel.spec.validate_firewall import declared_state
@@ -175,17 +187,63 @@ def allow_of(doc: dict) -> tuple[Allow, ...]:
                  for item in items or ())
 
 
+def access_of(doc: dict) -> Access | None:
+    """The spec's network.access as the ruleset needs it"""
+    found = accessnet.section(doc)
+    if found is None:
+        return None
+    try:
+        address = str(accessnet.address(found).ip)
+    except (KeyError, ValueError):
+        return None
+    return Access(accessnet.interface(found), accessnet.port(found),
+                  address, accessnet.relay_ports(doc))
+
+
+SSH_NARROWED = ("SSH: tcp {ports} on {where} only; IPv4 is closed"
+                " (decision 0098, answer 6, B)")
+SSH_NO_IPV6 = ("SSH stays open on IPv4 too: keel refuses to close tcp"
+               " {ports} on IPv4 on a node with no global IPv6 address and"
+               " IPv6 default route ({why}; decision 0098, answer 6)")
+SSH_UNATTENDED = ("SSH stays open on IPv4 until an apply a person runs"
+                  " (keel spec apply --system) closes it (decision 0098,"
+                  " answer 6)")
+
+
+def ssh_narrowed(state: FirewallState, attended: bool
+                 ) -> tuple[bool, str]:
+    """Whether the ruleset opens SSH on IPv6 alone, and why (answer 6)"""
+    ports = ", ".join(str(port) for port in state.ssh_ports)
+    if state.global_ipv6 is None:
+        # --root, or a state no one observed: nothing narrows, and
+        # nothing is refused
+        return False, ""
+    if state.global_ipv6 is True and state.ssh_ipv6 is not True:
+        return False, SSH_NO_IPV6.format(
+            ports=ports, why="sshd does not listen on IPv6 (sshd -T:"
+            " addressfamily and listenaddress)")
+    if state.global_ipv6 is False:
+        return False, SSH_NO_IPV6.format(ports=ports,
+                                         why=state.global_ipv6_source)
+    if attended or file_ssh_ipv6_only(state.file.text):
+        return True, ""
+    return False, SSH_UNATTENDED
+
+
 def build(doc: dict, resolved: Resolved, state: FirewallState,
-          target: str) -> Ruleset:
+          target: str, attended: bool = False) -> Ruleset:
+    narrowed, _ = ssh_narrowed(state, attended)
     return render(resolved, doc.get("overlays") or {}, overlay_of(doc),
                   state.bridges, state=target, ssh=state.ssh_ports,
-                  allow=allow_of(doc), fence=state.fence)
+                  allow=allow_of(doc), fence=state.fence,
+                  access=access_of(doc), ssh_ipv6_only=narrowed)
 
 
 def opened_ports(ruleset: Ruleset, doc: dict) -> frozenset:
     """What the ruleset opens to someone: public, the mesh on the
     overlay, the administrator's ports and the fence's redirected ones"""
-    return frozenset(ruleset.public) | frozenset(ruleset.mesh) | {
+    return frozenset(ruleset.public) | frozenset(ruleset.mesh) | frozenset(
+        ruleset.access) | {
         (item.port, item.protocol) for item in allow_of(doc)} | {
         (port, "tcp") for port in ruleset.fence}
 
@@ -241,7 +299,7 @@ def foretell(doc: dict, resolved: Resolved, state: FirewallState,
     (keel.diff.appliance) both ask it, so diff never foretells another
     state than the apply writes (keel#318)"""
     target, reasons = choose(doc, resolved, state, declared, attended)
-    ruleset = build(doc, resolved, state, target)
+    ruleset = build(doc, resolved, state, target, attended)
     return Foretold(ruleset, reasons, told(doc, resolved, state, ruleset))
 
 
@@ -292,6 +350,7 @@ def sorting(doc: dict, resolved: Resolved, state: FirewallState):
     """The sockets, sorted by rule B against the enforce ruleset"""
     enforcing = build(doc, resolved, state, ENFORCE)
     overlay = overlay_of(doc)
+    access = access_of(doc)
     return classify(
         state.listeners or (),
         declared_units(resolved, doc.get("overlays") or {}),
@@ -304,7 +363,9 @@ def sorting(doc: dict, resolved: Resolved, state: FirewallState):
             overlay.get("listen_port") or wireguard.DEFAULT_PORT),
         fence=state.fence,
         mesh=mesh_context(doc, resolved)[0],
-        overlay_addresses=mesh_context(doc, resolved)[1])
+        overlay_addresses=mesh_context(doc, resolved)[1],
+        access=None if access is None else (access.iface, access.port),
+        access_addresses=accessnet.addresses_of(doc))
 
 
 def told(doc: dict, resolved: Resolved, state: FirewallState,
@@ -322,14 +383,28 @@ def told(doc: dict, resolved: Resolved, state: FirewallState,
     device = None if overlay is None else (
         overlay.get("interface") or wireguard.DEFAULT_INTERFACE)
     mesh, addresses = mesh_context(doc, resolved)
+    access = access_of(doc)
     return [f"enforce would close {item.describe()}" for item in unopened(
         state.listeners, opened_ports(ruleset, doc), device, mesh,
-        addresses)]
+        addresses, access.iface if access else None,
+        accessnet.addresses_of(doc))]
 
 
-def ssh_said(resolved: Resolved, doc: dict, state: FirewallState
-             ) -> list[str]:
-    """Name sshd's ports where the manifests do not open them all"""
+def ssh_said(resolved: Resolved, doc: dict, state: FirewallState,
+             ruleset: Ruleset | None = None) -> list[str]:
+    """Name sshd's ports where the manifests do not open them all, and
+    where SSH is narrowed to IPv6, or why it is not (answer 6)"""
+    ports = ", ".join(str(port) for port in state.ssh_ports)
+    if ruleset is not None and ruleset.ssh_ipv6_only:
+        where = (f"IPv6 and on {ruleset.access_iface}"
+                 if ruleset.access_iface else "IPv6")
+        return [SSH_NARROWED.format(ports=ports, where=where)]
+    found = [] if ruleset is None else [ssh_narrowed(state, False)[1]]
+    return [one for one in found if one] + ssh_public(resolved, doc, state)
+
+
+def ssh_public(resolved: Resolved, doc: dict, state: FirewallState
+               ) -> list[str]:
     public, _ = exposed(resolved, doc.get("overlays") or {})
     if all((port, "tcp") in public for port in state.ssh_ports):
         return []
@@ -363,7 +438,7 @@ def on(doc: dict, resolved: Resolved, state: FirewallState, live: bool,
     ruleset, reasons, closes = foretell(doc, resolved, state, declared,
                                         attended)
     said = reasons + closes
-    said += ssh_said(resolved, doc, state)
+    said += ssh_said(resolved, doc, state, ruleset)
     said += [state.ssh_note] if state.ssh_note else []
     said += [state.recorded_warning] if state.recorded_warning else []
     said += [state.fence_note] if state.fence_note else []

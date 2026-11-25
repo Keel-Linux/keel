@@ -18,7 +18,7 @@ if [ -z "$policy" ] || [ "$(tail -n 1 "$file")" != "}" ]; then
     echo "keel-firewall: $file is empty or cut short; keel spec apply --system writes it again" >&2
     exit 1
 fi
-if ! "$nft" list table inet keel 2>/dev/null | grep -q "policy $policy;"; then
+if ! "$nft" list table inet keel 2>/dev/null | grep -q "hook input priority filter; policy $policy;"; then
     echo "keel-firewall: table inet keel is not loaded with policy $policy, as $file says" >&2
     exit 1
 fi

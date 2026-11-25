@@ -41,6 +41,23 @@ recorded() {
     fi
 }
 
+guard=${KEEL_SSH_GUARD:-/usr/lib/keel/firewall-ssh-guard}
+
+# the SSH guard of decision 0098 first, at each run: it opens IPv4 22
+# again where keel's file closes it and the node lost its global IPv6,
+# and removes its own rule when IPv6 is back; keel firewall check reads
+# that rule as keel's, so the check below does not undo it
+[ ! -x "$guard" ] || "$guard"
+
+# the check, and a restore where it loads the file; then the guard
+# again, since a restore loads the file over its rule
+restore() {
+    "$keel" firewall check --restore
+    code=$?
+    [ ! -x "$guard" ] || "$guard"
+    exit "$code"
+}
+
 if [ ! -e "$file" ]; then
     state=$(recorded)
     [ "$state" = off ] && exit 0
@@ -48,7 +65,7 @@ if [ ! -e "$file" ]; then
         && ! "$nft" list table inet keel >/dev/null 2>&1; then
         exit 0
     fi
-    exec "$keel" firewall check --restore
+    restore
 fi
 if [ -r "$mark" ]; then
     listed=$("$nft" -s list table inet keel 2>/dev/null) && {
@@ -57,4 +74,4 @@ if [ -r "$mark" ]; then
         [ "$now" = "$(cat "$mark")" ] && exit 0
     }
 fi
-exec "$keel" firewall check --restore
+restore

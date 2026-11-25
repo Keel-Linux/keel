@@ -21,6 +21,7 @@ each (keel.system.listeners, live only), and the ports of the init
 fence while its unit is enabled, read from its defaults file.
 """
 
+import ipaddress
 import re
 import subprocess
 from dataclasses import dataclass
@@ -94,6 +95,13 @@ class FirewallState:
     recorded_warning: str = ""
     # the sha256 of the ruleset the last apply loaded, from the record
     recorded_digest: str | None = None
+    # a global IPv6 address and an IPv6 default route on the live node
+    # (decision 0098, answer 6); None when not seen (--root), and
+    # global_ipv6_source says what was seen
+    global_ipv6: bool | None = None
+    global_ipv6_source: str = "not the live system"
+    # sshd listens on IPv6 (sshd -T); None when not asked or no answer
+    ssh_ipv6: bool | None = None
     # the policy of the table the kernel holds, drop or accept; None
     # when there is none, or when nothing was asked (--root)
     loaded_policy: str | None = None
@@ -198,6 +206,11 @@ def observe_firewall(tree: Tree, live: bool) -> FirewallState:
         recorded=recorded,
         recorded_warning=warning,
         recorded_digest=digest,
+        global_ipv6=global_ipv6(tree) if live else None,
+        ssh_ipv6=sshd_on_ipv6(ask(subprocess.run, SSHD_T)) if live
+        else None,
+        global_ipv6_source=global_ipv6_source(tree) if live
+        else "not the live system",
         loaded_policy=policy,
         copy=fwrecord.read_copy(tree)[0],
         boot_failed=unit_failed() if live else None,
@@ -353,6 +366,72 @@ def default_route_devices(tree: Tree) -> set[str]:
         if len(fields) == 10 and fields[0] == ZERO6 and fields[1] == "00":
             devices.add(fields[9])
     return devices
+
+
+IF_INET6 = "proc/net/if_inet6"
+GLOBAL_SCOPE = "00"
+# IFA_F_DADFAILED and IFA_F_TENTATIVE: an address no packet uses yet
+NOT_USABLE = 0x08 | 0x40
+UNIQUE_LOCAL = ipaddress.ip_network("fc00::/7")
+
+
+def global_addresses(tree: Tree) -> list[str]:
+    """The usable global IPv6 addresses, not unique local ones (the
+    mesh's and the access network's are unique local)"""
+    found = []
+    for line in tree.read(IF_INET6).lines():
+        fields = line.split()
+        if len(fields) != 6 or fields[3] != GLOBAL_SCOPE:
+            continue
+        try:
+            flags = int(fields[4], 16)
+            value = ipaddress.IPv6Address(int(fields[0], 16))
+        except ValueError:
+            continue
+        if flags & NOT_USABLE or value in UNIQUE_LOCAL:
+            continue
+        found.append(str(value))
+    return found
+
+
+def ipv6_default(tree: Tree) -> bool:
+    for line in tree.read(ROUTE6).lines():
+        fields = line.split()
+        if len(fields) == 10 and fields[0] == ZERO6 and fields[1] == "00" \
+                and fields[9] != "lo":
+            return True
+    return False
+
+
+def sshd_on_ipv6(text: str | None) -> bool | None:
+    """Whether `sshd -T` says sshd listens on IPv6: an addressfamily
+    that is not inet, and an IPv6 listenaddress, or none at all"""
+    if text is None:
+        return None
+    family, listens = "any", []
+    for line in text.splitlines():
+        words = line.split()
+        if len(words) >= 2 and words[0].lower() == "addressfamily":
+            family = words[1].lower()
+        elif len(words) >= 2 and words[0].lower() == "listenaddress":
+            listens.append(words[1])
+    if family == "inet":
+        return False
+    return not listens or any(one.startswith("[") or one.count(":") > 1
+                              for one in listens)
+
+
+def global_ipv6(tree: Tree) -> bool:
+    return bool(global_addresses(tree)) and ipv6_default(tree)
+
+
+def global_ipv6_source(tree: Tree) -> str:
+    found = global_addresses(tree)
+    route = "an IPv6 default route" if ipv6_default(tree) \
+        else "no IPv6 default route"
+    if not found:
+        return f"no global IPv6 address, {route}"
+    return f"global IPv6 {', '.join(found)}, {route}"
 
 
 def table_listing() -> str | None:

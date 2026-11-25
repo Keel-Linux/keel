@@ -1651,6 +1651,25 @@ When the record is missing or names any other file, nothing is restored
 and revert says so and exits 16, leaving the marker and the copy for the
 operator: a guess could write an overlay's file over the uplink's.
 
+**network.access** (`/etc/keel/access/<interface>.conf`; handbook decision
+0098)
+
+The administrators' WireGuard interface (docs/spec.md, "access"). It is
+converged after the firewall and before the uplink, with no
+confirmation window: it routes only the `/128` of each computer in its
+own unique local `/64`. The node's key is made by `wg genkey` at the
+first converge, never under `--root`. The file is written mode 0600;
+`keel-access@<interface>` is enabled, and started when the interface is
+down. A change of the peers is made live, `wg set <iface> peer KEY
+allowed-ips ADDRESS/128` and `wg set <iface> peer KEY remove` for a peer
+the spec does not declare, read from `wg show <iface> allowed-ips`; a
+change of the `[Interface]` lines restarts the unit. The database relay
+units are written beside it, systemd is reloaded, and each relay socket
+is enabled and started. A file of keel's path that keel did not write is
+never replaced: the step is refused. A spec without the section stops
+and disables the unit and the relays, and removes keel's files; the key
+file stays.
+
 **network.overlay** (`/etc/wireguard/<interface>.conf`; handbook decisions
 0018 and 0020)
 

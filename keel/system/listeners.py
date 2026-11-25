@@ -23,6 +23,11 @@ What counts as known without a unit of the manifests:
   decision 0048), whose port the set `mesh_invites` opens until it
   expires.
 
+- the access network's own UDP port, a socket of the kernel too, and a
+  socket on the access address, which only the access interface reaches
+  under enforce: the database relays of decision 0098 (systemd holds
+  their sockets, so their unit is PID 1's).
+
 A socket bound to the loopback, or to the overlay's interface, is not
 public. A socket ss shows with no process is unknown: the node stays in
 report and the socket is named, never guessed.
@@ -178,17 +183,22 @@ def classify(listeners: tuple[Listener, ...], units: frozenset[str], *,
              overlay: tuple[str, int] | None,
              fence: tuple[int, ...] = (),
              mesh: frozenset[Port] = frozenset(),
-             overlay_addresses: frozenset[str] = frozenset()) -> Classified:
+             overlay_addresses: frozenset[str] = frozenset(),
+             access: tuple[str, int] | None = None,
+             access_addresses: frozenset[str] = frozenset()) -> Classified:
     """`opened` the ports the ruleset opens; `overlay` the WireGuard
     interface and UDP port, None without an overlay; `fence` the init
     fence's ports while its unit is enabled; `mesh` the manifests' mesh
     ports and `overlay_addresses` this node's overlay addresses and VIP:
     a mesh port on another address serves someone the ruleset cuts
-    (decision 0097, section 7), so it keeps report too"""
+    (decision 0097, section 7), so it keeps report too; `access` the
+    access interface and UDP port, `access_addresses` its address"""
     undeclared, closed, reasons = [], [], []
     iface = overlay[0] if overlay else wireguard_default()
     for item in listeners:
         if loopback(item) or (overlay and item.device == overlay[0]):
+            continue
+        if on_access(item, access, access_addresses):
             continue
         port = (item.port, item.protocol)
         if known(item, ssh, allow, overlay) or fenced(item, fence):
@@ -273,10 +283,24 @@ def known(item: Listener, ssh: tuple[int, ...], allow: frozenset[Port],
                 and port == (overlay[1], "udp"))
 
 
+def on_access(item: Listener, access: tuple[str, int] | None,
+              addresses: frozenset[str]) -> bool:
+    """Bound to the access interface or address, or the access
+    network's own UDP socket of the kernel (decision 0098)"""
+    if access is None:
+        return False
+    if item.device == access[0] or on_overlay(item, addresses):
+        return True
+    return not item.pids and (item.port, item.protocol) == (access[1],
+                                                            "udp")
+
+
 def unopened(listeners: tuple[Listener, ...], opened: frozenset[Port],
              overlay_device: str | None,
              mesh: frozenset[Port] = frozenset(),
-             overlay_addresses: frozenset[str] = frozenset()
+             overlay_addresses: frozenset[str] = frozenset(),
+             access_device: str | None = None,
+             access_addresses: frozenset[str] = frozenset()
              ) -> tuple[Listener, ...]:
     """Sockets on an address that is not a loopback whose port the
     ruleset does not open, or a mesh port on an address outside the
@@ -291,6 +315,9 @@ def unopened(listeners: tuple[Listener, ...], opened: frozenset[Port],
     return tuple(item for item in listeners
                  if not loopback(item)
                  and not (overlay_device and item.device == overlay_device)
+                 and not (access_device and (
+                     item.device == access_device
+                     or on_overlay(item, access_addresses)))
                  and closes(item))
 
 
