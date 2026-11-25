@@ -18,6 +18,20 @@
 # fwlock) while it reads and changes the table, so an apply or a repair
 # never loads a table between its reading and its change. A busy lock
 # skips this round: the watch runs it again within 30 s.
+#
+# --boot (the boot unit, keel#329): an address of DHCPv6, or of a slow
+# router advertisement, comes after network-online.target. Where the
+# file closes IPv4 22 and IPv6 is not there yet, the guard first waits
+# for a global IPv6 address and an IPv6 default route: KEEL_SSH_GUARD_
+# TRIES times KEEL_SSH_GUARD_STEP s (30 x 2 s, about 60 s). It holds no
+# lock while it waits, and writes its PID in the wait file, so the
+# watch's runs leave the decision to it meanwhile. When IPv6 does not
+# come, it opens IPv4 22 as before: the node is never closed. At its
+# end it leaves the done file in /run. The watch's first run (30 s after
+# boot) can come before network-online and the boot unit: until the
+# done file is there, the watch leaves the decision to the boot unit,
+# for at most KEEL_SSH_GUARD_BOUND s of uptime (180), so a boot unit that
+# never runs does not keep IPv4 22 closed.
 set -u
 file=${KEEL_FIREWALL_FILE:-/etc/keel/firewall/keel-manifest.nft}
 nft=${KEEL_NFT:-/usr/sbin/nft}
@@ -26,16 +40,19 @@ route6=${KEEL_ROUTE6:-/proc/net/ipv6_route}
 line='# ssh: IPv6 and the access interface only (decision 0098)'
 comment='"keel-ssh-guard"'
 lock=${KEEL_FIREWALL_LOCK:-/run/keel/firewall.lock}
+wait_file=${KEEL_SSH_GUARD_WAIT_FILE:-/run/keel/ssh-guard-boot.wait}
+tries=${KEEL_SSH_GUARD_TRIES:-30}
+step=${KEEL_SSH_GUARD_STEP:-2}
+pause=${KEEL_SLEEP:-sleep}
+done_file=${KEEL_SSH_GUARD_DONE_FILE:-/run/keel/ssh-guard-boot.done}
+uptime=${KEEL_UPTIME:-/proc/uptime}
+bound=${KEEL_SSH_GUARD_BOUND:-180}
+boot=no
+[ "${1:-}" = --boot ] && boot=yes
 
-# a lock that cannot be opened skips the round too, as a busy one
-{ mkdir -p "$(dirname "$lock")" && touch "$lock"; } 2>/dev/null || exit 0
-exec 9>>"$lock"
-flock -n 9 || exit 0
-
-narrowed=no
-if [ -r "$file" ] && grep -qxF "$line" "$file"; then
-    narrowed=yes
-fi
+narrowed() {
+    [ -r "$file" ] && grep -qxF "$line" "$file"
+}
 
 global_address() {
     [ -r "$inet6" ] || return 1
@@ -59,6 +76,56 @@ default_route() {
     return 1
 }
 
+# seconds since the boot, 0 when they cannot be read
+booted_for() {
+    up=0
+    [ -r "$uptime" ] && read -r up _ < "$uptime"
+    echo "${up%%.*}"
+}
+
+# the boot run waits for IPv6 with no lock held; the watch's runs leave
+# the decision to it while its process lives, and until it is done
+if [ "$boot" = no ]; then
+    if [ -r "$wait_file" ]; then
+        read -r waiter _ < "$wait_file" || waiter=
+        case $waiter in
+            ''|*[!0-9]*) ;;
+            *) kill -0 "$waiter" 2>/dev/null && exit 0 ;;
+        esac
+    fi
+    if [ ! -e "$done_file" ] && [ "$(booted_for)" -lt "$bound" ] \
+        2>/dev/null; then
+        exit 0
+    fi
+else
+    mkdir -p "$(dirname "$done_file")" 2>/dev/null || true
+    trap 'rm -f "$wait_file"; : > "$done_file" 2>/dev/null' EXIT
+    trap 'exit 1' INT TERM
+    if narrowed && ! { global_address && default_route; }; then
+        { mkdir -p "$(dirname "$wait_file")" && echo $$ > "$wait_file"; } \
+            2>/dev/null || true
+        tried=0
+        while [ "$tried" -lt "$tries" ]; do
+            "$pause" "$step"
+            tried=$((tried + 1))
+            if global_address && default_route; then
+                break
+            fi
+        done
+        boot=waited
+    fi
+fi
+
+# a lock that cannot be opened skips the round too, as a busy one
+{ mkdir -p "$(dirname "$lock")" && touch "$lock"; } 2>/dev/null || exit 0
+exec 9>>"$lock"
+flock -n 9 || exit 0
+
+narrowed=no
+if narrowed; then
+    narrowed=yes
+fi
+
 # the handle of the guard's own rule, empty when there is none
 held=$("$nft" -a list chain inet keel input 2>/dev/null \
     | sed -n "s/.*comment $comment # handle \([0-9][0-9]*\).*/\1/p" \
@@ -81,7 +148,9 @@ ports=$(sed -n 's/^[[:space:]]*meta nfproto ipv6 tcp dport \(.*\) accept$/\1/p' 
 # shellcheck disable=SC2086
 "$nft" insert rule inet keel input meta nfproto ipv4 tcp dport $ports \
     accept comment "$comment"
+when=now
+[ "$boot" = waited ] && when="at boot, after a wait of $((tries * step)) s"
 echo "keel-firewall: opened IPv4 tcp $ports again: $file closes SSH on" \
     "IPv4, and this node has no global IPv6 address and IPv6 default route" \
-    "now (decision 0098); keel spec apply --system decides again" >&2
+    "$when (decision 0098); keel spec apply --system decides again" >&2
 exit 0
