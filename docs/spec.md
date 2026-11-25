@@ -1111,7 +1111,14 @@ comes in on it; both drops are in `report` too. SSH (answer 6, B): the
 ports sshd listens on open on IPv6 and on the access interface only,
 where the live node has a global IPv6 address and an IPv6 default route
 and sshd listens on IPv6 (`sshd -T`), the first time at an apply a person
-runs; else keel refuses to close them on IPv4 and the plan says so.
+runs; else keel refuses to close them on IPv4 and the plan says so. The
+first boot's run is not a person (keel#328): while inithooks' first boot
+is not over (`RUN_FIRSTBOOT=true` in `/etc/default/inithooks` and no
+`/run/inithooks-complete`), the applies of its hooks keep IPv4 22 open.
+Every run with no person (the first boot, `keel mesh`, `keel firewall
+refresh`) keeps what keel's file says of IPv4 22, also while the node has
+no global IPv6 for a moment; `keel diff` compares with what the file says
+of it too.
 `/usr/lib/keel/firewall-ssh-guard` runs once the network is online at
 boot (`keel-firewall-ssh-guard.service`) and at each run of
 `keel-firewall-watch` (every 30 s): where the file closes IPv4 22 and the

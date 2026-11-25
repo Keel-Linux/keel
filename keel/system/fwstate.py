@@ -59,6 +59,13 @@ FENCE_UNIT = ("etc/systemd/system/multi-user.target.wants/"
               "turnkey-init-fence.service")
 FENCE_DEFAULTS = "etc/default/turnkey-init-fence"
 FENCE_KEYS = ("HTTP_FENCE_PORT", "HTTPS_FENCE_PORT")
+# the first boot's run, read as inithooks reads it (libinithooks/
+# init_lock.py boot_pending): RUN_FIRSTBOOT=true in its defaults and no
+# marker of a finished run, which inithooks' run writes after its hooks
+INITHOOKS_DEFAULT = "etc/default/inithooks"
+INITHOOKS_COMPLETE = "run/inithooks-complete"
+RUN_FIRSTBOOT_RE = re.compile(
+    r"""^\s*(?:export\s+)?RUN_FIRSTBOOT=(["']?)([^"'\s#]*)\1\s*(?:#.*)?$""")
 
 
 @dataclass(frozen=True)
@@ -111,6 +118,9 @@ class FirewallState:
     boot_failed: bool | None = None
     # whether keel-firewall-watch.service is failed; None when not asked
     watch_failed: bool | None = None
+    # the first boot's run of inithooks is not over (keel#328): its
+    # applies are no person's, so they never close SSH on IPv4; live only
+    boot_run: bool = False
 
 
 def ports_in(lines: list[str]) -> set[int]:
@@ -215,7 +225,22 @@ def observe_firewall(tree: Tree, live: bool) -> FirewallState:
         copy=fwrecord.read_copy(tree)[0],
         boot_failed=unit_failed() if live else None,
         watch_failed=unit_failed(WATCH_UNIT) if live else None,
+        boot_run=boot_run(tree) if live else False,
     )
+
+
+def boot_run(tree: Tree) -> bool:
+    """Whether the first boot's run of inithooks is not over (keel#328):
+    the hooks 10keel-system and 75keel-role apply with nobody there. The
+    last RUN_FIRSTBOOT line counts, as when bash sources the file"""
+    if tree.exists(INITHOOKS_COMPLETE):
+        return False
+    value = ""
+    for line in tree.read(INITHOOKS_DEFAULT).lines():
+        found = RUN_FIRSTBOOT_RE.match(line)
+        if found:
+            value = found.group(2)
+    return value.lower() == "true"
 
 
 BOOT_UNIT = "keel-firewall.service"
