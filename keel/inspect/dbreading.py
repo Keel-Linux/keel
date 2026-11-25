@@ -112,6 +112,38 @@ def is_local(origin: str) -> bool:
         return False
 
 
+def _endpoint(local: str) -> tuple[str, int] | None:
+    """`[address]:port` or `address:port` as (canonical address, port);
+    None when it is not an address and a port"""
+    address, sep, port = local.rpartition(":")
+    if not sep or not port.isdigit():
+        return None
+    address = address.strip("[]").split("%", 1)[0]
+    try:
+        return str(ipaddress.ip_address(address)), int(port)
+    except ValueError:
+        return None
+
+
+def without_listens(sockets: File, held: frozenset[tuple[str, int]]) -> File:
+    """`sockets` (ss -lntH) without the lines of the sockets in `held`,
+    (address, port) pairs that are keel's own: the database relays of the
+    access network (decision 0098), which systemd holds on the access
+    address and the database's port. They are not the server's listen
+    (keel#332). Unchanged when unreadable or when `held` is empty."""
+    if not sockets.readable or not held:
+        return sockets
+    wanted = {_endpoint(f"{address}:{port}") for address, port in held}
+    kept = []
+    for line in (sockets.text or "").splitlines(keepends=True):
+        fields = line.split()
+        if len(fields) > LOCAL_ADDRESS_FIELD and \
+                _endpoint(fields[LOCAL_ADDRESS_FIELD]) in wanted:
+            continue
+        kept.append(line)
+    return File(sockets.path, "".join(kept))
+
+
 def listening_on(sockets: File, port: int) -> Value:
     """The addresses a server answers on, from the sockets it holds open
 

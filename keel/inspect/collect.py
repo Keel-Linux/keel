@@ -18,6 +18,7 @@ from keel.inspect.container import in_container
 from keel.inspect.database import Installed, probe_database
 from keel.inspect.dbclient import READERS, Reader
 from keel.inspect.dbengines import ENGINES
+from keel.inspect.dbreading import without_listens
 from keel.inspect.hostname import probe_hostname
 from keel.inspect.ipv6 import Runtime
 from keel.inspect.locale import probe_locale
@@ -32,6 +33,7 @@ from keel.inspect.tree import File, Tree
 from keel.inspect.users import probe_users
 from keel.inspect.wireguard import Module, probe_overlay
 from keel.mesh import vip, vipnet
+from keel.network import access as access_network
 from keel.network import live as live_system
 from keel.network import wgkeys
 from keel.network import wireguard
@@ -295,7 +297,8 @@ def database_servers(tree: Tree) -> tuple[Installed, ...]:
     offline root the questions are not run and every field of the reading
     reports why.
     """
-    sockets = run_command(tree, paths.LISTENING_COMMAND)
+    sockets = without_listens(run_command(tree, paths.LISTENING_COMMAND),
+                              relay_listens(tree))
     found = []
     for engine in ENGINES:
         binary = engine.installed(tree.glob)
@@ -309,6 +312,29 @@ def database_servers(tree: Tree) -> tuple[Installed, ...]:
             Installed(engine, tree.path(binary), answers, sockets)
         )
     return tuple(found)
+
+
+RELAY_SOCKETS = f"{access_network.RELAY_DIR}/keel-access-relay-*.socket"
+
+
+def relay_listens(tree: Tree) -> frozenset[tuple[str, int]]:
+    """The (address, port) of each ListenStream of keel's access relay
+    sockets (decision 0098): keel's own sockets, not the database's
+    listen (keel#332). A file of that name that keel did not write (its
+    header) is not keel's, and its sockets stay in the observation."""
+    found = set()
+    for name in tree.glob(RELAY_SOCKETS):
+        text = tree.read(name).text or ""
+        if not text.startswith(access_network.HEADER[0]):
+            continue
+        for line in text.splitlines():
+            key, sep, value = line.partition("=")
+            if not sep or key.strip() != "ListenStream":
+                continue
+            address, colon, port = value.strip().rpartition(":")
+            if colon and port.isdigit():
+                found.add((address.strip("[]"), int(port)))
+    return frozenset(found)
 
 
 def client_configs(tree: Tree) -> tuple[tuple[Reader, File], ...]:

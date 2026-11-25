@@ -363,7 +363,7 @@ A server that names no `read_only` makes the line `unknown`.
 | --- | --- |
 | `database.server.engine` | the server binary that is installed |
 | `database.server.role` | what the server says it is |
-| `database.server.listen` | the sockets the machine holds open on that server's port |
+| `database.server.listen` | the sockets the machine holds open on that server's port, less keel's access relay sockets (keel#332) |
 | `database.server.replication.primary.*` | the primary the server says it replicates from, when the declared role is `replica` |
 | `database.server.replication.allowed_from` | the origins the server holds an authorization for, when the declared role is `primary` |
 | `database.server.replication.secret`, `database.client.primary.secret` | not compared: a reference whose value is never read, on either side |
