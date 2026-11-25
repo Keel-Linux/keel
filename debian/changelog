@@ -1,3 +1,12 @@
+keel (0.23.106) unstable; urgency=medium
+
+  * wireguard-tools moves from Suggests to Depends: keel-access@ runs
+    wg-quick, and the access network (decision 0098) and the mesh
+    overlay make the node's key with wg. A node that declares
+    network.access or network.overlay.wireguard no longer misses them.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Wed, 25 Nov 2026 00:00:00 +0000
+
 keel (0.23.105) unstable; urgency=medium
 
   * Decision 0098, the enrolment of a computer on the access network:
