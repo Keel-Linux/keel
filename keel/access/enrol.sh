@@ -19,6 +19,8 @@ node_key='@NODE_KEY@'
 node_address='@NODE_ADDRESS@'
 wg_endpoint='@WG_ENDPOINT@'
 iface='@IFACE@'
+connect_timeout='@CONNECT_TIMEOUT@'
+enrol_time='@ENROL_TIME@'
 
 fail() {
     echo "keel access: $*" >&2
@@ -52,8 +54,9 @@ main() {
     umask 077
     work=$(mktemp -d)
     trap 'rm -rf "$work"' EXIT
-    key=$(wg genkey)
-    pub=$(printf '%s\n' "$key" | wg pubkey)
+    key=$(wg genkey) || fail "wg genkey failed"
+    pub=$(printf '%s\n' "$key" | wg pubkey) || fail "wg pubkey failed"
+    [ -n "$pub" ] || fail "wg made no key pair"
     # the proof: begin
     # HMAC-SHA256 of the public key, keyed by the hex SHA-256 of
     # keel-access:<secret> as 64 characters (one block): openssl reads
@@ -63,23 +66,38 @@ main() {
         | sed 's/^.*= //')
     # shellcheck disable=SC2059
     { printf "$(padded "$hkey" 54)"; printf '%s' "$pub"; } \
-        | openssl dgst -sha256 -binary >"$work/inner"
+        | openssl dgst -sha256 -binary >"$work/inner" \
+        || fail "openssl could not make the proof (openssl dgst -sha256)"
     # shellcheck disable=SC2059
     proof=$({ printf "$(padded "$hkey" 92)"; cat "$work/inner"; } \
         | openssl dgst -sha256 | sed 's/^.*= //')
     # the proof: end
+    # a pipe hides the status of openssl: an empty or short digest is its
+    # failure
+    [ "${#hkey}" = 64 ] \
+        || fail "openssl could not make the proof (openssl dgst -sha256)"
+    [ "${#proof}" = 64 ] \
+        || fail "openssl could not make the proof (openssl dgst -sha256)"
 
-    answer=$(curl -fsS --proto '=https' -k --pinnedpubkey "sha256//$pin" \
+    # curl exits 22 when the node answers with an HTTP error: a refusal.
+    # Any other failure: the node did not answer (a closed port is a used
+    # or expired line), or the pin did not match.
+    got=0
+    answer=$(curl -fsS --proto '=https' --connect-timeout "$connect_timeout" \
+        --max-time "$enrol_time" -k --pinnedpubkey "sha256//$pin" \
         -H 'Content-Type: application/json' \
         --data "{\"public_key\": \"$pub\", \"proof\": \"$proof\"}" \
-        "https://$url_host:$port/access/$invite") \
+        "https://$url_host:$port/access/$invite") || got=$?
+    [ "$got" != 22 ] \
         || fail "the node refused the enrolment (used, expired or wrong)"
+    [ "$got" = 0 ] \
+        || fail "the node did not answer the enrolment (curl exit $got)"
     address=$(printf '%s' "$answer" \
         | sed -n 's/.*"address": *"\([0-9a-f:]*\/128\)".*/\1/p')
     [ -n "$address" ] || fail "the node's answer has no address: $answer"
 
-    mkdir -p /etc/wireguard
-    cat >"$conf" <<CONF
+    mkdir -p /etc/wireguard || fail "cannot make /etc/wireguard"
+    cat >"$conf" <<CONF || fail "cannot write $conf"
 # keel access network of $url_host (decision 0098)
 [Interface]
 PrivateKey = $key
@@ -91,7 +109,8 @@ Endpoint = $wg_endpoint
 AllowedIPs = $node_address/128
 PersistentKeepalive = 25
 CONF
-    wg-quick up "$iface"
+    wg-quick up "$iface" \
+        || fail "wg-quick up $iface failed; the node enrolled this computer: see $conf"
     echo "keel access: $iface is up; the node is $node_address"
     if command -v nc >/dev/null 2>&1; then
         if nc -z -w 10 "$node_address" 22; then
