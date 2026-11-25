@@ -239,8 +239,8 @@ class Rule06PortsAndAddresses(ManifestCase):
         self.refused("nginx",
                      'processes[0].listen[0].protocol: must be tcp or udp,'
                      ' not "sctp"',
-                     'processes[0].listen[0].expose: must be loopback, mesh'
-                     ' or public, not "world"')
+                     'processes[0].listen[0].expose: must be access,'
+                     ' loopback, mesh or public, not "world"')
 
 
 class Rule07Checks(ManifestCase):
