@@ -1,3 +1,21 @@
+keel (0.23.105) unstable; urgency=medium
+
+  * Decision 0098, the enrolment of a computer on the access network:
+    keel access invite --name NAME prints one command, valid once and
+    for network.access.token_minutes. It refuses a node with no global
+    IPv6 address (answer 8), makes network.access at the first
+    enrolment and applies it, reserves a free /128, and opens a TCP
+    port in the new set access_invites for the time of the token. The
+    listener is keel mesh's, as its own unit keel-access-listen@ID with
+    a dynamic user and no capability; the root side checks the proof,
+    adds the computer to the spec and applies. The command pins the
+    listener's public key (curl --pinnedpubkey) and gives the one-use
+    secret to the script, never in a URL. The script makes the key pair
+    on the computer (Linux and macOS) and starts the tunnel. keel access
+    invites lists the waiting enrolments, keel access cancel ends one.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Wed, 25 Nov 2026 00:00:00 +0000
+
 keel (0.23.104) unstable; urgency=medium
 
   * Decision 0098, the node side of the access network: the spec section

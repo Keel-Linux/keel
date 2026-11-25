@@ -421,6 +421,27 @@ on `[<address>]:<port>` (FreeBind) and its `.service`, which runs
 database's bind addresses and accounts do not change: the connection
 comes from the loopback.
 
+**Enrolment.** `keel access invite --name NAME` (root) prints one line to
+paste in a terminal on the computer, Linux or macOS, with
+wireguard-tools, curl and openssl:
+
+```
+curl -fsS --proto '=https' -k --pinnedpubkey 'sha256//<pin>' 'https://[<node>]:<port>/access/<id>/enrol.sh' | sudo sh -s -- '<secret>'
+```
+
+The node must have a global IPv6 address (answer 8). At the first
+enrolment it writes `network.access` with a random unique local /64 and
+applies it. The enrolment is valid once and for `token_minutes`: its TCP
+port is in keel's set `access_invites` (IPv6 only) with that timeout.
+The listener is keel mesh's, as `keel-access-listen@<id>` with a dynamic
+user and no capability, with a certificate of its own whose public key
+the line pins. The script makes the key pair on the computer and sends
+the public key and an HMAC proof of the secret; the secret is in no URL,
+and the node keeps only a key derived from it. The node adds the
+computer to `network.access.peers`, applies, and answers with its /128.
+`keel access invites` lists the enrolments that wait, `keel access
+cancel ID` ends one.
+
 `keel access list` prints the computers (`--json` for confconsole) and,
 on the live system, the last handshake of each. `keel access remove NAME`
 removes one from the spec and applies, so its packets get no answer from

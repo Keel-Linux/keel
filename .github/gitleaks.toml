@@ -8,6 +8,7 @@ useDefault = true
 [[allowlists]]
 description = "test fixtures, fake keys on purpose"
 paths = [
+  '''^tests/test_access_enrol\.py$''',
   '''^tests/test_access_network\.py$''',
   '''^tests/test_inspect_overlay\.py$''',
   '''^tests/test_inspect_probes\.py$''',

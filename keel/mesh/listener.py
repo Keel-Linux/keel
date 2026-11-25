@@ -86,6 +86,9 @@ class Params:
     port: int
     overlay: str
     joined: tuple[str, str, datetime] | None = None
+    # "mesh", or "access" for an enrolment of decision 0098, whose
+    # listener is keel.access.enrol.AccessListener
+    kind: str = "mesh"
 
 
 class Limiter:

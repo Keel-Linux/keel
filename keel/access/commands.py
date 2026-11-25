@@ -144,3 +144,55 @@ def access_remove(args, node=None) -> int:
         return done.code
     out(f"removed {args.name}: its packets get no answer from now on")
     return exits.OK
+
+
+def inviter(args):
+    from keel.access import inviting
+    return inviting.live(args, out, error)
+
+
+def rooted(args, verb: str) -> int:
+    from keel.mesh.commands import as_root
+    return as_root(args, verb)
+
+
+def access_invite(args) -> int:
+    """Print the command that enrols a computer (decision 0098)"""
+    from keel.access import inviting
+    code = rooted(args, "keel access invite")
+    if code != exits.OK:
+        return code
+    return inviting.invite(inviter(args), args.name, args.endpoint)
+
+
+def access_serve(args) -> int:
+    """What keel-access-invite@<id> runs"""
+    import signal
+
+    from keel.access import inviting
+    from keel.mesh.inviting import terminated
+    code = rooted(args, "keel access serve")
+    if code != exits.OK:
+        return code
+    signal.signal(signal.SIGTERM, terminated)
+    return inviting.serve(inviter(args), args.invite)
+
+
+def access_invites(args) -> int:
+    from keel.access import inviting
+    code = rooted(args, "keel access invites")
+    if code != exits.OK:
+        return code
+    found = inviter(args)
+    for line in inviting.waiting(found.root, found.clock()) or [
+            "no enrolment waits"]:
+        out(line)
+    return exits.OK
+
+
+def access_cancel(args) -> int:
+    from keel.access import inviting
+    code = rooted(args, "keel access cancel")
+    if code != exits.OK:
+        return code
+    return inviting.cancel(inviter(args), args.invite)
