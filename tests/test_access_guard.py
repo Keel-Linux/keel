@@ -58,6 +58,7 @@ class TestGuard(unittest.TestCase):
                "KEEL_FIREWALL_FILE": self.put("rules.nft", text),
                "KEEL_IF_INET6": self.put("if_inet6", inet6),
                "KEEL_ROUTE6": self.put("ipv6_route", route6),
+               "KEEL_FIREWALL_LOCK": join(self.dir, "run", "firewall.lock"),
                "LISTED": listed}
         return subprocess.run(["sh", GUARD], env=env, capture_output=True,
                               text=True)
@@ -100,8 +101,34 @@ class TestGuard(unittest.TestCase):
         self.assertEqual(done.returncode, 0)
         self.assertEqual(self.deleted(),
                          ["delete rule inet keel input handle 17"])
-        self.assertIn("closed IPv4", done.stderr)
+        self.assertIn("removed the rule", done.stderr)
         self.assertEqual(self.inserted(), [])
+
+    def test_its_own_rule_goes_when_the_file_is_not_narrowed_now(self):
+        """An apply loaded a file that does not close IPv4 22 after the
+        guard read the old one: the guard's rule must not stay"""
+        listed = ("\t\tmeta nfproto ipv4 tcp dport 22 accept comment"
+                  ' "keel-ssh-guard" # handle 21\n')
+        self.guard(ULA, "", text="#!/usr/sbin/nft -f\n# state: enforce\n",
+                   listed=listed)
+        self.assertEqual(self.deleted(),
+                         ["delete rule inet keel input handle 21"])
+        self.assertEqual(self.inserted(), [])
+
+    def test_a_busy_firewall_lock_skips_the_round(self):
+        """The apply and the repair hold /run/keel/firewall.lock while
+        they write and load the table: the guard does nothing then, and
+        the watch runs it again within 30 s"""
+        import fcntl
+        lock = join(self.dir, "run", "firewall.lock")
+        os.makedirs(dirname(lock), exist_ok=True)
+        with open(lock, "w") as fob:
+            fcntl.flock(fob, fcntl.LOCK_EX)
+            done = self.guard(ULA, "")
+        self.assertEqual(done.returncode, 0)
+        self.assertFalse(os.path.exists(self.calls))
+        self.guard(ULA, "")
+        self.assertEqual(len(self.inserted()), 1)
 
     def test_nothing_to_remove_while_ipv6_holds_and_no_rule(self):
         self.guard(GLOBAL, DEFAULT, listed="\t\tct state x # handle 4\n")
@@ -114,6 +141,8 @@ class TestGuard(unittest.TestCase):
         self.assertEqual(self.inserted(), [])
         self.assertEqual(subprocess.run(
             ["sh", GUARD], env={"PATH": os.environ["PATH"],
+                                "KEEL_NFT": self.nft,
+                                "KEEL_FIREWALL_LOCK": join(self.dir, "l"),
                                 "KEEL_FIREWALL_FILE": "/nonexistent"},
             capture_output=True).returncode, 0)
 
