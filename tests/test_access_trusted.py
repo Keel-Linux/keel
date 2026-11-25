@@ -200,6 +200,84 @@ class TestJailLocal(RootCase):
                                                           ACCESS_NET))
 
 
+class TestMeshPrefix(unittest.TestCase):
+    """the whitelist holds the node's mesh /64, never a shorter prefix
+    (never all of fd00::/8)"""
+
+    def mesh(self, address: str) -> tuple[str, ...]:
+        return trusted.crowdsec_prefixes(
+            {"network": {"overlay": {"wireguard": {"address": address}}}})
+
+    def test_a_shorter_prefix_is_narrowed_to_the_node_s_64(self):
+        self.assertEqual(self.mesh("fde4:fee2:c919::1/48"), (MESH_NET,))
+        self.assertEqual(self.mesh("fde4:fee2:c919::1/8"), (MESH_NET,))
+        self.assertEqual(self.mesh("fde4:fee2:c919:7::1/1"),
+                         ("fde4:fee2:c919:7::/64",))
+
+    def test_a_64_or_a_longer_prefix_stays_as_declared(self):
+        self.assertEqual(self.mesh("fde4:fee2:c919::1/64"), (MESH_NET,))
+        self.assertEqual(self.mesh("fde4:fee2:c919::1/112"),
+                         ("fde4:fee2:c919::/112",))
+
+    def test_never_a_prefix_shorter_than_64(self):
+        for address in ("fd00::1/8", "fde4::1/16", "fde4:fee2:c919::1/63"):
+            for prefix in self.mesh(address):
+                self.assertGreaterEqual(
+                    int(prefix.rsplit("/", 1)[1]), 64, address)
+
+    def test_the_access_prefix_too(self):
+        broad = doc()
+        broad["network"]["access"] = {**ACCESS,
+                                      "address": "fd12:3456:789a:1::1/48"}
+        self.assertEqual(trusted.crowdsec_prefixes(broad), (ACCESS_NET,))
+
+
+class TestIgnoreipMerge(RootCase):
+    """every [DEFAULT] ignoreip, in the order fail2ban reads the files,
+    continuation lines included: no entry of an operator is lost"""
+
+    def test_continuation_lines(self):
+        self.assertEqual(trusted.ignoreip(
+            "[DEFAULT]\nignoreip = 127.0.0.1/8 ::1\n    192.0.2.7\n"
+            "\t198.51.100.0/24  # office\nbantime = 1h\n    9.9.9.9\n"),
+            ("127.0.0.1/8", "::1", "192.0.2.7", "198.51.100.0/24"))
+
+    def test_a_jail_s_own_ignoreip_is_not_the_default(self):
+        self.assertEqual(trusted.ignoreip(
+            "[sshd]\nignoreip = 198.51.100.1\n    198.51.100.2\n"),
+            trusted.LOOPBACK)
+
+    def test_every_file_in_fail2ban_s_order(self):
+        self.packages()
+        self.put("etc/fail2ban/jail.conf",
+                 "[DEFAULT]\n#ignoreip = 127.0.0.1/8 ::1\nignoreip = ::1\n")
+        self.put("etc/fail2ban/jail.d/b.conf",
+                 "[DEFAULT]\nignoreip = 192.0.2.2\n")
+        self.put("etc/fail2ban/jail.d/a.conf",
+                 "[DEFAULT]\nignoreip = 192.0.2.1\n")
+        self.put(trusted.JAIL_LOCAL, "[DEFAULT]\nignoreip = 127.0.0.1/8\n"
+                 "    192.0.2.3\n")
+        self.put("etc/fail2ban/jail.d/z-operator.local",
+                 "[DEFAULT]\nignoreip = 192.0.2.4 ::1\n")
+        found = self.plan(doc())[trusted.FAIL2BAN_FIELD][0]
+        self.assertIn("ignoreip = ::1 192.0.2.1 192.0.2.2 127.0.0.1/8"
+                      f" 192.0.2.3 192.0.2.4 {ACCESS_NET}\n", found.content)
+
+    def test_keel_s_own_file_is_not_read_back(self):
+        self.packages()
+        self.put(trusted.FAIL2BAN_PATH, trusted.render_fail2ban(
+            ("fd12:3456:789a:9::/64",)))
+        found = self.plan(doc())[trusted.FAIL2BAN_FIELD][0]
+        self.assertNotIn("fd12:3456:789a:9::/64", found.content)
+        self.assertIn(f"ignoreip = 127.0.0.1/8 ::1 {ACCESS_NET}\n",
+                      found.content)
+
+    def test_an_interpolation_is_not_an_address(self):
+        self.assertEqual(trusted.ignoreip(
+            "[DEFAULT]\nignoreip = %(known/ignoreip)s 192.0.2.9\n"),
+            ("192.0.2.9",))
+
+
 class TestDiff(RootCase):
     def fields(self, declared: dict) -> dict:
         return {one.field: one
