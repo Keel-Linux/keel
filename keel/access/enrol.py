@@ -52,8 +52,9 @@ def parse_endpoint(text: str) -> tuple[str, int | None]:
     """Where a computer reaches the node: a global IPv6 literal, bare or
     `[address]:port`, or a DNS name with an optional `:port`; the port
     is the WireGuard UDP port as the computer sees it. Raises
-    ValueError: an IPv4 literal (answer 8, A), a link local or loopback
-    address, or any character a name does not have"""
+    ValueError: an IPv4 literal (answer 8, A), a scope id, a link local
+    or loopback address, or any character a name does not have: the
+    endpoint goes into the script the node serves"""
     host, port = text, None
     if text.startswith("["):
         host, sep, rest = text[1:].partition("]")
@@ -64,6 +65,9 @@ def parse_endpoint(text: str) -> tuple[str, int | None]:
         host, _, digits = text.partition(":")
         port = endpoint_port(digits)
     if ":" in host:
+        if "%" in host:
+            raise ValueError("an IPv6 address with a scope id is no address"
+                             " a computer elsewhere reaches")
         address = ipaddress.IPv6Address(host)
         if address.is_link_local or address.is_loopback or \
                 address.is_multicast or address.is_unspecified:

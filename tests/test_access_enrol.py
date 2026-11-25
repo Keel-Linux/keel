@@ -345,7 +345,9 @@ class TestEndpoint(unittest.TestCase):
         for text in ("", "192.0.2.1", "192.0.2.1:51820", "x;rm -rf",
                      "a..b", "[2001:db8::1]", "[2001:db8::1]:0",
                      "node:99999", "fe80::1", "::1", "-a.example.org",
-                     "[nonsense]:1", "a" * 64 + ".org", "$(id)"):
+                     "[nonsense]:1", "a" * 64 + ".org", "$(id)",
+                     "2001:db8::1%eth0", "2001:db8::1%'$(id)'",
+                     "[2001:db8::1%x';reboot;']:51900"):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 enrol.parse_endpoint(text)
 
