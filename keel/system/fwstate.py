@@ -100,6 +100,8 @@ class FirewallState:
     # global_ipv6_source says what was seen
     global_ipv6: bool | None = None
     global_ipv6_source: str = "not the live system"
+    # sshd listens on IPv6 (sshd -T); None when not asked or no answer
+    ssh_ipv6: bool | None = None
     # the policy of the table the kernel holds, drop or accept; None
     # when there is none, or when nothing was asked (--root)
     loaded_policy: str | None = None
@@ -205,6 +207,8 @@ def observe_firewall(tree: Tree, live: bool) -> FirewallState:
         recorded_warning=warning,
         recorded_digest=digest,
         global_ipv6=global_ipv6(tree) if live else None,
+        ssh_ipv6=sshd_on_ipv6(ask(subprocess.run, SSHD_T)) if live
+        else None,
         global_ipv6_source=global_ipv6_source(tree) if live
         else "not the live system",
         loaded_policy=policy,
@@ -390,6 +394,24 @@ def ipv6_default(tree: Tree) -> bool:
                 and fields[9] != "lo":
             return True
     return False
+
+
+def sshd_on_ipv6(text: str | None) -> bool | None:
+    """Whether `sshd -T` says sshd listens on IPv6: an addressfamily
+    that is not inet, and an IPv6 listenaddress, or none at all"""
+    if text is None:
+        return None
+    family, listens = "any", []
+    for line in text.splitlines():
+        words = line.split()
+        if len(words) >= 2 and words[0].lower() == "addressfamily":
+            family = words[1].lower()
+        elif len(words) >= 2 and words[0].lower() == "listenaddress":
+            listens.append(words[1])
+    if family == "inet":
+        return False
+    return not listens or any(one.startswith("[") or one.count(":") > 1
+                              for one in listens)
 
 
 def global_ipv6(tree: Tree) -> bool:

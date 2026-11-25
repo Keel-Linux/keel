@@ -399,6 +399,28 @@ class TestGlobalIpv6(RootCase):
 
 
 class TestSshRule(FirewallCase):
+    def state(self, **fields):
+        # sshd listens on IPv6 unless a test says otherwise
+        return super().state(**{"ssh_ipv6": True, **fields})
+
+    def test_not_narrowed_when_sshd_does_not_listen_on_ipv6(self):
+        for value in (False, None):
+            found, said = ssh_narrowed(self.state(global_ipv6=True,
+                                                  ssh_ipv6=value), True)
+            self.assertFalse(found)
+            self.assertIn("sshd does not listen on IPv6", said)
+
+    def test_sshd_t_says_whether_it_listens_on_ipv6(self):
+        self.assertTrue(fwstate.sshd_on_ipv6(
+            "port 22\naddressfamily any\nlistenaddress [::]:22\n"
+            "listenaddress 0.0.0.0:22\n"))
+        self.assertFalse(fwstate.sshd_on_ipv6(
+            "port 22\naddressfamily inet\nlistenaddress 0.0.0.0:22\n"))
+        self.assertFalse(fwstate.sshd_on_ipv6(
+            "addressfamily any\nlistenaddress 192.0.2.1:22\n"))
+        self.assertTrue(fwstate.sshd_on_ipv6("addressfamily inet6\n"))
+        self.assertIsNone(fwstate.sshd_on_ipv6(None))
+
     def test_narrowed_only_with_global_ipv6_and_a_person(self):
         self.assertEqual(ssh_narrowed(self.state(), True), (False, ""))
         found, said = ssh_narrowed(self.state(

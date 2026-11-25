@@ -1,0 +1,61 @@
+#!/bin/sh
+# Run after each load of keel's ruleset that is not an apply: the boot
+# (keel-firewall.service), nftables.service (keel's drop-in) and the
+# watch's restore (handbook decision 0098, answer 6, B).
+#
+# An apply closes SSH on IPv4 only where the node has a global IPv6
+# address (not unique local, not tentative) and an IPv6 default route.
+# A load at boot does not apply: where the file closes IPv4 22 and that
+# no longer holds (the address or the route is gone), this opens IPv4 22
+# again with one rule of its own, at the head of keel's input chain, and
+# says so in the journal. So the node is never closed. keel firewall
+# check reads that rule as keel's; the next apply decides again.
+set -u
+file=${KEEL_FIREWALL_FILE:-/etc/keel/firewall/keel-manifest.nft}
+nft=${KEEL_NFT:-/usr/sbin/nft}
+inet6=${KEEL_IF_INET6:-/proc/net/if_inet6}
+route6=${KEEL_ROUTE6:-/proc/net/ipv6_route}
+line='# ssh: IPv6 and the access interface only (decision 0098)'
+comment='"keel-ssh-guard"'
+
+[ -r "$file" ] && grep -qxF "$line" "$file" || exit 0
+
+global_address() {
+    [ -r "$inet6" ] || return 1
+    while read -r address _ _ scope flags _; do
+        [ "$scope" = 00 ] || continue
+        case $address in fc*|fd*) continue ;; esac
+        [ $(( 0x$flags & 0x48 )) -eq 0 ] 2>/dev/null || continue
+        return 0
+    done < "$inet6"
+    return 1
+}
+
+default_route() {
+    [ -r "$route6" ] || return 1
+    zero=00000000000000000000000000000000
+    while read -r dst length _ _ _ _ _ _ _ dev; do
+        if [ "$dst" = "$zero" ] && [ "$length" = 00 ] && [ "$dev" != lo ]; then
+            return 0
+        fi
+    done < "$route6"
+    return 1
+}
+
+if global_address && default_route; then
+    exit 0
+fi
+ports=$(sed -n 's/^[[:space:]]*meta nfproto ipv6 tcp dport \(.*\) accept$/\1/p' \
+    "$file" | head -n 1)
+[ -n "$ports" ] || exit 0
+if "$nft" list chain inet keel input 2>/dev/null | grep -qF "$comment"; then
+    exit 0
+fi
+# word splitting of $ports is wanted: nft joins its arguments
+# shellcheck disable=SC2086
+"$nft" insert rule inet keel input meta nfproto ipv4 tcp dport $ports \
+    accept comment "$comment"
+echo "keel-firewall: opened IPv4 tcp $ports again: $file closes SSH on" \
+    "IPv4, and this node has no global IPv6 address and IPv6 default route" \
+    "now (decision 0098); keel spec apply --system decides again" >&2
+exit 0

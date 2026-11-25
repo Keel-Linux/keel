@@ -192,8 +192,12 @@ def access_of(doc: dict) -> Access | None:
     found = accessnet.section(doc)
     if found is None:
         return None
+    try:
+        address = str(accessnet.address(found).ip)
+    except (KeyError, ValueError):
+        return None
     return Access(accessnet.interface(found), accessnet.port(found),
-                  accessnet.relay_ports(doc))
+                  address, accessnet.relay_ports(doc))
 
 
 SSH_NARROWED = ("SSH: tcp {ports} on {where} only; IPv4 is closed"
@@ -214,6 +218,10 @@ def ssh_narrowed(state: FirewallState, attended: bool
         # --root, or a state no one observed: nothing narrows, and
         # nothing is refused
         return False, ""
+    if state.global_ipv6 is True and state.ssh_ipv6 is not True:
+        return False, SSH_NO_IPV6.format(
+            ports=ports, why="sshd does not listen on IPv6 (sshd -T:"
+            " addressfamily and listenaddress)")
     if state.global_ipv6 is False:
         return False, SSH_NO_IPV6.format(ports=ports,
                                          why=state.global_ipv6_source)
