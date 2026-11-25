@@ -46,6 +46,10 @@ from keel.mesh.listener import Listener, Params, bound, run
 UNIT = "keel-mesh-listen@{id}"
 # the listener's RuntimeDirectory, under /run
 RUNTIME = "keel/mesh-listen-{id}"
+# an enrolment of the access network (decision 0098): the same listener
+# process and bridge, its own unit and directory
+UNITS = {"mesh": UNIT, "access": "keel-access-listen@{id}"}
+RUNTIMES = {"mesh": RUNTIME, "access": "keel/access-listen-{id}"}
 SOCKET = "bridge.sock"
 MAX_MESSAGE = 65536
 CONNECT_WAIT = 30
@@ -86,12 +90,13 @@ class BridgeError(Exception):
     """The listener could not be started, trusted, or understood"""
 
 
-def unit(invite_id: str) -> str:
-    return UNIT.format(id=invite_id)
+def unit(invite_id: str, kind: str = "mesh") -> str:
+    return UNITS[kind].format(id=invite_id)
 
 
-def socket_path(root: str, invite_id: str) -> str:
-    return os.path.join(root, "run", RUNTIME.format(id=invite_id), SOCKET)
+def socket_path(root: str, invite_id: str, kind: str = "mesh") -> str:
+    return os.path.join(root, "run", RUNTIMES[kind].format(id=invite_id),
+                        SOCKET)
 
 
 def listener_command(path: str) -> tuple[str, ...]:
@@ -118,15 +123,18 @@ class Unit:
 
 def start_unit(invite_id: str, path: str, seconds: int,
                run: Callable[[tuple[str, ...]], str | None],
-               output: Callable[[tuple[str, ...]], str | None]) -> Unit:
-    """Start keel-mesh-listen@<id>; raises BridgeError"""
-    name = unit(invite_id)
+               output: Callable[[tuple[str, ...]], str | None],
+               kind: str = "mesh") -> Unit:
+    """Start keel-mesh-listen@<id> (keel-access-listen@<id> for an
+    enrolment); raises BridgeError"""
+    name = unit(invite_id, kind)
+    runtime = RUNTIMES[kind].format(id=invite_id)
     problem = run(("systemd-run", f"--unit={name}", "--collect", "--quiet",
                    f"--property=RuntimeMaxSec={seconds}",
-                   f"--property=RuntimeDirectory={RUNTIME.format(id=invite_id)}",
+                   f"--property=RuntimeDirectory={runtime}",
                    "--property=RuntimeDirectoryMode=0700",
                    *(f"--property={one}" for one in LISTENER_PROPERTIES),
-                   f"--description=keel: the unprivileged listener of mesh"
+                   f"--description=keel: the unprivileged listener of {kind}"
                    f" invite {invite_id}", *listener_command(path)))
     if problem:
         raise BridgeError(f"the listener could not start: {problem}")
@@ -140,7 +148,7 @@ def params_json(params: Params) -> bytes:
             "overlay": params.overlay,
             "joined": None if params.joined is None else [
                 params.joined[0], params.joined[1],
-                int(params.joined[2].timestamp())]}
+                int(params.joined[2].timestamp())], "kind": params.kind}
     return json.dumps(data).encode()
 
 
@@ -154,7 +162,8 @@ def params_of(data: bytes) -> Params:
         overlay=str(found["overlay"]),
         joined=None if joined is None else (
             str(joined[0]), str(joined[1]),
-            datetime.fromtimestamp(joined[2], timezone.utc)))
+            datetime.fromtimestamp(joined[2], timezone.utc)),
+        kind=str(found.get("kind") or "mesh"))
 
 
 def line(sock: socket.socket) -> bytes | None:
@@ -364,7 +373,11 @@ def listen(path: str, clock: Callable[[], datetime],
         finally:
             for one in fds:
                 os.close(one)
-        listener = Listener(params, Remote(sock), clock, log)
+        if params.kind == "access":
+            from keel.access.enrol import AccessListener
+            listener = AccessListener(params, Remote(sock), clock, log)
+        else:
+            listener = Listener(params, Remote(sock), clock, log)
         log(f"invite {params.invite_id}: listening on TCP port"
             f" {params.port}, without capabilities")
         run(bound(params.host, params.port), listener, context, poll)

@@ -52,6 +52,9 @@ LOCAL_RE = re.compile(
 USER_RE = re.compile(r'\("(?P<name>[^"]*)",pid=(?P<pid>\d+)')
 UNIT_SUFFIXES = (".service", ".scope", ".socket")
 INVITE_UNIT = "keel-mesh-invite@"
+# the unprivileged listener of an enrolment of the access network
+# (decision 0098), whose port the set access_invites opens
+ACCESS_LISTEN_UNIT = "keel-access-listen@"
 
 Port = tuple[int, str]
 
@@ -276,7 +279,8 @@ def known(item: Listener, ssh: tuple[int, ...], allow: frozenset[Port],
         return True
     if port in allow or port in DHCP_CLIENT:
         return True
-    if item.units and all(unit.startswith(INVITE_UNIT)
+    if item.units and all(unit.startswith((INVITE_UNIT,
+                                           ACCESS_LISTEN_UNIT))
                           for unit in item.units):
         return True
     return bool(overlay and not item.pids

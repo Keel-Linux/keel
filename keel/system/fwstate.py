@@ -375,9 +375,15 @@ NOT_USABLE = 0x08 | 0x40
 UNIQUE_LOCAL = ipaddress.ip_network("fc00::/7")
 
 
-def global_addresses(tree: Tree) -> list[str]:
+# IFA_F_TEMPORARY and IFA_F_DEPRECATED: an address that goes away
+UNSTABLE = 0x01 | 0x20
+
+
+def global_addresses(tree: Tree, stable: bool = False) -> list[str]:
     """The usable global IPv6 addresses, not unique local ones (the
-    mesh's and the access network's are unique local)"""
+    mesh's and the access network's are unique local); `stable` leaves
+    out the temporary and the deprecated ones too, for an address a
+    computer is told to come back to (decision 0098)"""
     found = []
     for line in tree.read(IF_INET6).lines():
         fields = line.split()
@@ -388,7 +394,8 @@ def global_addresses(tree: Tree) -> list[str]:
             value = ipaddress.IPv6Address(int(fields[0], 16))
         except ValueError:
             continue
-        if flags & NOT_USABLE or value in UNIQUE_LOCAL:
+        if flags & NOT_USABLE or value in UNIQUE_LOCAL or (
+                stable and flags & UNSTABLE):
             continue
         found.append(str(value))
     return found

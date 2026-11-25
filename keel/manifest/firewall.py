@@ -98,6 +98,11 @@ MEMBERS_PORT = 51821
 INVITES_SET_TEXT = (
     f"\tset {INVITES_SET} {{\n\t\ttype inet_service\n"
     "\t\tflags timeout\n\t}\n")
+# the TCP ports of the waiting enrolments of the access network
+# (decision 0098): keel access invite adds its port with a timeout
+ACCESS_INVITES_SET = "access_invites"
+ACCESS_INVITES_SET_TEXT = INVITES_SET_TEXT.replace(INVITES_SET,
+                                                   ACCESS_INVITES_SET)
 # What a host serves the guests on its bridges (lxcbr0, docker0, a
 # Proxmox vmbr): lxc-net's and libvirt's dnsmasq answer DNS, DHCPv4 and
 # DHCPv6 there, and a drop policy would make every guest lose its lease.
@@ -210,7 +215,10 @@ def render(resolved: Resolved, states: dict, wireguard: dict | None,
         rules.append(f"tcp dport @{INVITES_SET} accept")
         sets = INVITES_SET_TEXT
     if access is not None:
-        sets += _forward(access.iface)
+        # the enrolment comes from a computer that is not a peer yet
+        rules.append(f"meta nfproto ipv6 tcp dport @{ACCESS_INVITES_SET}"
+                     " accept")
+        sets += ACCESS_INVITES_SET_TEXT + _forward(access.iface)
     if bridges:
         rules += _rules(_iifname(sorted(set(bridges))) + " ",
                         list(BRIDGE_SERVICES))

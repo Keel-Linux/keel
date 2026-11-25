@@ -422,6 +422,36 @@ that address on another interface) and its `.service`, which runs
 database's bind addresses and accounts do not change: the connection
 comes from the loopback.
 
+**Enrolment.** `keel access invite --name NAME` (root) prints one line to
+paste in a terminal on the computer, Linux or macOS, with
+wireguard-tools, curl and openssl:
+
+```
+f=$(mktemp) && curl -fsS --proto '=https' -k --pinnedpubkey 'sha256//<pin>' -o "$f" 'https://[<node>]:<port>/access/<id>/enrol.sh' && printf '%s\n' '<secret>' | sudo sh "$f"; rm -f "$f"
+```
+
+The script runs only once it is whole on disk, and its body is one
+function called on its last line. The secret reaches it on its standard
+input from the shell's own printf, and the script computes the HMAC with
+`openssl dgst` on data alone: no secret and no key is on the argv of a
+process. The node must have a stable global IPv6 address (not temporary,
+not deprecated) and an IPv6 default route (answer 8), or `--endpoint`
+names where the computer reaches it: a global IPv6 literal or a DNS name,
+with an optional `:port` for WireGuard (`[address]:port`). The endpoint
+is kept with the enrolment, and the script and the WireGuard `Endpoint`
+use it. At the first
+enrolment it writes `network.access` with a random unique local /64 and
+applies it. The enrolment is valid once and for `token_minutes`: its TCP
+port is in keel's set `access_invites` (IPv6 only) with that timeout.
+The listener is keel mesh's, as `keel-access-listen@<id>` with a dynamic
+user and no capability, with a certificate of its own whose public key
+the line pins. The script makes the key pair on the computer and sends
+the public key and an HMAC proof of the secret; the secret is in no URL,
+and the node keeps only a key derived from it. The node adds the
+computer to `network.access.peers`, applies, and answers with its /128.
+`keel access invites` lists the enrolments that wait, `keel access
+cancel ID` ends one.
+
 `keel access list` prints the computers (`--json` for confconsole) and,
 on the live system, the last handshake of each. `keel access remove NAME`
 removes one from the spec and applies, so its packets get no answer from
