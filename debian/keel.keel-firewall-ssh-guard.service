@@ -5,14 +5,20 @@
 # default route, firewall-ssh-guard opens IPv4 22 again with a rule of
 # its own; keel-firewall-watch runs it again every 30 s, which also
 # removes that rule when IPv6 is back.
+#
+# --boot (keel#329): an address of DHCPv6 comes after network-online, so
+# the guard first waits up to about 60 s for a global IPv6 address and
+# an IPv6 default route, and the watch leaves the decision to it
+# meanwhile, and until it is done (at most 180 s of uptime). Type=exec:
+# the boot does not wait for that wait.
 [Unit]
 Description=keel: open SSH on IPv4 again where IPv6 is gone (decision 0098)
 After=network-online.target keel-firewall.service
 Wants=network-online.target
 
 [Service]
-Type=oneshot
-ExecStart=/usr/lib/keel/firewall-ssh-guard
+Type=exec
+ExecStart=/usr/lib/keel/firewall-ssh-guard --boot
 
 [Install]
 WantedBy=multi-user.target

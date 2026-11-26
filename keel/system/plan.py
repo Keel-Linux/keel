@@ -15,6 +15,7 @@ from keel.system.overlay import plan_overlay
 from keel.system.security import plan_security
 from keel.system.state import SystemState
 from keel.system.tls import plan_tls
+from keel.system.trusted import plan_trusted
 from keel.system.users import plan_users
 
 
@@ -67,6 +68,11 @@ def plan(
     # the access network after its firewall rules (decision 0098), and
     # before the uplink, the one step that can cut the session
     steps += plan_access(state.access, state.live, state.available)
+    # CrowdSec and fail2ban never ban the access /64 nor the mesh /64
+    # (keel#330, keel#303)
+    if state.trusted is not None:
+        steps += plan_trusted(doc, state.trusted, state.live,
+                              state.available)
     uplink = plan_network(doc.get("network") or {}, state.network,
                           state.live, state.available, network_window,
                           skip_network or skip_uplink,

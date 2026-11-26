@@ -238,7 +238,7 @@ def firewall_fields(declared: dict, resolved, states: dict,
         return [FieldDiff("derived.firewall", UNKNOWN, wanted, None,
                           "the ports sshd listens on cannot be determined"
                           f" ({state.ssh_source})")] + warnings
-    foretold = foretell(declared, resolved, state, said, True)
+    foretold = foretell(declared, resolved, state, said, True, False)
     ruleset = foretold.ruleset
     wanted = f"{RULESET}, {ruleset.state}"
     if file.text == ruleset.text:

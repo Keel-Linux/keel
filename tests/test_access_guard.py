@@ -53,12 +53,15 @@ class TestGuard(unittest.TestCase):
         return path
 
     def guard(self, inet6: str, route6: str, text: str = NARROWED,
-              listed: str = "") -> subprocess.CompletedProcess:
+              listed: str = "", uptime: str = "9999.00"
+              ) -> subprocess.CompletedProcess:
         env = {"PATH": os.environ["PATH"], "KEEL_NFT": self.nft,
                "KEEL_FIREWALL_FILE": self.put("rules.nft", text),
                "KEEL_IF_INET6": self.put("if_inet6", inet6),
                "KEEL_ROUTE6": self.put("ipv6_route", route6),
                "KEEL_FIREWALL_LOCK": join(self.dir, "run", "firewall.lock"),
+               "KEEL_SSH_GUARD_DONE_FILE": join(self.dir, "run", "done"),
+               "KEEL_UPTIME": self.put("uptime", f"{uptime} 1.00\n"),
                "LISTED": listed}
         return subprocess.run(["sh", GUARD], env=env, capture_output=True,
                               text=True)
@@ -174,6 +177,136 @@ class TestGuard(unittest.TestCase):
         with open(join(root, "debian/keel.install")) as fob:
             self.assertIn("firewall/firewall-ssh-guard /usr/lib/keel",
                           fob.read())
+
+
+class TestBootWait(TestGuard):
+    """keel#329: at boot, a DHCPv6 address comes after network-online.
+    With --boot, the guard waits a bounded time for a global IPv6
+    address and a default route before it opens IPv4 22; it still opens
+    it when IPv6 never comes. The watch leaves the decision to the boot
+    run while that one waits."""
+
+    def boot(self, inet6: str, route6: str, sleep: str = "true",
+             tries: int = 3, args=("--boot",), text: str = NARROWED,
+             wait_file: str | None = None, uptime: str = "9999.00"
+             ) -> subprocess.CompletedProcess:
+        env = {"PATH": os.environ["PATH"], "KEEL_NFT": self.nft,
+               "KEEL_FIREWALL_FILE": self.put("rules.nft", text),
+               "KEEL_IF_INET6": self.put("if_inet6", inet6),
+               "KEEL_ROUTE6": self.put("ipv6_route", route6),
+               "KEEL_FIREWALL_LOCK": join(self.dir, "run", "firewall.lock"),
+               "KEEL_SSH_GUARD_WAIT_FILE": wait_file or join(
+                   self.dir, "run", "ssh-guard-boot.wait"),
+               "KEEL_SSH_GUARD_TRIES": str(tries),
+               "KEEL_SLEEP": sleep, "LISTED": "",
+               "KEEL_SSH_GUARD_DONE_FILE": join(self.dir, "run", "done"),
+               "KEEL_UPTIME": self.put("uptime", f"{uptime} 1.00\n")}
+        return subprocess.run(["sh", GUARD, *args], env=env,
+                              capture_output=True, text=True)
+
+    def script(self, name: str, body: str) -> str:
+        path = self.put(name, f"#!/bin/sh\n{body}\n")
+        os.chmod(path, 0o755)
+        return path
+
+    def test_ipv6_that_comes_during_the_wait_keeps_ipv4_closed(self):
+        counter = join(self.dir, "slept")
+        inet6 = join(self.dir, "if_inet6")
+        sleep = self.script("sleep", f"echo x >> {counter}\n"
+                            f"printf '%s' '{GLOBAL}' > {inet6}")
+        done = self.boot(ULA, DEFAULT, sleep=sleep)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.inserted(), [])
+        with open(counter) as fob:
+            self.assertEqual(len(fob.readlines()), 1)
+        self.assertFalse(os.path.exists(join(self.dir, "run",
+                                             "ssh-guard-boot.wait")))
+
+    def test_ipv6_that_never_comes_opens_ipv4_after_the_wait(self):
+        counter = join(self.dir, "slept")
+        sleep = self.script("sleep", f"echo x >> {counter}")
+        done = self.boot(ULA, "", sleep=sleep, tries=3)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(len(self.inserted()), 1)
+        with open(counter) as fob:
+            self.assertEqual(len(fob.readlines()), 3)
+        self.assertIn("at boot", done.stderr)
+
+    def test_no_wait_where_nothing_is_narrowed_or_ipv6_holds(self):
+        counter = join(self.dir, "slept")
+        sleep = self.script("sleep", f"echo x >> {counter}")
+        self.boot(GLOBAL, DEFAULT, sleep=sleep)
+        self.boot(ULA, "", sleep=sleep,
+                  text="#!/usr/sbin/nft -f\n# state: enforce\n")
+        self.assertFalse(os.path.exists(counter))
+        self.assertEqual(self.inserted(), [])
+
+    def test_the_wait_does_not_hold_the_firewall_lock(self):
+        """an apply or the watch's restore runs during the wait"""
+        lock = join(self.dir, "run", "firewall.lock")
+        probe = join(self.dir, "free")
+        sleep = self.script(
+            "sleep", f"flock -n {lock} true && echo free >> {probe}")
+        os.makedirs(dirname(lock), exist_ok=True)
+        open(lock, "w").close()
+        self.boot(ULA, "", sleep=sleep, tries=2)
+        with open(probe) as fob:
+            self.assertEqual(len(fob.readlines()), 2)
+
+    def test_the_watch_leaves_the_decision_to_the_boot_wait(self):
+        wait_file = join(self.dir, "run", "ssh-guard-boot.wait")
+        os.makedirs(dirname(wait_file), exist_ok=True)
+        holder = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(holder.kill)
+        with open(wait_file, "w") as fob:
+            fob.write(f"{holder.pid}\n")
+        done = self.boot(ULA, "", args=(), wait_file=wait_file)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.inserted(), [])
+        holder.kill()
+        holder.wait()
+        # a wait file whose process is gone counts for nothing
+        self.boot(ULA, "", args=(), wait_file=wait_file)
+        self.assertEqual(len(self.inserted()), 1)
+
+    def test_the_watch_waits_for_the_boot_unit_within_a_bound(self):
+        """the watch's first run, 30 s after boot, can come before
+        network-online and the boot unit"""
+        done = self.boot(ULA, "", args=(), uptime="31.20")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.inserted(), [])
+        # a boot unit that never runs: the watch decides after the bound
+        self.boot(ULA, "", args=(), uptime="180.01")
+        self.assertEqual(len(self.inserted()), 1)
+
+    def test_the_boot_unit_leaves_the_done_file(self):
+        done_file = join(self.dir, "run", "done")
+        self.boot(GLOBAL, DEFAULT)
+        self.assertTrue(os.path.exists(done_file))
+        os.remove(done_file)
+        self.boot(ULA, "", tries=1)
+        self.assertTrue(os.path.exists(done_file))
+        # once it is done, the watch decides at once (the fake table
+        # holds no rule of the guard, so it opens IPv4 22)
+        os.remove(self.calls)
+        self.boot(ULA, "", args=(), uptime="40.00")
+        self.assertEqual(len(self.inserted()), 1)
+        self.assertTrue(os.path.exists(done_file))
+
+    def test_its_unit_waits_in_the_background_with_a_bound(self):
+        """Type=exec: multi-user.target does not wait for the guard's
+        wait; the default bound is about 60 s"""
+        root = dirname(dirname(abspath(__file__)))
+        with open(join(root, "debian/keel.keel-firewall-ssh-guard.service")
+                  ) as fob:
+            unit = fob.read()
+        self.assertIn("ExecStart=/usr/lib/keel/firewall-ssh-guard --boot",
+                      unit)
+        self.assertIn("Type=exec", unit)
+        with open(GUARD) as fob:
+            text = fob.read()
+        self.assertIn("KEEL_SSH_GUARD_TRIES:-30", text)
+        self.assertIn("KEEL_SSH_GUARD_STEP:-2", text)
 
 
 class TestTheWatchRunsTheGuard(unittest.TestCase):
