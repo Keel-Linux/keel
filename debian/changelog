@@ -1,3 +1,14 @@
+keel (0.23.114) unstable; urgency=medium
+
+  * keel#341: keel access cancel stops the listener of the enrolment
+    too. It stopped keel-access-invite@ID only, and
+    keel-access-listen@ID kept its port until its RuntimeMaxSec (about
+    15 minutes). The cancel now also stops keel-access-listen@ID, and
+    says so and gives exit 16 when that stop fails; a listener that is
+    not loaded (never started, or ended) is not a failure.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Thu, 26 Nov 2026 00:00:00 +0000
+
 keel (0.23.112) unstable; urgency=medium
 
   * keel#338: a failed init fence opens no port. In an unprivileged

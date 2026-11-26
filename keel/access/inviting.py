@@ -37,6 +37,9 @@ TRIES = 64
 EVERY_ADDRESS = "::"
 # the unit lives this much past the expiry, for the last answer
 GRACE = 30
+# what systemctl says of a unit that does not exist: a listener that
+# never started, or that ended by itself
+NOT_LOADED = "not loaded"
 NO_IPV6 = ("this node has no global IPv6 address and IPv6 default route:"
            " the enrolment and the tunnel use IPv6 only (decision 0098,"
            " answer 8); give --endpoint where the computer reaches it")
@@ -179,8 +182,15 @@ def cancel(inviter: Inviter, invite_id: str) -> int:
         inviter.err(f"no waiting enrolment {invite_id}")
         return exits.MESH_REFUSED
     inviter.run(("systemctl", "stop", UNIT.format(id=invite_id)))
+    # the listener is its own unit: the stop of the invite unit does not
+    # stop it, and it keeps its port until its RuntimeMaxSec (keel#341)
+    listener = bridge.unit(invite_id, "access")
+    problem = inviter.run(("systemctl", "stop", listener))
     invites.remove(inviter.root, invite_id)
     ports.close_port(found.port, inviter.run, ACCESS_INVITES_SET)
+    if problem and NOT_LOADED not in problem:
+        inviter.err(f"{listener} did not stop: {problem}")
+        return exits.APPLY_FAILED
     inviter.out(f"cancelled the enrolment of {found.name}")
     return exits.OK
 

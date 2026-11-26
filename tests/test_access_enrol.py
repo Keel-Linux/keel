@@ -432,6 +432,49 @@ class TestInvite(RootCase):
         self.assertEqual(inviting.cancel(self.inviter(), "0123456789abcdef"),
                          exits.MESH_REFUSED)
 
+    def test_cancel_stops_the_listener_too(self):
+        # keel#341: the stop of the invite unit alone left the listener
+        # on its port until its RuntimeMaxSec
+        invites.save(self.root, invite())
+        code = inviting.cancel(self.inviter(), "0123456789abcdef")
+        self.assertEqual(code, exits.OK)
+        stops = [argv for argv in self.ran if argv[:2] == ("systemctl",
+                                                           "stop")]
+        self.assertEqual(stops, [
+            ("systemctl", "stop", "keel-access-invite@0123456789abcdef"),
+            ("systemctl", "stop", "keel-access-listen@0123456789abcdef")])
+
+    def test_cancel_says_when_the_listener_did_not_stop(self):
+        invites.save(self.root, invite())
+
+        def run(argv):
+            self.ran.append(argv)
+            if argv[-1].startswith("keel-access-listen@"):
+                return "systemctl exited 1: Job failed"
+            return None
+
+        code = inviting.cancel(self.inviter(run=run), "0123456789abcdef")
+        self.assertEqual(code, exits.APPLY_FAILED)
+        self.assertTrue(any("keel-access-listen@0123456789abcdef" in line
+                            and "Job failed" in line for line in self.said),
+                        self.said)
+
+    def test_cancel_of_a_listener_that_never_started_is_quiet(self):
+        invites.save(self.root, invite())
+
+        def run(argv):
+            self.ran.append(argv)
+            if argv[-1].startswith("keel-access-listen@"):
+                return ("systemctl exited 5: Failed to stop"
+                        " keel-access-listen@0123456789abcdef.service:"
+                        " Unit keel-access-listen@0123456789abcdef.service"
+                        " not loaded.")
+            return None
+
+        code = inviting.cancel(self.inviter(run=run), "0123456789abcdef")
+        self.assertEqual(code, exits.OK)
+        self.assertEqual(self.said, ["cancelled the enrolment of desk"])
+
 
 
 class TestServe(TestInvite):
