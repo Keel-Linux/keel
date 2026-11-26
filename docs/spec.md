@@ -427,11 +427,16 @@ paste in a terminal on the computer, Linux or macOS, with
 wireguard-tools, curl and openssl:
 
 ```
-f=$(mktemp) && curl -fsS --proto '=https' -k --pinnedpubkey 'sha256//<pin>' -o "$f" 'https://[<node>]:<port>/access/<id>/enrol.sh' && printf '%s\n' '<secret>' | sudo sh "$f"; rm -f "$f"
+(f=$(mktemp) || exit 1; if curl -fsS --proto '=https' --connect-timeout 20 --max-time 60 -k --pinnedpubkey 'sha256//<pin>' -o "$f" 'https://[<node>]:<port>/access/<id>/enrol.sh'; then printf '%s\n' '<secret>' | sudo sh "$f"; s=$?; [ $s -eq 0 ] || echo "keel access: the enrolment failed (exit $s)" >&2; else s=$?; echo "keel access: the script did not come from the node (curl exit $s): the line is used, expired or wrong, or the node is not reachable" >&2; fi; rm -f "$f"; exit $s)
 ```
 
 The script runs only once it is whole on disk, and its body is one
-function called on its last line. The secret reaches it on its standard
+function called on its last line. The line waits at most 20 s for a
+connection and 60 s for the script; the script waits at most 300 s for
+the node's answer, which comes after the node's apply. A closed port (a
+used or expired line), a wrong pin, a refusal or a failed step gives a
+message and a non-zero exit: the status of curl or of the script
+(keel#331). The secret reaches the script on its standard
 input from the shell's own printf, and the script computes the HMAC with
 `openssl dgst` on data alone: no secret and no key is on the argv of a
 process. The node must have a stable global IPv6 address (not temporary,

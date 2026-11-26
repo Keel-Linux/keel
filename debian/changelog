@@ -1,3 +1,13 @@
+keel (0.23.110) unstable; urgency=medium
+
+  * keel#331: the enrolment line of keel access invite waits at most
+    20 s for a connection and 60 s for the script, and exits with the
+    status of curl or of the script, with a message; the script's
+    request waits at most 300 s, tells a refusal from no answer, and
+    checks each step.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Thu, 26 Nov 2026 00:00:00 +0000
+
 keel (0.23.109) unstable; urgency=medium
 
   * keel#327: the certificate of tls.acme is requested after keel-init
