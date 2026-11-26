@@ -1,3 +1,13 @@
+keel (0.23.108) unstable; urgency=medium
+
+  * keel#330 follow-up: the ignoreip that keel writes for fail2ban
+    keeps every entry of every [DEFAULT] ignoreip, in the order
+    fail2ban reads its files, continuation lines included. The CrowdSec
+    whitelist holds no prefix shorter than a /64: a short mesh or access
+    prefix gives the /64 of the node's address.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Thu, 26 Nov 2026 00:00:00 +0000
+
 keel (0.23.107) unstable; urgency=medium
 
   * keel#328: only an apply a person runs closes TCP 22 on IPv4
