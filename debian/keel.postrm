@@ -4,7 +4,29 @@
 # and last-good.nft, decision 0097), which no package file
 # holds, so a later install does not read a record of the node it was;
 # `remove` keeps it, as it keeps the ruleset file keel wrote.
+#
+# When the unpack of a new keel fails (abort-upgrade), the old package
+# stays, and its postinst does not know the marker of the new preinst
+# (keel#349): this removes it, and starts again each timer the preinst
+# stopped that is still enabled, as the postinst does after an upgrade.
 set -e
+
+if [ "$1" = "abort-upgrade" ]; then
+    marker=${KEEL_UPGRADE_MARKER:-/run/keel/upgrading}
+    if [ -e "$marker" ]; then
+        start=""
+        for timer in $(cat "$marker" || true); do
+            if systemctl --quiet is-enabled "$timer" 2>/dev/null; then
+                start="$start $timer"
+            fi
+        done
+        rm -f "$marker"
+        if [ -n "$start" ]; then
+            # shellcheck disable=SC2086
+            deb-systemd-invoke start $start >/dev/null || true
+        fi
+    fi
+fi
 
 if [ "$1" = "purge" ]; then
     rm -f "${DPKG_ROOT:-}/var/lib/keel/firewall/state" \

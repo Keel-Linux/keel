@@ -1,0 +1,85 @@
+#!/bin/sh
+# keel's preinst: before dpkg unpacks a new keel over an old one, no keel
+# timer may start a keel unit (keel#349). During the unpack the Python
+# modules of two versions are on disk; a unit that starts then fails
+# with an ImportError, and the node stays degraded until a reboot.
+#
+# The preinst of the NEW package runs before the unpack, so this works
+# also when the old package's scripts know nothing of it. On upgrade it:
+#
+# 1. writes the marker /run/keel/upgrading, with the timers that are
+#    active; each service a timer starts has
+#    ConditionPathExists=!/run/keel/upgrading, so a start while the
+#    marker is there is skipped and leaves no failed unit (from the
+#    next upgrade on: systemd reads the condition after the
+#    daemon-reload of this postinst);
+# 2. stops (does not disable) each keel timer, and
+#    keel-database-position.service, which starts itself again on
+#    failure;
+# 3. waits for the oneshot services the timers start, at most
+#    KEEL_UPGRADE_WAIT seconds (300). A stop of a oneshot that runs
+#    leaves it failed, so a oneshot that still runs after the wait is
+#    stopped and its failed state is reset; its timer starts it again.
+#
+# The postinst (configure) removes the marker before debhelper starts
+# the timers again, then starts each timer of the marker that is
+# enabled. The postrm (abort-upgrade) does the same after a failed
+# unpack. A failure here is said and never fails the upgrade.
+set -e
+
+marker=${KEEL_UPGRADE_MARKER:-/run/keel/upgrading}
+timers="keel-mesh-sync.timer keel-mesh-etcd.timer keel-database-watch.timer keel-database-dump.timer keel-database-position.timer keel-firewall-watch.timer"
+oneshots="keel-mesh-sync.service keel-mesh-etcd.service keel-database-watch.service keel-database-dump.service keel-firewall-watch.service"
+daemons="keel-database-position.service"
+
+# the oneshot services that run now
+running() {
+    for unit in $oneshots; do
+        state=$(systemctl show -p ActiveState --value "$unit" 2>/dev/null) || state=""
+        if [ "$state" = activating ]; then
+            echo "$unit"
+        fi
+    done
+    return 0
+}
+
+if [ "$1" = upgrade ] && [ -z "${DPKG_ROOT:-}" ] \
+    && [ -d "${KEEL_SYSTEMD_RUN:-/run/systemd/system}" ]; then
+    mkdir -p "$(dirname "$marker")" || true
+    # a marker of an upgrade that did not end keeps its timers
+    {
+        if [ -e "$marker" ]; then
+            cat "$marker"
+        fi
+        for timer in $timers; do
+            if systemctl --quiet is-active "$timer" 2>/dev/null; then
+                echo "$timer"
+            fi
+        done
+    } | sort -u > "$marker.new" && mv "$marker.new" "$marker" \
+        || echo "keel: the upgrade marker $marker was not written" >&2
+    # shellcheck disable=SC2086
+    deb-systemd-invoke stop $timers $daemons >/dev/null 2>&1 || true
+
+    waited=0
+    limit=${KEEL_UPGRADE_WAIT:-300}
+    while [ -n "$(running)" ] && [ "$waited" -lt "$limit" ]; do
+        if [ "$waited" -eq 0 ]; then
+            echo "keel: waiting for $(running | tr '\n' ' ')to end before the unpack" >&2
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    left=$(running)
+    if [ -n "$left" ]; then
+        echo "keel: stopped $(echo "$left" | tr '\n' ' ')after ${limit} s; its timer starts it again" >&2
+        # shellcheck disable=SC2086
+        deb-systemd-invoke stop $left >/dev/null 2>&1 || true
+        # shellcheck disable=SC2086
+        systemctl reset-failed $left >/dev/null 2>&1 || true
+    fi
+fi
+
+#DEBHELPER#
+
+exit 0

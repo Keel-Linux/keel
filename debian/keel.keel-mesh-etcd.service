@@ -5,6 +5,8 @@
 # etcd cluster has nothing to tend.
 [Unit]
 Description=keel mesh: tend etcd's learners and this member's certificates
+# no start while dpkg replaces keel's files (keel#349, debian/keel.preinst)
+ConditionPathExists=!/run/keel/upgrading
 After=network-online.target etcd.service
 Wants=network-online.target
 ConditionPathExists=/var/lib/keel/etcd/cluster.json

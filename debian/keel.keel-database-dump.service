@@ -4,6 +4,8 @@
 # keel database watch alerts through the monitor's channels.
 [Unit]
 Description=keel database: the dump on the standby
+# no start while dpkg replaces keel's files (keel#349, debian/keel.preinst)
+ConditionPathExists=!/run/keel/upgrading
 After=network-online.target mariadb.service postgresql.service
 ConditionPathExists=/var/lib/keel/database
 
