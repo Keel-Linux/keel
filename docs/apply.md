@@ -1676,12 +1676,19 @@ file stays.
 After the access network, keel writes a CrowdSec whitelist with the
 access /64 (`network.access.address`) and the mesh /64
 (`network.overlay.wireguard.address`), and the `ignoreip` of fail2ban's
-`[DEFAULT]` with the access /64 after the `[DEFAULT] ignoreip` of
-`jail.local` (a later one replaces it; the loopback where `jail.local`
-has none), so a few failed logins
+`[DEFAULT]` with the access /64 after every entry of every `[DEFAULT]
+ignoreip` of fail2ban's other files, in the order fail2ban reads them
+(`jail.conf`, `jail.d/*.conf`, `jail.local`, `jail.d/*.local`),
+continuation lines included, since a later one replaces the one before
+it; the loopback where none has one. A jail's own `ignoreip` (for
+example `[sshd] ignoreip = ...`) replaces the `[DEFAULT]` one for that
+jail, so that jail can still ban the access /64: keel does not change it,
+and the operator adds the access /64 there. A prefix is never shorter
+than a /64: an address declared with a shorter prefix gives the /64 of
+the node's address, never all of `fd00::/8`. This is so a few failed logins
 from an administrator's computer, or 401 answers to a node of the mesh,
 ban nobody of keel's own (decision 0098, section 4.7; decision 0086,
-answer 1). Only the prefixes this node has, never all of `fd00::/8`.
+answer 1). Only the prefixes this node has.
 Each file is written mode 0644 only where its package is on the node
 (`/etc/crowdsec`, `/etc/fail2ban`) and while the spec declares a prefix
 for it; keel's file is removed when none is left. A file of that path
