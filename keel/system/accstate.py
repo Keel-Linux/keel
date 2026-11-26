@@ -13,6 +13,7 @@ import subprocess
 from dataclasses import dataclass, field
 
 from keel.inspect import constants as paths
+from keel.inspect.dbengines import ENGINES
 from keel.inspect.tree import Tree
 from keel.network import access as acc
 from keel.network import live
@@ -94,6 +95,15 @@ def relay_files(tree: Tree) -> dict[str, str | None]:
     return found
 
 
+def installed_engine(tree: Tree) -> str | None:
+    """The one database engine with a relay whose server binary is on
+    the tree (keel.inspect.dbengines); None for none, and for two, where
+    keel does not guess"""
+    found = [engine.name for engine in ENGINES
+             if engine.name in acc.RELAY_PORTS and engine.installed(tree.glob)]
+    return found[0] if len(found) == 1 else None
+
+
 def observe_access(root: str, doc: dict) -> AccessState | None:
     """None when the spec declares no access network and keel wrote none"""
     tree = Tree(root)
@@ -114,7 +124,7 @@ def observe_access(root: str, doc: dict) -> AccessState | None:
     key = acc.key_path(access)
     key_file = tree.path(key.lstrip("/"))
     present = os.path.exists(key_file)
-    wanted = acc.relay_files(access, doc)
+    wanted = acc.relay_files(access, doc, installed_engine(tree))
     up = live.link_up(iface) if is_live else None
     return AccessState(
         iface=iface, declared=True,

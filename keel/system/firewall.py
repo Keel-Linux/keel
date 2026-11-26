@@ -189,8 +189,9 @@ def allow_of(doc: dict) -> tuple[Allow, ...]:
                  for item in items or ())
 
 
-def access_of(doc: dict) -> Access | None:
-    """The spec's network.access as the ruleset needs it"""
+def access_of(doc: dict, installed: str | None = None) -> Access | None:
+    """The spec's network.access as the ruleset needs it; INSTALLED the
+    node's database engine, for a spec that declares none (keel#340)"""
     found = accessnet.section(doc)
     if found is None:
         return None
@@ -199,7 +200,7 @@ def access_of(doc: dict) -> Access | None:
     except (KeyError, ValueError):
         return None
     return Access(accessnet.interface(found), accessnet.port(found),
-                  address, accessnet.relay_ports(doc))
+                  address, accessnet.relay_ports(doc, installed))
 
 
 SSH_NARROWED = ("SSH: tcp {ports} on {where} only; IPv4 is closed"
@@ -259,7 +260,8 @@ def build(doc: dict, resolved: Resolved, state: FirewallState,
     return render(resolved, doc.get("overlays") or {}, overlay_of(doc),
                   state.bridges, state=target, ssh=state.ssh_ports,
                   allow=allow_of(doc), fence=state.fence,
-                  access=access_of(doc), ssh_ipv6_only=narrowed)
+                  access=access_of(doc, state.db_engine),
+                  ssh_ipv6_only=narrowed)
 
 
 def opened_ports(ruleset: Ruleset, doc: dict) -> frozenset:
@@ -376,7 +378,7 @@ def sorting(doc: dict, resolved: Resolved, state: FirewallState):
     """The sockets, sorted by rule B against the enforce ruleset"""
     enforcing = build(doc, resolved, state, ENFORCE)
     overlay = overlay_of(doc)
-    access = access_of(doc)
+    access = access_of(doc, state.db_engine)
     return classify(
         state.listeners or (),
         declared_units(resolved, doc.get("overlays") or {}),
@@ -409,7 +411,7 @@ def told(doc: dict, resolved: Resolved, state: FirewallState,
     device = None if overlay is None else (
         overlay.get("interface") or wireguard.DEFAULT_INTERFACE)
     mesh, addresses = mesh_context(doc, resolved)
-    access = access_of(doc)
+    access = access_of(doc, state.db_engine)
     return [f"enforce would close {item.describe()}" for item in unopened(
         state.listeners, opened_ports(ruleset, doc), device, mesh,
         addresses, access.iface if access else None,
