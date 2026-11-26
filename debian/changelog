@@ -9,6 +9,20 @@ keel (0.23.114) unstable; urgency=medium
 
  -- KeelLinux maintainers <admin@keellinux.org>  Thu, 26 Nov 2026 00:00:00 +0000
 
+keel (0.23.113) unstable; urgency=medium
+
+  * keel#340: a headless first boot that declares network.access writes
+    the database relay. 10keel-system applies before 75keel-role records
+    database.server, and no apply follows that hook, so the relay units
+    were missing and keel diff gave exit 14 until a person applied. A
+    spec that declares no database.server.engine now takes the engine
+    installed on the node (the server binary of MariaDB or PostgreSQL
+    that keel inspect looks for, when only one is there), for the relay
+    units and for the relay port in keel's firewall. A declared engine
+    always comes first.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Thu, 26 Nov 2026 00:00:00 +0000
+
 keel (0.23.112) unstable; urgency=medium
 
   * keel#338: a failed init fence opens no port. In an unprivileged
