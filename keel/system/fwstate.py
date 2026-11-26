@@ -58,6 +58,9 @@ RECORD = fwrecord.RECORD
 FENCE_UNIT = ("etc/systemd/system/multi-user.target.wants/"
               "turnkey-init-fence.service")
 FENCE_DEFAULTS = "etc/default/turnkey-init-fence"
+FENCE_SERVICE = "turnkey-init-fence.service"
+FENCE_FAILED = ("the init fence is enabled and its unit is failed: it"
+                " redirects nothing, and its ports are not opened")
 FENCE_KEYS = ("HTTP_FENCE_PORT", "HTTPS_FENCE_PORT")
 # the first boot's run, read as inithooks reads it (libinithooks/
 # init_lock.py boot_pending): RUN_FIRSTBOOT=true in its defaults and no
@@ -194,7 +197,7 @@ def observe_firewall(tree: Tree, live: bool) -> FirewallState:
     listeners, listened = observe_listeners(tree, live)
     running = sshd_ports(listeners, sshd_main_pid() if live else None)
     ports, ssh_note = with_running(ports, source, running)
-    fence, fence_note = fence_ports(tree)
+    fence, fence_note = fence_of(tree, live)
     recorded, digest, warning = fwrecord.read_full(tree)
     listing = table_listing() if live else None
     found = POLICY_RE.search(listing or "")
@@ -327,6 +330,19 @@ def fence_enabled(tree: Tree) -> bool:
     multi-user.target.wants, which 97turnkey-init-fence-disable removes
     before it stops the fence"""
     return tree.exists(FENCE_UNIT)
+
+
+def fence_of(tree: Tree, live: bool) -> tuple[tuple[int, ...], str]:
+    """The fence ports the ruleset opens: those of an enabled fence, and
+    none on the live system when its unit is failed. A fence that cannot
+    redirect (an unprivileged container with no ip6tables nat table,
+    keel-nextcloud PR 10) fails its start and stays enabled until hook 97
+    disables it. With --root systemd cannot be asked, and an enabled
+    fence counts (keel.diff.appliance accepts both files there)"""
+    ports, note = fence_ports(tree)
+    if live and ports and unit_failed(FENCE_SERVICE):
+        return (), FENCE_FAILED
+    return ports, note
 
 
 def fence_ports(tree: Tree) -> tuple[tuple[int, ...], str]:

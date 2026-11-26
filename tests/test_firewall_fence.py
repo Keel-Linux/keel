@@ -22,12 +22,13 @@ import os
 import shlex
 import subprocess
 from os.path import join
+from unittest import mock
 
 from test_firewall_repair import SPEC, Loads, RepairCase
 
 from keel import exits
 from keel.inspect.tree import Tree
-from keel.system import fwrecord, fwrepair
+from keel.system import fwrecord, fwrepair, fwstate
 from keel.system.actions import Note
 from keel.system.firewall import plan_firewall
 from keel.system.fwstate import FENCE_DEFAULTS, FENCE_UNIT
@@ -37,6 +38,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DROPIN = join(REPO, "systemd", "turnkey-init-fence.service.d",
               "10-keel-firewall.conf")
 DROPIN_COMMAND = "-/usr/bin/keel firewall refresh"
+DROPIN_START = "-/usr/bin/keel firewall refresh --started"
 
 
 class FenceCase(RepairCase):
@@ -74,9 +76,10 @@ class FenceCase(RepairCase):
         self.assertEqual(len(found), 1, out + err)
         return found[0]
 
-    def refresh(self, nft=None):
+    def refresh(self, nft=None, failed=False, started=False):
         nft = nft or Loads()
-        return fwrepair.refresh(self.root, live=False, run=nft), nft
+        return fwrepair.refresh(self.root, live=False, run=nft,
+                                failed=failed, started=started), nft
 
 
 class TestDriftAfterTheFence(FenceCase):
@@ -201,12 +204,106 @@ class TestRefresh(FenceCase):
         return [action for step in steps for action in step.actions]
 
 
+class TestFailedFence(FenceCase):
+    """keel-nextcloud PR 10, task 21021: in an unprivileged container
+    the fence cannot redirect over IPv6 and its start fails. systemd runs
+    the ExecStopPost at that failure, while the fence is still enabled,
+    and hook 97 later disables and stops a unit that is already failed:
+    no ExecStopPost runs then. The fence rule stayed in the file"""
+
+    def test_a_failed_start_refreshes_while_the_fence_is_still_enabled(self):
+        self.first_boot()
+        (code, lines), _ = self.refresh(failed=True)
+        self.assertEqual(code, exits.OK, lines)
+        self.assertNotIn("ct status dnat", self.file())
+        self.assertEqual(fwrecord.read(Tree(self.root))[0], "enforce")
+
+    def test_the_command_reads_the_result_systemd_gives(self):
+        """SERVICE_RESULT, which systemd sets for ExecStopPost"""
+        self.first_boot()
+        with mock.patch.dict(os.environ, {"SERVICE_RESULT": "success"}):
+            code, _, err = self.cli("firewall", "refresh")
+        self.assertEqual(code, exits.OK, err)
+        self.assertIn(FENCE_RULE, self.file())
+        with mock.patch.dict(os.environ, {"SERVICE_RESULT": "exit-code"}):
+            code, _, err = self.cli("firewall", "refresh")
+        self.assertEqual(code, exits.OK, err)
+        self.assertNotIn("ct status dnat", self.file())
+
+    def test_a_failed_fence_opens_no_port_on_the_live_system(self):
+        """the apply of 10keel-system runs after the failure"""
+        self.enable_fence()
+        tree = Tree(self.root)
+        with mock.patch.object(fwstate, "unit_failed", return_value=True):
+            ports, note = fwstate.fence_of(tree, True)
+        self.assertEqual(ports, ())
+        self.assertIn("failed", note)
+        with mock.patch.object(fwstate, "unit_failed", return_value=False):
+            self.assertEqual(fwstate.fence_of(tree, True)[0],
+                             (60080, 60443))
+        self.assertEqual(fwstate.fence_of(tree, False)[0], (60080, 60443))
+
+    def test_offline_the_file_of_a_failed_fence_is_the_same(self):
+        """keel diff --root cannot ask systemd whether the enabled fence
+        failed: the file with the fence rule and the file without it
+        are both what an apply writes (keel-lnmp: a hook left a
+        question, so the failed fence stays enabled)"""
+        self.first_boot()
+        self.refresh(failed=True)
+        self.assertNotIn("ct status dnat", self.file())
+        self.assertIn("derived.firewall: same", self.firewall_diff())
+
+
+class TestFenceStart(FenceCase):
+    """inithooks#68, inithooks PR 69: the fence now starts in an
+    unprivileged container (nftables, table inet keel_fence). A node
+    whose ruleset lost the fence rule after a failed start gets it back
+    at the next start of the fence, so the fence page answers under
+    enforce, and keel diff says same"""
+
+    def failed_then_upgraded(self) -> None:
+        """the ruleset a failed fence left: enforce, no fence rule, and
+        the fence still enabled"""
+        self.first_boot()
+        self.refresh(failed=True)
+        self.assertNotIn("ct status dnat", self.file())
+
+    def test_a_start_of_the_fence_opens_its_ports_again(self):
+        self.failed_then_upgraded()
+        (code, lines), _ = self.refresh(started=True)
+        self.assertEqual(code, exits.OK, lines)
+        self.assertIn(FENCE_RULE, self.file())
+        self.assertEqual(fwrecord.read(Tree(self.root))[0], "enforce")
+        self.assertIn("derived.firewall: same", self.firewall_diff())
+
+    def test_a_start_with_the_rule_there_changes_nothing(self):
+        self.first_boot()
+        before = self.file()
+        (code, lines), _ = self.refresh(started=True)
+        self.assertEqual(code, exits.OK, lines)
+        self.assertEqual(self.file(), before)
+
+    def test_a_start_on_a_node_with_no_firewall_begins_none(self):
+        """the first boot: the fence starts before 10keel-system"""
+        self.enable_fence()
+        (code, lines), _ = self.refresh(started=True)
+        self.assertEqual((code, lines), (exits.OK, []))
+        self.assertIsNone(self.file())
+
+    def test_the_command_takes_started(self):
+        self.failed_then_upgraded()
+        code, _, err = self.cli("firewall", "refresh", "--started")
+        self.assertEqual(code, exits.OK, err)
+        self.assertIn(FENCE_RULE, self.file())
+
+
 class TestDropIn(FenceCase):
     def test_the_drop_in_refreshes_after_each_stop_of_the_fence(self):
         with open(DROPIN) as fob:
             found = [line.strip() for line in fob
                      if line.strip() and not line.startswith("#")]
         self.assertEqual(found, ["[Service]",
+                                 f"ExecStartPost={DROPIN_START}",
                                  f"ExecStopPost={DROPIN_COMMAND}"])
 
     def test_the_drop_in_is_installed_beside_any_other(self):

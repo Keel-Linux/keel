@@ -241,7 +241,8 @@ def firewall_fields(declared: dict, resolved, states: dict,
     foretold = foretell(declared, resolved, state, said, True, False)
     ruleset = foretold.ruleset
     wanted = f"{RULESET}, {ruleset.state}"
-    if file.text == ruleset.text:
+    if file.text == ruleset.text or failed_fence(
+            declared, resolved, state, said, live, file.text):
         fields = [FieldDiff("derived.firewall", SAME, wanted, wanted)]
     else:
         fields = [FieldDiff("derived.firewall", DRIFT, wanted,
@@ -261,6 +262,17 @@ def firewall_fields(declared: dict, resolved, states: dict,
                            reason=f"{PERSON_HOLDS}, so it closes nothing")
                  if withheld else listener_field(state, foretold))
     return fields + [listeners] + warnings
+
+
+def failed_fence(declared: dict, resolved, state, said, live: bool,
+                 text: str | None) -> bool:
+    """With --root, whether the file is what an apply writes when the
+    enabled fence is failed: systemd is not asked there, and the live
+    apply leaves the fence ports out (keel.system.fwstate.fence_of)"""
+    if live or not state.fence:
+        return False
+    gone = replace(state, fence=(), fence_note="")
+    return text == foretell(declared, resolved, gone, said, True).ruleset.text
 
 
 def withheld_by(state, live: bool) -> str:

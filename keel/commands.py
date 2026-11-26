@@ -497,8 +497,13 @@ def firewall_refresh(args) -> int:
     (decision 0097, keel#322); never fails, so the fence's stop succeeds"""
     from keel.system import fwrepair
     root = getattr(args, "root", ROOT_DEFAULT)
+    # systemd sets SERVICE_RESULT for ExecStopPost: not success after a
+    # start that failed (keel-nextcloud PR 10)
+    result = os.environ.get("SERVICE_RESULT", "")
     code, lines = fwrepair.refresh(root,
-                                   os.path.abspath(root) == ROOT_DEFAULT)
+                                   os.path.abspath(root) == ROOT_DEFAULT,
+                                   failed=result not in ("", "success"),
+                                   started=getattr(args, "started", False))
     for line in lines:
         print(line)
     return code

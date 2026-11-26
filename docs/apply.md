@@ -1284,6 +1284,22 @@ drop in `enforce`, and these rules:
   The stale rule accepted only packets redirected to the fence ports:
   the fence's own stop removes its redirect, so 80 and 443 went to the
   application, and nothing listened on the fence ports.
+  A fence whose start failed (an unprivileged container with no
+  ip6tables nat table, keel#338) redirects nothing. On the live system
+  the apply does not open its ports while its unit is failed, also
+  while it is enabled. systemd runs the drop-in at that failure with
+  `SERVICE_RESULT` other than `success`, and the refresh then writes
+  the file again also while the fence is enabled: a later disable and
+  stop of the failed unit runs no `ExecStopPost`. With `--root`,
+  `keel diff` cannot ask systemd, so for an enabled fence the file
+  with the fence rule and the file without it both say
+  `derived.firewall: same`.
+  After each start of the fence the drop-in runs `keel firewall
+  refresh --started` (its `ExecStartPost`): the ruleset is written again
+  while the fence is enabled, so a node whose ruleset lost the fence
+  rule after a failed start opens the fence ports again once the fence
+  starts (inithooks#68). The fence loads its own table first, and the
+  refresh replaces only `inet keel`.
 
 `loopback` opens nothing. A `mesh` port is accepted only for a packet
 that comes in on the WireGuard interface: a neighbour on the uplink's
