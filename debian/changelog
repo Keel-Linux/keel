@@ -1,3 +1,18 @@
+keel (0.23.116) unstable; urgency=medium
+
+  * keel#347: keel diff shows a filesync.config row: the files that the
+    next keel spec apply --system writes for syncthing (config.xml, its
+    digest record, the unit's drop-in, .stignore and .stfolder), and
+    whether the apply restarts syncthing.service. The row uses the same
+    observe and plan as the apply. Before, keel diff compared only
+    whether the overlay was enabled, and said "same" when the render of
+    keel 0.23.100 (the loopback listen address, decision 0097) differed
+    from the digest record of an earlier version; the apply then
+    rewrote config.xml and restarted syncthing. The row is on the live
+    system only, as the apply's filesync step is.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Thu, 26 Nov 2026 00:00:00 +0000
+
 keel (0.23.115) unstable; urgency=medium
 
   * keel#342: the apply that first enables overlays.crowdsec writes a

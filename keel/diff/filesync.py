@@ -12,9 +12,11 @@ on the live system only; when it gives no answer the rows are UNKNOWN,
 as a peer's handshake is (keel.diff.handshakes).
 """
 
-from keel.diff.report import DRIFT, SAME, UNKNOWN, FieldDiff
+from keel.diff.report import DRIFT, NOT_COMPARED, SAME, UNKNOWN, FieldDiff
+from keel.inspect.tree import Tree
 from keel.manifest.facts import gather
 from keel.system import filesync, filesync_api, filesync_io
+from keel.system.actions import Note, Refuse
 
 WANTED = "0"
 NO_ANSWER = ("syncthing gives no answer on the loopback: is the service"
@@ -60,7 +62,8 @@ def filesync_fields(declared: dict, root: str, live: bool) -> list[FieldDiff]:
                 observed=str(value),
                 note="" if value == 0 else NOTE))
     fields.append(_peer_row(root, found))
-    return fields
+    render = _render_row(declared, root, facts.resolved)
+    return fields + ([render] if render else [])
 
 
 DIRECTION = {filesync_io.PRIMARY: filesync.SEND,
@@ -101,3 +104,35 @@ def _peer_row(root: str, found) -> FieldDiff:
     return FieldDiff("filesync.peer", DRIFT, declared="connected",
                      observed="unknown" if peer is None else
                      "not connected", note=PEER_NOTE)
+
+
+RENDER_FIELD = "filesync.config"
+RENDERED = "the files apply renders for syncthing"
+DIFFERS = "files that differ from them"
+
+
+def _render_row(declared: dict, root: str, resolved) -> FieldDiff | None:
+    """What the next apply writes for syncthing (keel#347): the same
+    observe and plan as the apply's (keel.system.filesync), so a render
+    that changed between versions is drift before the apply restarts
+    syncthing, not after"""
+    state = filesync.observe_filesync(Tree(root), declared, resolved)
+    if state is None:
+        return None
+    actions, restart = filesync.plan_filesync(state, True)
+    refused = [one.summary for one in actions if isinstance(one, Refuse)]
+    if refused:
+        return FieldDiff(RENDER_FIELD, UNKNOWN, RENDERED,
+                         reason="; ".join(refused))
+    changes = [one.summary for one in actions if not isinstance(one, Note)]
+    if not changes:
+        notes = [one.summary for one in actions]
+        if notes:
+            return FieldDiff(RENDER_FIELD, NOT_COMPARED, RENDERED,
+                             reason="; ".join(notes))
+        return FieldDiff(RENDER_FIELD, SAME, RENDERED, RENDERED)
+    if restart:
+        changes.append("restarts syncthing.service: its configuration"
+                       " changed")
+    return FieldDiff(RENDER_FIELD, DRIFT, RENDERED, DIFFERS,
+                     note="keel spec apply --system: " + "; ".join(changes))

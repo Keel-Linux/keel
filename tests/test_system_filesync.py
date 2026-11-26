@@ -505,7 +505,9 @@ class TestTheDiffRows(SyncCase):
                 mock.patch("keel.system.filesync_api.peer_connected",
                            return_value=connected):
             found = filesync_fields(document, self.root, live)
-        return found, asked
+        # the row of the rendered files: tests/test_diff_filesync_render.py
+        return [one for one in found if one.field != "filesync.config"], \
+            asked
 
     def named(self, found, name):
         return next(one for one in found if one.field == name)
