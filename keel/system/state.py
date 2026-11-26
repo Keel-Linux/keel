@@ -23,6 +23,7 @@ from keel.system.monstate import MonitorState, observe_monitor
 from keel.system.netstate import NetworkState, observe_network
 from keel.system.accstate import AccessState, observe_access
 from keel.system.ovstate import OverlayState, observe_overlay
+from keel.system.trusted import TrustedState, observe_trusted
 
 LOCALE_GEN = "etc/locale.gen"
 MAILNAME = "etc/mailname"
@@ -96,6 +97,7 @@ class SystemState:
     overlay: OverlayState | None = None
     access: AccessState | None = None
     appliance: ApplianceState | None = None
+    trusted: TrustedState | None = None
 
 
 def observe(root: str, doc: dict, start: bool = False,
@@ -153,6 +155,7 @@ def observe(root: str, doc: dict, start: bool = False,
         overlay=observe_overlay(root, doc),
         access=observe_access(root, doc),
         appliance=observe_appliance(root, doc, start, spec),
+        trusted=observe_trusted(root),
     )
 
 

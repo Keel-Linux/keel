@@ -16,11 +16,16 @@
 #   - the fence is no longer enabled. inithooks' 97turnkey-init-fence-disable
 #     disables the unit, then stops it; a shutdown or a stop by hand
 #     leaves it enabled, and the fence comes back at the next boot;
-#   - the first boot's run (inithooks.service) is not active. The first
-#     boot defers the certificate (--defer-certificate): DNS rarely points
-#     at a machine that is still booting, and a golden image copied with
-#     its domain would send a request from each copy. After keel-init, an
-#     operator has set this machine up.
+#   - the first boot's run does not run its hooks now: inithooks.service
+#     is not active, or its hooks are done (the marker INITHOOKS_COMPLETE,
+#     which /usr/lib/inithooks/run writes after its hooks). The unit
+#     stays active after its hooks while confconsole's usage screen waits
+#     on the console, and keel-init over SSH stops the fence then
+#     (keel#327). The first boot defers the certificate
+#     (--defer-certificate): DNS rarely points at a machine that is still
+#     booting, and a golden image copied with its domain would send a
+#     request from each copy. After keel-init, an operator has set this
+#     machine up.
 #   It never fails: the stop of the fence must succeed.
 # - --request: ExecStart of keel-certificate.service. keel spec apply
 #   --certificate-only converges tls.acme and nothing else, so the answers
@@ -29,6 +34,7 @@
 #
 # KEEL_SPEC_PATHS: where the description is looked for, the paths and the
 # order of firstboot.d/10keel-system.
+# INITHOOKS_COMPLETE: the marker of inithooks' run, its own default.
 
 set -u
 
@@ -36,6 +42,7 @@ KEEL_SPEC_PATHS="${KEEL_SPEC_PATHS:-/etc/keel/instance.yaml:/etc/inithooks.yaml}
 FENCE=turnkey-init-fence.service
 BOOT_RUN=inithooks.service
 UNIT=keel-certificate.service
+INITHOOKS_COMPLETE="${INITHOOKS_COMPLETE:-/run/inithooks-complete}"
 
 say() {
     echo "keel: $*"
@@ -43,7 +50,7 @@ say() {
 
 after_stop() {
     systemctl --quiet is-enabled "$FENCE" && return 0
-    if systemctl --quiet is-active "$BOOT_RUN"; then
+    if systemctl --quiet is-active "$BOOT_RUN" && [ ! -e "$INITHOOKS_COMPLETE" ]; then
         say "$FENCE stopped in the first boot's run: the first boot defers the certificate"
         return 0
     fi

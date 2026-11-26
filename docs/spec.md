@@ -427,11 +427,16 @@ paste in a terminal on the computer, Linux or macOS, with
 wireguard-tools, curl and openssl:
 
 ```
-f=$(mktemp) && curl -fsS --proto '=https' -k --pinnedpubkey 'sha256//<pin>' -o "$f" 'https://[<node>]:<port>/access/<id>/enrol.sh' && printf '%s\n' '<secret>' | sudo sh "$f"; rm -f "$f"
+(f=$(mktemp) || exit 1; if curl -fsS --proto '=https' --connect-timeout 20 --max-time 60 -k --pinnedpubkey 'sha256//<pin>' -o "$f" 'https://[<node>]:<port>/access/<id>/enrol.sh'; then printf '%s\n' '<secret>' | sudo sh "$f"; s=$?; [ $s -eq 0 ] || echo "keel access: the enrolment failed (exit $s)" >&2; else s=$?; echo "keel access: the script did not come from the node (curl exit $s): the line is used, expired or wrong, or the node is not reachable" >&2; fi; rm -f "$f"; exit $s)
 ```
 
 The script runs only once it is whole on disk, and its body is one
-function called on its last line. The secret reaches it on its standard
+function called on its last line. The line waits at most 20 s for a
+connection and 60 s for the script; the script waits at most 300 s for
+the node's answer, which comes after the node's apply. A closed port (a
+used or expired line), a wrong pin, a refusal or a failed step gives a
+message and a non-zero exit: the status of curl or of the script
+(keel#331). The secret reaches the script on its standard
 input from the shell's own printf, and the script computes the HMAC with
 `openssl dgst` on data alone: no secret and no key is on the argv of a
 process. The node must have a stable global IPv6 address (not temporary,
@@ -1111,13 +1116,27 @@ comes in on it; both drops are in `report` too. SSH (answer 6, B): the
 ports sshd listens on open on IPv6 and on the access interface only,
 where the live node has a global IPv6 address and an IPv6 default route
 and sshd listens on IPv6 (`sshd -T`), the first time at an apply a person
-runs; else keel refuses to close them on IPv4 and the plan says so.
+runs; else keel refuses to close them on IPv4 and the plan says so. The
+first boot's run is not a person (keel#328): while inithooks' first boot
+is not over (`RUN_FIRSTBOOT=true` in `/etc/default/inithooks` and no
+`/run/inithooks-complete`), the applies of its hooks keep IPv4 22 open.
+Every run with no person (the first boot, `keel mesh`, `keel firewall
+refresh`) keeps what keel's file says of IPv4 22, also while the node has
+no global IPv6 for a moment; `keel diff` compares with what the file says
+of it too.
 `/usr/lib/keel/firewall-ssh-guard` runs once the network is online at
 boot (`keel-firewall-ssh-guard.service`) and at each run of
 `keel-firewall-watch` (every 30 s): where the file closes IPv4 22 and the
 node has no global IPv6 address and IPv6 default route now, it opens
 IPv4 22 again with one rule of its own and a line in the journal, so the
-node is never closed; when IPv6 is back, it removes that rule. Decision 0097 ends the scope of
+node is never closed; when IPv6 is back, it removes that rule. At boot
+(keel#329) an address of DHCPv6 can come after network-online, so the
+boot unit first waits up to about 60 s for a global IPv6 address and an
+IPv6 default route, with no lock held, and the watch leaves the decision
+to it meanwhile; when IPv6 does not come, it opens IPv4 22 as above.
+The watch's first run can come before the boot unit: until the boot unit
+has decided (`/run/keel/ssh-guard-boot.done`), the watch leaves the
+decision to it, for at most 180 s of uptime. Decision 0097 ends the scope of
 2026-09-30 (cloud advanced only): keel writes it in every mode, simple,
 cloud simple and cloud advanced, the etcd witness included, and the
 section is valid in each.

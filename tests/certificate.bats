@@ -15,6 +15,9 @@ setup() {
     PRIMARY="$TMP/etc/keel/instance.yaml"
     LEGACY="$TMP/etc/inithooks.yaml"
     export KEEL_SPEC_PATHS="$PRIMARY:$LEGACY"
+    # the marker the boot run writes when its hooks are done
+    export INITHOOKS_COMPLETE="$TMP/run/inithooks-complete"
+    mkdir -p "$TMP/run"
     # after keel-init: the fence is disabled, the boot run is over
     fake systemctl '[ "$1" = --quiet ] && exit 1; exit 0'
     fake keel 'echo "apply --certificate-only: 1 change(s), 0 failed"'
@@ -57,12 +60,35 @@ argv() {
 
 @test "the first boot's run starts nothing: it defers the certificate" {
     fake systemctl '[ "$2" = is-active ] && exit 0; [ "$1" = --quiet ] && exit 1; exit 0'
+    # the hooks run: no marker yet
 
     run "$SCRIPT"
 
     [ "$status" -eq 0 ]
     [[ "$output" == *"the first boot defers the certificate"* ]]
     run ! grep -q start "$TMP/systemctl.argv"
+}
+
+@test "keel-init while the first boot's console screen is open starts keel-certificate.service (keel#327)" {
+    # inithooks.service stays active while confconsole --usage waits on
+    # the console, after the boot run's hooks are done
+    fake systemctl '[ "$2" = is-active ] && exit 0; [ "$1" = --quiet ] && exit 1; exit 0'
+    touch "$INITHOOKS_COMPLETE"
+
+    run "$SCRIPT"
+
+    [ "$status" -eq 0 ]
+    [ "$(argv systemctl)" = "--quiet is-enabled turnkey-init-fence.service
+--quiet is-active inithooks.service
+--no-block start keel-certificate.service" ]
+    [[ "$output" != *"defers the certificate"* ]]
+}
+
+@test "a boot run with no active unit (keel-init ran the boot run) starts keel-certificate.service" {
+    run "$SCRIPT"
+
+    [ "$status" -eq 0 ]
+    [[ "$(argv systemctl)" == *"--no-block start keel-certificate.service" ]]
 }
 
 @test "a start that fails is said and does not fail the fence's stop" {

@@ -44,6 +44,14 @@ MAX_BODY = 1024
 MAX_FORGED = 5
 SCRIPT_FILE = os.path.join(os.path.dirname(__file__), "enrol.sh")
 TEXT = "text/plain"
+# curl's limits on the computer, in seconds (keel#331): a closed port (a
+# used or expired line) fails at CONNECT_TIMEOUT. The POST waits for the
+# root side's apply under the sync lock, so its limit is long: a client
+# that gave up after the node enrolled its key would leave a used invite
+# and no tunnel.
+CONNECT_TIMEOUT = 20
+SCRIPT_TIME = 60
+ENROL_TIME = 300
 LABEL_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
 MAX_NAME = 253
 
@@ -174,6 +182,8 @@ def script(endpoint: str, port: int, pin: str, invite_id: str,
     values = {"@URL_HOST@": url_host(endpoint),
               "@WG_ENDPOINT@": wg_endpoint(endpoint, access),
               "@PORT@": str(port), "@PIN@": pin,
+              "@CONNECT_TIMEOUT@": str(CONNECT_TIMEOUT),
+              "@ENROL_TIME@": str(ENROL_TIME),
               "@ID@": invite_id, "@NODE_KEY@": node_key,
               "@NODE_ADDRESS@": str(acc.address(access).ip),
               "@IFACE@": client_interface(str(access["address"]))}
@@ -187,12 +197,22 @@ def command(endpoint: str, port: int, pin: str, invite_id: str,
     """The one line the administrator pastes on the computer: the script
     is written whole to a file of mktemp's (0600) before it runs, so a
     cut-off download runs nothing, and the secret reaches it on its
-    standard input from the shell's own printf, in no argv"""
+    standard input from the shell's own printf, in no argv. The line
+    waits a limited time, and exits with the status of curl or of the
+    script, with a message when it is not 0 (keel#331). It is a
+    subshell: its exit does not close the administrator's terminal. No
+    variable is called `status`, which zsh reserves."""
     path = SCRIPT.format(id=invite_id)
     url = f"https://{url_host(endpoint)}:{port}{path}"
-    return (f"f=$(mktemp) && curl -fsS --proto '=https' -k --pinnedpubkey"
-            f" 'sha256//{pin}' -o \"$f\" '{url}' && printf '%s\\n'"
-            f" '{secret}' | sudo sh \"$f\"; rm -f \"$f\"")
+    return (f"(f=$(mktemp) || exit 1; if curl -fsS --proto '=https'"
+            f" --connect-timeout {CONNECT_TIMEOUT} --max-time {SCRIPT_TIME}"
+            f" -k --pinnedpubkey 'sha256//{pin}' -o \"$f\" '{url}'; then"
+            f" printf '%s\\n' '{secret}' | sudo sh \"$f\"; s=$?;"
+            f" [ $s -eq 0 ] || echo \"keel access: the enrolment failed"
+            f" (exit $s)\" >&2; else s=$?; echo \"keel access: the script"
+            f" did not come from the node (curl exit $s): the line is used,"
+            f" expired or wrong, or the node is not reachable\" >&2; fi;"
+            f" rm -f \"$f\"; exit $s)")
 
 
 def spki_pin(certificate: str) -> str:

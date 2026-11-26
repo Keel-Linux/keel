@@ -273,7 +273,7 @@ class TestScript(unittest.TestCase):
         self.assertIn(f"printf '%s\\n' '{SECRET}' | sudo sh \"$f\"", line)
         self.assertNotIn("sh -s --", line)
         self.assertIn(' -o "$f" ', line)
-        self.assertTrue(line.startswith('f=$(mktemp) && curl '))
+        self.assertTrue(line.startswith('(f=$(mktemp) || exit 1; if curl '))
         named = enrol.command("node.example.org:51900", 50000, "PIN=",
                               "0123456789abcdef", SECRET)
         self.assertIn("'https://node.example.org:50000/access/", named)

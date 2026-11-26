@@ -45,8 +45,10 @@ Decision 0098, answer 6, B: the ports sshd listens on open on IPv6 and
 on the access interface only. Closing 22 on IPv4 can lock a person out,
 so keel does it only where the live node has a global IPv6 address
 (not a unique local one) and an IPv6 default route, and the first time
-only at an apply a person runs, as rule B moves a node to enforce; from
-then on keel's file is the record. A node with no global IPv6 address
+only at an apply a person runs; from then on keel's file is the record.
+The first boot's run is not a person (keel#328), although its apply is
+attended for rule B: it keeps IPv4 22 open. A run with no person keeps
+what keel's file says of IPv4 22, also while IPv6 is gone for a moment. A node with no global IPv6 address
 keeps 22 on both families, and the plan says that keel refuses to close
 it. Under --root, where nothing live is seen, 22 stays on both.
 """
@@ -208,11 +210,25 @@ SSH_NO_IPV6 = ("SSH stays open on IPv4 too: keel refuses to close tcp"
 SSH_UNATTENDED = ("SSH stays open on IPv4 until an apply a person runs"
                   " (keel spec apply --system) closes it (decision 0098,"
                   " answer 6)")
+SSH_BOOT_RUN = ("SSH stays open on IPv4: the first boot's run applies with"
+                " no person there; an apply a person runs (keel spec apply"
+                " --system) closes it (decision 0098, answer 6; keel#328)")
 
 
-def ssh_narrowed(state: FirewallState, attended: bool
+def by_person(state: FirewallState, attended: bool) -> bool:
+    """Whether a person runs this apply, for SSH (keel#328). keel spec
+    apply is attended for rule B of 0097, the first boot's hooks too;
+    but the first boot's run has nobody there to keep a session, so it
+    never closes IPv4 22"""
+    return attended and not state.boot_run
+
+
+def ssh_narrowed(state: FirewallState, person: bool
                  ) -> tuple[bool, str]:
-    """Whether the ruleset opens SSH on IPv6 alone, and why (answer 6)"""
+    """Whether the ruleset opens SSH on IPv6 alone, and why (answer 6).
+    Only an apply a person runs closes IPv4 22; any other run keeps what
+    keel's file says, also while IPv6 is gone for a moment: the SSH guard
+    opens IPv4 22 live then (firewall/firewall-ssh-guard)"""
     ports = ", ".join(str(port) for port in state.ssh_ports)
     if state.global_ipv6 is None:
         # --root, or a state no one observed: nothing narrows, and
@@ -222,17 +238,24 @@ def ssh_narrowed(state: FirewallState, attended: bool
         return False, SSH_NO_IPV6.format(
             ports=ports, why="sshd does not listen on IPv6 (sshd -T:"
             " addressfamily and listenaddress)")
+    if not person and state.ssh_ipv6 is True and \
+            file_ssh_ipv6_only(state.file.text):
+        return True, ""
     if state.global_ipv6 is False:
         return False, SSH_NO_IPV6.format(ports=ports,
                                          why=state.global_ipv6_source)
-    if attended or file_ssh_ipv6_only(state.file.text):
+    if person:
         return True, ""
-    return False, SSH_UNATTENDED
+    return False, SSH_BOOT_RUN if state.boot_run else SSH_UNATTENDED
 
 
 def build(doc: dict, resolved: Resolved, state: FirewallState,
-          target: str, attended: bool = False) -> Ruleset:
-    narrowed, _ = ssh_narrowed(state, attended)
+          target: str, attended: bool = False,
+          person: bool | None = None) -> Ruleset:
+    """`person` None: by_person of `attended`"""
+    if person is None:
+        person = by_person(state, attended)
+    narrowed, _ = ssh_narrowed(state, person)
     return render(resolved, doc.get("overlays") or {}, overlay_of(doc),
                   state.bridges, state=target, ssh=state.ssh_ports,
                   allow=allow_of(doc), fence=state.fence,
@@ -294,12 +317,15 @@ class Foretold(NamedTuple):
 
 
 def foretell(doc: dict, resolved: Resolved, state: FirewallState,
-             declared: str | None, attended: bool) -> Foretold:
+             declared: str | None, attended: bool,
+             person: bool | None = None) -> Foretold:
     """The one decision of rule B: apply's plan (on) and keel diff
     (keel.diff.appliance) both ask it, so diff never foretells another
-    state than the apply writes (keel#318)"""
+    state than the apply writes (keel#318). `person` is for SSH alone
+    (by_person); keel diff passes False, since the close of IPv4 22 is a
+    person's act and not a field of the spec, so diff keeps the file's"""
     target, reasons = choose(doc, resolved, state, declared, attended)
-    ruleset = build(doc, resolved, state, target, attended)
+    ruleset = build(doc, resolved, state, target, attended, person)
     return Foretold(ruleset, reasons, told(doc, resolved, state, ruleset))
 
 
@@ -391,7 +417,8 @@ def told(doc: dict, resolved: Resolved, state: FirewallState,
 
 
 def ssh_said(resolved: Resolved, doc: dict, state: FirewallState,
-             ruleset: Ruleset | None = None) -> list[str]:
+             ruleset: Ruleset | None = None,
+             person: bool = False) -> list[str]:
     """Name sshd's ports where the manifests do not open them all, and
     where SSH is narrowed to IPv6, or why it is not (answer 6)"""
     ports = ", ".join(str(port) for port in state.ssh_ports)
@@ -399,7 +426,7 @@ def ssh_said(resolved: Resolved, doc: dict, state: FirewallState,
         where = (f"IPv6 and on {ruleset.access_iface}"
                  if ruleset.access_iface else "IPv6")
         return [SSH_NARROWED.format(ports=ports, where=where)]
-    found = [] if ruleset is None else [ssh_narrowed(state, False)[1]]
+    found = [] if ruleset is None else [ssh_narrowed(state, person)[1]]
     return [one for one in found if one] + ssh_public(resolved, doc, state)
 
 
@@ -438,7 +465,8 @@ def on(doc: dict, resolved: Resolved, state: FirewallState, live: bool,
     ruleset, reasons, closes = foretell(doc, resolved, state, declared,
                                         attended)
     said = reasons + closes
-    said += ssh_said(resolved, doc, state, ruleset)
+    said += ssh_said(resolved, doc, state, ruleset,
+                     by_person(state, attended))
     said += [state.ssh_note] if state.ssh_note else []
     said += [state.recorded_warning] if state.recorded_warning else []
     said += [state.fence_note] if state.fence_note else []
