@@ -1,3 +1,17 @@
+keel (0.23.115) unstable; urgency=medium
+
+  * keel#342: the apply that first enables overlays.crowdsec writes a
+    monit file that watches CrowdSec. The monit step is planned before
+    the overlay's step registers the machine, so crowdsec.service
+    (ConditionPathExists=local_api_credentials.yaml) was left out, and
+    keel diff found derived.monit drift until a second apply. A unit
+    whose start condition the same apply makes true (the local API's
+    credentials, or the removal of the bouncer's pending registration)
+    is now watched. Under --root, without cscli, or with a masked unit
+    nothing is made, and the unit stays out.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Thu, 26 Nov 2026 00:00:00 +0000
+
 keel (0.23.112) unstable; urgency=medium
 
   * keel#338: a failed init fence opens no port. In an unprivileged

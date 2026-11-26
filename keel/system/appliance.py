@@ -30,11 +30,15 @@ stopped; turning one on adds checks Monit holds for two cycles, by
 which time the units have started.
 """
 
+import dataclasses
+
+from keel.inspect.units import met_by
 from keel.manifest.firewall import OFF
 from keel.manifest.monit import render
 from keel.manifest.resolve import Resolved
 from keel.system.actions import (
     Action,
+    AddBouncer,
     Note,
     Refuse,
     RemoveFile,
@@ -51,7 +55,7 @@ from keel.system.appstate import (
 )
 from keel.system import anubiskey, filesync
 from keel.system.crowdsec import OVERLAY as CROWDSEC
-from keel.system.crowdsec import plan_identity
+from keel.system.crowdsec import LAPI, plan_identity
 from keel.system.etcd import OVERLAY as ETCD
 from keel.system.etcd import plan_etcd, waiting
 from keel.system.filesync import plan_filesync
@@ -88,13 +92,43 @@ def plan_appliance(doc: dict, state: ApplianceState | None, live: bool,
         return [Step("appliance", tuple(
             Refuse(problem) for problem in state.problems))]
     states = doc.get("overlays") or {}
-    steps = [plan_monit(doc, states, state, live, available)]
+    # the units whose start condition this same apply makes true are
+    # watched now, or the next keel diff finds the monit file out of
+    # date (keel#342)
+    made, removed = identity_paths(states, state, live, available)
+    watched = dataclasses.replace(state, waiting={
+        unit: why for unit, why in state.waiting.items()
+        if not met_by(why, made, removed)})
+    steps = [plan_monit(doc, states, watched, live, available)]
     for name in converge_order(state.resolved, states):
         units = overlay_units(state.resolved, name)
         if units or state.hooks.get(name):
             steps.append(plan_overlay(name, states.get(name), units, state,
                                       live, available))
     return steps
+
+
+def identity_paths(states: dict, state: ApplianceState, live: bool,
+                   available: frozenset[str]) -> tuple[set[str], set[str]]:
+    """The files CrowdSec's first enable makes and removes in this apply,
+    as plan_overlay plans it: none when the step stops before the
+    identity (no systemctl, a hook not safe to run, a masked unit)"""
+    if states.get(CROWDSEC) != ENABLED:
+        return set(), set()
+    units = overlay_units(state.resolved, CROWDSEC)
+    hooks = state.hooks.get(CROWDSEC)
+    if ((units and live and "systemctl" not in available)
+            or (hooks and hooks.problems)
+            or any(state.units[unit].is_masked for unit in units)):
+        return set(), set()
+    made, removed = set(), set()
+    for action in plan_identity(state.crowdsec, live, available):
+        if isinstance(action, Run) and action.argv[2:4] == (
+                "machines", "add"):
+            made.add("/" + LAPI)
+        if isinstance(action, AddBouncer) and action.pending:
+            removed.add("/" + action.pending)
+    return made, removed
 
 
 def converge_order(resolved: Resolved, states: dict) -> list[str]:

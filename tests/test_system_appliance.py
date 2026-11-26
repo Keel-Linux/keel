@@ -622,3 +622,72 @@ class TestAnubisKeyOfAPair(PlanCase):
                              for a in step.actions))
         self.assertIn(("systemctl", "start", "anubis.service"),
                       [a.argv for a in step.actions if isinstance(a, Run)])
+
+
+class TestMonitAfterTheIdentity(PlanCase):
+    """keel#342: the apply that first enables CrowdSec makes the files its
+    units' start conditions name, after the monit file is planned; one
+    apply must still write the file that watches them"""
+
+    NONE = CrowdsecState(lapi=False, capi="absent", bouncer_key=False,
+                         bouncer_mode=None, bouncer_id=None)
+
+    def unmet(self, unit: str, condition: str) -> dict[str, str]:
+        from keel.inspect.tree import Tree
+        from keel.inspect.units import waiting
+        if condition.startswith("!"):
+            held = join(self.root, condition[2:])
+            os.makedirs(os.path.dirname(held), exist_ok=True)
+            open(held, "w").close()
+        path = join(self.root, "usr/lib/systemd/system", unit)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fob:
+            fob.write(f"[Unit]\nConditionPathExists={condition}\n")
+        found = waiting(Tree(self.root), [unit])
+        self.assertIn(unit, found)
+        return found
+
+    def monit(self, state: ApplianceState, live: bool = True):
+        steps = self.plan(ON, state, live=live)
+        step = next(step for step in steps if step.field == "derived.monit")
+        written = [a for a in step.actions if isinstance(a, WriteFile)]
+        notes = [a.summary for a in step.actions if isinstance(a, Note)]
+        return (written[0].content if written else ""), notes
+
+    def test_the_registration_of_this_apply_meets_the_condition(self):
+        state = self.state(crowdsec=self.NONE, waiting=self.unmet(
+            "crowdsec.service", "/etc/crowdsec/local_api_credentials.yaml"))
+        content, notes = self.monit(state)
+        self.assertIn("keel-unit-crowdsec ", content, notes)
+        self.assertFalse([n for n in notes if "not watched" in n
+                          and "crowdsec" in n], notes)
+
+    def test_the_bouncer_registration_removes_the_pending_file(self):
+        state = self.state(
+            crowdsec=dataclasses.replace(REGISTERED, pending=True),
+            waiting=self.unmet("crowdsec-firewall-bouncer.service",
+                               "!/var/lib/crowdsec/pending-registration"))
+        content, notes = self.monit(state)
+        self.assertIn("keel-unit-firewall-bouncer ", content, notes)
+        self.assertFalse([n for n in notes if "not watched" in n], notes)
+
+    def test_no_identity_made_keeps_the_unit_waiting(self):
+        waits = self.unmet("crowdsec.service",
+                           "/etc/crowdsec/local_api_credentials.yaml")
+        cases = (
+            # under --root no identity is made (tracker#47)
+            (self.state(crowdsec=self.NONE, waiting=waits), False, LIVE),
+            # no cscli: refused
+            (self.state(crowdsec=self.NONE, waiting=waits), True,
+             frozenset(("systemctl", "monit"))),
+            # a masked unit stops the step before the identity
+            (self.state(crowdsec=self.NONE, waiting=waits, units=units(**{
+                "crowdsec.service": UnitState("crowdsec.service", "masked",
+                                              "inactive")})), True, LIVE),
+        )
+        for state, live, available in cases:
+            steps = self.plan(ON, state, live=live, available=available)
+            step = next(s for s in steps if s.field == "derived.monit")
+            notes = [a.summary for a in step.actions if isinstance(a, Note)]
+            self.assertTrue([n for n in notes if n.startswith(
+                "crowdsec not watched")], (live, available, notes))
