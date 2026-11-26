@@ -164,7 +164,11 @@ the line names each server.
 
 `database.server.listen` comes from `ss -lntH`, filtered on the port the server
 itself reported, so it is the addresses the machine is really answering on and
-not the setting it was given. `database.server.replication.allowed_from` is the
+not the setting it was given. The sockets of keel's access relays
+(`keel-access-relay-PORT.socket`, decision 0098) are not in it: systemd holds
+them on the access address and the server's port, and they are keel's own
+(keel#332). A relay file that keel did not write stays in the observation.
+`database.server.replication.allowed_from` is the
 origins the server holds an authorization for, a MariaDB `Host` verbatim and a
 `pg_hba` address and netmask joined into a prefix. Redis reports it as not
 inferred: it has no per origin authorization, and the reason says so. So is a

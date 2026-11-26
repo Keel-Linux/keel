@@ -10,6 +10,15 @@ keel (0.23.112) unstable; urgency=medium
 
  -- KeelLinux maintainers <admin@keellinux.org>  Thu, 26 Nov 2026 00:00:00 +0000
 
+keel (0.23.111) unstable; urgency=medium
+
+  * keel#332: keel diff and keel inspect leave keel's access relay
+    sockets (keel-access-relay-PORT.socket) out of
+    database.server.listen; a pair node with an access network gave
+    drift.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Thu, 26 Nov 2026 00:00:00 +0000
+
 keel (0.23.110) unstable; urgency=medium
 
   * keel#331: the enrolment line of keel access invite waits at most
