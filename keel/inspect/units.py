@@ -136,6 +136,17 @@ def waiting(tree: Tree, units: Iterable[str]) -> dict[str, str]:
     return {unit: why for unit in units if (why := unmet(tree, unit))}
 
 
+def met_by(why: str, made: Iterable[str] = (),
+           removed: Iterable[str] = ()) -> bool:
+    """Whether the condition that unmet() named holds once the paths in
+    MADE exist and those in REMOVED are gone (an apply that makes them
+    after it reads the tree, keel#342)"""
+    return any(why.endswith(f" when {path} exists ({CONDITION})")
+               for path in made) or any(
+        why.endswith(f" when {path} does not exist ({CONDITION})")
+        for path in removed)
+
+
 def overlay_state(units: list[UnitState]) -> tuple[str | None, str]:
     """`enabled`, `disabled`, or None and what each unit says
 
