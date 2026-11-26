@@ -221,8 +221,11 @@ def prior(root: str, live: bool, run) -> str | None:
     return "report" if "policy accept;" in listing else None
 
 
-def step(root: str, doc: dict, live: bool) -> list[str]:
-    """The apply's firewall step, unattended; the lines it printed"""
+def step(root: str, doc: dict, live: bool,
+         no_fence: bool = False) -> list[str]:
+    """The apply's firewall step, unattended; the lines it printed.
+    `no_fence`: the fence failed, and its ports are not opened"""
+    from dataclasses import replace
     from keel.commands import manifest_facts
     from keel.spec.validate_appliance import with_defaults
     from keel.system import appstate
@@ -236,7 +239,11 @@ def step(root: str, doc: dict, live: bool) -> list[str]:
         return ["no appliance is resolved: the firewall step does not run"]
     available = frozenset(name for name in ("nft", "systemctl")
                           if live and shutil.which(name))
-    steps = plan_firewall(full, appliance.resolved, appliance.firewall,
+    state = appliance.firewall
+    if no_fence and state.fence:
+        from keel.system.fwstate import FENCE_FAILED
+        state = replace(state, fence=(), fence_note=FENCE_FAILED)
+    steps = plan_firewall(full, appliance.resolved, state,
                           live, available, attended=False)
     outcome = execute(Plan(tuple(steps)), Effects(root), False,
                       "keel firewall repair")
@@ -250,7 +257,8 @@ FENCE_SPEC = (f"/{SPEC} cannot be read or parsed: /{PATH} keeps the"
 
 def refresh(root: str, live: bool = True, run=None,
             lock: bool | None = None,
-            wait: float = LOCK_WAIT) -> tuple[int, list[str]]:
+            wait: float = LOCK_WAIT,
+            failed: bool = False) -> tuple[int, list[str]]:
     """keel firewall refresh: the ruleset written again when the init
     fence is gone (decision 0097, section 2, item 4; keel#322)
 
@@ -263,22 +271,31 @@ def refresh(root: str, live: bool = True, run=None,
     the evidence says. It never begins a firewall (no evidence: NOT
     APPLIED), never restores the copy and never loads the fallback: the
     old ruleset stays, and the line says why. It never fails, because
-    the stop of the fence must succeed"""
+    the stop of the fence must succeed
+
+    `failed`: the fence's start failed (SERVICE_RESULT is not success).
+    systemd runs the ExecStopPost then, while the fence is still
+    enabled, and a later disable and stop of the failed unit runs none.
+    The fence redirects nothing, so its ports go from the ruleset now,
+    also while it is enabled"""
     from keel.system.fwstate import fence_enabled
-    if fence_enabled(Tree(root)):
+    if fence_enabled(Tree(root)) and not failed:
         return exits.OK, []
     if not (live if lock is None else lock):
-        return exits.OK, refreshed(root, live, run or subprocess.run)
+        return exits.OK, refreshed(root, live, run or subprocess.run,
+                                   failed)
     from keel.system import fwlock
     with fwlock.held(root, wait) as held:
         if not held:
             return exits.OK, ["an apply holds the firewall lock: this"
                               " refresh skips its run; the apply renders"
                               " the ruleset from the same state"]
-        return exits.OK, refreshed(root, live, run or subprocess.run)
+        return exits.OK, refreshed(root, live, run or subprocess.run,
+                                   failed)
 
 
-def refreshed(root: str, live: bool, run) -> list[str]:
+def refreshed(root: str, live: bool, run,
+              failed: bool = False) -> list[str]:
     """The step, where keel's firewall is on; what it said"""
     if prior(root, live, run) is None:
         return []
@@ -287,7 +304,7 @@ def refreshed(root: str, live: bool, run) -> list[str]:
         return [FENCE_SPEC]
     if not wants_firewall(doc):
         return []
-    return step(root, doc, live)
+    return step(root, doc, live, failed)
 
 
 def fallback(ssh: tuple[int, ...], overlay: tuple[str, int] | None) -> str:

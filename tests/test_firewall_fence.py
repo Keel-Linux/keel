@@ -22,12 +22,13 @@ import os
 import shlex
 import subprocess
 from os.path import join
+from unittest import mock
 
 from test_firewall_repair import SPEC, Loads, RepairCase
 
 from keel import exits
 from keel.inspect.tree import Tree
-from keel.system import fwrecord, fwrepair
+from keel.system import fwrecord, fwrepair, fwstate
 from keel.system.actions import Note
 from keel.system.firewall import plan_firewall
 from keel.system.fwstate import FENCE_DEFAULTS, FENCE_UNIT
@@ -74,9 +75,10 @@ class FenceCase(RepairCase):
         self.assertEqual(len(found), 1, out + err)
         return found[0]
 
-    def refresh(self, nft=None):
+    def refresh(self, nft=None, failed=False):
         nft = nft or Loads()
-        return fwrepair.refresh(self.root, live=False, run=nft), nft
+        return fwrepair.refresh(self.root, live=False, run=nft,
+                                failed=failed), nft
 
 
 class TestDriftAfterTheFence(FenceCase):
@@ -199,6 +201,56 @@ class TestRefresh(FenceCase):
         steps = plan_firewall(full, appliance.resolved, appliance.firewall,
                               False, frozenset(), attended=True)
         return [action for step in steps for action in step.actions]
+
+
+class TestFailedFence(FenceCase):
+    """keel-nextcloud PR 10, task 21021: in an unprivileged container
+    the fence cannot redirect over IPv6 and its start fails. systemd runs
+    the ExecStopPost at that failure, while the fence is still enabled,
+    and hook 97 later disables and stops a unit that is already failed:
+    no ExecStopPost runs then. The fence rule stayed in the file"""
+
+    def test_a_failed_start_refreshes_while_the_fence_is_still_enabled(self):
+        self.first_boot()
+        (code, lines), _ = self.refresh(failed=True)
+        self.assertEqual(code, exits.OK, lines)
+        self.assertNotIn("ct status dnat", self.file())
+        self.assertEqual(fwrecord.read(Tree(self.root))[0], "enforce")
+
+    def test_the_command_reads_the_result_systemd_gives(self):
+        """SERVICE_RESULT, which systemd sets for ExecStopPost"""
+        self.first_boot()
+        with mock.patch.dict(os.environ, {"SERVICE_RESULT": "success"}):
+            code, _, err = self.cli("firewall", "refresh")
+        self.assertEqual(code, exits.OK, err)
+        self.assertIn(FENCE_RULE, self.file())
+        with mock.patch.dict(os.environ, {"SERVICE_RESULT": "exit-code"}):
+            code, _, err = self.cli("firewall", "refresh")
+        self.assertEqual(code, exits.OK, err)
+        self.assertNotIn("ct status dnat", self.file())
+
+    def test_a_failed_fence_opens_no_port_on_the_live_system(self):
+        """the apply of 10keel-system runs after the failure"""
+        self.enable_fence()
+        tree = Tree(self.root)
+        with mock.patch.object(fwstate, "unit_failed", return_value=True):
+            ports, note = fwstate.fence_of(tree, True)
+        self.assertEqual(ports, ())
+        self.assertIn("failed", note)
+        with mock.patch.object(fwstate, "unit_failed", return_value=False):
+            self.assertEqual(fwstate.fence_of(tree, True)[0],
+                             (60080, 60443))
+        self.assertEqual(fwstate.fence_of(tree, False)[0], (60080, 60443))
+
+    def test_offline_the_file_of_a_failed_fence_is_the_same(self):
+        """keel diff --root cannot ask systemd whether the enabled fence
+        failed: the file with the fence rule and the file without it
+        are both what an apply writes (keel-lnmp: a hook left a
+        question, so the failed fence stays enabled)"""
+        self.first_boot()
+        self.refresh(failed=True)
+        self.assertNotIn("ct status dnat", self.file())
+        self.assertIn("derived.firewall: same", self.firewall_diff())
 
 
 class TestDropIn(FenceCase):
