@@ -38,6 +38,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DROPIN = join(REPO, "systemd", "turnkey-init-fence.service.d",
               "10-keel-firewall.conf")
 DROPIN_COMMAND = "-/usr/bin/keel firewall refresh"
+DROPIN_START = "-/usr/bin/keel firewall refresh --started"
 
 
 class FenceCase(RepairCase):
@@ -75,10 +76,10 @@ class FenceCase(RepairCase):
         self.assertEqual(len(found), 1, out + err)
         return found[0]
 
-    def refresh(self, nft=None, failed=False):
+    def refresh(self, nft=None, failed=False, started=False):
         nft = nft or Loads()
         return fwrepair.refresh(self.root, live=False, run=nft,
-                                failed=failed), nft
+                                failed=failed, started=started), nft
 
 
 class TestDriftAfterTheFence(FenceCase):
@@ -253,12 +254,56 @@ class TestFailedFence(FenceCase):
         self.assertIn("derived.firewall: same", self.firewall_diff())
 
 
+class TestFenceStart(FenceCase):
+    """inithooks#68, inithooks PR 69: the fence now starts in an
+    unprivileged container (nftables, table inet keel_fence). A node
+    whose ruleset lost the fence rule after a failed start gets it back
+    at the next start of the fence, so the fence page answers under
+    enforce, and keel diff says same"""
+
+    def failed_then_upgraded(self) -> None:
+        """the ruleset a failed fence left: enforce, no fence rule, and
+        the fence still enabled"""
+        self.first_boot()
+        self.refresh(failed=True)
+        self.assertNotIn("ct status dnat", self.file())
+
+    def test_a_start_of_the_fence_opens_its_ports_again(self):
+        self.failed_then_upgraded()
+        (code, lines), _ = self.refresh(started=True)
+        self.assertEqual(code, exits.OK, lines)
+        self.assertIn(FENCE_RULE, self.file())
+        self.assertEqual(fwrecord.read(Tree(self.root))[0], "enforce")
+        self.assertIn("derived.firewall: same", self.firewall_diff())
+
+    def test_a_start_with_the_rule_there_changes_nothing(self):
+        self.first_boot()
+        before = self.file()
+        (code, lines), _ = self.refresh(started=True)
+        self.assertEqual(code, exits.OK, lines)
+        self.assertEqual(self.file(), before)
+
+    def test_a_start_on_a_node_with_no_firewall_begins_none(self):
+        """the first boot: the fence starts before 10keel-system"""
+        self.enable_fence()
+        (code, lines), _ = self.refresh(started=True)
+        self.assertEqual((code, lines), (exits.OK, []))
+        self.assertIsNone(self.file())
+
+    def test_the_command_takes_started(self):
+        self.failed_then_upgraded()
+        code, _, err = self.cli("firewall", "refresh", "--started")
+        self.assertEqual(code, exits.OK, err)
+        self.assertIn(FENCE_RULE, self.file())
+
+
 class TestDropIn(FenceCase):
     def test_the_drop_in_refreshes_after_each_stop_of_the_fence(self):
         with open(DROPIN) as fob:
             found = [line.strip() for line in fob
                      if line.strip() and not line.startswith("#")]
         self.assertEqual(found, ["[Service]",
+                                 f"ExecStartPost={DROPIN_START}",
                                  f"ExecStopPost={DROPIN_COMMAND}"])
 
     def test_the_drop_in_is_installed_beside_any_other(self):

@@ -7,6 +7,9 @@ keel (0.23.112) unstable; urgency=medium
     enabled and not failed; keel firewall refresh reads SERVICE_RESULT
     and writes the ruleset again after a failed start; keel diff --root
     takes the file with or without the fence rule for an enabled fence.
+    After each start of the fence, keel's drop-in runs keel firewall
+    refresh --started (ExecStartPost), so a node whose ruleset lost the
+    fence rule opens the fence ports again (inithooks#68).
 
  -- KeelLinux maintainers <admin@keellinux.org>  Thu, 26 Nov 2026 00:00:00 +0000
 

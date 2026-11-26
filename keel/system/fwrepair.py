@@ -258,7 +258,8 @@ FENCE_SPEC = (f"/{SPEC} cannot be read or parsed: /{PATH} keeps the"
 def refresh(root: str, live: bool = True, run=None,
             lock: bool | None = None,
             wait: float = LOCK_WAIT,
-            failed: bool = False) -> tuple[int, list[str]]:
+            failed: bool = False,
+            started: bool = False) -> tuple[int, list[str]]:
     """keel firewall refresh: the ruleset written again when the init
     fence is gone (decision 0097, section 2, item 4; keel#322)
 
@@ -277,9 +278,15 @@ def refresh(root: str, live: bool = True, run=None,
     systemd runs the ExecStopPost then, while the fence is still
     enabled, and a later disable and stop of the failed unit runs none.
     The fence redirects nothing, so its ports go from the ruleset now,
-    also while it is enabled"""
+    also while it is enabled.
+
+    `started`: the fence has just started (the ExecStartPost). The step
+    runs while the fence is enabled, so a ruleset that lost the fence
+    rule (a failed start before inithooks#68 was fixed) opens the fence
+    ports again. The fence loads its own table (inet keel_fence) before
+    its ExecStartPost, and the step replaces only inet keel"""
     from keel.system.fwstate import fence_enabled
-    if fence_enabled(Tree(root)) and not failed:
+    if fence_enabled(Tree(root)) and not (failed or started):
         return exits.OK, []
     if not (live if lock is None else lock):
         return exits.OK, refreshed(root, live, run or subprocess.run,

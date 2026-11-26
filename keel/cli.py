@@ -418,9 +418,16 @@ def add_firewall_parser(subparsers) -> None:
     refresh_parser = firewall_actions.add_parser(
         "refresh",
         help="write the ruleset again by the apply's firewall step,"
-        " unattended, once the init fence is no longer enabled; nothing"
-        " while it is;"
-        " what the ExecStopPost of turnkey-init-fence.service runs",
+        " unattended, once the init fence is no longer enabled, failed"
+        " or just started; nothing while it runs; what the ExecStartPost"
+        " and ExecStopPost of turnkey-init-fence.service run",
+    )
+    refresh_parser.add_argument(
+        "--started",
+        action="store_true",
+        help="the fence has just started: write the ruleset again also"
+        " while it is enabled, so its ports are open (what the"
+        " ExecStartPost of turnkey-init-fence.service passes)",
     )
     add_root_option(refresh_parser, "refresh keel's ruleset file of")
     refresh_parser.set_defaults(handler="keel.commands.firewall_refresh")

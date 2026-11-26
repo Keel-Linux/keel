@@ -502,7 +502,8 @@ def firewall_refresh(args) -> int:
     result = os.environ.get("SERVICE_RESULT", "")
     code, lines = fwrepair.refresh(root,
                                    os.path.abspath(root) == ROOT_DEFAULT,
-                                   failed=result not in ("", "success"))
+                                   failed=result not in ("", "success"),
+                                   started=getattr(args, "started", False))
     for line in lines:
         print(line)
     return code
