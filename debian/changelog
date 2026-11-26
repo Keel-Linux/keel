@@ -1,3 +1,15 @@
+keel (0.23.112) unstable; urgency=medium
+
+  * keel#338: a failed init fence opens no port. In an unprivileged
+    container the start of turnkey-init-fence fails, and the ruleset
+    kept the fence rule after the first boot (keel diff: drift). On the
+    live system the apply opens the fence ports only while the fence is
+    enabled and not failed; keel firewall refresh reads SERVICE_RESULT
+    and writes the ruleset again after a failed start; keel diff --root
+    takes the file with or without the fence rule for an enabled fence.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Thu, 26 Nov 2026 00:00:00 +0000
+
 keel (0.23.110) unstable; urgency=medium
 
   * keel#331: the enrolment line of keel access invite waits at most
