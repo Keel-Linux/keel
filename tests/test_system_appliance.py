@@ -662,6 +662,15 @@ class TestMonitAfterTheIdentity(PlanCase):
         self.assertFalse([n for n in notes if "not watched" in n
                           and "crowdsec" in n], notes)
 
+    def test_the_central_api_file_of_this_apply_meets_the_condition(self):
+        # Debian's crowdsec.service also needs online_api_credentials.yaml
+        state = self.state(
+            crowdsec=dataclasses.replace(self.NONE, lapi=True),
+            waiting=self.unmet("crowdsec.service",
+                               "/etc/crowdsec/online_api_credentials.yaml"))
+        content, notes = self.monit(state)
+        self.assertIn("keel-unit-crowdsec ", content, notes)
+
     def test_the_bouncer_registration_removes_the_pending_file(self):
         state = self.state(
             crowdsec=dataclasses.replace(REGISTERED, pending=True),

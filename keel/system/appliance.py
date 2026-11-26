@@ -55,7 +55,7 @@ from keel.system.appstate import (
 )
 from keel.system import anubiskey, filesync
 from keel.system.crowdsec import OVERLAY as CROWDSEC
-from keel.system.crowdsec import LAPI, plan_identity
+from keel.system.crowdsec import CAPI, LAPI, plan_identity
 from keel.system.etcd import OVERLAY as ETCD
 from keel.system.etcd import plan_etcd, waiting
 from keel.system.filesync import plan_filesync
@@ -110,7 +110,9 @@ def plan_appliance(doc: dict, state: ApplianceState | None, live: bool,
 
 def identity_paths(states: dict, state: ApplianceState, live: bool,
                    available: frozenset[str]) -> tuple[set[str], set[str]]:
-    """The files CrowdSec's first enable makes and removes in this apply,
+    """The files CrowdSec's first enable makes (the local API's
+    credentials and the empty central API file, both conditions of
+    Debian's crowdsec.service) and removes in this apply,
     as plan_overlay plans it: none when the step stops before the
     identity (no systemctl, a hook not safe to run, a masked unit)"""
     if states.get(CROWDSEC) != ENABLED:
@@ -126,6 +128,8 @@ def identity_paths(states: dict, state: ApplianceState, live: bool,
         if isinstance(action, Run) and action.argv[2:4] == (
                 "machines", "add"):
             made.add("/" + LAPI)
+        if isinstance(action, WriteFile) and action.path == CAPI:
+            made.add("/" + CAPI)
         if isinstance(action, AddBouncer) and action.pending:
             removed.add("/" + action.pending)
     return made, removed
