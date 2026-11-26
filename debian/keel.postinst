@@ -8,7 +8,24 @@
 # It also makes /etc/keel/secrets, root only (mode 0700), where the
 # spec's secret files go (the monitor's tokens, decision 0063): without
 # it the operator made it by hand first. One that exists is left as it is.
+#
+# After an upgrade it removes the marker of the preinst (keel#349)
+# before debhelper's section starts keel's timers again, so the
+# services they start are not skipped. After that section (and its
+# daemon-reload) it starts each timer the preinst stopped that is
+# still enabled: a timer the admin disabled or masked stays stopped.
+# This also starts keel-firewall-watch.timer again, which debhelper
+# does not start (--no-start, decision 0073): so the upgrade leaves it
+# as it found it.
 set -e
+
+marker=${KEEL_UPGRADE_MARKER:-/run/keel/upgrading}
+stopped=""
+if { [ "$1" = "configure" ] || [ "$1" = "abort-upgrade" ]; } \
+    && [ -e "$marker" ]; then
+    stopped=$(cat "$marker") || true
+    rm -f "$marker"
+fi
 
 if [ "$1" = "configure" ] && [ ! -d "${DPKG_ROOT:-}/etc/keel/secrets" ]; then
     install -d -m 0700 "${DPKG_ROOT:-}/etc/keel/secrets"
@@ -19,5 +36,16 @@ if [ "$1" = "configure" ] && command -v keel >/dev/null 2>&1; then
 fi
 
 #DEBHELPER#
+
+start=""
+for timer in $stopped; do
+    if systemctl --quiet is-enabled "$timer" 2>/dev/null; then
+        start="$start $timer"
+    fi
+done
+if [ -n "$start" ]; then
+    # shellcheck disable=SC2086
+    deb-systemd-invoke start $start >/dev/null || true
+fi
 
 exit 0

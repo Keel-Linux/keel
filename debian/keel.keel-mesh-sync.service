@@ -5,6 +5,8 @@
 # every 15 minutes; a node in no mesh has nothing to sync.
 [Unit]
 Description=keel mesh: learn the members this node's peers know
+# no start while dpkg replaces keel's files (keel#349, debian/keel.preinst)
+ConditionPathExists=!/run/keel/upgrading
 After=network-online.target
 Wants=network-online.target
 

@@ -6,6 +6,8 @@
 # to watch.
 [Unit]
 Description=keel database: the semi-synchronous fallback, the certificate
+# no start while dpkg replaces keel's files (keel#349, debian/keel.preinst)
+ConditionPathExists=!/run/keel/upgrading
 After=network-online.target mariadb.service
 Wants=network-online.target
 ConditionPathExists=/var/lib/keel/database

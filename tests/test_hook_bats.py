@@ -22,6 +22,8 @@ SUITE = join(HERE, "hook.bats")
 # the package's postinst (keel#139)
 POSTINST_SUITE = join(HERE, "postinst.bats")
 HOOK = join(dirname(HERE), "firstboot.d", "10keel-system")
+# the upgrade's preinst, postinst and postrm (keel#349)
+UPGRADE_SUITE = join(HERE, "upgrade.bats")
 # the certificate after the init fence (keel#320)
 CERTIFICATE_SUITE = join(HERE, "certificate.bats")
 CERTIFICATE = join(dirname(HERE), "certificate", "certificate-after-fence")
@@ -67,6 +69,18 @@ class TestHookSuite(unittest.TestCase):
                           " .github/workflows/tests.yml")
             self.skipTest("bats is not installed")
         done = subprocess.run([bats, CERTIFICATE_SUITE], capture_output=True,
+                              text=True, check=False)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("ok 13 ", done.stdout)
+
+    def test_bats_reports_every_upgrade_test_passing(self):
+        bats = shutil.which("bats")
+        if bats is None:
+            if os.environ.get("CI"):
+                self.fail("bats is not installed in CI: the upgrade suite"
+                          " would not run, see .github/workflows/tests.yml")
+            self.skipTest("bats is not installed")
+        done = subprocess.run([bats, UPGRADE_SUITE], capture_output=True,
                               text=True, check=False)
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertIn("ok 13 ", done.stdout)

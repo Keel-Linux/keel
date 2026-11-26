@@ -1,3 +1,24 @@
+keel (0.23.117) unstable; urgency=medium
+
+  * keel#349: an upgrade of keel runs no keel unit on a tree of two
+    versions. A timer started keel-mesh-sync.service in the second that
+    dpkg replaced keel's files; it failed with an ImportError and the
+    node stayed degraded until a reboot. The new debian/keel.preinst
+    runs before the unpack, also when the old package's scripts know
+    nothing of it: it writes the marker /run/keel/upgrading with the
+    active timers, stops (does not disable) each keel timer and
+    keel-database-position.service, and waits for the oneshot services
+    the timers start (at most 300 s; one that still runs is then
+    stopped and its failed state reset). The postinst removes the
+    marker before debhelper starts the timers again, then starts each
+    timer of the marker that is still enabled, keel-firewall-watch.timer
+    included; the postrm does the same when the unpack fails. Each
+    service a timer starts has ConditionPathExists=!/run/keel/upgrading,
+    so a start during a later upgrade is skipped and leaves no failed
+    unit.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Thu, 26 Nov 2026 00:00:00 +0000
+
 keel (0.23.116) unstable; urgency=medium
 
   * keel#347: keel diff shows a filesync.config row: the files that the

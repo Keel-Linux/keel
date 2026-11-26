@@ -801,8 +801,11 @@ class TestTableLoss(unittest.TestCase):
                      "AccuracySec=5s", "WantedBy=timers.target"):
             self.assertIn(line, timer)
         service = lines(WATCH + ".service")
-        self.assertFalse([line for line in service
-                          if line.startswith("ConditionPathExists=")])
+        # it depends on nothing in the spec: its one condition is the
+        # marker of an upgrade (keel#349)
+        self.assertEqual([line for line in service
+                          if line.startswith("ConditionPathExists=")],
+                         ["ConditionPathExists=!/run/keel/upgrading"])
         for line in ("Type=oneshot",
                      "ExecStart=/usr/lib/keel/firewall-watch",
                      "LogLevelMax=notice", "SyslogLevel=warning"):

@@ -9,6 +9,8 @@
 # SyslogLevel lets keel's own lines through.
 [Unit]
 Description=keel: load keel's firewall table again when it is lost
+# no start while dpkg replaces keel's files (keel#349, debian/keel.preinst)
+ConditionPathExists=!/run/keel/upgrading
 
 [Service]
 Type=oneshot

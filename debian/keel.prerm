@@ -2,8 +2,10 @@
 # keel's prerm: on removal, stop keel-firewall-watch.timer. Its units
 # are installed with --no-start, so debhelper writes no stop for them;
 # a timer left active after its service file is gone fails at its next
-# elapse, and the node is degraded until a reboot. An upgrade stops
-# nothing (--no-stop-on-upgrade, decision 0073). keel's table inet keel
+# elapse, and the node is degraded until a reboot. On an upgrade the
+# prerm stops nothing (--no-stop-on-upgrade, decision 0073): the new
+# preinst stops keel's timers for the unpack, and the postinst starts
+# again those it stopped (keel#349). keel's table inet keel
 # stays loaded until a reboot, which keeps the node closed.
 set -e
 
