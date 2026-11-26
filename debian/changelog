@@ -1,3 +1,13 @@
+keel (0.23.109) unstable; urgency=medium
+
+  * keel#327: the certificate of tls.acme is requested after keel-init
+    also while the first boot's console screen is open.
+    certificate-after-fence defers only while the first boot's run is in
+    its hooks (inithooks.service active and no /run/inithooks-complete);
+    the unit stays active while confconsole's usage screen waits.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Thu, 26 Nov 2026 00:00:00 +0000
+
 keel (0.23.108) unstable; urgency=medium
 
   * keel#330 follow-up: the ignoreip that keel writes for fail2ban
