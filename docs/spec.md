@@ -420,7 +420,13 @@ on `[<address>]:<port>` (FreeBind; keel's firewall drops what comes to
 that address on another interface) and its `.service`, which runs
 `systemd-socket-proxyd 127.0.0.1:<port>` with a dynamic user. The
 database's bind addresses and accounts do not change: the connection
-comes from the loopback.
+comes from the loopback. A spec that declares no `database.server.engine`
+takes the engine installed on the node: the server binary of MariaDB or
+of PostgreSQL that `keel inspect` looks for, when only one of the two is
+there. The first boot applies before `75keel-role` records
+`database.server`, and no apply follows that hook, so the relay and its
+firewall port come from that first apply (keel#340). A declared engine
+always comes first.
 
 **Enrolment.** `keel access invite --name NAME` (root) prints one line to
 paste in a terminal on the computer, Linux or macOS, with

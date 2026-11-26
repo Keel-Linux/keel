@@ -30,6 +30,7 @@ from keel.inspect.tree import File, Tree
 from keel.manifest.firewall import PATH, POLICY_RE, TABLE, loaded_digest
 from keel.network import marker
 from keel.system import fwrecord
+from keel.system.accstate import installed_engine
 from keel.system.listeners import Listener, observe_listeners, sshd_ports
 
 SSHD_CONFIG = "etc/ssh/sshd_config"
@@ -124,6 +125,9 @@ class FirewallState:
     # the first boot's run of inithooks is not over (keel#328): its
     # applies are no person's, so they never close SSH on IPv4; live only
     boot_run: bool = False
+    # the database engine installed on the node, for the relay port of
+    # a spec that declares none yet (keel#340, accstate.installed_engine)
+    db_engine: str | None = None
 
 
 def ports_in(lines: list[str]) -> set[int]:
@@ -229,6 +233,7 @@ def observe_firewall(tree: Tree, live: bool) -> FirewallState:
         boot_failed=unit_failed() if live else None,
         watch_failed=unit_failed(WATCH_UNIT) if live else None,
         boot_run=boot_run(tree) if live else False,
+        db_engine=installed_engine(tree),
     )
 
 

@@ -246,6 +246,53 @@ class TestObserve(RootCase):
             self.assertIsNone(accstate.held_peers("keel-access"))
 
 
+class TestFirstBootRelay(RootCase):
+    """keel#340: at the first boot's apply (10keel-system) the spec has no
+    database section yet: 75keel-role records database.server later, and
+    no apply follows. The relay follows the engine installed then"""
+
+    MARIADBD = "usr/sbin/mariadbd"
+    POSTGRES = "usr/lib/postgresql/17/bin/postgres"
+
+    def test_the_installed_engine_when_none_is_declared(self):
+        self.assertEqual(acc.relay_ports({}, "mariadb"), (3306,))
+        self.assertEqual(acc.relay_ports({}, "postgresql"), (5432,))
+        self.assertEqual(acc.relay_ports({}, None), ())
+        # what the spec declares comes first, also an engine with no relay
+        self.assertEqual(acc.relay_ports({"database": {"server": {
+            "engine": "postgresql"}}}, "mariadb"), (5432,))
+        self.assertEqual(acc.relay_ports({"database": {"server": {
+            "engine": "redis"}}}, "mariadb"), ())
+
+    def test_the_engine_is_the_one_server_binary_on_the_tree(self):
+        tree = Tree(self.root)
+        self.assertIsNone(accstate.installed_engine(tree))
+        self.put(self.MARIADBD, "")
+        self.assertEqual(accstate.installed_engine(tree), "mariadb")
+        # two engines: no guess
+        self.put(self.POSTGRES, "")
+        self.assertIsNone(accstate.installed_engine(tree))
+
+    def test_a_spec_with_no_database_section_wants_the_relay(self):
+        self.put(self.MARIADBD, "")
+        found = observe_access(self.root, doc(database=None))
+        self.assertEqual(sorted(found.wanted), [SERVICE, SOCKET])
+        self.assertEqual(found.wanted, acc.relay_files(ACCESS, doc()))
+
+    def test_no_database_server_no_relay(self):
+        found = observe_access(self.root, doc(database=None))
+        self.assertEqual(found.wanted, {})
+
+    def test_the_firewall_opens_the_same_port(self):
+        from keel.system.firewall import access_of
+        self.put(self.MARIADBD, "")
+        state = fwstate.observe_firewall(Tree(self.root), False)
+        self.assertEqual(state.db_engine, "mariadb")
+        self.assertEqual(access_of(doc(database=None),
+                                   state.db_engine).relays, (3306,))
+        self.assertEqual(access_of(doc(database=None)).relays, ())
+
+
 class TestDiff(RootCase):
     def test_same_and_drift_under_a_root(self):
         self.put(CONF, acc.render(ACCESS))

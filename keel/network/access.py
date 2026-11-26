@@ -159,16 +159,21 @@ def peer_changes(wanted: dict[str, str], held: dict[str, str]
     return add, remove
 
 
-def relay_ports(doc: dict) -> tuple[int, ...]:
+def relay_ports(doc: dict, installed: str | None = None) -> tuple[int, ...]:
     """The database ports a relay serves on the access address: the
-    engine database.server declares, MariaDB or PostgreSQL (answer 5)"""
+    engine database.server declares, MariaDB or PostgreSQL (answer 5);
+    with none declared, the engine INSTALLED on the node. The first
+    boot applies before 75keel-role records database.server, and no
+    apply follows it (keel#340)"""
     server = ((doc.get("database") or {}).get("server") or {})
     engine = server.get("engine") if isinstance(server, dict) else None
+    engine = engine or installed
     found = RELAY_PORTS.get(str(engine)) if engine else None
     return (found,) if found else ()
 
 
-def relay_files(access: dict, doc: dict) -> dict[str, str]:
+def relay_files(access: dict, doc: dict,
+                installed: str | None = None) -> dict[str, str]:
     """The relay units, by path under the root: a socket on the access
     address and port (no BindToDevice: it would tie the socket to the
     device's unit, which comes up after sockets.target; keel's firewall
@@ -177,7 +182,7 @@ def relay_files(access: dict, doc: dict) -> dict[str, str]:
     database's binds and accounts do not change"""
     files = {}
     here = address(access).ip
-    for number in relay_ports(doc):
+    for number in relay_ports(doc, installed):
         name = RELAY_UNIT.format(port=number)
         files[f"{RELAY_DIR}/{name}.socket"] = "\n".join((
             "# Written by keel spec apply --system from network.access",
