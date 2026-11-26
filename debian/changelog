@@ -1,3 +1,52 @@
+keel (0.23.109) unstable; urgency=medium
+
+  * keel#327: the certificate of tls.acme is requested after keel-init
+    also while the first boot's console screen is open.
+    certificate-after-fence defers only while the first boot's run is in
+    its hooks (inithooks.service active and no /run/inithooks-complete);
+    the unit stays active while confconsole's usage screen waits.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Thu, 26 Nov 2026 00:00:00 +0000
+
+keel (0.23.108) unstable; urgency=medium
+
+  * keel#330 follow-up: the ignoreip that keel writes for fail2ban
+    keeps every entry of every [DEFAULT] ignoreip, in the order
+    fail2ban reads its files, continuation lines included. The CrowdSec
+    whitelist holds no prefix shorter than a /64: a short mesh or access
+    prefix gives the /64 of the node's address.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Thu, 26 Nov 2026 00:00:00 +0000
+
+keel (0.23.107) unstable; urgency=medium
+
+  * keel#328: only an apply a person runs closes TCP 22 on IPv4
+    (decision 0098, answer 6, B). The first boot's run of inithooks
+    (RUN_FIRSTBOOT=true and no /run/inithooks-complete) applies with
+    nobody there, so it keeps IPv4 22 open; rule B of 0097 does not
+    change. A run with no person keeps what keel's file says of IPv4
+    22, also while IPv6 is gone for a moment, and keel diff compares
+    with the file's choice.
+  * keel#329: at boot, the SSH guard waits up to about 60 s for a
+    global IPv6 address and an IPv6 default route before it opens IPv4
+    22 (DHCPv6 comes after network-online), with no lock held; the
+    watch leaves the decision to it meanwhile, and until it is done,
+    for at most 180 s of uptime. The unit is Type=exec.
+  * keel#330, keel#303: keel writes a CrowdSec whitelist with the
+    access /64 and the mesh /64, and the ignoreip of fail2ban with the
+    access /64 after the [DEFAULT] ignoreip of jail.local, where the
+    package is on the node; keel diff compares both files.
+ -- KeelLinux maintainers <admin@keellinux.org>  Wed, 25 Nov 2026 00:00:00 +0000
+
+keel (0.23.106) unstable; urgency=medium
+
+  * wireguard-tools moves from Suggests to Depends: keel-access@ runs
+    wg-quick, and the access network (decision 0098) and the mesh
+    overlay make the node's key with wg. A node that declares
+    network.access or network.overlay.wireguard no longer misses them.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Wed, 25 Nov 2026 00:00:00 +0000
+
 keel (0.23.105) unstable; urgency=medium
 
   * Decision 0098, the enrolment of a computer on the access network:

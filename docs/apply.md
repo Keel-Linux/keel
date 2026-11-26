@@ -319,12 +319,17 @@ keel's drop-in `turnkey-init-fence.service.d/keel-certificate.conf` runs
 `/usr/lib/keel/certificate-after-fence` after each stop of the fence.
 When the fence is no longer enabled (keel-init's
 `97turnkey-init-fence-disable` disables it, then stops it) and the first
-boot's run (`inithooks.service`) is not active, the script starts
+boot's run is not in its hooks, the script starts
 `keel-certificate.service`. That unit runs `keel spec apply
 --certificate-only` on the first description found
 (`/etc/keel/instance.yaml`, then `/etc/inithooks.yaml`). A shutdown or a
 stop by hand leaves the fence enabled, and nothing starts. The first boot
-keeps `--defer-certificate`. With no `tls.acme`, or a certificate that
+keeps `--defer-certificate`: a fence that its own hooks stop starts
+nothing. The run is in its hooks when `inithooks.service` is active and
+`/run/inithooks-complete` is not there. The run writes that marker after
+its hooks, and the unit stays active while confconsole's usage screen
+waits on the console. Thus a `keel-init` over SSH while that screen is
+open also gets the certificate (keel#327). With no `tls.acme`, or a certificate that
 already carries the domains, nothing is asked.
 
 Refused, with the reason, and the run fails: `dns-01` (a DNS provider and
@@ -1669,6 +1674,35 @@ is enabled and started. A file of keel's path that keel did not write is
 never replaced: the step is refused. A spec without the section stops
 and disables the unit and the relays, and removes keel's files; the key
 file stays.
+
+**CrowdSec and fail2ban** (`/etc/crowdsec/parsers/s02-enrich/keel-whitelist.yaml`,
+`/etc/fail2ban/jail.d/keel-ignoreip.local`; keel#330, keel#303)
+
+After the access network, keel writes a CrowdSec whitelist with the
+access /64 (`network.access.address`) and the mesh /64
+(`network.overlay.wireguard.address`), and the `ignoreip` of fail2ban's
+`[DEFAULT]` with the access /64 after every entry of every `[DEFAULT]
+ignoreip` of fail2ban's other files, in the order fail2ban reads them
+(`jail.conf`, `jail.d/*.conf`, `jail.local`, `jail.d/*.local`),
+continuation lines included, since a later one replaces the one before
+it; the loopback where none has one. A jail's own `ignoreip` (for
+example `[sshd] ignoreip = ...`) replaces the `[DEFAULT]` one for that
+jail, so that jail can still ban the access /64: keel does not change it,
+and the operator adds the access /64 there. A prefix is never shorter
+than a /64: an address declared with a shorter prefix gives the /64 of
+the node's address, never all of `fd00::/8`. This is so a few failed logins
+from an administrator's computer, or 401 answers to a node of the mesh,
+ban nobody of keel's own (decision 0098, section 4.7; decision 0086,
+answer 1). Only the prefixes this node has.
+Each file is written mode 0644 only where its package is on the node
+(`/etc/crowdsec`, `/etc/fail2ban`) and while the spec declares a prefix
+for it; keel's file is removed when none is left. A file of that path
+that keel did not write is left alone, and the plan says so. Then
+`systemctl try-reload-or-restart crowdsec.service` (or
+`fail2ban.service`), which does nothing where the daemon does not run; a
+failure of the reload does not fail the apply. A ban made before the
+file is there stays until it ends (`cscli decisions delete`,
+`fail2ban-client unban`).
 
 **network.overlay** (`/etc/wireguard/<interface>.conf`; handbook decisions
 0018 and 0020)

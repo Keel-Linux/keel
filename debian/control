@@ -24,6 +24,7 @@ Depends:
  openssl,
  nftables,
  iproute2,
+ wireguard-tools,
  ${python3:Depends},
  ${misc:Depends},
 Breaks:
@@ -31,7 +32,6 @@ Breaks:
  keel-overlay-etcd (<< 0.4.0~),
 Suggests:
  monit,
- wireguard-tools,
 Description: Declarative management of one appliance instance
  Keel describes one appliance instance in a single file and applies it
  idempotently. It is compatible with TurnKey Linux appliances: the spec is
