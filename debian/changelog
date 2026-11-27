@@ -1,3 +1,18 @@
+keel (0.23.118) unstable; urgency=medium
+
+  * keel#313: keel-database-position.service does not restart in a loop
+    on a one-node database node. The loop read this node's WireGuard key
+    before it asked whether the node is in a MariaDB pair under etcd. A
+    one-node node has no key, so each start stopped with a traceback
+    (173 times in 20 min in the 0090 test, and the start limit on a
+    downgrade). Now the key is read only on a pair. A node with no such
+    pair writes one line and exits 0. A node of a pair whose key cannot
+    be read writes one line and exits 4 (SECRET_ERROR), and the new
+    RestartPreventExitStatus=4 stops Restart= from starting it again;
+    the timer tries again each 30 s.
+
+ -- KeelLinux maintainers <admin@keellinux.org>  Fri, 27 Nov 2026 00:00:00 +0000
+
 keel (0.23.117) unstable; urgency=medium
 
   * keel#349: an upgrade of keel runs no keel unit on a tree of two

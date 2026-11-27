@@ -306,13 +306,26 @@ class Publisher:
         return columns
 
 
+NOTHING = ("database position: nothing to publish: this node is not in a"
+           " MariaDB pair under etcd")
+
+
+class KeyUnreadable(Exception):
+    """A node of a pair whose WireGuard key cannot be read: it cannot say
+    which member wrote the record, and it does not come back by itself"""
+
+
 def serve(here, pair_of: Callable[[], tuple[str, bool] | None],
           stop: threading.Event, err: Callable[[str], None],
-          runner=subprocess.run) -> None:
+          runner=subprocess.run,
+          out: Callable[[str], None] = lambda line: None) -> None:
     """Until `stop`, or until this node has nothing to publish: `pair_of`
     says the VIP and whether this node holds it, None for a node that is
-    no MariaDB pair under etcd. The timer starts it again. A failure is
-    said once, and a record that cannot be written costs nothing here"""
+    no MariaDB pair under etcd, which `out` is told once. The timer starts
+    it again. A failure is said once, and a record that cannot be written
+    costs nothing here. This node's key is read only on a pair: a
+    one-node node has none (keel#313), and on a pair a key that cannot be
+    read is KeyUnreadable"""
     said: dict[str, str] = {}
     vip: dict[str, str] = {}
 
@@ -321,12 +334,15 @@ def serve(here, pair_of: Callable[[], tuple[str, bool] | None],
         client.timeout = SAMPLE_TIMEOUT
         client.put(key(here.mesh_id(), vip["now"]), text)
 
-    publisher = Publisher(runner, put, here.own_key())
+    publisher: Publisher | None = None
     while not stop.is_set():
         try:
             found = pair_of()
             if found is None:
+                out(NOTHING)
                 return
+            if publisher is None:
+                publisher = Publisher(runner, put, own_key(here))
             vip["now"] = found[0]
             if found[1]:
                 publisher.turn()
@@ -334,8 +350,20 @@ def serve(here, pair_of: Callable[[], tuple[str, bool] | None],
                 publisher.forget()
             said.clear()
         except (EtcdError, VipError, NodeError, ValueError, OSError) as e:
-            publisher.last = None
+            if publisher is not None:
+                publisher.last = None
             if said.get("why") != str(e):
                 said["why"] = str(e)
                 err(f"database position: {e}")
         stop.wait(POLL)
+
+
+def own_key(here) -> str:
+    try:
+        return here.own_key()
+    except VipError as e:
+        raise KeyUnreadable(
+            f"database position: {e}. This node is in a MariaDB pair, and"
+            " it cannot publish its position without its WireGuard key."
+            " Restore the key file: keel-database-position.timer then"
+            " starts this unit again") from None

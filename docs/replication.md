@@ -364,6 +364,10 @@ keeps in etcd, each 2 s, a record of its `gtid_binlog_pos` of about 4 s
 ago and whether it has a replica. The key is
 `/keel/<mesh>/etcd/database/<vip>`. A read-only holder writes nothing, so
 a lagging holder cannot write over the record that refused it.
+On a node that is not in a MariaDB pair under etcd (one node, or
+PostgreSQL) the unit writes one line and exits 0. On a node of the pair
+whose WireGuard key cannot be read it fails with exit 4 and one line,
+and only its timer starts it again, each 30 s (keel#313).
 
 Before a replica that holds the VIP drains, follow compares what it
 received (`gtid_slave_pos`, `Gtid_IO_Pos`, its binary log state) with the

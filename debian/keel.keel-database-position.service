@@ -1,8 +1,11 @@
 # keel database position (keel#271): while this node holds the VIP of a
 # MariaDB pair, its GTID position and whether it has a replica, kept in
 # etcd each 2 s, so that a lagging replica does not take writes after a
-# failover. It ends on a node with no such pair, and
-# keel-database-position.timer starts it again.
+# failover. It ends on a node with no such pair with one line and exit 0,
+# and keel-database-position.timer starts it again. On a node of the pair
+# whose WireGuard key cannot be read it fails with exit 4 (SECRET_ERROR in
+# keel/exits.py) and one line: Restart= does not start it again, because
+# that cannot help, and the timer tries again each 30 s (keel#313).
 [Unit]
 Description=keel database: the holder's position, in etcd
 # no start while dpkg replaces keel's files (keel#349, debian/keel.preinst)
@@ -16,3 +19,4 @@ Type=simple
 ExecStart=/usr/bin/keel database position
 Restart=on-failure
 RestartSec=5s
+RestartPreventExitStatus=4

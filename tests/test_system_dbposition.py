@@ -3,15 +3,23 @@
 itself. The holder leaves its position in etcd; the node that claims the
 VIP compares it, by GTID, before it takes writes"""
 
+import contextlib
+import io
+import os
 import subprocess
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
 from helpers import spec  # noqa: F401  (puts the repository on sys.path)
 
+from keel import exits
 from keel.mesh.etcdclient import EtcdError
-from keel.system import dbposition
+from keel.mesh.vipnode import VipError
+from keel.system import dbfollow, dbposition, dbpositionunit
+from vip_helpers import VIP as PAIR_VIP
+from vip_helpers import Pair
 
 VIP = "fd00:6b65:f1b::ffff:100"
 
@@ -226,6 +234,245 @@ class TestReading(unittest.TestCase):
         self.assertIs(
             dbposition.read_record(FakeHere(error=EtcdError("down")), VIP),
             dbposition.UNREADABLE)
+
+
+NO_KEY = ("this node's WireGuard key: /etc/wireguard/wg0.key: secret file"
+          " not found")
+
+
+class KeylessHere(FakeHere):
+    """A node with no WireGuard key file, as a one-node node is"""
+
+    def __init__(self):
+        super().__init__()
+        self.asked_key = 0
+
+    def own_key(self):
+        self.asked_key += 1
+        raise VipError(NO_KEY)
+
+
+class KeyedHere(FakeHere):
+    """A node of a pair, with its key"""
+
+    def __init__(self):
+        super().__init__()
+        self.asked_key = 0
+        self.client = mock.Mock()
+
+    def own_key(self):
+        self.asked_key += 1
+        return "holder-key"
+
+    def local(self):
+        return self.client
+
+
+def serving(here, answers):
+    """serve with pair_of giving `answers` in turn, the last one again;
+    what it said, on each stream, and how many times pair_of was asked"""
+    said = {"out": [], "err": []}
+    asked = []
+
+    def pair_of():
+        asked.append(1)
+        found = answers[min(len(asked), len(answers)) - 1]
+        if isinstance(found, Exception):
+            raise found
+        return found
+
+    stop = threading.Event()
+    with mock.patch.object(dbposition, "POLL", 0):
+        timer = threading.Timer(5, stop.set)
+        timer.start()
+        try:
+            dbposition.serve(here, pair_of, stop, said["err"].append,
+                             runner=mock.Mock(side_effect=OSError),
+                             out=said["out"].append)
+        finally:
+            timer.cancel()
+    return said, len(asked), stop.is_set()
+
+
+class TestServe(unittest.TestCase):
+    """keel#313: a one-node node has no pair and no WireGuard key"""
+
+    def test_a_node_with_no_pair_ends_with_one_line_and_no_key_read(self):
+        here = KeylessHere()
+        said, asked, stopped = serving(here, [None])
+        self.assertFalse(stopped)
+        self.assertEqual(asked, 1)
+        self.assertEqual(here.asked_key, 0)
+        self.assertEqual(said["out"], [dbposition.NOTHING])
+        self.assertEqual(said["err"], [])
+
+    def test_a_pair_with_no_key_stops_at_once_and_says_why(self):
+        here = KeylessHere()
+        with self.assertRaises(dbposition.KeyUnreadable) as caught:
+            serving(here, [(VIP, True)])
+        self.assertIn(NO_KEY, str(caught.exception))
+        self.assertEqual(here.asked_key, 1)
+
+    def test_a_replica_with_no_key_stops_too(self):
+        with self.assertRaises(dbposition.KeyUnreadable):
+            serving(KeylessHere(), [(VIP, False)])
+
+    def test_a_holder_with_its_key_publishes_and_reads_the_key_once(self):
+        here = KeyedHere()
+        answers = [(VIP, True)] * (dbposition.DELAY + 2) + [None]
+        said = {"out": [], "err": []}
+        asked = []
+
+        def pair_of():
+            asked.append(1)
+            return answers[len(asked) - 1]
+
+        sample = subprocess.CompletedProcess([], 0, "0-1-100\t0\t1\tON\n", "")
+        with mock.patch.object(dbposition, "POLL", 0):
+            dbposition.serve(here, pair_of, threading.Event(),
+                             said["err"].append,
+                             runner=mock.Mock(return_value=sample),
+                             out=said["out"].append)
+        self.assertEqual(here.asked_key, 1)
+        self.assertEqual(said["err"], [])
+        here.client.put.assert_called_once_with(
+            dbposition.key("mesh", VIP),
+            dbposition.Record("0-1-100", False, "holder-key").text())
+
+    def test_an_error_that_can_pass_is_said_once_and_the_loop_goes_on(self):
+        here = KeylessHere()
+        down = EtcdError("etcd does not answer")
+        said, asked, stopped = serving(here, [down, down, down, None])
+        self.assertFalse(stopped)
+        self.assertEqual(asked, 4)
+        self.assertEqual(said["err"],
+                         ["database position: etcd does not answer"])
+        self.assertEqual(here.asked_key, 0)
+
+
+ONE_NODE = """\
+version: 1
+appliance:
+  name: {name}
+installation:
+  mode: cloud_simple
+database:
+  server:
+    engine: {engine}
+    role: standalone
+    listen:
+      - "::1"
+"""
+
+
+class TestUnit(unittest.TestCase):
+    """What keel-database-position.service runs, on a node as the 0090
+    test found it (keel#313)"""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, self.root)
+        patcher = mock.patch("keel.manifest.machine.ROOT_UID", os.getuid())
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        # main sets SIGTERM and SIGINT handlers: not on the test runner
+        patcher = mock.patch("keel.system.dbpositionunit.signal.signal")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def run_main(self, engine: str, name: str):
+        path = os.path.join(self.root, "instance.yaml")
+        with open(path, "w") as fob:
+            fob.write(ONE_NODE.format(engine=engine, name=name))
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = dbpositionunit.main(self.root, path)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_a_one_node_postgresql_node_exits_0_with_one_line(self):
+        code, out, err = self.run_main("postgresql", "postgresql")
+        self.assertEqual(code, exits.OK)
+        self.assertEqual(out.splitlines(), [dbposition.NOTHING])
+        self.assertEqual(err, "")
+
+    def test_a_one_node_mariadb_node_exits_0_with_one_line(self):
+        code, out, err = self.run_main("mariadb", "mariadb")
+        self.assertEqual(code, exits.OK)
+        self.assertEqual(out.splitlines(), [dbposition.NOTHING])
+        self.assertEqual(err, "")
+
+    def test_a_pair_with_no_key_fails_once_with_one_line(self):
+        err = io.StringIO()
+        with mock.patch.object(dbfollow, "_here",
+                               return_value=KeylessHere()), \
+                mock.patch.object(dbpositionunit, "pair_of",
+                                  return_value=(VIP, True)), \
+                contextlib.redirect_stderr(err):
+            code = dbpositionunit.main(self.root, "unused.yaml")
+        self.assertEqual(code, exits.SECRET_ERROR)
+        lines = err.getvalue().splitlines()
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn(NO_KEY, lines[0])
+        self.assertNotIn("Traceback", err.getvalue())
+
+
+class TestUnitOnAPair(Pair):
+    """The real pair_of on a node of a MariaDB pair under etcd whose key
+    file is not there: a pair, and so a failure, not nothing to publish"""
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch("keel.system.dbpositionunit.signal.signal")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.nodes()
+        self.here = self.all[0]
+        doc = self.here.node.document()
+        doc["database"] = {"server": {"engine": "mariadb",
+                                      "role": "primary"}}
+        self.here.node.write(doc)
+
+    def test_a_mariadb_pair_with_no_key_file_fails_with_exit_4(self):
+        no_key = (None, "/etc/wireguard/wg0.key: secret file not found")
+        err = io.StringIO()
+        with mock.patch("keel.system.dbpair.wgkeys.public",
+                        return_value=no_key), \
+                mock.patch.object(self.here.node, "public_key",
+                                  return_value=no_key), \
+                mock.patch.object(dbposition, "with_etcd",
+                                  return_value=True), \
+                mock.patch.object(dbfollow, "_here", return_value=self.here):
+            found = dbpositionunit.pair_of(self.here.root,
+                                           self.here.node.path,
+                                           self.here)
+            with contextlib.redirect_stderr(err):
+                code = dbpositionunit.main(self.here.root,
+                                           self.here.node.path)
+        self.assertEqual(found[0], PAIR_VIP)
+        self.assertEqual(code, exits.SECRET_ERROR)
+        self.assertIn("secret file not found", err.getvalue())
+        self.assertNotIn("Traceback", err.getvalue())
+
+
+UNIT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
+    __file__))), "debian", "keel.keel-database-position.service")
+
+
+class TestUnitFile(unittest.TestCase):
+    """A key that cannot be read is no cause for systemd to start the
+    unit again each 5 s until its start limit (keel#313)"""
+
+    def setUp(self):
+        with open(UNIT) as fob:
+            self.lines = [line.strip() for line in fob
+                          if not line.startswith("#")]
+
+    def test_the_exit_of_a_key_that_cannot_be_read_is_not_restarted(self):
+        self.assertIn(f"RestartPreventExitStatus={exits.SECRET_ERROR}",
+                      self.lines)
+
+    def test_other_failures_are_still_restarted(self):
+        self.assertIn("Restart=on-failure", self.lines)
 
 
 if __name__ == "__main__":
