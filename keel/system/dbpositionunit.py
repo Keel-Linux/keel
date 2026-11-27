@@ -28,6 +28,14 @@ def main(root: str, spec: str) -> int:
     for one in (signal.SIGTERM, signal.SIGINT):
         signal.signal(one, lambda *_: stop.set())
     here = dbfollow._here(root, spec)
-    dbposition.serve(here, lambda: pair_of(root, spec, here), stop,
-                     lambda line: print(line, file=sys.stderr, flush=True))
+    try:
+        dbposition.serve(here, lambda: pair_of(root, spec, here), stop,
+                         lambda line: print(line, file=sys.stderr,
+                                            flush=True),
+                         out=lambda line: print(line, flush=True))
+    except dbposition.KeyUnreadable as e:
+        # the unit's RestartPreventExitStatus= names this code: one
+        # failure, and no restart that cannot help (keel#313)
+        print(e, file=sys.stderr, flush=True)
+        return exits.SECRET_ERROR
     return exits.OK
